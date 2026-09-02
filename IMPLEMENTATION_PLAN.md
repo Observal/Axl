@@ -860,15 +860,7 @@ Resolve each decision only before its dependent phase:
 
 ## 5. Immediate next slice
 
-Sandbox execution is the active user-approved priority. Follow [plan.md](plan.md) and [RFC 0001](docs/architecture/rfcs/0001-sandbox-execution.md) in complete vertical slices:
-
-1. Add explicit readable roots to kernel path policy and make the default runtime workspace-only.
-2. Harden native process isolation and report only controls actually enforced.
-3. Add the rootless local OCI backend and verify cleanup.
-4. Add one self-hosted remote Linux worker before selecting a managed provider.
-5. Stop at each plan exit gate and verify the security boundary before continuing.
-
-After the sandbox priority is complete, return to these dogfood fixes before other Phase 5 work:
+Complete these dogfood fixes before continuing Phase 5:
 
 1. Add interactive-only `ask_user_question` with visible blocker behavior for non-interactive goals.
 2. Build the local BM25 capability index and log the three-or-fewer records disclosed for each user turn.
