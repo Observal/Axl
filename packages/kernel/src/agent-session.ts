@@ -90,6 +90,8 @@ export interface AgentSessionOptions {
   readonly configModel?: EventPayloadMap["config.model"];
   /** Thinking configuration announced at every open as a `config.thinking` event. */
   readonly configThinking?: EventPayloadMap["config.thinking"];
+  /** Effective tool profile announced at every open as a `config.profile` event. */
+  readonly configProfile?: EventPayloadMap["config.profile"];
   /** Optional web-tool configuration announced at every open. */
   readonly configTools?: EventPayloadMap["config.tools"];
   /** Dialect boundary announced at open; the payload carries its own reason. */
@@ -236,6 +238,9 @@ export class AgentSession {
     }
     if (options.configThinking !== undefined) {
       await session.append(undefined, "config.thinking", options.configThinking);
+    }
+    if (options.configProfile !== undefined) {
+      await session.append(undefined, "config.profile", options.configProfile);
     }
     if (options.configTools !== undefined) {
       await session.append(undefined, "config.tools", options.configTools);

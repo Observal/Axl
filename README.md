@@ -45,11 +45,14 @@ The `axl` command connects to the local daemon and starts one in the background 
 axl <session-id>
 axl -r
 axl --cwd ~/code/project
+axl --profile exec  # expose only sandboxed Bash to the model
 axl daemon
 axl doctor
 ```
 
 The resume picker includes native, OCI, and unsafe histories. Every row shows its placement, and unsafe sessions are marked `UNSAFE` before selection.
+
+The `exec` profile is selected when creating a session and gives the model only the canonical `bash` tool, which runs through the configured sandbox. It does not activate file tools, web tools, Skills, or MCP servers. It does not make `--unsafe` sessions safer.
 
 The TUI supports multiline editing, model and theme selection, daemon-owned steering and follow-up prompts, manual context compaction with `/compact [instructions]`, compact tool output, session metrics, and terminal scrollback. While a turn runs, Enter steers it after the current tool-call batch and Alt+Enter queues a follow-up for when it would otherwise finish. Run `/help` for commands and keys. Run `/quit` to detach without stopping the session.
 

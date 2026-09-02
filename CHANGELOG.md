@@ -47,7 +47,7 @@ This file records notable user-facing changes.
 - Local provider, tool, extension, and sandbox assembly now lives outside the terminal client, so clients remain replaceable projections over the daemon protocol.
 - File tools now require explicit readable roots, and the default runtime limits them to the workspace.
 - The canonical command tool is named `bash`; historical `shell` calls remain replayable.
-- The exact-match local wire protocol is version 6 for manual compaction, steering, and follow-ups.
+- The exact-match local wire protocol is version 7 for session profiles, manual compaction, steering, and follow-ups.
 - Bubblewrap masks the user's home directory while rebinding the authorized workspace.
 - Shell cancellation now terminates the complete process group and refuses to start with an already-aborted signal.
 

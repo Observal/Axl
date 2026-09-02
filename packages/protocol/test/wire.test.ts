@@ -94,6 +94,7 @@ test("validates every request shape", () => {
         thinkingLevel: "medium",
         webFetch: true,
         webSearch: false,
+        profile: "exec",
       },
     },
     {
@@ -159,6 +160,12 @@ test("rejects malformed requests at the wire boundary", () => {
     { kind: "request", id: 1, method: "daemon.info", params: { extra: true } },
     { kind: "request", id: 1, method: "unknown", params: {} },
     { kind: "request", id: 1, method: "session.create", params: { cwd: "" } },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.create",
+      params: { cwd: "/repo", profile: "unknown" },
+    },
     { kind: "request", id: 1, method: "session.resume", params: { sessionId: "bad" } },
     {
       kind: "request",

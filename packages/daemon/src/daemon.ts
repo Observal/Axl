@@ -238,12 +238,13 @@ export class AxlDaemon {
           ...(this.sandboxImage === undefined ? {} : { sandboxImage: this.sandboxImage }),
         };
       case "session.create": {
-        const { cwd, modelId, thinkingLevel, webFetch, webSearch } = request.params;
+        const { cwd, modelId, thinkingLevel, webFetch, webSearch, profile } = request.params;
         return this.sessions.create(cwd, {
           ...(modelId === undefined ? {} : { modelId }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
           ...(webFetch === undefined ? {} : { webFetch }),
           ...(webSearch === undefined ? {} : { webSearch }),
+          ...(profile === undefined ? {} : { profile }),
         });
       }
       case "session.resume": {

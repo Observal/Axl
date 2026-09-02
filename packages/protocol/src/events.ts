@@ -6,14 +6,15 @@ import {
   type EventId,
   type JsonObject,
   type JsonValue,
-  type SessionId,
+  ProtocolValidationError,
   parseEventEnvelope,
   parseEventId,
   parseSessionId,
-  ProtocolValidationError,
+  type SessionId,
 } from "./event-envelope.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type SessionProfile = "standard" | "exec";
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type InteractionAction = "accept" | "decline" | "cancel";
 export type InteractionKind =
@@ -78,6 +79,7 @@ export type EventPayloadMap = {
   "config.model": { readonly modelId: string };
   "config.provider": { readonly providerId: string };
   "config.entitlement": { readonly entitlementId: string };
+  "config.profile": { readonly profile: SessionProfile };
   "config.thinking": {
     readonly requested: ThinkingLevel;
     readonly effective: ThinkingLevel;
@@ -368,6 +370,11 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
   "config.entitlement": (payload, path) => {
     exact(payload, path, ["entitlementId"]);
     string(payload.entitlementId, `${path}.entitlementId`);
+    return payload;
+  },
+  "config.profile": (payload, path) => {
+    exact(payload, path, ["profile"]);
+    choice(payload.profile, `${path}.profile`, ["standard", "exec"]);
     return payload;
   },
   "config.thinking": (payload, path) => {

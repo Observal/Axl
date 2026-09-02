@@ -98,6 +98,7 @@ export class SessionView {
   private readonly renderBlob: BlobRenderer | undefined;
   model: string | undefined;
   thinking: string | undefined;
+  profile: string | undefined;
   sandbox: string | undefined;
   working = false;
   thinkingDisplay: ThinkingDisplay = "compact";
@@ -323,6 +324,9 @@ export class SessionView {
           ? []
           : this.wrap(dim(`· thinking ${previous} → ${effective}`));
       }
+      case "config.profile":
+        this.profile = event.payload.profile;
+        return EMPTY_ROWS;
       case "config.tools":
         return EMPTY_ROWS;
       case "config.dialect":
@@ -385,7 +389,7 @@ export class SessionView {
       : queued
         ? `idle +${queued}`
         : "idle";
-    const full = `${activity} · session ${sessionId.slice(0, 8)} · model ${this.model ?? "?"} · thinking ${this.thinking ?? "?"} · sandbox ${this.sandbox ?? "none"}`;
+    const full = `${activity} · session ${sessionId.slice(0, 8)} · profile ${this.profile ?? "?"} · model ${this.model ?? "?"} · thinking ${this.thinking ?? "?"} · sandbox ${this.sandbox ?? "none"}`;
     return this.palette.dim(truncateToWidth(full, this.width, ""));
   }
 

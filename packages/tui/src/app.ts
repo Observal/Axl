@@ -23,6 +23,7 @@ import type {
   JsonValue,
   SessionActivityFrame,
   SessionForkResult,
+  SessionProfile,
   SessionSnapshot,
   SessionSummary,
   ThinkingLevel,
@@ -471,6 +472,7 @@ export interface AxlAppOptions {
   readonly modelCatalog?: readonly ModelInfo[];
   readonly currentModel?: string;
   readonly currentThinking?: ThinkingLevel;
+  readonly profile?: SessionProfile;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
   readonly toolOutputDisplay?: ToolOutputDisplay;
@@ -916,6 +918,7 @@ export class AxlApp {
             ...(options.currentThinking === undefined
               ? {}
               : { thinkingLevel: options.currentThinking }),
+            ...(options.profile === undefined ? {} : { profile: options.profile }),
             ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
             ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
           })
@@ -2218,6 +2221,7 @@ export class AxlApp {
       this.commitLines([
         this.view.palette.accent("Session"),
         `  id        ${this.sessionId}`,
+        `  profile   ${this.view.profile ?? "?"}`,
         `  model     ${this.view.model ?? "?"}`,
         `  thinking  ${this.view.thinking ?? "?"}`,
         `  sandbox   ${this.view.sandbox ?? "?"}`,

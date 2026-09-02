@@ -8,7 +8,13 @@ import {
   parseOperationId,
   parseSessionId,
 } from "./event-envelope.ts";
-import type { CanonicalEvent, InteractionAction, ThinkingLevel, UserContent } from "./events.ts";
+import type {
+  CanonicalEvent,
+  InteractionAction,
+  SessionProfile,
+  ThinkingLevel,
+  UserContent,
+} from "./events.ts";
 import { parseEvent, parseUserContent } from "./events.ts";
 
 export const MAX_HISTORY_PAGE_EVENTS = 5_000;
@@ -24,6 +30,10 @@ export interface SessionToolSelection {
 }
 
 export type SessionSelection = SessionModelSelection & SessionToolSelection;
+
+export interface SessionConfiguration extends SessionSelection {
+  readonly profile?: SessionProfile;
+}
 
 export interface SessionSummary {
   readonly sessionId: SessionId;
@@ -165,7 +175,7 @@ export type WireRequest =
       readonly kind: "request";
       readonly id: number;
       readonly method: "session.create";
-      readonly params: { readonly cwd: string } & SessionSelection;
+      readonly params: { readonly cwd: string } & SessionConfiguration;
     }
   | {
       readonly kind: "request";
@@ -541,6 +551,18 @@ function selection(params: Record<string, unknown>, path: string): SessionSelect
   };
 }
 
+function configuration(params: Record<string, unknown>, path: string): SessionConfiguration {
+  const selected = selection(params, path);
+  const profile = params.profile;
+  if (profile !== undefined && profile !== "standard" && profile !== "exec") {
+    throw new ProtocolValidationError(`${path}.profile`, "must be one of: standard, exec");
+  }
+  return {
+    ...selected,
+    ...(profile === undefined ? {} : { profile }),
+  };
+}
+
 export function parseWireRequest(value: unknown): WireRequest {
   const request = object(value, "request");
   exact(request, "request", ["kind", "id", "method", "params"]);
@@ -558,13 +580,20 @@ export function parseWireRequest(value: unknown): WireRequest {
     return { ...base, method, params: {} };
   }
   if (method === "session.create") {
-    exact(params, "request.params", ["cwd", "modelId", "thinkingLevel", "webFetch", "webSearch"]);
+    exact(params, "request.params", [
+      "cwd",
+      "modelId",
+      "thinkingLevel",
+      "webFetch",
+      "webSearch",
+      "profile",
+    ]);
     return {
       ...base,
       method,
       params: {
         cwd: string(params.cwd, "request.params.cwd"),
-        ...selection(params, "request.params"),
+        ...configuration(params, "request.params"),
       },
     };
   }

@@ -212,15 +212,20 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
       const { ai, kernel, sandbox, provider } = await loadAssembly();
-      const [hasMcpConfig, hasSkills] = await Promise.all([
-        Promise.all([
-          exists(join(axlHome, "mcp.json")),
-          exists(join(cwd, ".axl", "mcp.json")),
-        ]).then((values) => values.some(Boolean)),
-        Promise.all([exists(join(axlHome, "skills")), exists(join(cwd, ".axl", "skills"))]).then(
-          (values) => values.some(Boolean),
-        ),
-      ]);
+      const profile = selection.profile ?? "standard";
+      const [hasMcpConfig, hasSkills] =
+        profile === "exec"
+          ? [false, false]
+          : await Promise.all([
+              Promise.all([
+                exists(join(axlHome, "mcp.json")),
+                exists(join(cwd, ".axl", "mcp.json")),
+              ]).then((values) => values.some(Boolean)),
+              Promise.all([
+                exists(join(axlHome, "skills")),
+                exists(join(cwd, ".axl", "skills")),
+              ]).then((values) => values.some(Boolean)),
+            ]);
       const [mcpPackage, skillsPackage] = await Promise.all([
         hasMcpConfig ? import("@axl/extension-mcp") : Promise.resolve(undefined),
         hasSkills ? import("@axl/extension-skills") : Promise.resolve(undefined),
@@ -243,8 +248,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       const active = {
         modelId: selection.modelId ?? defaults.modelId,
         thinkingLevel: selection.thinkingLevel ?? defaults.thinkingLevel,
-        webFetch: selection.webFetch ?? defaults.webFetch ?? true,
-        webSearch: selection.webSearch ?? defaults.webSearch ?? true,
+        webFetch: profile === "standard" && (selection.webFetch ?? defaults.webFetch ?? true),
+        webSearch: profile === "standard" && (selection.webSearch ?? defaults.webSearch ?? true),
       };
       const modelInfo = ai.AZURE_OPENAI_MODELS.find(
         (candidate) => candidate.modelId === active.modelId,
@@ -264,9 +269,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       const tools = new kernel.ToolRegistry();
       const overflowDirectory = join(stateDirectory, "tool-output");
       tools.register(sandbox.makeShellTool({ cwd, overflowDirectory, policy }));
-      tools.register(kernel.makeReadTool({ cwd, ...(unsafe ? {} : { policy }) }));
-      tools.register(kernel.makeWriteTool({ cwd, ...(unsafe ? {} : { policy }) }));
-      tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
+      if (profile === "standard") {
+        tools.register(kernel.makeReadTool({ cwd, ...(unsafe ? {} : { policy }) }));
+        tools.register(kernel.makeWriteTool({ cwd, ...(unsafe ? {} : { policy }) }));
+        tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
+      }
       if (active.webFetch) tools.register(kernel.makeWebFetchTool());
       const braveSearchKey = active.webSearch
         ? ai.nodeAuthContext.env("BRAVE_SEARCH_API_KEY") || undefined
@@ -329,6 +336,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         sandbox: sandbox.configuredPayload(),
         configModel: { modelId: active.modelId },
         configThinking: thinking,
+        configProfile: { profile },
         configTools: { webFetch: active.webFetch, webSearch: active.webSearch },
         ...(boundary === "config_change"
           ? {}

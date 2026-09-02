@@ -87,8 +87,9 @@ test("leaves tool presentation to retained transactions and renders errors loudl
   );
 });
 
-test("tracks model, thinking, and sandbox without noisy startup rows", () => {
-  const view = new SessionView(200, PLAIN_PALETTE);
+test("tracks profile, model, thinking, and sandbox without noisy startup rows", () => {
+  const view = new SessionView(220, PLAIN_PALETTE);
+  assert.deepEqual(view.apply(makeEvent("config.profile", { profile: "exec" })), []);
   assert.deepEqual(view.apply(makeEvent("config.model", { modelId: "gpt-5" })), []);
   const clamp = view.apply(
     makeEvent("config.thinking", { requested: "max", effective: "high", clamped: true }),
@@ -117,6 +118,7 @@ test("tracks model, thinking, and sandbox without noisy startup rows", () => {
   const status = view.statusLine("123e4567-e89b-42d3-a456-426614174000");
   assert.match(status, /idle/);
   assert.match(status, /session 123e4567/);
+  assert.match(status, /profile exec/);
   assert.match(status, /model gpt-5\.6/);
   assert.match(status, /thinking high/);
   assert.match(status, /sandbox bubblewrap/);

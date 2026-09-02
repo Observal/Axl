@@ -7,10 +7,10 @@ import test from "node:test";
 import {
   EVENT_FORMAT_VERSION,
   type EventPayloadMap,
+  ProtocolValidationError,
   parseEvent,
   parseEventId,
   parseSessionId,
-  ProtocolValidationError,
 } from "../src/index.ts";
 
 const eventId = parseEventId("018f47a5-4f18-7cc2-8000-123456789abc");
@@ -54,6 +54,7 @@ const validPayloads = {
   "config.model": { modelId: "model-1" },
   "config.provider": { providerId: "provider-1" },
   "config.entitlement": { entitlementId: "credential-reference" },
+  "config.profile": { profile: "exec" },
   "config.thinking": { requested: "high", effective: "medium", clamped: true },
   "config.tools": { webFetch: true, webSearch: false },
   "config.dialect": {
@@ -131,6 +132,7 @@ test("rejects invalid event payloads", () => {
     event("assistant.message", { content: [], stopReason: "error" }),
     event("context.compacted", { summary: "empty", replacedEventIds: [] }),
     event("permission.resolved", { requestId: "not-a-uuid", decision: "deny" }),
+    event("config.profile", { profile: "unknown" }),
     event("child.result", { childSessionId: sessionId, status: "unknown" }),
   ];
 

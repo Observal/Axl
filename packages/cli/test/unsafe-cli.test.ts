@@ -20,6 +20,7 @@ test("--help and --version do not require credentials", () => {
   assert.equal(help.status, 0);
   assert.match(help.stdout, /^Usage: axl/);
   assert.match(help.stdout, /-r, --resume/);
+  assert.match(help.stdout, /--profile/);
   assert.match(help.stdout, /--no-web-search/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
@@ -72,6 +73,16 @@ test("resume mode rejects an explicit session ID", async () => {
   const result = await runCli(["-r", "123e4567-e89b-42d3-a456-426614174000"]);
   assert.equal(result.code, 1);
   assert.match(result.stderr, /--resume cannot be combined with a session ID/);
+});
+
+test("rejects invalid session profile arguments", async () => {
+  const unknown = await runCli(["--profile", "unknown"]);
+  assert.equal(unknown.code, 1);
+  assert.match(unknown.stderr, /Unknown profile unknown; expected standard or exec/);
+
+  const resume = await runCli(["--profile", "exec", "--resume"]);
+  assert.equal(resume.code, 1);
+  assert.match(resume.stderr, /--profile cannot be combined with --resume/);
 });
 
 test("OCI CLI arguments fail closed", async () => {

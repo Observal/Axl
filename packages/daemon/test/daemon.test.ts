@@ -426,6 +426,54 @@ test("a session survives daemon termination and resumes with full history", asyn
   assert.equal(sent.stopReason, "stop");
 });
 
+test("an exec profile survives daemon restart", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-profile-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const dataDirectory = join(directory, "data");
+  const observed: Array<string | undefined> = [];
+  const makeDaemon = (): AxlDaemon =>
+    new AxlDaemon({
+      socketPath,
+      dataDirectory,
+      runtime: ({ selection }) => {
+        observed.push(selection.profile);
+        return {
+          model: replyPort(),
+          tools: new ToolRegistry(),
+          configProfile: { profile: selection.profile ?? "standard" },
+        };
+      },
+    });
+
+  const first = makeDaemon();
+  await first.start();
+  const client = await DaemonClient.connect(socketPath);
+  const created = (await client.request("session.create", {
+    cwd: directory,
+    profile: "exec",
+  })) as SessionSnapshot;
+  client.close();
+  await first.stop();
+
+  const second = makeDaemon();
+  await second.start();
+  context.after(() => second.stop());
+  const resumedClient = await DaemonClient.connect(socketPath);
+  context.after(() => resumedClient.close());
+  const resumed = (await resumedClient.request("session.resume", {
+    sessionId: created.sessionId,
+  })) as SessionSnapshot;
+
+  assert.deepEqual(observed, ["exec", "exec"]);
+  assert.equal(
+    resumed.events
+      .flatMap((event) => (event.type === "config.profile" ? [event.payload.profile] : []))
+      .at(-1),
+    "exec",
+  );
+});
+
 test("serves bounded working and last-turn workspace diffs", async (context) => {
   const fixture = await startDaemon(context);
   const workspace = join(fixture.cwd, "workspace");
@@ -936,7 +984,7 @@ test("routes runtime interaction requests to an attached client", async (context
   );
 });
 
-test("configuration changes rebuild and log the selected model, thinking, and tools", async (context) => {
+test("configuration changes preserve the selected profile", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "axl.sock");
@@ -944,6 +992,7 @@ test("configuration changes rebuild and log the selected model, thinking, and to
     boundary: string;
     model?: string;
     thinking?: string;
+    profile?: string;
     webFetch?: boolean;
     webSearch?: boolean;
   }> = [];
@@ -955,6 +1004,7 @@ test("configuration changes rebuild and log the selected model, thinking, and to
         boundary,
         ...(selection.modelId === undefined ? {} : { model: selection.modelId }),
         ...(selection.thinkingLevel === undefined ? {} : { thinking: selection.thinkingLevel }),
+        ...(selection.profile === undefined ? {} : { profile: selection.profile }),
         ...(selection.webFetch === undefined ? {} : { webFetch: selection.webFetch }),
         ...(selection.webSearch === undefined ? {} : { webSearch: selection.webSearch }),
       });
@@ -971,6 +1021,9 @@ test("configuration changes rebuild and log the selected model, thinking, and to
                 clamped: false,
               },
             }),
+        ...(selection.profile === undefined
+          ? {}
+          : { configProfile: { profile: selection.profile } }),
         ...(selection.webFetch === undefined || selection.webSearch === undefined
           ? {}
           : {
@@ -991,6 +1044,7 @@ test("configuration changes rebuild and log the selected model, thinking, and to
     cwd: directory,
     modelId: "gpt-5",
     thinkingLevel: "medium",
+    profile: "exec",
     webFetch: true,
     webSearch: true,
   })) as SessionSnapshot;
@@ -1010,6 +1064,7 @@ test("configuration changes rebuild and log the selected model, thinking, and to
       boundary: "session_start",
       model: "gpt-5",
       thinking: "medium",
+      profile: "exec",
       webFetch: true,
       webSearch: true,
     },
@@ -1017,6 +1072,7 @@ test("configuration changes rebuild and log the selected model, thinking, and to
       boundary: "model_switch",
       model: "gpt-4.1",
       thinking: "high",
+      profile: "exec",
       webFetch: true,
       webSearch: true,
     },
@@ -1024,12 +1080,23 @@ test("configuration changes rebuild and log the selected model, thinking, and to
       boundary: "tool_change",
       model: "gpt-4.1",
       thinking: "high",
+      profile: "exec",
       webFetch: true,
       webSearch: false,
     },
   ]);
-  assert.deepEqual(types(changed.events), ["config.model", "config.thinking", "config.tools"]);
-  assert.deepEqual(types(toolsChanged.events), ["config.model", "config.thinking", "config.tools"]);
+  assert.deepEqual(types(changed.events), [
+    "config.model",
+    "config.thinking",
+    "config.profile",
+    "config.tools",
+  ]);
+  assert.deepEqual(types(toolsChanged.events), [
+    "config.model",
+    "config.thinking",
+    "config.profile",
+    "config.tools",
+  ]);
 });
 
 test("reload rebuilds the runtime as a logged boundary with live subscriptions", async (context) => {

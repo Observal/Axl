@@ -85,6 +85,7 @@ async function startStack(
               clamped: false,
             },
           }),
+      ...(selection.profile === undefined ? {} : { configProfile: { profile: selection.profile } }),
     }),
   });
   await daemon.start();
@@ -171,6 +172,35 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   assert.match(resumed.text(), /│ hello axl/);
   assert.match(resumed.text(), /the answer/);
   resumedApp.stop();
+});
+
+test("passes the selected profile when creating a session", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await DaemonClient.connect(socketPath),
+    input,
+    output,
+    cwd: directory,
+    profile: "exec",
+    color: false,
+  });
+
+  input.write("/status\r");
+  await until(() => text().includes("profile   exec"), "profile status");
+  const inspector = await DaemonClient.connect(socketPath);
+  context.after(() => inspector.close());
+  const snapshot = (await inspector.request("session.resume", {
+    sessionId: app.sessionId,
+  })) as SessionSnapshot;
+  assert.equal(
+    snapshot.events.some(
+      (event) => event.type === "config.profile" && event.payload.profile === "exec",
+    ),
+    true,
+  );
+  app.stop();
 });
 
 test("/compact summarizes older context through the daemon", async (context) => {

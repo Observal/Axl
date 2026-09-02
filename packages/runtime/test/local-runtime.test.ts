@@ -185,6 +185,9 @@ test("assembles an authoritative local runtime and ignores an empty Brave key", 
       .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
     ["bash", "read", "write", "edit", "web_fetch", "web_search"],
   );
+  assert.deepEqual(snapshot.events.find((event) => event.type === "config.profile")?.payload, {
+    profile: "standard",
+  });
   const disabled = (await client.request("session.create", {
     cwd: workspace,
     webFetch: false,
@@ -200,4 +203,37 @@ test("assembles an authoritative local runtime and ignores an empty Brave key", 
     webFetch: false,
     webSearch: false,
   });
+
+  // Exec must not parse disabled MCP configuration or discover Skills.
+  await mkdir(join(workspace, ".axl", "skills", "hidden"), { recursive: true });
+  await writeFile(
+    join(workspace, ".axl", "skills", "hidden", "SKILL.md"),
+    "---\nname: hidden\ndescription: must stay disabled\n---\nDo hidden work.\n",
+  );
+  await writeFile(join(workspace, ".axl", "mcp.json"), "not valid json\n");
+  const exec = (await client.request("session.create", {
+    cwd: workspace,
+    profile: "exec",
+  })) as SessionSnapshot;
+  assert.deepEqual(
+    exec.events
+      .filter((event) => event.type === "tool.schema")
+      .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
+    ["bash"],
+  );
+  assert.deepEqual(exec.events.find((event) => event.type === "config.profile")?.payload, {
+    profile: "exec",
+  });
+  assert.deepEqual(exec.events.find((event) => event.type === "config.tools")?.payload, {
+    webFetch: false,
+    webSearch: false,
+  });
+  assert.equal(
+    exec.events.some(
+      (event) =>
+        event.type === "prompt.section" &&
+        (event.payload.name === "skills" || event.payload.content.includes("hidden")),
+    ),
+    false,
+  );
 });

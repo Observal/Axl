@@ -31,6 +31,7 @@ import {
   parseEventId,
   parseSessionId,
   type SessionActivityFrame,
+  type SessionConfiguration,
   type SessionForkResult,
   type SessionHistoryPage,
   type SessionId,
@@ -67,6 +68,7 @@ export interface SessionRuntime {
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
+  readonly configProfile?: EventPayloadMap["config.profile"];
   readonly configTools?: EventPayloadMap["config.tools"];
   readonly configDialect?: EventPayloadMap["config.dialect"];
 }
@@ -94,7 +96,7 @@ export type SessionRuntimeFactory = (input: {
   readonly sessionId: SessionId;
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
-  readonly selection: SessionSelection;
+  readonly selection: SessionConfiguration;
   readonly interact: (
     request: SessionInteractionRequest,
     signal?: AbortSignal,
@@ -131,7 +133,7 @@ interface ManagedSession {
     thinking: string;
     tools: Array<{ callId: string; name: string }>;
   };
-  selection: SessionSelection;
+  selection: SessionConfiguration;
   activeTurn?: ActiveTurn;
   queuedInputs: Promise<void>;
   rebuilding?: Promise<void>;
@@ -255,7 +257,7 @@ export class SessionManager {
       tools: Array<{ callId: string; name: string }>;
     },
     boundary: SessionRuntimeBoundary,
-    selection: SessionSelection,
+    selection: SessionConfiguration,
   ): Promise<AgentSession> {
     const runtime = await this.options.runtime({
       sessionId,
@@ -277,6 +279,7 @@ export class SessionManager {
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
+      ...(runtime.configProfile === undefined ? {} : { configProfile: runtime.configProfile }),
       ...(runtime.configTools === undefined ? {} : { configTools: runtime.configTools }),
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
       onEvent: (event) => {
@@ -294,7 +297,7 @@ export class SessionManager {
   private async open(
     sessionId: SessionId,
     cwd: string,
-    selection: SessionSelection,
+    selection: SessionConfiguration,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [];
     const listeners = new Set<(event: CanonicalEvent) => void>();
@@ -336,14 +339,17 @@ export class SessionManager {
 
   async create(
     cwd: string,
-    selection: SessionSelection = {},
+    selection: SessionConfiguration = {},
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
       throw new DaemonError("invalid_cwd", `Cannot open working directory ${cwd}`, { cause });
     });
     await mkdir(join(this.options.dataDirectory, "sessions"), { recursive: true, mode: 0o700 });
     const sessionId = parseSessionId(randomUUID(), "sessionId");
-    const managed = await this.open(sessionId, canonicalCwd, selection);
+    const managed = await this.open(sessionId, canonicalCwd, {
+      ...selection,
+      profile: selection.profile ?? "standard",
+    });
     return { sessionId, events: [...managed.events] };
   }
 
@@ -555,12 +561,14 @@ export class SessionManager {
       throw new DaemonError("corrupt_session", `Session ${sessionId} has no creation event`);
     }
     let modelId: string | undefined;
-    let thinkingLevel: SessionSelection["thinkingLevel"];
+    let thinkingLevel: SessionConfiguration["thinkingLevel"];
     let webFetch: boolean | undefined;
     let webSearch: boolean | undefined;
+    let profile: SessionConfiguration["profile"];
     for (const event of events) {
       if (event.type === "config.model") modelId = event.payload.modelId;
       else if (event.type === "config.thinking") thinkingLevel = event.payload.requested;
+      else if (event.type === "config.profile") profile = event.payload.profile;
       else if (event.type === "config.tools") {
         webFetch = event.payload.webFetch;
         webSearch = event.payload.webSearch;
@@ -571,6 +579,7 @@ export class SessionManager {
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(webFetch === undefined ? {} : { webFetch }),
       ...(webSearch === undefined ? {} : { webSearch }),
+      profile: profile ?? "standard",
     });
   }
 
@@ -923,7 +932,7 @@ export class SessionManager {
   private async rebuild(
     managed: ManagedSession,
     boundary: SessionRuntimeBoundary,
-    selection: SessionSelection,
+    selection: SessionConfiguration,
   ): Promise<void> {
     const previous = managed.session;
     const rebuilding = (async () => {

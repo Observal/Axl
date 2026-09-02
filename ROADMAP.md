@@ -619,9 +619,12 @@ Profiles define the model's base tool surface:
 
 ```text
 chat      (none)
+exec      bash
 minimal   bash, edit
 standard  bash, read, write, edit, web_search, web_fetch, ask_user_question
 ```
+
+The `exec` profile gives the model exactly one canonical tool: `bash`, executed under the active sandbox. It does not discover or activate Skills, MCP servers, or other optional capabilities. In unsafe sessions Bash retains the user's full host access, so the profile is a smaller model interface, not an isolation boundary.
 
 `ask_user_question` appears only in interactive sessions. Goal sessions, headless runs, and unattended automation omit both its schema and instructions. A goal that needs more information either records a safe, reversible assumption or emits a blocker and pauses.
 
@@ -1770,6 +1773,7 @@ After this gate, use Axl for ordinary development. Continue independent review o
 
 The Phase 4 gate still stands, but several current paths need replacement before dogfooding expands:
 
+- [x] Add a strict `exec` profile that exposes only sandboxed Bash and activates no Skills or MCP servers.
 - [ ] Replace the prompt-wide skill catalog with BM25 selection before each user turn.
 - [ ] Replace the generic MCP invocation path with turn-selected, provider-native tool schemas and frozen per-turn bindings.
 - [ ] Add `ask_user_question` to interactive sessions and verify that it is absent from goals and headless runs.
@@ -1837,7 +1841,7 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 - [ ] Read global and project `AGENTS.md` files.
 - [ ] Read global `~/.axl/` and project `.axl/` configuration.
 - [ ] Resolve project settings over global settings while allowing project policy only to narrow capabilities.
-- [ ] Add standard, minimal, and chat profiles.
+- [ ] Add standard, minimal, exec, and chat profiles.
 
 #### Terminal experience
 
@@ -2432,4 +2436,6 @@ Complete these dogfood fixes before continuing Phase 5:
 2. Build the local BM25 capability index and log the three-or-fewer records disclosed for each user turn.
 3. Replace the generic MCP gateway with selected provider-native tool schemas and frozen per-turn dispatch bindings.
 4. Add the bearer-token and basic-auth credential broker before using credentialed third-party processes in dogfood sessions.
-5. Stop and verify these paths before returning to web access or compaction.
+5. Add hash-anchored reads and edits with stale-snapshot rejection.
+6. Add bounded parallel tool execution with deterministic call/result ordering and explicit concurrency policy.
+7. Stop and verify these paths before returning to web access or compaction.

@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
 import { DaemonClient, WireClientError } from "@axl/daemon/client";
-import type { ThinkingLevel } from "@axl/protocol";
+import type { SessionProfile, ThinkingLevel } from "@axl/protocol";
 import {
   diagnoseLocalSandboxes,
   type LocalSandboxSelection,
@@ -34,6 +34,7 @@ Options:
   --cwd <path>       Set the workspace directory
   --model <id>       Select the initial model
   --thinking <level> Select the initial reasoning effort
+  --profile <name>   Select the standard or Bash-only exec profile
   --theme <name>     Select the terminal theme
   --tui-mode <mode>  Use regular or fullscreen terminal mode
   --socket <path>    Use a custom daemon socket
@@ -59,6 +60,7 @@ interface CliArguments {
   socket?: string;
   model?: string;
   thinking?: ThinkingLevel;
+  profile?: SessionProfile;
   theme?: string;
   tuiMode?: "regular" | "fullscreen";
   image?: string;
@@ -92,7 +94,13 @@ function parseArguments(argv: readonly string[]): CliArguments {
     if (argument === "--socket") parsed.socket = next();
     else if (argument === "--model") parsed.model = next();
     else if (argument === "--thinking") parsed.thinking = next() as ThinkingLevel;
-    else if (argument === "--cwd") parsed.cwd = next();
+    else if (argument === "--profile") {
+      const profile = next();
+      if (profile !== "standard" && profile !== "exec") {
+        throw new Error(`Unknown profile ${profile}; expected standard or exec`);
+      }
+      parsed.profile = profile;
+    } else if (argument === "--cwd") parsed.cwd = next();
     else if (argument === "--theme") parsed.theme = next();
     else if (argument === "--tui-mode") {
       const mode = next();
@@ -374,6 +382,15 @@ async function main(): Promise<void> {
     process.stdout.write(`axl ${AXL_VERSION}\n`);
     return;
   }
+  if (cli.profile !== undefined && cli.command === "daemon") {
+    throw new Error("--profile selects a session and cannot be used with the daemon command");
+  }
+  if (cli.profile !== undefined && cli.sessionId !== undefined) {
+    throw new Error("--profile cannot replace the recorded profile of a resumed session");
+  }
+  if (cli.profile !== undefined && cli.resume) {
+    throw new Error("--profile cannot be combined with --resume");
+  }
 
   const startupIndicator = cli.command === undefined && showStartupIndicator("starting…");
   const tuiModule = cli.command === undefined ? import("@axl/tui") : undefined;
@@ -567,6 +584,7 @@ async function main(): Promise<void> {
     modelCatalog: AZURE_OPENAI_MODELS,
     currentModel: active.modelId,
     currentThinking: active.thinkingLevel,
+    ...(cli.profile === undefined ? {} : { profile: cli.profile }),
     webFetch: active.webFetch,
     webSearch: active.webSearch,
     loadCredentials: credentials,
