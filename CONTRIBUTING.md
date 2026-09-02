@@ -3,7 +3,7 @@
 
 # Contributing to Axl
 
-Contributions to code, tests, documentation, and design are welcome. Read the [Code of Conduct](CODE_OF_CONDUCT.md), [AI Policy](AI_POLICY.md), and [development guide](AGENTS.md) before contributing.
+Contributions to code, tests, documentation, and design are welcome. Read the [Code of Conduct](CODE_OF_CONDUCT.md), [AI Policy](AI_POLICY.md), [governance](GOVERNANCE.md), and [development guide](docs/DEVELOPMENT_GUIDE.md) before contributing. Coding agents must also follow [AGENTS.md](AGENTS.md).
 
 ## Prerequisites
 
@@ -104,7 +104,7 @@ Add user-visible changes under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
 4. Complete the pull request template, including AI assistance and external provenance.
 5. Resolve all review and CI findings.
 
-Keep each pull request focused on one concern. Kernel and security-boundary changes require two reviewers. Other changes require one maintainer.
+Keep each pull request focused on one concern. Protected branches require two approvals and BDFL approval. During bootstrap, the BDFL may use the documented administrator bypass until another maintainer role is delegated.
 
 ## Report issues
 

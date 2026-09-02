@@ -32,17 +32,13 @@ Third-party work carries its original obligations:
 
 ## 3. Governance
 
-Axl uses a BDFL and area-maintainer model.
+Axl currently uses bootstrap BDFL governance. Hari Srinivasan ([@Haz3-jolt](https://github.com/Haz3-jolt)) is the founder and BDFL. The BDFL owns final project, architecture, security, repository-policy, release, and governance decisions.
 
-The BDFL owns the kernel guarantees, event format, child contract, extension API, and final architectural decisions. The role exists to settle questions that cannot reach consensus. It should not block routine work.
+No maintainer roles, area ownership, committees, or succession process have been delegated yet. The BDFL currently performs those duties. Future roles remain intentionally unspecified until the contributor base requires them.
 
-Area maintainers own defined parts of the project, including the adoption compiler, terminal and web clients, mobile clients, protocol and SDKs, sandbox providers, and documentation. They may merge changes within their areas. Cross-area changes need review from each affected area, while kernel changes also need BDFL review.
+Changes to a kernel guarantee, event format, extension API, security boundary, or protocol require prior design discussion and an RFC when requested by the BDFL. Other changes use the normal pull request process.
 
-Changes to a kernel guarantee, event format, extension API, or protocol require a short RFC in the repository. An RFC should explain the problem, proposed design, alternatives, and compatibility impact. Other changes use the normal pull request process.
-
-Maintainers are nominated after sustained, high-quality contributions and sound review work in an area. Existing maintainers approve the nomination. Inactive maintainers may step down and return later through the same process.
-
-If the BDFL leaves, the maintainers choose a successor from among themselves.
+[GOVERNANCE.md](GOVERNANCE.md) is the authoritative statement of current decision authority and role status.
 
 ## 4. Contributions
 
@@ -58,7 +54,7 @@ Unattended pull requests, bulk-generated patches without human ownership, and is
 
 ### Review requirements
 
-Kernel and security-boundary changes require two reviewers, including the relevant area maintainer or BDFL. Other changes require one maintainer. Behavior changes include tests, and the Pi compatibility fixtures remain part of the regression floor.
+Protected branches require two human approvals and BDFL approval. During bootstrap, the BDFL may use the documented administrator bypass until another maintainer role is delegated. Behavior changes include tests, and the Pi compatibility fixtures remain part of the regression floor.
 
 The adoption compiler should produce useful starter issues. Each issue should cover one ecosystem quirk, conversion gap, or catalog failure and include a reproduction.
 
@@ -138,9 +134,12 @@ Each contributor document has a specific job:
 | --- | --- |
 | `AI_POLICY.md` | Sets the human-review and disclosure requirements for AI-assisted work. |
 | `.github/pull_request_template.md` | Collects purpose, approach, tests, provenance, and AI-assistance details. |
-| `CONTRIBUTING.md` | Explains setup, development, testing, licensing, commits, and review. |
+| `CONTRIBUTING.md` | Summarizes contribution policy, licensing, commits, and review. |
+| `GOVERNANCE.md` | Names current decision authority and records the status of project roles. |
 | `AGENTS.md` | Gives coding agents the same repository rules contributors follow. |
 | `SETUP.md` | Covers installation, provider setup, first use, and development commands. |
+| `docs/DEVELOPMENT_GUIDE.md` | Explains the complete contributor workflow and current architecture. |
+| `RELEASES.md` | Defines release branches, backports, channels, publication, and verification gates. |
 | `.github/CODEOWNERS` | Maps default, security, and release ownership. |
 | `.github/ISSUE_TEMPLATE/` | Provides forms for bugs, features, and adoption targets. |
 | `SECURITY.md` | Lists private reporting channels and response times. |

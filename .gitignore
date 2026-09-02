@@ -3,6 +3,7 @@
 
 node_modules/
 dist/
+.release/
 coverage/
 docs/screenshots/
 *.tsbuildinfo

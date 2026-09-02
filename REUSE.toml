@@ -5,10 +5,12 @@ version = 1
 
 [[annotations]]
 path = [
+  ".release.json",
   "LICENSE",
   "NOTICE",
   "biome.json",
   "package.json",
+  "distribution/npm/package.json",
   "packages/*/package.json",
   "packages/*/tsconfig*.json",
   "packages/extensions/*/package.json",
@@ -16,6 +18,11 @@ path = [
   "pnpm-lock.yaml",
   "tsconfig*.json",
 ]
+SPDX-FileCopyrightText = "2026 Hari Srinivasan"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [".agents/skills/**"]
 SPDX-FileCopyrightText = "2026 Hari Srinivasan"
 SPDX-License-Identifier = "Apache-2.0"
 

@@ -10,6 +10,8 @@ This file records notable user-facing changes.
 ### Added
 
 - Repository, licensing, contribution, and CI foundations
+- Release-branch tooling for channel releases, tracked backports, signed tags, npm publication, and GitHub Releases
+- The public `@observal/axl` package, checksum-verifying installer, and CLI `--help` and `--version` output
 - Explicit `--unsafe` startup mode with separate state, logged unenforced status, and a persistent terminal warning
 - Dependency-free event and local wire protocols with runtime validation
 - Crash-safe JSONL sessions, branch reconstruction, redaction, and deterministic replay

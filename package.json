@@ -9,6 +9,8 @@
   },
   "scripts": {
     "build": "tsc -b packages/*/tsconfig.build.json packages/extensions/*/tsconfig.build.json --force",
+    "build:release": "node scripts/build-release-package.ts",
+    "build:release-metadata": "node scripts/build-release-metadata.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm check:generated",
     "check:boundaries": "node scripts/check-boundaries.ts",
     "check:generated": "node scripts/check-generated.ts",
@@ -16,12 +18,15 @@
     "format:check": "biome format .",
     "install:cli": "pnpm install && pnpm build && node scripts/install-cli.ts",
     "lint": "biome lint --error-on-warnings .",
+    "release": "node scripts/release.ts",
+    "release:preview": "node scripts/release.ts --preview",
     "test": "pnpm build && node --test packages/*/test/*.test.ts packages/extensions/*/test/*.test.ts scripts/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.5",
     "@types/node": "22.19.19",
+    "esbuild": "0.28.2",
     "typescript": "5.9.3"
   }
 }

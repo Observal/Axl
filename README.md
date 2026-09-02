@@ -7,23 +7,35 @@ Axl, short for Axolotl, is an agent harness that works with existing tools, mode
 
 **Current status:** phases 0 through 4 of the [implementation plan](IMPLEMENTATION_PLAN.md) are complete. The TUI, Agent Skills, and MCP support were brought forward from later phases. Other later-phase work has not started.
 
-## Run Axl locally
+## Install
 
-You need:
+Axl requires Node.js `^22.19.0` or `>=24`. Sandboxed command execution requires Bubblewrap on Linux. macOS uses Seatbelt.
 
-- Node.js `^22.19.0` or `>=24`
-- pnpm `10.34.4`
-- Bubblewrap on Linux
-- An Azure OpenAI API key and endpoint
+Install the package from npm:
 
 ```bash
-git clone https://github.com/Haz3-jolt/Axl
-cd Axl
-pnpm install --frozen-lockfile
-pnpm run install:cli
+npm install --global @observal/axl
+```
 
-export AZURE_OPENAI_API_KEY=...
-export AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/
+Or install the latest package artifact from GitHub Releases with checksum verification:
+
+```bash
+curl -fsSL https://github.com/Observal/Axl/releases/latest/download/install.sh | sh
+```
+
+Install a specific GitHub release by setting `AXL_VERSION`:
+
+```bash
+AXL_VERSION=v0.1.0 \
+  curl -fsSL https://github.com/Observal/Axl/releases/download/v0.1.0/install.sh | sh
+```
+
+Axl has not published its first release yet. These commands become available after the first release passes the gate in [RELEASES.md](RELEASES.md).
+
+Configure Azure OpenAI and start Axl:
+
+```bash
+axl login
 axl
 ```
 
@@ -63,20 +75,28 @@ Unsafe mode disables operating-system isolation and file-tool path policy. Shell
 ## Project documents
 
 - [Setup](SETUP.md)
+- [Development guide](docs/DEVELOPMENT_GUIDE.md)
+- [Contributing](CONTRIBUTING.md)
+- [Governance](GOVERNANCE.md)
 - [Product plan](HARNESS_PLAN.md)
 - [Implementation plan](IMPLEMENTATION_PLAN.md)
 - [Repository structure](CODE_STRUCTURE.md)
-- [Contributing](CONTRIBUTING.md)
+- [Release guide](RELEASES.md)
 - [Security policy](SECURITY.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 
 ## Development
 
 ```bash
+git clone https://github.com/Observal/Axl.git
+cd Axl
 pnpm install --frozen-lockfile
+pnpm run install:cli
 pnpm check
 reuse lint
 ```
+
+See the [development guide](docs/DEVELOPMENT_GUIDE.md) for architecture, focused test commands, contribution workflow, and debugging.
 
 ## License
 

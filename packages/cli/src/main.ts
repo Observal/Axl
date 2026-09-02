@@ -23,6 +23,23 @@ import { AxlApp, runAzureSetup, themeNames } from "@axl/tui";
 
 import { type AxlSettings, readSettings, writeSettings } from "./settings.ts";
 
+const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
+
+const HELP = `Usage: axl [session-id] [options]
+       axl login
+       axl daemon [options]
+
+Options:
+  --cwd <path>       Set the workspace directory
+  --model <id>       Select the initial model
+  --thinking <level> Select the initial reasoning effort
+  --theme <name>     Select the terminal theme
+  --socket <path>    Use a custom daemon socket
+  --unsafe           Disable operating-system isolation
+  --help             Show this help
+  --version          Show the installed version
+`;
+
 interface CliArguments {
   command?: "login" | "daemon";
   sessionId?: string;
@@ -32,10 +49,17 @@ interface CliArguments {
   theme?: string;
   cwd: string;
   unsafe: boolean;
+  showHelp: boolean;
+  showVersion: boolean;
 }
 
 function parseArguments(argv: readonly string[]): CliArguments {
-  const parsed: CliArguments = { cwd: process.cwd(), unsafe: false };
+  const parsed: CliArguments = {
+    cwd: process.cwd(),
+    unsafe: false,
+    showHelp: false,
+    showVersion: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] as string;
     const next = (): string => {
@@ -50,6 +74,8 @@ function parseArguments(argv: readonly string[]): CliArguments {
     else if (argument === "--cwd") parsed.cwd = next();
     else if (argument === "--theme") parsed.theme = next();
     else if (argument === "--unsafe") parsed.unsafe = true;
+    else if (argument === "--help" || argument === "-h") parsed.showHelp = true;
+    else if (argument === "--version" || argument === "-v") parsed.showVersion = true;
     else if (argument === "login" || argument === "daemon") parsed.command = argument;
     else if (!argument.startsWith("-")) parsed.sessionId = argument;
     else throw new Error(`Unknown argument ${argument}`);
@@ -152,6 +178,15 @@ async function connectOrStartDaemon(input: {
 
 async function main(): Promise<void> {
   const cli = parseArguments(process.argv.slice(2));
+  if (cli.showHelp) {
+    process.stdout.write(HELP);
+    return;
+  }
+  if (cli.showVersion) {
+    process.stdout.write(`axl ${AXL_VERSION}\n`);
+    return;
+  }
+
   const axlHome = join(homedir(), ".axl");
   const stateDirectory = cli.unsafe ? join(axlHome, "unsafe") : axlHome;
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,16 @@ import { type ModelPort, ToolRegistry } from "@axl/kernel";
 import type { ModelStreamEvent } from "@axl/protocol";
 
 const entry = fileURLToPath(new URL("../dist/main.js", import.meta.url));
+
+test("--help and --version do not require credentials", () => {
+  const help = spawnSync(process.execPath, [entry, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /^Usage: axl/);
+
+  const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
+  assert.equal(version.status, 0);
+  assert.equal(version.stdout, "axl 0.0.0-dev\n");
+});
 
 async function temporaryDirectory(context: TestContext): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "axl-unsafe-cli-"));

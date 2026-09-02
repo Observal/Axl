@@ -1,0 +1,35 @@
+{
+  "name": "@observal/axl",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Axl agent harness command-line interface",
+  "type": "module",
+  "bin": {
+    "axl": "dist/axl.js"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Observal/Axl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Observal/Axl/issues"
+  },
+  "homepage": "https://github.com/Observal/Axl#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "yaml": "2.8.3"
+  }
+}

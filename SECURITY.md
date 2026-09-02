@@ -7,13 +7,13 @@ The [security assurance case](docs/security/assurance-case.md) lists Axl's asset
 
 ## Supported versions
 
-Axl is still in pre-release development, so only the current `main` branch receives security fixes.
+Until Axl publishes its first release, only `main` receives security fixes. Afterward, fixes land on `main` first and are backported to the current stable `release/X.Y` branch and any older line carrying an `lts-X.Y` npm tag. Permanent release branches without an active stable or LTS channel remain available for audit but are not supported.
 
 ## Report a vulnerability
 
 Please do not open a public issue for a suspected vulnerability.
 
-Use GitHub Private Vulnerability Reporting in the canonical repository when it is available. Otherwise, email `harisrini21@gmail.com`.
+Use GitHub Private Vulnerability Reporting in the canonical repository when it is available. Otherwise, email `hari@observal.io`.
 
 Include the affected revision, expected impact, reproduction steps, and any suggested fix. Do not send live credentials or private user data.
 

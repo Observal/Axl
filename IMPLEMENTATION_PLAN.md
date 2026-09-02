@@ -67,7 +67,7 @@ Build this before product code so security and license hygiene do not become a r
 - [x] Add formatting, type checking, unit tests, license checks, and DCO checks.
 - [x] Add Gitleaks, dependency review, CodeQL, actionlint, and lockfile auditing.
 - [x] Configure path-gated jobs while ensuring every required check reports a result.
-- [ ] Protect main with pull requests, linear history, and a merge queue after the canonical GitHub remote exists.
+- [x] Protect main with pull requests, linear history, and a merge queue after the canonical GitHub remote exists.
 
 ### Exit gate
 

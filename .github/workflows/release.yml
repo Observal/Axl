@@ -1,0 +1,335 @@
+# SPDX-FileCopyrightText: 2026 Hari Srinivasan
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release
+
+on:
+  push:
+    branches: ["release/**"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.resolve.outputs.release }}
+      version: ${{ steps.resolve.outputs.version }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      npm_tag: ${{ steps.resolve.outputs.npm_tag }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      target: ${{ steps.resolve.outputs.target }}
+      branch: ${{ steps.resolve.outputs.branch }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        with:
+          standalone: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Resolve release commit
+        id: resolve
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: >-
+          node scripts/release.ts --resolve-push
+          --before "$BEFORE"
+          --after "$AFTER"
+          --branch "$BRANCH"
+
+      - name: Install dependencies
+        if: steps.resolve.outputs.release == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run repository checks
+        if: steps.resolve.outputs.release == 'true'
+        run: pnpm check
+
+      - name: Audit dependencies
+        if: steps.resolve.outputs.release == 'true'
+        run: pnpm audit --audit-level high
+
+      - name: Check REUSE compliance
+        if: steps.resolve.outputs.release == 'true'
+        uses: fsfe/reuse-action@676e2d560c9a403aa252096d99fcab3e1132b0f5 # v6
+
+      - name: Build release package and security metadata
+        if: steps.resolve.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          pnpm build:release
+          pnpm build:release-metadata -- "$VERSION"
+
+      - name: Smoke-test packed CLI
+        if: steps.resolve.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          test_root=$(mktemp -d)
+          trap 'rm -rf "$test_root"' EXIT
+          npm install --prefix "$test_root" --ignore-scripts ".release/artifacts/observal-axl-$VERSION.tgz"
+          test "$("$test_root/node_modules/.bin/axl" --version)" = "axl $VERSION"
+          "$test_root/node_modules/.bin/axl" --help | grep '^Usage: axl'
+
+      - name: Upload release package
+        if: steps.resolve.outputs.release == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-package
+          path: .release/artifacts/*
+          if-no-files-found: error
+          retention-days: 5
+
+  tag:
+    name: Sign release tag
+    needs: preflight
+    if: needs.preflight.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.preflight.outputs.target }}
+
+      - uses: chainguard-dev/actions/setup-gitsign@9d631658f55713e5f63ca0cc21ee168f81301fd9 # v1.6.30
+
+      - name: Install verified gitsign
+        env:
+          GITSIGN_VERSION: "0.17.1"
+          GITSIGN_SHA256: "69213a8a0813a151e5a47d0060862952ff833a845d57309dff76f7ba6600abae"
+        run: |
+          binary=$(mktemp)
+          trap 'rm -f "$binary"' EXIT
+          curl -fLsS \
+            "https://github.com/sigstore/gitsign/releases/download/v${GITSIGN_VERSION}/gitsign_${GITSIGN_VERSION}_linux_amd64" \
+            -o "$binary"
+          printf '%s  %s\n' "$GITSIGN_SHA256" "$binary" | sha256sum -c
+          install -m 0755 "$binary" "$HOME/.gitsign/gitsign"
+          gitsign version
+
+      - name: Create or verify signed tag
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          TARGET: ${{ needs.preflight.outputs.target }}
+          BRANCH: ${{ needs.preflight.outputs.branch }}
+          GITSIGN_ENABLE_SIGSTORE_GO: "true"
+          GITSIGN_REKOR_MODE: "online"
+          GITSIGN_REKOR_VERSION: "1"
+        run: |
+          identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/$BRANCH"
+          if git rev-parse "$TAG^{commit}" >/dev/null 2>&1; then
+            test "$(git rev-parse "$TAG^{commit}")" = "$TARGET" || {
+              echo "::error::$TAG points to a different commit"
+              exit 1
+            }
+          else
+            git tag -s "$TAG" -m "Release $TAG" "$TARGET"
+            git push origin "$TAG"
+          fi
+          gitsign verify-tag "$TAG" \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+  npm:
+    name: Publish npm package
+    needs: [preflight, tag]
+    if: needs.preflight.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-package
+          path: release
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+          scope: "@observal"
+
+      - name: Publish or verify existing package
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: |
+          package="release/observal-axl-$VERSION.tgz"
+          remote_integrity=$(npm view "@observal/axl@$VERSION" dist.integrity 2>/dev/null || true)
+          if [ -n "$remote_integrity" ]; then
+            local_integrity="sha512-$(openssl dgst -sha512 -binary "$package" | openssl base64 -A)"
+            test "$remote_integrity" = "$local_integrity" || {
+              echo "::error::npm already contains different bytes for @observal/axl@$VERSION"
+              exit 1
+            }
+            echo "npm already contains the identical package"
+          else
+            npm publish "$package" --access public --tag "$NPM_TAG" --provenance
+          fi
+
+  github-release:
+    name: Publish GitHub Release
+    needs: [preflight, tag, npm]
+    if: needs.preflight.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.preflight.outputs.target }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-package
+          path: release
+
+      - name: Attest release artifacts
+        id: attest
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
+        with:
+          subject-path: |
+            release/observal-axl-*.tgz
+            release/observal-axl-*.cdx.json
+            release/observal-axl-*.openvex.json
+            release/install.sh
+            release/checksums.txt
+
+      - name: Add provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          test -n "$BUNDLE_PATH" -a -s "$BUNDLE_PATH"
+          cp "$BUNDLE_PATH" release/build-provenance.intoto.jsonl
+
+      - name: Verify provenance before publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ needs.preflight.outputs.branch }}
+        run: |
+          identity="$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/$BRANCH"
+          for artifact in \
+            release/observal-axl-*.tgz \
+            release/observal-axl-*.cdx.json \
+            release/observal-axl-*.openvex.json \
+            release/install.sh \
+            release/checksums.txt; do
+            gh attestation verify "$artifact" \
+              --repo "$GITHUB_REPOSITORY" \
+              --bundle release/build-provenance.intoto.jsonl \
+              --signer-workflow "$identity"
+          done
+
+      - name: Create or resume GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CHANNEL: ${{ needs.preflight.outputs.channel }}
+          NPM_TAG: ${{ needs.preflight.outputs.npm_tag }}
+        run: |
+          published=false
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --draft --title "Axl $TAG" --notes-file .github/release-notes.md
+          elif [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = "false" ]; then
+            published=true
+          fi
+          existing=$(mktemp -d)
+          trap 'rm -rf "$existing"' EXIT
+          for artifact in release/*; do
+            name=$(basename "$artifact")
+            if gh release download "$TAG" --pattern "$name" --dir "$existing" >/dev/null 2>&1; then
+              cmp "$artifact" "$existing/$name" || {
+                echo "::error::$name already exists with different bytes"
+                exit 1
+              }
+            elif [ "$published" = "true" ]; then
+              echo "::error::immutable release $TAG is missing $name"
+              exit 1
+            else
+              gh release upload "$TAG" "$artifact"
+            fi
+          done
+          if [ "$published" = "true" ]; then
+            exit 0
+          elif [ "$CHANNEL" = "stable" ]; then
+            if [ "$NPM_TAG" = "latest" ]; then
+              gh release edit "$TAG" --draft=false --prerelease=false --latest
+            else
+              gh release edit "$TAG" --draft=false --prerelease=false --latest=false
+            fi
+          else
+            gh release edit "$TAG" --draft=false --prerelease --latest=false
+          fi
+
+  verify:
+    name: Verify published release
+    needs: [preflight, github-release]
+    if: needs.preflight.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: read
+      contents: read
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Download and verify GitHub assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          mkdir release
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release
+          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+          for artifact in release/*; do
+            gh release verify-asset "$TAG" "$artifact" --repo "$GITHUB_REPOSITORY"
+          done
+          cd release
+          sha256sum --check checksums.txt
+          cd ..
+          node -e '
+            const prefix = "./release/observal-axl-" + process.env.VERSION;
+            const sbom = require(prefix + ".cdx.json");
+            if (sbom.specVersion !== "1.5" || sbom.metadata.component.name !== "@observal/axl" || sbom.metadata.component.version !== process.env.VERSION) process.exit(1);
+            const vex = require(prefix + ".openvex.json");
+            if (vex["@context"] !== "https://openvex.dev/ns/v0.2.0" || !Array.isArray(vex.statements)) process.exit(1);
+          '
+          test_root=$(mktemp -d)
+          npm_copy=$(mktemp -d)
+          trap 'rm -rf "$test_root" "$npm_copy"' EXIT
+          npm install --prefix "$test_root" --ignore-scripts "release/observal-axl-$VERSION.tgz"
+          test "$("$test_root/node_modules/.bin/axl" --version)" = "axl $VERSION"
+          test "$(npm view "@observal/axl@$VERSION" version)" = "$VERSION"
+          npm pack --pack-destination "$npm_copy" "@observal/axl@$VERSION" >/dev/null
+          cmp "release/observal-axl-$VERSION.tgz" "$npm_copy/observal-axl-$VERSION.tgz"
