@@ -15,10 +15,9 @@ Axl is a universal agent harness that adapts to existing user setups, models, to
 
 Read these documents before changing architecture or sequencing work:
 
-- `HARNESS_PLAN.md`: product behavior and invariants
+- `ROADMAP.md`: product behavior, invariants, and ordered implementation plan
 - `CODE_STRUCTURE.md`: repository and package boundaries
 - `OPEN_SOURCE.md`: licensing, governance, security, and release requirements
-- `IMPLEMENTATION_PLAN.md`: ordered execution plan
 
 When documents conflict, stop and surface the conflict instead of silently choosing one.
 
@@ -46,7 +45,7 @@ Study their behavior, contracts, tests, and architecture. Write independent Axl 
 
 ## Implementation order
 
-Follow `IMPLEMENTATION_PLAN.md`. Build phases 0 through 4 with a stable harness. Begin dogfooding only after Axl can safely edit its own disposable worktree, run tests inside Bubblewrap, survive daemon restart, and replay the session deterministically.
+Follow the technical implementation roadmap in `ROADMAP.md`. Build phases 0 through 4 with a stable harness. Begin dogfooding only after Axl can safely edit its own disposable worktree, run tests inside Bubblewrap, survive daemon restart, and replay the session deterministically.
 
 Build the smallest complete vertical slice. Do not scaffold later phases or add speculative abstractions.
 

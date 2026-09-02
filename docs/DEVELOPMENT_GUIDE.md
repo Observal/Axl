@@ -5,7 +5,7 @@
 
 This guide explains how to set up, run, understand, change, test, and contribute to Axl. It complements the shorter [setup guide](../SETUP.md) and [contribution rules](../CONTRIBUTING.md). The broad contributor journey follows the useful pattern established by the Observal development guide, while every command, package, and guarantee below is specific to Axl.
 
-Axl is still pre-1.0. Documentation must distinguish implemented behavior from planned behavior. [HARNESS_PLAN.md](../HARNESS_PLAN.md) defines the product, [IMPLEMENTATION_PLAN.md](../IMPLEMENTATION_PLAN.md) records delivery order, and [CODE_STRUCTURE.md](../CODE_STRUCTURE.md) defines repository boundaries.
+Axl is still pre-1.0. Documentation must distinguish implemented behavior from planned behavior. [ROADMAP.md](../ROADMAP.md) defines the product vision and delivery order, and [CODE_STRUCTURE.md](../CODE_STRUCTURE.md) defines repository boundaries.
 
 ## Contents
 
@@ -896,8 +896,7 @@ Axl has several documents with distinct responsibilities:
 | `docs/DEVELOPMENT_GUIDE.md` | Complete contributor workflow |
 | `CONTRIBUTING.md` | Contribution policy and concise checklist |
 | `GOVERNANCE.md` | Current decision authority and project roles |
-| `HARNESS_PLAN.md` | Product behavior and invariants |
-| `IMPLEMENTATION_PLAN.md` | Delivery order and completed work |
+| `ROADMAP.md` | Product behavior, invariants, delivery order, and completed work |
 | `CODE_STRUCTURE.md` | Package and repository boundaries |
 | `OPEN_SOURCE.md` | Licensing, contribution, and public-project policy |
 | `AI_POLICY.md` | Human ownership of AI-assisted work |

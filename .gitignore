@@ -13,6 +13,5 @@ docs/screenshots/
 
 # These product plans belong in the repository even when a global ignore file hides them.
 !CODE_STRUCTURE.md
-!HARNESS_PLAN.md
-!IMPLEMENTATION_PLAN.md
 !OPEN_SOURCE.md
+!ROADMAP.md

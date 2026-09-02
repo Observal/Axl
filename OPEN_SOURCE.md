@@ -3,7 +3,7 @@
 
 # Axl open source plan
 
-Status: working plan. This document accompanies [HARNESS_PLAN.md](HARNESS_PLAN.md).
+Status: working plan. This document accompanies [ROADMAP.md](ROADMAP.md).
 
 Updated: 2026-08-28
 

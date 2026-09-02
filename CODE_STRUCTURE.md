@@ -3,7 +3,7 @@
 
 # Axl code structure
 
-Status: working plan. This document accompanies [HARNESS_PLAN.md](HARNESS_PLAN.md) and [OPEN_SOURCE.md](OPEN_SOURCE.md).
+Status: working plan. This document accompanies [ROADMAP.md](ROADMAP.md) and [OPEN_SOURCE.md](OPEN_SOURCE.md).
 
 Updated: 2026-08-28
 
@@ -36,24 +36,24 @@ Codex offers a useful contrast. Its CLI and Rust core share a repository, while 
 ```text
 axl/
   packages/
-    kernel/            # event log, agent loop, tool protocol, and policy (HP §2.3)
+    kernel/            # event log, agent loop, tool protocol, and policy (roadmap §2.3)
     protocol/          # authoritative TypeScript event, RPC, and capability contracts
-    ai/                # provider adapters, tool dialects, and thinking levels (HP §2.7, 7.4, 7.6)
-    compiler/          # adoption inspectors, converters, and verifiers (HP §4)
-    daemon/            # sessions, placements, and pooling (HP §13, 14, 15)
+    ai/                # provider adapters, tool dialects, and thinking levels (roadmap §2.7, 7.4, 7.6)
+    compiler/          # adoption inspectors, converters, and verifiers (roadmap §4)
+    daemon/            # sessions, placements, and pooling (roadmap §13, 14, 15)
     runtime/           # client-independent local runtime assembly
-    sandbox/           # operating-system providers and OCI runtime (HP §10, 11)
+    sandbox/           # operating-system providers and OCI runtime (roadmap §10, 11)
     cli/               # axl executable, process startup, and client selection
     tui/               # terminal event projection and interaction UI
     web/               # web client
     sdk/               # public client SDK when an external consumer needs it
-    extensions/        # first-party extensions, one package per feature (HP §2.9)
+    extensions/        # first-party extensions, one package per feature (roadmap §2.9)
   apps/
     android/           # Gradle project using the generated Kotlin SDK
     ios/               # Xcode project using the generated Swift SDK
   fuzz/                # fuzz targets and oracles (OS §7.3)
   docs/                # user docs, security material, and RFCs
-  plan/                # product and project plans
+  ROADMAP.md           # product vision and technical implementation roadmap
   .github/             # workflows, templates, and CODEOWNERS (OS §8)
 ```
 

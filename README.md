@@ -5,7 +5,7 @@
 
 Axl, short for Axolotl, is an agent harness that works with existing tools, models, and client setups. A single daemon owns each session, while terminal and future clients render the same event stream.
 
-**Current status:** phases 0 through 4 of the [implementation plan](IMPLEMENTATION_PLAN.md) are complete. The TUI, Agent Skills, and MCP support were brought forward from later phases. Other later-phase work has not started.
+**Current status:** phases 0 through 4 of the [technical implementation roadmap](ROADMAP.md#technical-implementation-roadmap) are complete. The TUI, Agent Skills, and MCP support were brought forward from later phases. Other later-phase work has not started.
 
 ## Install
 
@@ -78,8 +78,7 @@ Unsafe mode disables operating-system isolation and file-tool path policy. Shell
 - [Development guide](docs/DEVELOPMENT_GUIDE.md)
 - [Contributing](CONTRIBUTING.md)
 - [Governance](GOVERNANCE.md)
-- [Product plan](HARNESS_PLAN.md)
-- [Implementation plan](IMPLEMENTATION_PLAN.md)
+- [Product vision and technical roadmap](ROADMAP.md)
 - [Repository structure](CODE_STRUCTURE.md)
 - [Release guide](RELEASES.md)
 - [Security policy](SECURITY.md)
