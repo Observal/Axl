@@ -346,6 +346,7 @@ export class AxlApp {
   private branch: string | undefined;
   private currentTheme: string;
   private readonly seenEventIds = new Set<string>();
+  private eventSessionId: string;
   private bufferedEvents: CanonicalEvent[] | undefined = [];
   private readonly interactionQueue: EventPayloadMap["interaction.requested"][] = [];
   private activeInteractionId: string | undefined;
@@ -380,6 +381,7 @@ export class AxlApp {
   ) {
     this.options = options;
     this.sessionId = sessionId;
+    this.eventSessionId = sessionId;
     this.width = width;
     this.height = height;
     this.cwd = options.cwd;
@@ -392,7 +394,7 @@ export class AxlApp {
         : (THEMES[this.currentTheme] ?? (THEMES[DEFAULT_THEME] as never));
     this.view = new SessionView(width, palette, options.modelCatalog);
     this.unsubscribeEvents = options.client.onEvent((message) => {
-      if (message.sessionId !== this.sessionId) return;
+      if (message.sessionId !== this.eventSessionId) return;
       if (this.bufferedEvents) this.bufferedEvents.push(message.event);
       else this.commitEvent(message.event);
     });
@@ -1052,9 +1054,10 @@ export class AxlApp {
     const palette = this.view.palette;
     const thinkingDisplay = this.view.thinkingDisplay;
     const toolOutputDisplay = this.view.toolOutputDisplay;
-    this.sessionId = snapshot.sessionId;
-    this.cwd = created.payload.cwd;
-    this.branch = await readGitBranch(this.cwd);
+    const nextCwd = created.payload.cwd;
+    const nextBranch = await readGitBranch(nextCwd);
+    this.cwd = nextCwd;
+    this.branch = nextBranch;
     this.seenEventIds.clear();
     this.transcript.length = 0;
     this.interactionQueue.length = 0;
@@ -1065,6 +1068,9 @@ export class AxlApp {
     this.view.toolOutputDisplay = toolOutputDisplay;
     this.transcript.push({ kind: "lines", lines: this.welcomeLines(this.cwd, true) });
     for (const event of snapshot.events) this.commitEvent(event, false);
+    this.editor.setText(draft);
+    this.notice = this.view.palette.dim(notice);
+    this.eventSessionId = snapshot.sessionId;
     const lastEventId = snapshot.events.at(-1)?.id;
     const subscription = (await this.options.client.request("session.subscribe", {
       sessionId: snapshot.sessionId,
@@ -1073,8 +1079,7 @@ export class AxlApp {
     for (const event of subscription.snapshot) this.commitEvent(event, false);
     for (const event of this.bufferedEvents ?? []) this.commitEvent(event, false);
     this.bufferedEvents = undefined;
-    this.editor.setText(draft);
-    this.notice = this.view.palette.dim(notice);
+    this.sessionId = snapshot.sessionId;
     this.openNextInteraction();
     this.rebuildAfterResize();
   }
