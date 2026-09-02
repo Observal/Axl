@@ -55,6 +55,7 @@ function runCommand(
   timeoutMs: number,
   signal: AbortSignal,
 ): Promise<CommandCapture> {
+  signal.throwIfAborted();
   return new Promise((resolvePromise, rejectPromise) => {
     const [executable, ...args] = argv as [string, ...string[]];
     const detached = process.platform !== "win32";

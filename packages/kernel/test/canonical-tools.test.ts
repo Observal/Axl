@@ -97,6 +97,22 @@ test("shell abort terminates descendant processes and never starts with a spent 
   );
   await assert.rejects(stat(join(cwd, "should-not-exist")), /ENOENT/);
 
+  const abortedWhileWrapping = new AbortController();
+  const wrappingShell = shellIn(cwd, {
+    wrapCommand: (command) => {
+      abortedWhileWrapping.abort();
+      return ["bash", "-c", command];
+    },
+  });
+  await assert.rejects(
+    wrappingShell.execute(
+      { command: "touch wrapped-should-not-exist" },
+      abortedWhileWrapping.signal,
+    ),
+    (error) => error instanceof DOMException && error.name === "AbortError",
+  );
+  await assert.rejects(stat(join(cwd, "wrapped-should-not-exist")), /ENOENT/);
+
   if (process.platform === "win32") return;
   const controller = new AbortController();
   const running = shell.execute(
