@@ -46,7 +46,7 @@ axl/
     cli/               # axl executable, process startup, and client selection
     tui/               # terminal event projection and interaction UI
     web/               # web client
-    sdk/               # public client SDK when an external consumer needs it
+    sdk/               # shared TypeScript client SDK when multiple clients need it
     extensions/        # first-party extensions, one package per feature (roadmap §2.9)
   apps/
     android/           # Gradle project using the generated Kotlin SDK

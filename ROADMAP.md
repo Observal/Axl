@@ -2082,6 +2082,8 @@ Child sessions remain inspectable, budgeted, cancellable, policy-narrowed, repla
 
 ### Phase 9: Full protocol, SDK, web, and viewer
 
+The local web client and only the TypeScript SDK, wire-protocol, transport, security, workspace, and packaging work required for it are brought forward as an explicit exception to phase ordering. This work may proceed while the current dogfood follow-up remains incomplete, but those prerequisites still block expanded dogfooding of credentialed or untrusted capabilities. Unavailable features remain explicitly unsupported. This exception does not bring forward the session viewer, media roles, public SDK publication, multi-language generation, remote-device access, cloud placement, or unrelated protocol work, and it does not mark Phase 9 complete.
+
 Do not build public or multi-language SDKs before this phase. The second real client creates the need.
 
 #### Wire protocol
