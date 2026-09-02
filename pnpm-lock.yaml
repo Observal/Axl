@@ -24,6 +24,28 @@ importers:
         specifier: workspace:*
         version: link:../protocol
 
+  packages/cli:
+    dependencies:
+      '@axl/ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@axl/daemon':
+        specifier: workspace:*
+        version: link:../daemon
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@axl/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+      '@axl/tui':
+        specifier: workspace:*
+        version: link:../tui
+    devDependencies:
+      '@axl/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+
   packages/daemon:
     dependencies:
       '@axl/kernel':
@@ -65,16 +87,7 @@ importers:
 
   packages/protocol: {}
 
-  packages/sandbox:
-    dependencies:
-      '@axl/kernel':
-        specifier: workspace:*
-        version: link:../kernel
-      '@axl/protocol':
-        specifier: workspace:*
-        version: link:../protocol
-
-  packages/tui:
+  packages/runtime:
     dependencies:
       '@axl/ai':
         specifier: workspace:*
@@ -97,6 +110,31 @@ importers:
       '@axl/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+
+  packages/sandbox:
+    dependencies:
+      '@axl/kernel':
+        specifier: workspace:*
+        version: link:../kernel
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/tui:
+    dependencies:
+      '@axl/ai':
+        specifier: workspace:*
+        version: link:../ai
+      '@axl/daemon':
+        specifier: workspace:*
+        version: link:../daemon
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@axl/kernel':
+        specifier: workspace:*
+        version: link:../kernel
 
 packages:
 

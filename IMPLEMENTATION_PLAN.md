@@ -204,6 +204,7 @@ This is the final phase built primarily with the stable external harness.
 - [x] Use a local Unix socket transport first.
 - [x] Implement snapshot plus event tail for client attachment.
 - [x] Keep the client free of agent-loop behavior.
+- [x] Move provider, tool, extension, and sandbox assembly into a client-independent runtime package; keep the executable and terminal projection separate.
 
 ### Minimal client
 

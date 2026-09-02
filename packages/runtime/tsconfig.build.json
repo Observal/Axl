@@ -1,0 +1,20 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist", "test"],
+  "references": [
+    { "path": "../protocol/tsconfig.build.json" },
+    { "path": "../kernel/tsconfig.build.json" },
+    { "path": "../ai/tsconfig.build.json" },
+    { "path": "../daemon/tsconfig.build.json" },
+    { "path": "../extensions/mcp/tsconfig.build.json" },
+    { "path": "../extensions/skills/tsconfig.build.json" },
+    { "path": "../sandbox/tsconfig.build.json" }
+  ]
+}

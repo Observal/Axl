@@ -1,10 +1,13 @@
 {
-  "name": "@axl/tui",
+  "name": "@axl/cli",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Interactive terminal client for the Axl daemon",
+  "description": "Axl command-line entry point and client selection",
   "license": "Apache-2.0",
+  "bin": {
+    "axl": "./dist/main.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -16,13 +19,15 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.build.json --force",
-    "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/ai build && pnpm --filter @axl/daemon build && node --test test/*.test.ts",
+    "test": "pnpm build && node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@axl/ai": "workspace:*",
     "@axl/daemon": "workspace:*",
-    "@axl/protocol": "workspace:*"
+    "@axl/protocol": "workspace:*",
+    "@axl/runtime": "workspace:*",
+    "@axl/tui": "workspace:*"
   },
   "devDependencies": {
     "@axl/kernel": "workspace:*"

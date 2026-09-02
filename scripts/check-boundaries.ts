@@ -77,8 +77,11 @@ export function checkWorkspace(root: string): string[] {
     ({ directory }) => directory === resolve(root, "packages/protocol"),
   );
   const kernel = packages.find(({ directory }) => directory === resolve(root, "packages/kernel"));
+  const runtime = packages.find(({ directory }) => directory === resolve(root, "packages/runtime"));
+  const tui = packages.find(({ directory }) => directory === resolve(root, "packages/tui"));
   const protocolName = protocol?.manifest.name ?? "@axl/protocol";
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
+  const tuiName = tui?.manifest.name ?? "@axl/tui";
 
   if (protocol) {
     for (const dependency of runtimeDependencies(protocol.manifest)) {
@@ -93,6 +96,23 @@ export function checkWorkspace(root: string): string[] {
       if (dependency !== protocolName) {
         errors.push(
           `${relative(root, kernel.directory)} may depend only on ${protocolName}, found ${dependency}`,
+        );
+      }
+    }
+  }
+
+  if (runtime && runtimeDependencies(runtime.manifest).includes(tuiName)) {
+    errors.push(
+      `${relative(root, runtime.directory)} must not depend on presentation package ${tuiName}`,
+    );
+  }
+
+  if (tui) {
+    const allowed = new Set(["@axl/ai", "@axl/daemon", protocolName]);
+    for (const dependency of runtimeDependencies(tui.manifest)) {
+      if (!allowed.has(dependency)) {
+        errors.push(
+          `${relative(root, tui.directory)} may depend only on client-facing packages, found ${dependency}`,
         );
       }
     }

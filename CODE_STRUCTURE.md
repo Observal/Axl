@@ -41,8 +41,10 @@ axl/
     ai/                # provider adapters, tool dialects, and thinking levels (HP §2.7, 7.4, 7.6)
     compiler/          # adoption inspectors, converters, and verifiers (HP §4)
     daemon/            # sessions, placements, and pooling (HP §13, 14, 15)
+    runtime/           # client-independent local runtime assembly
     sandbox/           # operating-system providers and OCI runtime (HP §10, 11)
-    tui/               # terminal client
+    cli/               # axl executable, process startup, and client selection
+    tui/               # terminal event projection and interaction UI
     web/               # web client
     sdk/               # public client SDK when an external consumer needs it
     extensions/        # first-party extensions, one package per feature (HP §2.9)
@@ -62,6 +64,9 @@ These rules keep package ownership clear:
 - First-party extensions use the same public extension API as third-party extensions.
 - `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript client creates a real need for generation.
 - Apps use the public protocol SDK rather than package internals.
+- `packages/runtime` assembles providers, tools, extensions, sandboxing, and the authoritative daemon without importing a presentation client.
+- `packages/tui` is a daemon client projection. It does not construct the runtime or depend on sandbox, kernel, or extension packages.
+- `packages/cli` owns process startup and selects the current client, so replacing the TUI does not move backend assembly.
 
 CI enforces these boundaries.
 

@@ -8,7 +8,6 @@ export * from "./highlight.ts";
 export * from "./login-dialog.ts";
 export * from "./markdown.ts";
 export * from "./render.ts";
-export * from "./settings.ts";
 export * from "./setup.ts";
 export * from "./themes.ts";
 export * from "./tool-display.ts";

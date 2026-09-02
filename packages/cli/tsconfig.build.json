@@ -9,14 +9,10 @@
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "test"],
   "references": [
-    {
-      "path": "../protocol/tsconfig.build.json"
-    },
-    {
-      "path": "../ai/tsconfig.build.json"
-    },
-    {
-      "path": "../daemon/tsconfig.build.json"
-    }
+    { "path": "../protocol/tsconfig.build.json" },
+    { "path": "../ai/tsconfig.build.json" },
+    { "path": "../daemon/tsconfig.build.json" },
+    { "path": "../runtime/tsconfig.build.json" },
+    { "path": "../tui/tsconfig.build.json" }
   ]
 }

@@ -1,0 +1,31 @@
+{
+  "name": "@axl/runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Client-independent local runtime assembly for Axl",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json --force",
+    "test": "pnpm --filter @axl/ai build && pnpm --filter @axl/daemon build && pnpm --filter @axl/extension-mcp build && pnpm --filter @axl/extension-skills build && pnpm --filter @axl/kernel build && pnpm --filter @axl/protocol build && pnpm --filter @axl/sandbox build && node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@axl/ai": "workspace:*",
+    "@axl/daemon": "workspace:*",
+    "@axl/extension-mcp": "workspace:*",
+    "@axl/extension-skills": "workspace:*",
+    "@axl/kernel": "workspace:*",
+    "@axl/protocol": "workspace:*",
+    "@axl/sandbox": "workspace:*"
+  }
+}

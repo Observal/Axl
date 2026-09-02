@@ -22,6 +22,7 @@ This file records notable user-facing changes.
 
 ### Changed
 
+- Local provider, tool, extension, and sandbox assembly now lives outside the terminal client, so clients remain replaceable projections over the daemon protocol.
 - File tools now require explicit readable roots, and the default runtime limits them to the workspace.
 - Bubblewrap masks the user's home directory while rebinding the authorized workspace.
 - Shell cancellation now terminates the complete process group and refuses to start with an already-aborted signal.

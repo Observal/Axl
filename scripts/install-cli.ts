@@ -7,7 +7,7 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const target = join(repoRoot, "packages", "tui", "dist", "main.js");
+const target = join(repoRoot, "packages", "cli", "dist", "main.js");
 const binDirectory = join(homedir(), ".local", "bin");
 const link = join(binDirectory, "axl");
 

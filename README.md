@@ -53,8 +53,10 @@ Unsafe mode disables operating-system isolation and file-tool path policy. Shell
 | `packages/kernel` | JSONL history, replay, the agent loop, tools, and path policy |
 | `packages/ai` | Provider contracts, credentials, dialects, and the full Pi-compatible Azure OpenAI model catalog |
 | `packages/daemon` | Authoritative sessions and Unix-socket transport |
+| `packages/runtime` | Client-independent provider, tool, extension, and sandbox assembly |
 | `packages/sandbox` | Required operating-system confinement |
-| `packages/tui` | Interactive terminal client |
+| `packages/cli` | `axl` executable, local process startup, and client selection |
+| `packages/tui` | Interactive terminal projection over the daemon protocol |
 | `packages/extensions/skills` | Agent Skills discovery, validation, and progressive loading |
 | `packages/extensions/mcp` | MCP 2025-11-25 over stdio and Streamable HTTP |
 

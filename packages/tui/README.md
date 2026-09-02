@@ -10,7 +10,7 @@ The TUI includes:
 - Unicode-aware multiline editing, soft wrapping, paste handling, history, word movement, undo, and a kill ring
 - Kitty keyboard support with fallbacks for older terminals
 - Full-width searchable model, thinking-level, and theme selectors
-- Global model, thinking, and theme preferences in `~/.axl/settings.json`
+- Model, thinking, and theme selectors with persistence delegated to the executable
 - Model and thinking changes recorded by the daemon
 - Queued follow-up prompts while a turn is running
 - Markdown, syntax highlighting, bordered prompts, compact tool output, bounded shell output, and line-numbered diffs that switch between unified and split views
@@ -20,6 +20,6 @@ The TUI includes:
 - Interactive Azure OpenAI setup with credentials shared across workspaces
 - MCP approval, browser authorization, and structured-input dialogs
 
-`main.ts` connects to the authoritative daemon and starts a detached local daemon when needed. The TUI does not own the model loop or canonical session state.
+The TUI attaches to an injected daemon client. It does not construct providers, tools, extensions, sandboxing, the model loop, or canonical session state. The `@axl/cli` executable handles process startup, while `@axl/runtime` assembles the local backend.
 
 Run `/help` inside the TUI for commands and keybindings.
