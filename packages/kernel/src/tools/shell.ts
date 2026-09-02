@@ -57,7 +57,12 @@ function runCommand(
 ): Promise<CommandCapture> {
   return new Promise((resolvePromise, rejectPromise) => {
     const [executable, ...args] = argv as [string, ...string[]];
-    const child = spawn(executable, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const detached = process.platform !== "win32";
+    const child = spawn(executable, args, {
+      cwd,
+      detached,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const chunks: Buffer[] = [];
     let captured = 0;
     let truncatedCapture = false;
@@ -78,10 +83,22 @@ function runCommand(
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
 
+    const signalProcessTree = (signalName: NodeJS.Signals): void => {
+      if (detached && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signalName);
+          return;
+        } catch {
+          // The group may already be gone or group signaling may be unavailable.
+        }
+      }
+      child.kill(signalName);
+    };
     const kill = (reason: CommandCapture["endedBy"]): void => {
-      if (endedBy === "exit") endedBy = reason;
-      child.kill("SIGTERM");
-      killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+      if (endedBy !== "exit") return;
+      endedBy = reason;
+      signalProcessTree("SIGTERM");
+      killTimer = setTimeout(() => signalProcessTree("SIGKILL"), KILL_GRACE_MS);
       killTimer.unref();
     };
     const timeout = setTimeout(() => kill("timeout"), timeoutMs);
@@ -91,6 +108,7 @@ function runCommand(
 
     child.once("error", (error) => {
       clearTimeout(timeout);
+      if (killTimer !== undefined) clearTimeout(killTimer);
       signal.removeEventListener("abort", onAbort);
       rejectPromise(error);
     });
@@ -136,6 +154,7 @@ export function makeShellTool(options: ShellToolOptions): KernelTool {
     async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
       rejectUnknownFields(input, "shell", ["command", "cwd", "timeoutMs"]);
       const command = requiredString(input, "shell", "command");
+      signal.throwIfAborted();
       let cwd = resolve(options.cwd, optionalString(input, "shell", "cwd") ?? ".");
       if (options.policy !== undefined) cwd = await assertReadAllowed(options.policy, cwd);
       const timeoutMs =

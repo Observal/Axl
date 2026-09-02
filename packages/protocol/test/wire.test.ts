@@ -16,6 +16,7 @@ const sessionId = "123e4567-e89b-42d3-a456-426614174000";
 
 test("validates every request shape", () => {
   const requests = [
+    { kind: "request", id: 0, method: "daemon.info", params: {} },
     { kind: "request", id: 1, method: "session.create", params: { cwd: "/repo" } },
     { kind: "request", id: 2, method: "session.resume", params: { sessionId } },
     { kind: "request", id: 11, method: "session.list", params: {} },
@@ -66,6 +67,7 @@ test("validates every request shape", () => {
 test("rejects malformed requests at the wire boundary", () => {
   for (const request of [
     { kind: "request", id: -1, method: "session.create", params: { cwd: "/repo" } },
+    { kind: "request", id: 1, method: "daemon.info", params: { extra: true } },
     { kind: "request", id: 1, method: "unknown", params: {} },
     { kind: "request", id: 1, method: "session.create", params: { cwd: "" } },
     { kind: "request", id: 1, method: "session.resume", params: { sessionId: "bad" } },

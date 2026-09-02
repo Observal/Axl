@@ -17,8 +17,11 @@ import {
 
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
+export type DaemonSecurityMode = "sandboxed" | "unsafe";
+
 export interface DaemonOptions extends SessionManagerOptions {
   readonly socketPath: string;
+  readonly securityMode?: DaemonSecurityMode;
 }
 
 const MAX_REQUEST_BYTES = 1_048_576;
@@ -77,6 +80,7 @@ async function removeStaleSocket(path: string): Promise<void> {
 export class AxlDaemon {
   readonly sessions: SessionManager;
   private readonly socketPath: string;
+  private readonly securityMode: DaemonSecurityMode;
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
@@ -84,6 +88,7 @@ export class AxlDaemon {
   constructor(options: DaemonOptions) {
     this.sessions = new SessionManager(options);
     this.socketPath = options.socketPath;
+    this.securityMode = options.securityMode ?? "sandboxed";
   }
 
   async start(): Promise<void> {
@@ -217,6 +222,8 @@ export class AxlDaemon {
     subscriptions: Set<() => void>,
   ): Promise<unknown> {
     switch (request.method) {
+      case "daemon.info":
+        return { securityMode: this.securityMode };
       case "session.create": {
         const { cwd, modelId, thinkingLevel } = request.params;
         return this.sessions.create(cwd, {

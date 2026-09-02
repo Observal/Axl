@@ -23,6 +23,7 @@ import {
 
 const policy: WorkspacePolicy = {
   workspace: "/Users/dev/repo",
+  readableRoots: ["/Users/dev/repo"],
   protectedPaths: ["/Users/dev/.axl"],
 };
 
@@ -43,6 +44,7 @@ test("the profile allows by default and denies network, writes, and protected pa
 test("profile paths with quotes and backslashes are escaped", () => {
   const tricky = buildSeatbeltProfile({
     workspace: '/Users/we"ird\\path',
+    readableRoots: ['/Users/we"ird\\path'],
     protectedPaths: [],
   });
   assert.match(tricky, /\(subpath "\/Users\/we\\"ird\\\\path"\)/);
@@ -134,7 +136,7 @@ async function makeLayout(context: TestContext) {
   const tool = makeSeatbeltShellTool({
     cwd: workspace,
     overflowDirectory: join(root, "overflow"),
-    policy: { workspace, protectedPaths: [axlHome] },
+    policy: { workspace, readableRoots: [workspace], protectedPaths: [axlHome] },
     capabilities: darwin,
   });
   return { root, workspace, axlHome, tool };

@@ -476,17 +476,45 @@ export class AxlApp {
   }
 
   private liveFrame(): { components: readonly Component[]; cursor?: CursorPlacement } {
+    const unsafeWarning = this.view.unsafe
+      ? (this.view.palette.warning ?? this.view.palette.error)(
+          "⚠ UNSAFE: no sandbox; tools have full host access",
+        )
+      : undefined;
     if (this.modal !== null) {
-      const lines = this.modal.render(this.width);
+      const lines = [
+        ...(unsafeWarning === undefined ? [] : [unsafeWarning]),
+        ...this.modal.render(this.width),
+      ];
       const cursor = this.modal.cursor?.();
-      return { components: [{ render: () => lines }], ...(cursor === undefined ? {} : { cursor }) };
+      return {
+        components: [{ render: () => lines }],
+        ...(cursor === undefined
+          ? {}
+          : {
+              cursor: {
+                row: cursor.row + (unsafeWarning === undefined ? 0 : 1),
+                column: cursor.column,
+              },
+            }),
+      };
     }
 
     if (this.width < 8) {
       const rendered = this.editor.render(Math.max(1, this.width - 2));
       return {
-        components: [{ render: () => rendered.lines.map((line) => `❯ ${line}`) }],
-        cursor: { row: rendered.cursorRow, column: 2 + rendered.cursorColumn },
+        components: [
+          {
+            render: () => [
+              ...(unsafeWarning === undefined ? [] : [truncateToWidth(unsafeWarning, this.width)]),
+              ...rendered.lines.map((line) => `❯ ${line}`),
+            ],
+          },
+        ],
+        cursor: {
+          row: rendered.cursorRow + (unsafeWarning === undefined ? 0 : 1),
+          column: 2 + rendered.cursorColumn,
+        },
       };
     }
 
@@ -506,13 +534,15 @@ export class AxlApp {
     const completionHints = this.completions();
     const location = `${formatPath(this.cwd)}${this.branch ? `   ${this.branch}` : ""}`;
     const lines = [
+      ...(unsafeWarning === undefined ? [] : [unsafeWarning]),
       ...(this.notice === undefined ? [] : [this.notice]),
       this.frameLine(this.view.usageLabel(), this.view.modelLabel(), "┌", "┐"),
       ...contentLines,
       this.frameLine(location, this.view.tpsLabel(), "└", "┘"),
       ...(completionHints ?? []),
     ];
-    const contentStart = (this.notice === undefined ? 0 : 1) + 1;
+    const contentStart =
+      (unsafeWarning === undefined ? 0 : 1) + (this.notice === undefined ? 0 : 1) + 1;
     return {
       components: [{ render: () => lines }],
       cursor: { row: contentStart + rendered.cursorRow, column: 4 + rendered.cursorColumn },

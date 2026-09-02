@@ -26,6 +26,12 @@ export type WireRequest =
   | {
       readonly kind: "request";
       readonly id: number;
+      readonly method: "daemon.info";
+      readonly params: Record<string, never>;
+    }
+  | {
+      readonly kind: "request";
+      readonly id: number;
       readonly method: "session.create";
       readonly params: { readonly cwd: string } & SessionModelSelection;
     }
@@ -184,6 +190,10 @@ export function parseWireRequest(value: unknown): WireRequest {
   const params = object(request.params, "request.params");
   const base = { kind: "request" as const, id: request.id as number };
 
+  if (method === "daemon.info") {
+    exact(params, "request.params", []);
+    return { ...base, method, params: {} };
+  }
   if (method === "session.create") {
     exact(params, "request.params", ["cwd", "modelId", "thinkingLevel"]);
     return {

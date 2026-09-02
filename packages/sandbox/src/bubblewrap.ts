@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -28,6 +30,7 @@ export const BUBBLEWRAP_CONTROLS: readonly string[] = [
   "filesystem.readonly-root",
   "filesystem.workspace-writes",
   "filesystem.masked-protected-paths",
+  "filesystem.user-home-masked",
   "network.none",
   "environment.cleared",
   "process.namespaces",
@@ -88,6 +91,8 @@ export function buildBubblewrapArgv(
   cwd: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): readonly string[] {
+  const home = resolve(env.HOME ?? homedir());
+  if (home === "/") throw new SandboxUnavailableError("cannot mask a root home directory");
   const argv: string[] = [
     "bwrap",
     "--die-with-parent",
@@ -101,6 +106,8 @@ export function buildBubblewrapArgv(
     "/proc",
     "--tmpfs",
     "/tmp",
+    "--tmpfs",
+    home,
     "--bind",
     policy.workspace,
     policy.workspace,
@@ -132,6 +139,8 @@ export function buildBubblewrapProcess(
   cwd: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): SandboxedProcess {
+  const home = resolve(env.HOME ?? homedir());
+  if (home === "/") throw new SandboxUnavailableError("cannot mask a root home directory");
   const argv = [
     "--die-with-parent",
     "--unshare-all",
@@ -144,6 +153,8 @@ export function buildBubblewrapProcess(
     "/proc",
     "--tmpfs",
     "/tmp",
+    "--tmpfs",
+    home,
     "--bind",
     policy.workspace,
     policy.workspace,

@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { KernelTool, ShellToolOptions, WorkspacePolicy } from "@axl/kernel";
+import {
+  makeShellTool,
+  type KernelTool,
+  type ShellToolOptions,
+  type WorkspacePolicy,
+} from "@axl/kernel";
 import type { EventPayloadMap } from "@axl/protocol";
 
 import {
@@ -18,6 +23,7 @@ import {
   makeSeatbeltShellTool,
   seatbeltConfiguredPayload,
 } from "./seatbelt.ts";
+import { definedEnvironment } from "./environment.ts";
 
 export interface PlatformShellOptions extends Omit<ShellToolOptions, "wrapCommand"> {
   readonly policy: WorkspacePolicy;
@@ -38,6 +44,23 @@ export interface PlatformSandbox {
     readonly env?: Readonly<Record<string, string | undefined>>;
   }): SandboxedProcess;
   configuredPayload(): EventPayloadMap["sandbox.configured"];
+}
+
+/** Explicit unconfined execution for the `--unsafe` startup mode. */
+export function createUnsafePlatformExecution(): PlatformSandbox {
+  return {
+    provider: "none",
+    available: true,
+    reason: "operating-system isolation disabled by --unsafe",
+    makeShellTool: ({ policy: _policy, ...options }) => makeShellTool(options),
+    wrapProcess: ({ command, args, cwd, env = process.env }) => ({
+      command,
+      args,
+      cwd,
+      env: definedEnvironment(env),
+    }),
+    configuredPayload: () => ({ provider: "none", enforced: false, controls: [] }),
+  };
 }
 
 /**

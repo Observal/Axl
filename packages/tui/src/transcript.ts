@@ -167,6 +167,10 @@ export class SessionView {
     return this.tokensPerSecond === undefined ? "" : `${this.tokensPerSecond.toFixed(1)} tok/s`;
   }
 
+  get unsafe(): boolean {
+    return this.sandbox === "unenforced";
+  }
+
   apply(event: CanonicalEvent): string[] {
     const { dim } = this.palette;
     switch (event.type) {

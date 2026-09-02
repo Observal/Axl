@@ -21,11 +21,13 @@ export class SandboxViolationError extends Error {
   }
 }
 
-/** Filesystem policy for in-process tools: reads anywhere except protected, writes workspace-only. */
+/** Filesystem policy for tools: explicit readable roots and workspace-only writes. */
 export interface WorkspacePolicy {
   /** Canonical workspace root; the only writable subtree. */
   readonly workspace: string;
-  /** Subtrees invisible to tools in both directions, e.g. `~/.axl`. */
+  /** The only subtrees visible to file tools. The workspace must be listed explicitly. */
+  readonly readableRoots: readonly string[];
+  /** Subtrees invisible to tools in both directions, e.g. `~/.axl`. Denials win. */
   readonly protectedPaths: readonly string[];
 }
 
@@ -58,15 +60,20 @@ export async function canonicalizeForPolicy(path: string): Promise<string> {
 
 async function canonicalPolicy(policy: WorkspacePolicy): Promise<{
   workspace: string;
+  readableRoots: readonly string[];
   protectedPaths: readonly string[];
 }> {
+  if (policy.readableRoots.length === 0) {
+    throw new TypeError("WorkspacePolicy.readableRoots must not be empty");
+  }
   return {
     workspace: await canonicalizeForPolicy(policy.workspace),
+    readableRoots: await Promise.all(policy.readableRoots.map(canonicalizeForPolicy)),
     protectedPaths: await Promise.all(policy.protectedPaths.map(canonicalizeForPolicy)),
   };
 }
 
-/** Reads are allowed everywhere except protected subtrees. Throws on violation. */
+/** Reads are allowed only inside an explicit readable root and never in a protected subtree. */
 export async function assertReadAllowed(policy: WorkspacePolicy, path: string): Promise<string> {
   const canonical = await canonicalizeForPolicy(path);
   const resolved = await canonicalPolicy(policy);
@@ -78,18 +85,35 @@ export async function assertReadAllowed(policy: WorkspacePolicy, path: string): 
       );
     }
   }
+  if (!resolved.readableRoots.some((root) => isWithin(canonical, root))) {
+    throw new SandboxViolationError(
+      "filesystem.read",
+      `${canonical} is outside the readable roots ${resolved.readableRoots.join(", ")}`,
+    );
+  }
   return canonical;
 }
 
 /** Writes are allowed only inside the workspace and never in protected subtrees. */
 export async function assertWriteAllowed(policy: WorkspacePolicy, path: string): Promise<string> {
-  const canonical = await assertReadAllowed(policy, path);
+  const canonical = await canonicalizeForPolicy(path);
   const resolved = await canonicalPolicy(policy);
+  for (const protectedPath of resolved.protectedPaths) {
+    if (isWithin(canonical, protectedPath)) {
+      throw new SandboxViolationError(
+        "filesystem.write",
+        `${canonical} is inside the protected path ${protectedPath}`,
+      );
+    }
+  }
   if (!isWithin(canonical, resolved.workspace)) {
     throw new SandboxViolationError(
       "filesystem.write",
       `${canonical} is outside the workspace ${resolved.workspace}`,
     );
+  }
+  if (!resolved.readableRoots.some((root) => isWithin(canonical, root))) {
+    throw new TypeError("WorkspacePolicy.workspace must be inside a readable root");
   }
   return canonical;
 }

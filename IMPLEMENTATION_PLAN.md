@@ -222,7 +222,7 @@ This is the final phase built primarily with the stable external harness.
 - [x] Start with workspace-scoped writes and no tool-process network access.
 - [x] Set `failIfUnavailable` for dogfood sessions.
 - [x] Emit explicit sandbox violation events.
-- [x] Provide no unsandboxed escape in the bootstrap.
+- [x] Provide no implicit unsandboxed fallback. The later explicit `--unsafe` mode uses separate state, logs the unenforced configuration, and shows a persistent warning.
 
 ### Dogfood gate
 
@@ -245,7 +245,7 @@ The Phase 4 gate still stands, but several current paths need replacement before
 - [ ] Replace the generic MCP invocation path with turn-selected, provider-native tool schemas and frozen per-turn bindings.
 - [ ] Add `ask_user_question` to interactive sessions and verify that it is absent from goals and headless runs.
 - [ ] Add blind credential brokering before dogfooding credentialed third-party extensions or local MCP servers.
-- [ ] Keep the current fail-closed sandbox default. Test `--unsafe` separately when that explicit mode is implemented.
+- [x] Keep the fail-closed sandbox default and test the explicit `--unsafe` mode separately.
 
 These are the next dogfood prerequisites. They take priority over the remaining Phase 5 convenience work.
 
@@ -393,7 +393,7 @@ The initial public registrations have real first-party consumers, each registrat
 - [ ] Implement `direct`, `auto`, `manual`, and `deny`.
 - [ ] Use `direct` by default only when the requested operating-system sandbox is active.
 - [ ] Fail startup when the requested sandbox is unavailable.
-- [ ] Add `axl --unsafe` as the only way to start without operating-system isolation.
+- [x] Add `axl --unsafe` as the only way to start without operating-system isolation.
 - [ ] Default an unsafe session to `auto`, show the unsafe state in every client, and record it in the session log.
 - [ ] Allow users to choose a stricter permission level while unsafe.
 - [ ] Treat bypassing an active sandbox as a separate action that always requires approval.
@@ -860,7 +860,15 @@ Resolve each decision only before its dependent phase:
 
 ## 5. Immediate next slice
 
-Complete these dogfood fixes before continuing Phase 5:
+Sandbox execution is the active user-approved priority. Follow [plan.md](plan.md) and [RFC 0001](docs/architecture/rfcs/0001-sandbox-execution.md) in complete vertical slices:
+
+1. Add explicit readable roots to kernel path policy and make the default runtime workspace-only.
+2. Harden native process isolation and report only controls actually enforced.
+3. Add the rootless local OCI backend and verify cleanup.
+4. Add one self-hosted remote Linux worker before selecting a managed provider.
+5. Stop at each plan exit gate and verify the security boundary before continuing.
+
+After the sandbox priority is complete, return to these dogfood fixes before other Phase 5 work:
 
 1. Add interactive-only `ask_user_question` with visible blocker behavior for non-interactive goals.
 2. Build the local BM25 capability index and log the three-or-fewer records disclosed for each user turn.

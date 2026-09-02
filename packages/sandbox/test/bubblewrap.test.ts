@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
@@ -14,6 +14,7 @@ import {
   bubblewrapConfiguredPayload,
   buildBubblewrapArgv,
   buildBubblewrapProcess,
+  createUnsafePlatformExecution,
   detectBubblewrap,
   makeBubblewrapShellTool,
   SandboxUnavailableError,
@@ -34,7 +35,11 @@ async function makeLayout(context: TestContext) {
   await mkdir(axlHome, { recursive: true });
   await writeFile(join(axlHome, "credentials.json"), '{"secret":"topsecret"}\n');
   await writeFile(join(root, "outside.txt"), "outside\n");
-  const policy: WorkspacePolicy = { workspace, protectedPaths: [axlHome] };
+  const policy: WorkspacePolicy = {
+    workspace,
+    readableRoots: [workspace],
+    protectedPaths: [axlHome],
+  };
   const tool = makeBubblewrapShellTool({
     cwd: workspace,
     overflowDirectory: join(root, "overflow"),
@@ -49,7 +54,11 @@ function text(result: { content: readonly { type: string; text?: string }[] }): 
 }
 
 test("builds the confinement argv: namespaces, masks, cleared environment", () => {
-  const policy: WorkspacePolicy = { workspace: "/repo", protectedPaths: ["/home/user/.axl"] };
+  const policy: WorkspacePolicy = {
+    workspace: "/repo",
+    readableRoots: ["/repo"],
+    protectedPaths: ["/home/user/.axl"],
+  };
   const argv = buildBubblewrapArgv(policy, "echo hi", "/repo", {
     PATH: "/usr/bin",
     HOME: "/home/user",
@@ -58,6 +67,11 @@ test("builds the confinement argv: namespaces, masks, cleared environment", () =
   assert.equal(argv.includes("--unshare-all"), true);
   assert.equal(argv.includes("--die-with-parent"), true);
   assert.equal(argv.includes("--clearenv"), true);
+  const homeMask = argv.findIndex(
+    (part, index) => part === "--tmpfs" && argv[index + 1] === "/home/user",
+  );
+  assert.equal(homeMask >= 0, true);
+  assert.equal(homeMask < argv.indexOf("--bind"), true);
   assert.deepEqual(argv.slice(argv.indexOf("--bind"), argv.indexOf("--bind") + 3), [
     "--bind",
     "/repo",
@@ -71,14 +85,27 @@ test("builds the confinement argv: namespaces, masks, cleared environment", () =
 });
 
 test("wraps long-lived extension processes without a shell", () => {
-  const policy: WorkspacePolicy = { workspace: "/repo", protectedPaths: ["/home/user/.axl"] };
+  const policy: WorkspacePolicy = {
+    workspace: "/repo",
+    readableRoots: ["/repo"],
+    protectedPaths: ["/home/user/.axl"],
+  };
   const process = buildBubblewrapProcess(policy, "node", ["server.mjs"], "/repo", {
     PATH: "/usr/bin",
+    HOME: "/home/user",
     MCP_TOKEN: "secret",
   });
   assert.equal(process.command, "bwrap");
   assert.deepEqual(process.args.slice(-4), ["--chdir", "/repo", "node", "server.mjs"]);
-  assert.deepEqual(process.env, { PATH: "/usr/bin", MCP_TOKEN: "secret" });
+  const homeMask = process.args.findIndex(
+    (part, index) => part === "--tmpfs" && process.args[index + 1] === "/home/user",
+  );
+  assert.equal(homeMask >= 0, true);
+  assert.deepEqual(process.env, {
+    PATH: "/usr/bin",
+    HOME: "/home/user",
+    MCP_TOKEN: "secret",
+  });
   assert.equal(process.args.includes("secret"), false);
 });
 
@@ -88,13 +115,48 @@ test("failIfUnavailable: constructing the tool without bubblewrap throws", () =>
       makeBubblewrapShellTool({
         cwd: "/repo",
         overflowDirectory: "/tmp/overflow",
-        policy: { workspace: "/repo", protectedPaths: [] },
+        policy: { workspace: "/repo", readableRoots: ["/repo"], protectedPaths: [] },
         capabilities: { available: false, reason: "bwrap binary not found" },
       }),
     (error) =>
       error instanceof SandboxUnavailableError &&
       /does not run tools unsandboxed/.test(error.message),
   );
+});
+
+test("unsafe execution is explicit, unconfined, and reported as unenforced", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-unsafe-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const outside = join(root, "outside.txt");
+  await mkdir(workspace);
+  const execution = createUnsafePlatformExecution();
+  const tool = execution.makeShellTool({
+    cwd: workspace,
+    overflowDirectory: join(workspace, ".output"),
+    policy: { workspace, readableRoots: [workspace], protectedPaths: [] },
+  });
+  const result = await tool.execute({ command: `echo unsafe > ${outside}` }, noSignal);
+  assert.equal(result.isError, false);
+  assert.equal(await readFile(outside, "utf8"), "unsafe\n");
+  assert.deepEqual(execution.configuredPayload(), {
+    provider: "none",
+    enforced: false,
+    controls: [],
+  });
+  const process = execution.wrapProcess({
+    policy: { workspace, readableRoots: [workspace], protectedPaths: [] },
+    command: "node",
+    args: ["server.mjs"],
+    cwd: workspace,
+    env: { PATH: "/usr/bin", TOKEN: "value" },
+  });
+  assert.deepEqual(process, {
+    command: "node",
+    args: ["server.mjs"],
+    cwd: workspace,
+    env: { PATH: "/usr/bin", TOKEN: "value" },
+  });
 });
 
 test("the configured payload reports provider and controls honestly", () => {
@@ -153,6 +215,32 @@ test("protected paths are invisible inside the sandbox", integration, async (con
   assert.match(text(result), /No such file|^\s*$/m);
 });
 
+test(
+  "the host home is masked while a nested workspace remains available",
+  integration,
+  async (context) => {
+    const root = await mkdtemp(join(homedir(), ".axl-bwrap-test-"));
+    context.after(() => rm(root, { recursive: true, force: true }));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside.txt");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "inside.txt"), "inside\n");
+    await writeFile(outside, "private-home-data\n");
+    const tool = makeBubblewrapShellTool({
+      cwd: workspace,
+      overflowDirectory: join(workspace, ".output"),
+      policy: { workspace, readableRoots: [workspace], protectedPaths: [] },
+      capabilities,
+    });
+    const result = await tool.execute(
+      { command: `cat inside.txt; cat ${outside} 2>/dev/null || true` },
+      noSignal,
+    );
+    assert.match(text(result), /inside/);
+    assert.equal(text(result).includes("private-home-data"), false);
+  },
+);
+
 test("the sandbox has no network", integration, async (context) => {
   const { tool } = await makeLayout(context);
   const result = await tool.execute(
@@ -167,9 +255,9 @@ test("the sandbox has no network", integration, async (context) => {
 
 test("the environment is cleared to the allowlist", integration, async (context) => {
   const { tool } = await makeLayout(context);
-  process.env.AXL_TEST_SECRET = "leaky-value";
+  process.env.KEPLER_TEST_SECRET = "leaky-value";
   context.after(() => {
-    delete process.env.AXL_TEST_SECRET;
+    delete process.env.KEPLER_TEST_SECRET;
   });
   const result = await tool.execute({ command: "env" }, noSignal);
   assert.equal(text(result).includes("leaky-value"), false);

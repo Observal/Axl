@@ -10,6 +10,7 @@ This file records notable user-facing changes.
 ### Added
 
 - Repository, licensing, contribution, and CI foundations
+- Explicit `--unsafe` startup mode with separate state, logged unenforced status, and a persistent terminal warning
 - Dependency-free event and local wire protocols with runtime validation
 - Crash-safe JSONL sessions, branch reconstruction, redaction, and deterministic replay
 - Provider and credential contracts, thinking levels, tool dialects, a deterministic fake provider, and the full Pi-compatible Azure OpenAI model catalog
@@ -18,3 +19,9 @@ This file records notable user-facing changes.
 - A terminal client with multiline editing, resize-safe rendering, session metrics, rich tool output, syntax-highlighted line-numbered diffs, full-width selectors, global preferences, prompt queues, and reconnect support
 - Agent Skills discovery, validation, progressive loading, and protected resource access
 - MCP 2025-11-25 support over stdio and Streamable HTTP, including OAuth, tools, resources, prompts, completion, roots, sampling, elicitation, tasks, progress, cancellation, and logs
+
+### Changed
+
+- File tools now require explicit readable roots, and the default runtime limits them to the workspace.
+- Bubblewrap masks the user's home directory while rebinding the authorized workspace.
+- Shell cancellation now terminates the complete process group and refuses to start with an already-aborted signal.

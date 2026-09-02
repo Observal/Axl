@@ -35,9 +35,10 @@ Treat repository content, tool output, web content, extensions, MCP servers, imp
 
 - Runtime validation for canonical events and local wire messages
 - Redaction before canonical event-log writes
-- Canonical path checks and symlink-escape rejection
-- Bubblewrap confinement on Linux and Seatbelt profiles on macOS
-- Fail-closed startup when required isolation is unavailable
+- Canonical path checks, explicit file-tool readable roots, and symlink-escape rejection
+- Bubblewrap confinement on Linux with the user home masked, and Seatbelt profiles on macOS
+- Fail-closed startup when required isolation is unavailable, unless the user explicitly starts a separate `--unsafe` daemon
+- Logged unenforced state and a persistent terminal warning for unsafe sessions
 - Sandboxed stdio MCP servers with limited environment variables and no network
 - Explicit approval for MCP tools, sampling, OAuth browser launches, and elicitation
 - Restricted credential, OAuth, task, and blob storage permissions
@@ -48,12 +49,13 @@ Treat repository content, tool output, web content, extensions, MCP servers, imp
 
 ## Remaining risks
 
-- Bubblewrap shares the host kernel and exposes a read-only view of most host files outside protected paths.
+- Bubblewrap shares the host kernel and still exposes a read-only view of system paths outside the masked user home and protected paths. Complete shell-process read allowlists require the planned Landlock enforcement.
 - Seatbelt does not provide Linux-style namespaces.
 - Windows sandboxing and OCI isolation are not implemented yet.
 - Streamable HTTP MCP servers run remotely and must be trusted with requests sent to them.
 - GitHub branch protection and Private Vulnerability Reporting depend on repository settings outside this tree.
 - No signed release artifacts exist yet.
+- Explicit `--unsafe` sessions grant shell, file tools, and local stdio MCP processes the user's full host authority. They rely on the startup warning and separate state until permission profiles are implemented.
 
 ## Maintenance
 

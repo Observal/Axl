@@ -61,6 +61,19 @@ Axl reads global configuration from `~/.axl`:
 
 Credentials and settings apply in every workspace. Axl also reads `AGENTS.md`, `.axl/skills`, and `.axl/mcp.json` from the workspace root. A project skill or MCP server replaces the global entry with the same name. Reload the session after changing instructions, skills, or MCP configuration.
 
+## Unsafe mode
+
+Use `--unsafe` only when you explicitly need to run without operating-system confinement:
+
+```bash
+axl --unsafe
+axl daemon --unsafe
+```
+
+This disables Bubblewrap or Seatbelt and removes file-tool path restrictions. Shell commands, reads, edits, and local stdio MCP servers receive the user's full host authority. The TUI displays a persistent warning, and the canonical log records `sandbox.configured` with `enforced: false`.
+
+Unsafe mode uses a separate daemon socket and session directory under `~/.axl/unsafe/`. This prevents a normal client from silently attaching to an unsafe daemon. Provider credentials remain in the normal credential store.
+
 ## Add Agent Skills
 
 Put skills in either location:

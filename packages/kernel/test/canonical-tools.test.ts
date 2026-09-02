@@ -61,7 +61,9 @@ test("shell validates input before execution", async (context) => {
 test("shell rejects a protected working directory before spawning", async (context) => {
   const cwd = await workspace(context);
   const protectedPath = join(cwd, "private");
-  const shell = shellIn(cwd, { policy: { workspace: cwd, protectedPaths: [protectedPath] } });
+  const shell = shellIn(cwd, {
+    policy: { workspace: cwd, readableRoots: [cwd], protectedPaths: [protectedPath] },
+  });
   await assert.rejects(
     shell.execute({ command: "pwd", cwd: protectedPath }, noSignal),
     SandboxViolationError,
@@ -82,6 +84,46 @@ test("shell enforces timeouts and abort promptly", async (context) => {
   assert.equal(aborted.isError, true);
   assert.match(text(aborted), /aborted after/);
   assert.equal(Date.now() - started < 5_000, true);
+});
+
+test("shell abort terminates descendant processes and never starts with a spent signal", async (context) => {
+  const cwd = await workspace(context);
+  const shell = shellIn(cwd);
+  const spent = new AbortController();
+  spent.abort();
+  await assert.rejects(
+    shell.execute({ command: "touch should-not-exist" }, spent.signal),
+    (error) => error instanceof DOMException && error.name === "AbortError",
+  );
+  await assert.rejects(stat(join(cwd, "should-not-exist")), /ENOENT/);
+
+  if (process.platform === "win32") return;
+  const controller = new AbortController();
+  const running = shell.execute(
+    { command: "sleep 30 & echo $! > child.pid; wait" },
+    controller.signal,
+  );
+  let childPid: number | undefined;
+  for (let attempt = 0; attempt < 100 && childPid === undefined; attempt += 1) {
+    try {
+      childPid = Number((await readFile(join(cwd, "child.pid"), "utf8")).trim());
+    } catch {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    }
+  }
+  assert.equal(Number.isSafeInteger(childPid), true);
+  controller.abort();
+  const result = await running;
+  assert.equal(result.isError, true);
+  assert.match(text(result), /aborted after/);
+  let state: string | undefined;
+  try {
+    const status = await readFile(`/proc/${childPid as number}/stat`, "utf8");
+    state = status.split(" ")[2];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  assert.equal(state === undefined || state === "Z", true);
 });
 
 test("shell truncates the model surface but preserves the complete output", async (context) => {
