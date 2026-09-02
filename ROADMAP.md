@@ -106,7 +106,7 @@ Some defaults should be off. Features that depend on uncommon resources, such as
 
 #### 2.9 Batteries included, removable
 
-Every shipped feature outside the kernel is a native extension that can be enabled or disabled on its own. This includes side conversations, goal and plan modes, insights, learning, web access, browser support, the session viewer, tips, workflows, mission control, the review inbox, vision routing, and voice. First-party and third-party extensions use the same public API (section 5).
+Every shipped feature outside the kernel is a native extension that can be enabled or disabled on its own. This includes side conversations, goal, slow, and plan modes, insights, learning, web access, browser support, the session viewer, tips, workflows, mission control, the review inbox, vision routing, and voice. First-party and third-party extensions use the same public API (section 5).
 
 - A disabled feature contributes no prompt tokens, UI, or background work.
 - The kernel (section 2.3) is not a plugin. DSH allows its model adapter, session log, and agent loop to be replaced, but Axl keeps them fixed for these reasons:
@@ -226,10 +226,19 @@ Tip: /learn tier 3 can draft extensions from your patterns. You approve before a
 Tip: /minimal runs with just two tools when you want raw speed.
 ```
 
+Starting a goal always gives one contextual slow-mode line. When batch mode is available but disabled, it reads:
+
+```text
+Tip: Use /slow to run this goal in provider batch mode when lower cost matters more than latency.
+```
+
+When slow mode is already active or the provider lacks batch support, the same line reports that state instead of suggesting an unavailable action.
+
 Rules that keep tips helpful instead of annoying:
 
 - Tips come from a reviewed list of plain strings. They never require a model call or spend tokens.
 - Rotation is random, then filtered by local usage. Axl skips tips for familiar, dismissed, or disabled features.
+- The `/goal` slow-mode reminder is contextual rather than random. It appears once whenever a goal starts.
 - A tip takes one line, appears infrequently, and never blocks work.
 - Tips introduce optional features. Ignoring every tip must still leave a useful agent.
 - `/tip off` removes the feature and its UI completely.
@@ -245,6 +254,25 @@ Rules that keep tips helpful instead of annoying:
 - Getting stuck is reported loudly, with what was tried and what is blocking. A goal never spins silently.
 - Goals follow the isolation-based permission default in section 9.2. A sandboxed goal can run without prompts because the sandbox and budget provide the boundary. An unsandboxed goal pauses on gated actions and sends a notification instead of waiting on an unseen prompt (section 16.3).
 - Mission control and the mobile app show goal progress and send notifications when goals block or finish.
+
+##### Slow mode (/slow)
+
+`/slow` toggles slow mode for the current session. `/slow on`, `/slow off`, and `/slow status` provide explicit control for clients and automation. Slow mode sends each future model request through the selected provider's batch API. It is intended for goals and other work where lower batch pricing matters more than interactive latency.
+
+Slow mode changes transport, not agent semantics:
+
+- The daemon still owns the loop, tools, event log, budgets, and cancellation.
+- Each model step is submitted as a batch request. Tool calls execute only after that batch result arrives, and the next model step becomes a new batch request.
+- Independent child requests may share a provider batch when identity, model, policy, and cache boundaries match. Axl never combines requests across users or authorization contexts.
+- The event log records slow-mode changes, provider batch identifiers, submission time, status transitions, completion, usage, and cost.
+- Pending batch requests survive detach and daemon restart. Every client shows that the session is waiting on a provider rather than appearing stalled.
+- Steering and follow-ups queue for the next model boundary while a batch request is pending. Interrupt requests provider cancellation and reports clearly when the provider can no longer cancel the request.
+- Enabling slow mode takes effect on the next model request. It never converts an in-flight streaming request.
+- A provider without a compatible batch API rejects `/slow on` explicitly. Axl never simulates slow mode with sleeps and never silently falls back to the real-time API.
+- `/slow off` restores the normal streaming path after the pending batch request reaches a terminal state.
+- Batch discounts and latency estimates appear in cost and status views when the provider supplies them.
+
+Every `/goal` invocation checks slow-mode availability and displays the static slow-mode line above. When batch execution is available but disabled, it recommends `/slow`. When slow mode is already enabled, it confirms that state. When batch execution is unavailable, it says so without presenting `/slow` as usable.
 
 #### 3.8 Vision, voice, and media
 
@@ -608,7 +636,7 @@ Tool identity is canonical, but provider adapters render each selected tool in t
 Axl distinguishes four directions of invocation:
 
 - **Model to harness:** typed tools selected for the current turn
-- **User to harness:** commands such as `/goal`, `/btw`, `/subagents`, `/learn`, `/adopt`, and `/insights`
+- **User to harness:** commands such as `/goal`, `/slow`, `/btw`, `/subagents`, `/learn`, `/adopt`, and `/insights`
 - **Harness to model:** roles such as compaction, facet extraction, and vision description
 - **Internal work:** hooks, learning records, tips, and reconciliation
 
@@ -645,6 +673,16 @@ Axl calls reasoning effort a thinking level and follows Pi's scale. Provider ada
 **Thinking level is session state.** It applies to future turns and can change during a session. Per-model settings override the global default, and switching models clamps the level to the new model's capabilities without changing that global default. Every role and child carries its own level.
 
 Thinking level is a major cost control, so reports show it next to the model and include its spend in session and tree budgets. Routine roles use lower defaults, while the main loop uses the session default.
+
+#### 7.7 Slow batch execution
+
+Batch execution is an optional provider capability. A provider that advertises it implements submit, status, result retrieval, and cancellation for deferred model requests. The canonical request and response content remains the same as the streaming path, while provider-specific batch files, job formats, polling rules, and completion windows stay in the provider adapter.
+
+The daemon persists a batch operation before submission and records the provider identifier after acceptance. Recovery reconciles operations whose submission outcome is uncertain by idempotency key before sending anything again. Polling is bounded, survives restarts, respects provider retry guidance, and stops when the session is cancelled or its budget expires.
+
+A slow-mode response enters the canonical event stream only after the provider returns a complete result. The adapter converts it into the same assistant, tool-call, usage, completion, and error events used by live streaming. This keeps replay, clients, and the kernel independent of provider batch formats.
+
+Slow mode is explicit session state. It is never selected automatically to save money, and the provider's estimated discount or completion window is informational rather than guaranteed. Unsupported batch execution fails at selection time without a real-time fallback.
 
 ### 8. Learning loop
 
@@ -1447,6 +1485,7 @@ The initial product thesis is proven when a user can:
 10. Update or roll back the adopted plugin safely.
 11. Watch and steer a cloud session from the mobile app, including answering a permission request from the phone.
 12. Add a second entitlement to a pool and keep working when the first hits its limit, with the switch, its reason, and its cache cost shown rather than inferred.
+13. Start a goal, see the `/slow` tip, enable slow mode, and complete the goal through resumable provider batch requests.
 
 ### 22. FAQ
 
@@ -1489,6 +1528,10 @@ Use any provider that meets the role's capability requirements. Tool dialects ad
 **Can Axl combine subscriptions and API keys?**
 
 Yes. Subscription pools group authorized entitlements, keep sessions sticky for cache reuse, and move work when a member is throttled or exhausted. Axl records the switch, reason, and cost. It does not silently downgrade models or share credentials between people.
+
+**What does `/slow` do?**
+
+`/slow` routes future model requests through the provider's batch API. Responses take longer, but supported providers may charge less. It is useful for unattended goals, remains visible in session status, and never falls back silently when batch execution is unavailable.
 
 **Do I need to configure every feature?**
 
@@ -1782,6 +1825,11 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 - [ ] When a goal needs missing information, record a reversible assumption or emit a visible blocker and pause.
 - [ ] Add context, token, cache, latency, and cost visibility.
 - [ ] Add token, cost, and wall-clock budgets with safe-boundary pauses.
+- [ ] Add `/slow on`, `/slow off`, and `/slow status` as explicit per-session controls.
+- [ ] Route every model request made in slow mode through a provider batch API without a real-time fallback.
+- [ ] Persist batch request IDs, idempotency keys, state transitions, usage, and cost so pending requests survive daemon restart.
+- [ ] Reconcile uncertain submissions before retrying and implement provider cancellation where available.
+- [ ] Keep steering and follow-ups queued until the pending batch request reaches a terminal state.
 - [ ] Implement steer, follow-up, and interrupt semantics.
 - [x] Queue multiple follow-ups in order.
 - [x] Add `/fork` from a selected user message and `/clone` from the current tip.
@@ -1807,7 +1855,7 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 
 #### Exit gate
 
-Use Axl for multiple real development sessions across restarts and branches without returning to the stable harness for routine edits, tests, compaction, or recovery.
+Use Axl for multiple real development sessions across restarts and branches without returning to the stable harness for routine edits, tests, compaction, or recovery. A slow-mode request can survive daemon restart, resolve exactly once, and continue through the canonical event stream.
 
 ### Phase 6: Native extension runtime and open standards
 
@@ -1994,6 +2042,9 @@ Adversarial tests cannot escape workspace path rules, tool egress policy, extens
 
 - [ ] Add persistent objectives with explicit completion criteria.
 - [ ] Continue plan, act, verify, and correct until completion, a blocker, or a budget boundary.
+- [ ] Show one static slow-mode line whenever a goal starts: recommend `/slow` when available, confirm it when active, or report it unavailable.
+- [ ] Preserve slow mode across every goal step, detach, restart, and placement change.
+- [ ] Show pending batch status and estimated completion in goal views without polling aggressively.
 - [ ] Allow bounded child attempts under goal authority.
 - [ ] Persist goals through detach, restart, and placement changes.
 - [ ] Run sandboxed unattended goals without prompts.
@@ -2007,7 +2058,7 @@ Adversarial tests cannot escape workspace path rules, tool egress policy, extens
 
 #### Exit gate
 
-Child sessions remain inspectable, budgeted, cancellable, policy-narrowed, replayable, and non-ambient across every implemented backend.
+Child sessions remain inspectable, budgeted, cancellable, policy-narrowed, replayable, and non-ambient across every implemented backend. Goals clearly advertise available slow mode, and slow goals remain resumable while provider batch requests are pending.
 
 ### Phase 9: Full protocol, SDK, web, and viewer
 
