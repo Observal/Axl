@@ -9,6 +9,7 @@ This file records notable user-facing changes.
 
 ### Added
 
+- A session-scoped `exec` profile that exposes only sandboxed Bash and activates no Skills or MCP servers
 - Repository, licensing, contribution, and CI foundations
 - Release-branch tooling for channel releases, tracked backports, signed tags, npm publication, and GitHub Releases
 - The public `@observal/axl` package, checksum-verifying installer, and CLI `--help` and `--version` output
