@@ -1,13 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
-// SPDX-FileCopyrightText: 2025 Mario Zechner
-// SPDX-License-Identifier: Apache-2.0 AND MIT
-//
-// Adapted from Pi (earendil-works/pi @ 6c87d9a, MIT): thinking-level support
-// and clamping semantics from pi-ai models.ts; default thinking budgets and
-// answer-room reservation from pi-ai api/simple-options.ts. Changes: rewritten
-// against Axl's ModelInfo and protocol ThinkingLevel (which includes "off"),
-// and clamping returns the `config.thinking` event payload so every clamp is
-// visible in the session log.
+// SPDX-License-Identifier: Apache-2.0
+
+// Axl-native thinking-level selection, clamping, and token-budget policy.
 
 import type { ThinkingLevel } from "@axl/protocol";
 

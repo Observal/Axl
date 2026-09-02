@@ -414,7 +414,7 @@ function isMcpTool(name: string): boolean {
   return name === "mcp" || name.startsWith("mcp_") || name.includes("__mcp__");
 }
 
-/** Result rendering matching the configured Pi defaults: reads and searches hidden, shell previewed. */
+/** Result rendering with reads and searches hidden and shell output previewed. */
 export function renderToolResult(input: {
   readonly name: string;
   readonly text: string;

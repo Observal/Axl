@@ -21,7 +21,7 @@ export function dialogInnerWidth(width: number): number {
   return Math.max(1, width - 4);
 }
 
-/** Renders a Pi-style panel with horizontal rules and open content. */
+/** Renders a panel with horizontal rules and open content. */
 export function renderDialog(input: DialogInput): string[] {
   const { title, rows, footer, width, palette } = input;
   const inner = dialogInnerWidth(width);

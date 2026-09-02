@@ -23,7 +23,7 @@ The name reflects the architecture: one runtime keeps many models and ecosystems
 
 The product has five pillars:
 
-1. **Adoption.** Import Pi extensions, OpenCode plugins, DSH plugins, and Claude Code resources with one command (section 4). Install resources based on open standards directly (section 5.2).
+1. **Adoption.** Import OpenCode plugins, DSH plugins, Claude Code resources, and other supported ecosystems with one command (section 4). Install resources based on open standards directly (section 5.2).
 2. **Useful defaults.** A user should get a capable agent without editing configuration first (section 2.8).
 3. **Visible learning.** Corrections and repeated preferences can become rules, but every learned change is evidence-based, recorded, and reversible (section 8).
 4. **Extensibility.** Everything outside the kernel can be replaced or disabled. Experimental self-extension follows the same boundary (sections 2.9 and 8.5).
@@ -31,7 +31,7 @@ The product has five pillars:
 
 These goals pull in different directions. A small fixed kernel keeps the guarantees stable. The event log gives every client the same state. Progressive discovery keeps an extensible system usable without a long setup process. The learning ledger makes automated changes visible.
 
-Three commitments support the whole design: enforced sandboxing through operating-system or OCI isolation (section 10), small prompts without default model-controlled delegation (sections 2.5 and 7), and compatibility with Pi's compaction and session behavior (sections 14 and 15.6).
+Three commitments support the whole design: enforced sandboxing through operating-system or OCI isolation (section 10), small prompts without default model-controlled delegation (sections 2.5 and 7), and deterministic compaction and session behavior (sections 14 and 15.6).
 
 ### 2. Product principles
 
@@ -87,10 +87,10 @@ Permission hooks alone are not a security boundary. Foreign extensions, MCP serv
 
 The model supplies most of the raw capability. The harness should keep working when that model changes:
 
-- Pi's provider API is the model abstraction. Axl does not add another layer (section 19).
+- Axl has one provider API as its model abstraction. It does not add another layer (section 19).
 - Tool dialects (section 7.4): provider adapters render the canonical tool roster in each model's trained schema and edit format, so switching models never means playing away from home.
 - Each model-calling role can choose its own provider. Roles include the main loop, side conversations, conversion workers, permission checks, compaction, vision, OCR, speech, facet extraction, and insights.
-- Thinking level is part of model selection. Every role and child session carries a level that can change mid-session and is recorded as configuration. Axl follows Pi's levels, capability maps, clamping, and token budgets (section 7.6).
+- Thinking level is part of model selection. Every role and child session carries a level that can change mid-session and is recorded as configuration. Axl defines shared levels, capability maps, clamping, and token budgets (section 7.6).
 - Roles use the main model when it fits or the cheapest capable model for routine text work. Users do not need to configure each role before using it.
 - OCR and speech roles start disabled with no default model. Choosing a hosted service on the user's behalf would be unsafe, while choosing no model would make the feature fail on first use. Section 3.8 describes how users enable them.
 - The kernel makes no vendor-specific prompt assumptions. Provider quirks live in provider adapters.
@@ -129,11 +129,6 @@ Example:
 ```text
 Existing setups found
 
-Pi
-  7 extensions
-  12 skills
-  4 prompts
-
 OpenCode
   5 plugins
   3 agents
@@ -161,7 +156,6 @@ Interactive:
 Direct installation:
 
 ```bash
-axl install pi @juicesharp/pi-web-tools
 axl install opencode opencode-wakatime
 axl install dsh @vendor/dsh-plugin
 ```
@@ -169,13 +163,13 @@ axl install dsh @vendor/dsh-plugin
 Optional passthrough form:
 
 ```bash
-axl adopt -- pi install @juicesharp/pi-web-tools
+axl adopt -- opencode install opencode-wakatime
 ```
 
 #### 3.3 Adoption result
 
 ```text
-Adoption complete: @juicesharp/pi-web-tools
+Adoption complete: opencode-wakatime
 
 Converted
   4 tools
@@ -192,7 +186,7 @@ Permissions requested
   Network: api.example.com
 
 Source retained at:
-  ~/.axl/adopted/pi/@juicesharp/pi-web-tools/1.4.2/source
+  ~/.axl/adopted/opencode/opencode-wakatime/1.4.2/source
 ```
 
 #### 3.4 Plan mode
@@ -579,7 +573,7 @@ An adopted plugin may register subagent capabilities, but activation must show t
 
 #### 7.1 System prompt
 
-Follow Pi's minimal approach.
+Keep the system prompt minimal.
 
 The stable base contains only:
 
@@ -656,7 +650,7 @@ The stable prompt says only that optional capabilities may be supplied with a re
 
 #### 7.6 Thinking levels
 
-Axl calls reasoning effort a thinking level and follows Pi's scale. Provider adapters translate that common setting into each provider's format.
+Axl calls reasoning effort a thinking level and uses one shared scale. Provider adapters translate that common setting into each provider's format.
 
 **The scale.** Seven values: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. The default is `medium`, resolved as user setting → current session level → `medium`. `off` omits the reasoning parameter from the request entirely rather than sending a zero.
 
@@ -809,7 +803,7 @@ Additional controls:
 
 #### 8.6 Insights engine
 
-The evidence layer for the learning loop is a native insights engine built on the design proven by `observal/pi-insights` (prior work by Axl's author), promoted from a Pi extension to a built-in `/insights` command.
+The evidence layer for the learning loop is a native insights engine exposed through the built-in `/insights` command.
 
 ```text
 /insights
@@ -859,7 +853,7 @@ Suggestions appear only in the client. They do not enter model context or alter 
 
 #### 9.1 Default philosophy
 
-Follow Pi's core insight: repeated manual permission dialogs create habituation and do not provide a strong security boundary.
+Repeated manual permission dialogs create habituation and do not provide a strong security boundary.
 
 The primary safety mechanism is sandbox policy, not constant confirmation prompts.
 
@@ -867,7 +861,7 @@ The primary safety mechanism is sandbox policy, not constant confirmation prompt
 
 Provide at least:
 
-- `direct`: Pi-style operation within the selected sandbox, without routine per-command prompts
+- `direct`: operation within the selected sandbox, without routine per-command prompts
 - `auto`: classifier-mediated approval similar to Claude Code auto mode
 - `manual`: explicit approval for gated actions
 - `deny`: deny the capability
@@ -878,7 +872,7 @@ Unsandboxed execution requires `axl --unsafe`. Unsafe sessions default to `auto`
 
 #### 9.3 Auto mode
 
-Auto mode is the recommended midpoint for users who want more intervention than Pi without approving every command.
+Auto mode is the recommended midpoint for users who want more intervention than direct mode without approving every command.
 
 Axl gives the classifier a structured action record with the tool name, parsed arguments, canonical paths, target domains, requested capability change, and active sandbox profile. Raw commands and file contents are clearly marked as untrusted data.
 
@@ -959,7 +953,7 @@ Use shell and file tools first, MCP and APIs second, and browser automation when
 
 #### 10.6 Web access
 
-Web search and content fetching are core capabilities. Axl adopts the proven shape of `pi-web-access` under its MIT license:
+Web search and content fetching are core capabilities. Axl exposes a small two-tool interface:
 
 - Two public tools, `web_search` and `fetch_content`, with provider routing behind them.
 - Keyless search works by default. API keys, reused subscription auth, and self-hosted endpoints enable more providers.
@@ -1179,9 +1173,7 @@ When every member is exhausted, Axl reports the pool state and earliest reset ti
 
 ### 14. Compaction
 
-Adopt Pi's compaction behavior and defaults as the compatibility target. Reuse Pi's MIT-licensed implementation where practical, preserving required notices and attribution.
-
-Required behavior:
+Axl's compaction contract defines the following required behavior:
 
 - Proactive threshold compaction
 - Overflow recovery and retry
@@ -1200,7 +1192,7 @@ Required behavior:
 - Extension interception for custom compaction
 - Compaction usage included in cost and token totals
 
-Compatibility should be enforced with behavior tests against Pi fixtures rather than only copied implementation details.
+Compaction behavior must be enforced through independent fixtures and public outcomes rather than implementation details.
 
 ### 15. Session daemon and clients
 
@@ -1256,7 +1248,7 @@ A session can carry token, cost, and wall-clock budgets. Crossing a budget pause
 
 #### 15.4 Tree sessions
 
-A session is a tree of turns. Following Pi's model, every event has an ID and parent ID. Branching, rewind, and children with forked history all start a new branch from an existing node. Old branches remain available, compaction works per branch, and clients display the tree directly.
+A session is a tree of turns. Every event has an ID and parent ID. Branching, rewind, and children with forked history all start a new branch from an existing node. Old branches remain available, compaction works per branch, and clients display the tree directly.
 
 #### 15.5 Protocol and SDK
 
@@ -1284,8 +1276,8 @@ RPCs that require special authority, including child creation and goal control, 
 
 Storage is split into a canonical log and a derived index, each in the format that suits its job:
 
-- **JSONL is the source of truth.** Each session has an append-only log whose parent IDs form the tree. The shape stays close to Pi's format so imports can preserve most information. A torn write can damage only the final line, which recovery may truncate. JSONL is readable, searchable, streamable, and easy to move between workers.
-- **Per-session JSON sidecar caches are the default index.** The pi-insights pattern (section 8.6): deterministic stats extracted once per session and cached as small JSON files. This covers the session picker, insights aggregation, and most viewer queries with no database at all.
+- **JSONL is the source of truth.** Each session has an append-only log whose parent IDs form the tree. A torn write can damage only the final line, which recovery may truncate. JSONL is readable, searchable, streamable, and easy to move between workers.
+- **Per-session JSON sidecar caches are the default index.** Deterministic stats are extracted once per session and cached as small JSON files. This covers the session picker, insights aggregation, and most viewer queries with no database at all.
 - **SQLite is an optional search index.** When JSON sidecars become too slow for full-text search, Axl builds an FTS5 database from the logs. The database is disposable. Schema changes rebuild it instead of migrating canonical history.
 - Every write reaches JSONL before any index. An index may lag, but the log may not. If they disagree, rebuild the index.
 - Cloud workers upload only durable JSONL (section 11). Each client builds its own local caches and indexes.
@@ -1294,7 +1286,7 @@ Storage is split into a canonical log and a derived index, each in the format th
 
 #### 16.1 Terminal
 
-Use Pi's rendering principles:
+Use incremental terminal rendering principles:
 
 - Differential rendering
 - Synchronized output
@@ -1445,7 +1437,7 @@ Axl should not add:
 
 - Another skill format
 - Another MCP replacement
-- Another provider API abstraction when Pi's is sufficient
+- Another provider abstraction above Axl's provider contract
 - A plugin marketplace before adoption works reliably
 - Default model-driven subagents
 - A large built-in workflow language
@@ -1458,13 +1450,13 @@ Axl should not add:
 
 1. Product name: Axl. The public npm package is `@observal/axl`, and the executable is `axl`.
 2. Default permission profile: decided. Use `direct` with an enforced sandbox and `auto` when policy permits operation without confinement (section 9.2).
-3. Exact compatibility surface promised for the first Pi, OpenCode, and DSH release.
+3. Exact compatibility surface promised for the first OpenCode, DSH, and Claude Code release.
 4. Third-party extension placement: decided for v1. Third-party and adopted code always runs out of process under the selected sandbox.
 5. Protocol versioning for the client wire format. The at-rest format is decided: JSONL event log as source of truth with derived caches and a search index (section 15.6).
 6. First cloud provider to support before generalizing all three.
 7. Global and project learning budgets.
 8. Whether cloud transfer moves a session or creates a fork.
-9. Licensing and attribution policy for reused Pi code.
+9. Licensing and attribution policy for any future approved third-party code.
 10. Whether the mobile app connects through a hosted relay service or direct daemon pairing first.
 11. Whether a pool may span providers by default, or only entitlements of the same provider and model family (section 13.2).
 12. Whether shared team pools ship in the first release, or pooling stays single-owner until the ownership and accounting model is proven (section 13.4).
@@ -1474,7 +1466,7 @@ Axl should not add:
 The initial product thesis is proven when a user can:
 
 1. Install the harness with one command.
-2. Detect existing Pi, OpenCode, and DSH resources.
+2. Detect existing OpenCode, DSH, and Claude Code resources.
 3. Select a real third-party plugin.
 4. Adopt it in one operation using isolated conversion workers.
 5. Inspect generated code, permissions, provenance, and test results.
@@ -1493,17 +1485,13 @@ The initial product thesis is proven when a user can:
 
 DSH makes the loop, log, and policy layer replaceable. Axl uses that flexibility for features but keeps a fixed kernel for event-log integrity, replay, and security enforcement. DSH serves framework builders. Axl is an opinionated product.
 
-**Why not fork Pi?**
-
-Pi provides proven behavior for the agent loop, compaction, provider API, prompt design, cache handling, and tree-shaped JSONL sessions. Axl uses those contracts where they fit. It adds an adoption compiler, one daemon for every client, cloud placement, enforced sandbox policy, and a learning system.
-
 **Is this a Claude Code clone?**
 
 No. Axl focuses on adopting existing ecosystems and running one session across clients and models. Tree sessions, visible decisions, and the lack of default model-controlled delegation are also core differences.
 
 **Will my existing setup work?**
 
-Open standards such as MCP, AGENTS.md, Agent Skills, and Agent Plugins install directly. Pi, OpenCode, DSH, and Claude Code resources go through the adoption compiler, which leaves the original untouched and reports any behavior it could not preserve.
+Open standards such as MCP, AGENTS.md, Agent Skills, and Agent Plugins install directly. OpenCode, DSH, Claude Code, and other proprietary resources go through the adoption compiler, which leaves the original untouched and reports any behavior it could not preserve.
 
 **Can Axl run subagents without exposing a default subagent tool?**
 
@@ -1546,7 +1534,7 @@ Phases 0 through 4 are complete. Selected TUI, Agent Skills, and MCP work was br
 ### Delivery rules
 
 1. Build vertical slices, not empty package scaffolding.
-2. Use Pi and DSH as read-only behavioral and architectural references. Write Axl-native implementations. Do not copy files, paste source, or translate implementations line by line.
+2. Treat DSH and other external systems as read-only behavioral and architectural references. Write Axl-native implementations. Do not copy files, paste source, or translate implementations line by line.
 3. Build phases 0 through 4 with a stable external harness.
 4. Start using Axl to build Axl when the phase 4 dogfood gate passes.
 5. Continue using independent review for kernel, protocol, sandbox, credentials, adoption trust boundaries, and cloud cleanup.
@@ -1567,7 +1555,7 @@ Resolve these before implementation because they affect irreversible boundaries.
 - [x] Define the first at-rest event format version as `1`.
 - [x] Define the first local wire protocol version as `1`, with exact-version compatibility before the first stable release.
 - [x] Confirm Apache-2.0 for Axl and establish the attribution process for behavior or fixtures derived from external projects.
-- [x] Record Pi and DSH reference commits used during implementation.
+- [x] Record external reference revisions used during implementation.
 - [x] Keep third-party extensions out of the daemon process in v1. Only trusted first-party extensions may run in process.
 - [x] Keep capability search local and lexical. V1 uses BM25, not embeddings or provider-native tool search.
 - [x] Keep TypeScript definitions authoritative until the first non-TypeScript client requires code generation.
@@ -1658,7 +1646,7 @@ A process can append a branched session, crash during an append, recover, replay
 
 ### Phase 2: Provider and model foundation
 
-Adapt Pi's provider architecture as an Axl-native contract. Do not create another wrapper above it.
+Use Axl's provider contract directly. Do not create another wrapper above it.
 
 #### Provider contract
 
@@ -1689,7 +1677,7 @@ Adapt Pi's provider architecture as an Axl-native contract. Do not create anothe
 
 - [x] Implement only the provider adapter required for the first dogfood sessions. Decided and built: Azure OpenAI over the Responses API.
 - [x] Add generic OpenAI-compatible support only when the first provider needs it. `OpenAiResponsesProvider` supplies the shared layer, and Azure adds its endpoint policy.
-- [x] Keep provider breadth deferred until the stream contract is stable. Azure exposes Pi's full Azure OpenAI model catalog, but no other provider adapters ship in this phase.
+- [x] Keep provider breadth deferred until the stream contract is stable. Azure exposes Axl's built-in Azure OpenAI model catalog, but no other provider adapters ship in this phase.
 
 #### Tool dialect foundation
 
@@ -1797,7 +1785,7 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 #### Standard profile and web access
 
 - [ ] Add `write`, `web_search`, and `fetch_content` to the standard profile.
-- [ ] Adapt the two-tool shape and routing principles of `pi-web-access` without copying its source.
+- [ ] Implement the two-tool search and fetch surface through Axl's provider-routing contract.
 - [ ] Provide keyless search where available and explicit configuration for optional providers.
 - [ ] Add readable, raw, and summarized fetch modes.
 - [ ] Clone GitHub repositories locally instead of scraping rendered pages.
@@ -1815,7 +1803,7 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 - [ ] Summarize branches independently and exclude side-channel branches.
 - [ ] Retain original history outside the compacted model surface.
 - [ ] Track compaction tokens and cost.
-- [ ] Add behavior tests against Pi fixtures where fixture licensing permits use.
+- [ ] Add independent compaction behavior fixtures.
 
 #### Session controls
 
@@ -2120,7 +2108,7 @@ Implement the unified child mechanism and extension isolation before model-drive
 
 #### Discovery and installation
 
-- [ ] Scan known Pi, OpenCode, DSH, and Claude Code locations without executing discovered code.
+- [ ] Scan known OpenCode, DSH, and Claude Code locations without executing discovered code.
 - [ ] Present first-launch findings without a setup wizard.
 - [ ] Add interactive `/adopt` and direct `axl install` commands.
 - [ ] Add optional passthrough adoption syntax.
@@ -2160,7 +2148,6 @@ Implement the unified child mechanism and extension isolation before model-drive
 
 #### Ecosystem order
 
-- [ ] Pi resources.
 - [ ] OpenCode resources.
 - [ ] DSH resources.
 - [ ] Claude Code resources and agent definitions.
@@ -2363,7 +2350,7 @@ Each derived feature is implemented from existing public primitives without expa
 #### Final product-thesis gate
 
 - [ ] One-command installation works.
-- [ ] Existing Pi, OpenCode, and DSH resources are detected.
+- [ ] Existing OpenCode, DSH, and Claude Code resources are detected.
 - [ ] A real plugin is adopted with provenance, verification, permissions, and unsupported behavior visible.
 - [ ] The adopted plugin runs in the terminal and web clients against one session inside required isolation.
 - [ ] Detach, reconnect, update, and rollback work.
@@ -2377,7 +2364,7 @@ Do not implement these unless the product vision changes:
 
 - Another skill format.
 - Another MCP replacement.
-- A second provider abstraction above the Pi-inspired contract.
+- A second provider abstraction above Axl's provider contract.
 - A plugin marketplace before adoption is reliable.
 - Default model-controlled subagents in ordinary sessions.
 - A custom workflow language.

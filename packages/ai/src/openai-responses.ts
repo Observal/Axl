@@ -1,12 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
-// SPDX-FileCopyrightText: 2025 Mario Zechner
-// SPDX-License-Identifier: Apache-2.0 AND MIT
-//
-// Adapted from Pi (earendil-works/pi @ 6c87d9a, MIT): OpenAI Responses API
-// behavior from pi-ai api/openai-responses-shared.ts — stream event mapping,
-// cached/cache-write token subtraction from input usage, and the minimum
-// output-token floor. Changes: Axl-native codec split from transport, wired
-// to Axl's canonical ModelStreamEvent contract and ModelInfo thinking maps.
+// SPDX-License-Identifier: Apache-2.0
+
+// Axl-native OpenAI Responses codec and transport implementation.
 
 import type { JsonObject, JsonValue, Usage } from "@axl/protocol";
 

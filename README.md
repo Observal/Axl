@@ -63,7 +63,7 @@ Unsafe mode disables operating-system isolation and file-tool path policy. Shell
 | --- | --- |
 | `packages/protocol` | Event and local wire contracts with no runtime dependencies |
 | `packages/kernel` | JSONL history, replay, the agent loop, tools, and path policy |
-| `packages/ai` | Provider contracts, credentials, dialects, and the full Pi-compatible Azure OpenAI model catalog |
+| `packages/ai` | Provider contracts, credentials, dialects, and the built-in Azure OpenAI model catalog |
 | `packages/daemon` | Authoritative sessions and Unix-socket transport |
 | `packages/runtime` | Client-independent provider, tool, extension, and sandbox assembly |
 | `packages/sandbox` | Required operating-system confinement |

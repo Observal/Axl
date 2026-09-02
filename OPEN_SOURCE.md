@@ -26,8 +26,8 @@ Apache-2.0 provides an explicit patent grant and clear contribution terms. Those
 
 Third-party work carries its original obligations:
 
-- Pi is MIT-licensed. Any approved adaptation keeps the original copyright notice and license text, records its provenance, and credits Pi in the README and `NOTICE`. The same rule applies to `pi-web-access` and other adopted implementations.
-- Every adapted file records the source project, source commit, and nature of the changes in its header.
+- Any approved adaptation keeps the original copyright notice and license text and records its provenance in the file and `NOTICE`.
+- Independently implemented behavior based on public specifications or black-box observation must not copy or translate external source.
 - Every file has SPDX copyright and license information. `REUSE.toml` covers files that cannot hold comments, and CI runs REUSE checks.
 
 ## 3. Governance
@@ -36,7 +36,7 @@ Axl currently uses bootstrap BDFL governance. Hari Srinivasan ([@Haz3-jolt](http
 
 No maintainer roles, area ownership, committees, or succession process have been delegated yet. The BDFL currently performs those duties. Future roles remain intentionally unspecified until the contributor base requires them.
 
-Changes to a kernel guarantee, event format, extension API, security boundary, or protocol require prior design discussion and an RFC when requested by the BDFL. Other changes use the normal pull request process.
+Changes to a kernel guarantee, event format, extension API, security boundary, or protocol require prior design discussion in an issue. Other changes use the normal pull request process.
 
 [GOVERNANCE.md](GOVERNANCE.md) is the authoritative statement of current decision authority and role status.
 
@@ -54,13 +54,13 @@ Unattended pull requests, bulk-generated patches without human ownership, and is
 
 ### Review requirements
 
-Protected branches require two human approvals and BDFL approval. During bootstrap, the BDFL may use the documented administrator bypass until another maintainer role is delegated. Behavior changes include tests, and the Pi compatibility fixtures remain part of the regression floor.
+Protected branches require two human approvals and BDFL approval. During bootstrap, the BDFL may use the documented administrator bypass until another maintainer role is delegated. Behavior changes include tests, and compatibility fixtures remain part of the regression floor.
 
 The adoption compiler should produce useful starter issues. Each issue should cover one ecosystem quirk, conversion gap, or catalog failure and include a reproduction.
 
 ## 5. Working with other ecosystems
 
-Axl converts resources from Pi, OpenCode, DSH, Claude Code, and open standards. It should help those communities rather than strip value from them.
+Axl converts resources from OpenCode, DSH, Claude Code, and open standards. It should help those communities rather than strip value from them.
 
 - Report upstream bugs and offer fixes when possible.
 - Preserve authorship, licenses, notices, and provenance during conversion.
@@ -185,7 +185,7 @@ This plan is working when:
 2. A plugin author independently verifies a catalog entry.
 3. An upstream project accepts a fix found through Axl's adoption work.
 4. A compliant fork exists without causing a governance dispute.
-5. The project has rejected at least one kernel RFC on its merits.
+5. The project has rejected at least one kernel proposal on its merits.
 6. A private security report is fixed and disclosed within the published timeline.
 7. A maintainer joins who did not know the founding team before contributing.
 8. The project earns the OpenSSF Best Practices Gold badge and sustains a Scorecard of 9 or higher during release hardening.

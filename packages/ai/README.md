@@ -3,4 +3,4 @@
 
 # `@axl/ai`
 
-This package keeps provider-specific behavior outside the kernel. It defines provider and model contracts, credential lookup, thinking levels, tool dialects, deterministic test models, and the Azure OpenAI Responses adapter with Pi's full Azure model catalog.
+This package keeps provider-specific behavior outside the kernel. It defines provider and model contracts, credential lookup, thinking levels, tool dialects, deterministic test models, and the Azure OpenAI Responses adapter with Axl's built-in model catalog.

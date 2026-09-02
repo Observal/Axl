@@ -23,7 +23,7 @@ When documents conflict, stop and surface the conflict instead of silently choos
 
 ## Reference implementations
 
-Pi and DSH are read-only references. Local checkout paths belong in developer-specific configuration, not this repository.
+DSH and any other external implementations are read-only references. Local checkout paths belong in developer-specific configuration, not this repository.
 
 Study their behavior, contracts, tests, and architecture. Write independent Axl implementations. Do not copy source or translate implementations line by line. Do not modify a reference checkout. Flag unavoidable derivative use before writing it so licensing and attribution can be decided first.
 

@@ -17,12 +17,7 @@ These decisions set the package and compatibility boundaries established during 
 
 Other packages use the kernel through public exports. Extensions cannot import private kernel paths.
 
-These rules are stricter than the reference projects inspected for Phase 0:
-
-- Pi at `6c87d9a026677b601e8278030dcf1ad97fe0bd86` has third-party runtime dependencies in its agent package and uses TypeBox in its protocol package.
-- DSH at `cd5ef8148158c3a752a658978873241fdf8e2bbc` builds its loop from several workspace packages and uses Schemastery at runtime.
-
-Axl uses both projects as behavioral references, not as package-layout templates.
+These rules are stricter than the external architecture inspected for Phase 0. DSH at `cd5ef8148158c3a752a658978873241fdf8e2bbc` builds its loop from several workspace packages and uses Schemastery at runtime. Axl treats it as a read-only behavioral reference, not as a package-layout template.
 
 ## Event identity
 

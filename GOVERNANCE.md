@@ -28,7 +28,7 @@ Protected branches require two approvals. Until another maintainer role is deleg
 
 Contributors propose changes through issues and pull requests. Review requirements, DCO sign-off, licensing, testing, and AI-assistance rules are defined in [CONTRIBUTING.md](CONTRIBUTING.md), [AI_POLICY.md](AI_POLICY.md), and [OPEN_SOURCE.md](OPEN_SOURCE.md).
 
-Accepted changes become project decisions when they merge. Changes to kernel guarantees, event formats, the extension API, security boundaries, or the wire protocol require prior design discussion and an RFC when requested by the BDFL.
+Accepted changes become project decisions when they merge. Changes to kernel guarantees, event formats, the extension API, security boundaries, or the wire protocol require prior design discussion in an issue.
 
 ## Maintainers
 

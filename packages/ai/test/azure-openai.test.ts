@@ -265,7 +265,7 @@ test("missing configuration surfaces a typed auth state through the stream", asy
   }
 });
 
-test("publishes Pi's complete Azure OpenAI model catalog", async () => {
+test("publishes the complete built-in Azure OpenAI model catalog", async () => {
   const { AZURE_OPENAI_MODELS } = await import("../src/index.ts");
   assert.deepEqual(
     AZURE_OPENAI_MODELS.map((model) => model.modelId),

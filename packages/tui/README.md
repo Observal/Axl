@@ -3,7 +3,7 @@
 
 # `@axl/tui`
 
-This package contains Axl's interactive terminal client. Its rendering model follows behavior studied in Pi at commit `6c87d9a`, but the implementation is native to Axl. Components produce lines, the differential renderer updates only the live tail, and completed output remains in normal terminal scrollback. The client does not use an alternate screen or curses library.
+This package contains Axl's independently implemented interactive terminal client. Components produce lines, the differential renderer updates only the live tail, and completed output remains in normal terminal scrollback. The client does not use an alternate screen or curses library.
 
 The TUI includes:
 

@@ -34,7 +34,7 @@ See [SETUP.md](SETUP.md) for provider configuration and local CLI usage.
 
 ## Find and claim work
 
-Search existing issues first. Discuss changes to kernel guarantees, event formats, the extension API, or the wire protocol before implementation. Those changes require an RFC under `docs/rfcs/`.
+Search existing issues first. Discuss changes to kernel guarantees, event formats, the extension API, or the wire protocol in an issue before implementation. Include compatibility notes with the change.
 
 ## Make changes
 
@@ -69,7 +69,7 @@ Do not edit generated files. Change their source or generator and regenerate. Ge
 
 ### SPDX and provenance
 
-Every file must carry SPDX copyright and license information. Files that cannot contain comments are covered by `REUSE.toml`. Follow [docs/provenance.md](docs/provenance.md) for external material.
+Every file must carry SPDX copyright and license information. Files that cannot contain comments are covered by `REUSE.toml`. Credit externally inspired behavior beside its implementation with a source link and note that it was independently implemented from public interfaces or black-box observation. Preserve required attribution and notices for copied or adapted material.
 
 ```bash
 reuse lint

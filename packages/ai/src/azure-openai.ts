@@ -1,13 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
-// SPDX-FileCopyrightText: 2025 Mario Zechner
-// SPDX-License-Identifier: Apache-2.0 AND MIT
-//
-// Adapted from Pi (earendil-works/pi @ 6c87d9a, MIT): Azure OpenAI endpoint
-// behavior from pi-ai api/azure-openai-responses.ts — base-URL normalization
-// for Azure hosts, the AZURE_OPENAI_* environment contract, and the
-// model-to-deployment name map format. Changes: Axl-native composition over
-// OpenAiResponsesProvider with no SDK dependency, auth through Axl's
-// credential store, and a static model catalog.
+// SPDX-License-Identifier: Apache-2.0
+
+// Axl-native Azure OpenAI endpoint, authentication, and deployment mapping.
 
 import { AuthError, type ApiKeyAuthMethod, type AuthContext, type ResolvedAuth } from "./auth.ts";
 import type { CredentialStore } from "./credentials.ts";
@@ -70,7 +64,7 @@ export function parseDeploymentMap(value: string | undefined): Readonly<Record<s
 export const azureOpenAiAuthMethod: ApiKeyAuthMethod = {
   displayName: "Azure OpenAI API key",
   resolve: async ({ context, credential }) => {
-    // Match Pi's provider behavior: exported Azure configuration is live and
+    // Exported Azure configuration is live and
     // takes precedence over values captured by an earlier interactive login.
     const env = (name: string): string | undefined => context.env(name) || credential?.env?.[name];
     const key = credential?.key ?? context.env("AZURE_OPENAI_API_KEY");

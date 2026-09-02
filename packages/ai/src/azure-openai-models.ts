@@ -53,7 +53,7 @@ const GPT5_THINKING = { off: null } as const;
 const GPT5_XHIGH_THINKING = { off: null, xhigh: "xhigh" } as const;
 const GPT56_THINKING = { off: null, xhigh: "xhigh", max: "max" } as const;
 
-/** Azure OpenAI catalog aligned with Pi 0.84.1. */
+/** Azure OpenAI model catalog used by the built-in provider. */
 export const AZURE_OPENAI_MODELS: readonly ModelInfo[] = [
   azureModel({
     modelId: "gpt-4",

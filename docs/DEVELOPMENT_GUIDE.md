@@ -383,7 +383,7 @@ Responsibilities:
 - protocol version constants; and
 - runtime validation at trust boundaries.
 
-The package has no runtime dependencies. Do not import Node.js built-ins or another workspace package into it. A wire or event change requires compatibility analysis and normally an RFC.
+The package has no runtime dependencies. Do not import Node.js built-ins or another workspace package into it. A wire or event change requires compatibility analysis and prior design discussion in an issue.
 
 Focused check:
 
@@ -1091,9 +1091,9 @@ SPDX-License-Identifier: Apache-2.0
 
 Files that cannot hold comments must be covered by `REUSE.toml`.
 
-Do not copy source from Pi, DSH, another harness, a blog, or an answer without resolving provenance first. Studying observable behavior and writing an independent implementation is different from translating another implementation line by line.
+Do not copy source from elsewhere. Build an independent [black-box implementation](https://en.wikipedia.org/wiki/Clean-room_design) from public interfaces and observable behavior, and credit the idea beside its implementation with a source link.
 
-When external material is approved, record the source, revision, license, and nature of the use. See [docs/provenance.md](provenance.md).
+For approved copied or adapted material, record the source, revision, license, and nature of the use in the affected file and `NOTICE`.
 
 ## Debugging
 

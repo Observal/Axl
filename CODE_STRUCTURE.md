@@ -27,7 +27,7 @@ Codex offers a useful contrast. Its CLI and Rust core share a repository, while 
 
 ## 2. Languages
 
-- Use **TypeScript** for the kernel, protocol, daemon, adoption compiler, terminal client, web client, and extensions. It matches the ecosystems Axl integrates with and the Pi components used as references.
+- Use **TypeScript** for the kernel, protocol, daemon, adoption compiler, terminal client, web client, and extensions. It matches the ecosystems and standards Axl integrates with.
 - Use **Kotlin with Jetpack Compose** for Android and **Swift with SwiftUI** for iOS. Choose protocol code generation when the first of these clients is built.
 - Do not add another application language. Tooling should use TypeScript or POSIX shell.
 
@@ -75,13 +75,13 @@ CI enforces these boundaries.
 The protocol package owns the contract between the daemon and every client.
 
 - TypeScript definitions are authoritative while all clients use TypeScript.
-- A schema change requires an RFC and compatibility notes.
+- A schema change requires prior design discussion and compatibility notes.
 - The first Swift or Kotlin client triggers a decision on the schema language and generator.
 - Generated SDKs then ship through their native package systems so external and in-tree clients use the same contract.
 
-## 5. Using Pi as a reference
+## 5. Independent implementation
 
-Axl studies Pi's loop, compaction, provider behavior, and session format, then implements the required behavior in the appropriate Axl package. It does not keep a modified copy of Pi under `third_party/`.
+Axl derives requirements from public specifications and black-box behavior, then implements them independently in the appropriate Axl package. It does not keep modified copies of external agent harnesses under `third_party/`.
 
 Any approved adaptation records its source, commit, and changes in an SPDX header. Behavior tests pin compatibility where needed. The `third_party/` directory is reserved for unmodified imported material.
 
@@ -96,7 +96,7 @@ Bazel would add more contributor cost than value at the current scale.
 ## 7. Tests
 
 - Unit tests live with the package they cover.
-- Behavior tests live with the package that makes the promise. This includes Pi compatibility fixtures, child-contract tests, and permission-policy cases.
+- Behavior tests live with the package that makes the promise. This includes compatibility fixtures, child-contract tests, and permission-policy cases.
 - Fuzz targets live in `fuzz/` and exercise the same input paths as production.
 - End-to-end tests drive real clients against the real daemon in a sandboxed workspace. Catalog runs use their own schedule rather than blocking the merge queue.
 - Recorded sessions serve as deterministic replay fixtures.
