@@ -51,6 +51,8 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly sandboxImage?: string;
   readonly snapshotIdleLifetimeMs?: number;
   readonly snapshotAbsoluteLifetimeMs?: number;
+  readonly heartbeatIntervalMs?: number;
+  readonly presenceTimeoutMs?: number;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -175,6 +177,8 @@ export class AxlDaemon {
   private readonly dataDirectory: string;
   private readonly snapshotIdleLifetimeMs: number;
   private readonly snapshotAbsoluteLifetimeMs: number;
+  private readonly heartbeatIntervalMs: number;
+  private readonly presenceTimeoutMs: number;
   private readonly daemonInstanceId = randomUUID();
   private commandJournal: CommandJournal | undefined;
   private dataLock: DataDirectoryLock | undefined;
@@ -193,6 +197,8 @@ export class AxlDaemon {
     this.dataDirectory = options.dataDirectory;
     this.snapshotIdleLifetimeMs = options.snapshotIdleLifetimeMs ?? 30_000;
     this.snapshotAbsoluteLifetimeMs = options.snapshotAbsoluteLifetimeMs ?? 300_000;
+    this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+    this.presenceTimeoutMs = options.presenceTimeoutMs ?? PRESENCE_TIMEOUT_MS;
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
       this.snapshotIdleLifetimeMs <= 0 ||
@@ -200,6 +206,14 @@ export class AxlDaemon {
       this.snapshotAbsoluteLifetimeMs < this.snapshotIdleLifetimeMs
     ) {
       throw new TypeError("Snapshot lifetimes must be positive and absolute must cover idle");
+    }
+    if (
+      !Number.isSafeInteger(this.heartbeatIntervalMs) ||
+      this.heartbeatIntervalMs <= 0 ||
+      !Number.isSafeInteger(this.presenceTimeoutMs) ||
+      this.presenceTimeoutMs <= this.heartbeatIntervalMs
+    ) {
+      throw new TypeError("Presence timeout must be greater than the positive heartbeat interval");
     }
   }
 
@@ -368,7 +382,7 @@ export class AxlDaemon {
     const presenceTimer = setInterval(
       () => {
         const now = Date.now();
-        if (state.lastSeenAt !== undefined && now - state.lastSeenAt > PRESENCE_TIMEOUT_MS) {
+        if (state.lastSeenAt !== undefined && now - state.lastSeenAt > this.presenceTimeoutMs) {
           socket.destroy();
           return;
         }
@@ -383,7 +397,7 @@ export class AxlDaemon {
           }
         }
       },
-      Math.min(HEARTBEAT_INTERVAL_MS, this.snapshotIdleLifetimeMs),
+      Math.min(this.heartbeatIntervalMs, this.snapshotIdleLifetimeMs),
     );
     presenceTimer.unref();
     const cleanup = (): void => {
@@ -653,8 +667,8 @@ export class AxlDaemon {
           wireVersion: WIRE_PROTOCOL_VERSION,
           grantedCapabilities: [...state.grantedCapabilities],
           scope: "local_control",
-          heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
-          presenceTimeoutMs: PRESENCE_TIMEOUT_MS,
+          heartbeatIntervalMs: this.heartbeatIntervalMs,
+          presenceTimeoutMs: this.presenceTimeoutMs,
         };
       }
       case "connection.ping":

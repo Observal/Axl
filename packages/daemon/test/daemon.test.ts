@@ -536,6 +536,45 @@ test("publishes bounded attachment presence and subscription membership", async 
   third.close();
 });
 
+test("expires an initialized attachment that stops sending heartbeats", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    heartbeatIntervalMs: 10,
+    presenceTimeoutMs: 40,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+
+  const observer = await connectUnixClient(socketPath, {
+    requestedCapabilities: ["session.presence"],
+  });
+  context.after(() => observer.close());
+  const snapshots: number[] = [];
+  observer.onPresence((message) => snapshots.push(message.attachments.length));
+
+  const stale = rawConnection(socketPath);
+  context.after(() => stale.socket.destroy());
+  assert.equal((await stale.next()).kind, "hello");
+  stale.send({
+    kind: "request",
+    id: 1,
+    method: "connection.initialize",
+    params: {
+      client: { kind: "headless", version: "0.0.0", instanceId: "stale-client" },
+      requestedCapabilities: [],
+    },
+  });
+  const initialized = await stale.next();
+  assert.equal(initialized.kind, "success");
+  await waitFor(() => snapshots.includes(2), "stale attachment presence");
+  await waitFor(() => snapshots.at(-1) === 1, "stale attachment expiry");
+});
+
 test("reports the daemon security mode", async (context) => {
   const sandboxed = await startDaemon(context);
   const sandboxedClient = await connectUnixClient(sandboxed.socketPath, {
