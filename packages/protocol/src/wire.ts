@@ -2217,7 +2217,7 @@ export function parseRpcResult<Method extends RpcMethod>(
   return parsed as RpcResult<Method>;
 }
 
-const RPC_METHODS = new Set<RpcMethod>([
+export const RPC_METHODS = [
   "daemon.info",
   "connection.initialize",
   "connection.ping",
@@ -2248,11 +2248,12 @@ const RPC_METHODS = new Set<RpcMethod>([
   "session.blob.abort",
   "session.blob.read",
   "session.dispose",
-]);
+] as const satisfies readonly RpcMethod[];
+const RPC_METHOD_SET = new Set<RpcMethod>(RPC_METHODS);
 
 function parseRpcMethod(value: unknown, path: string): RpcMethod {
   const method = string(value, path) as RpcMethod;
-  if (!RPC_METHODS.has(method)) {
+  if (!RPC_METHOD_SET.has(method)) {
     throw new ProtocolValidationError(path, `unknown method ${JSON.stringify(method)}`);
   }
   return method;
