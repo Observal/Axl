@@ -31,7 +31,7 @@ export interface PlatformShellOptions extends Omit<ShellToolOptions, "wrapComman
 
 /** The host's sandbox provider: detection result plus the tool factory. */
 export interface PlatformSandbox {
-  readonly provider: "bubblewrap" | "seatbelt" | "none";
+  readonly provider: "bubblewrap" | "seatbelt" | "podman" | "docker" | "none";
   readonly available: boolean;
   readonly reason?: string;
   /** Throws SandboxUnavailableError when the provider is unavailable. */
@@ -77,7 +77,15 @@ export async function detectPlatformSandbox(): Promise<PlatformSandbox> {
       ...(capabilities.reason === undefined ? {} : { reason: capabilities.reason }),
       makeShellTool: (options) => makeBubblewrapShellTool({ ...options, capabilities }),
       wrapProcess: ({ policy, command, args, cwd, env }) =>
-        buildBubblewrapProcess(policy, command, args, cwd, env),
+        buildBubblewrapProcess(
+          policy,
+          command,
+          args,
+          cwd,
+          env,
+          capabilities.landlockLauncher,
+          capabilities.seccompPolicyPath,
+        ),
       configuredPayload: () => bubblewrapConfiguredPayload(capabilities),
     };
   }

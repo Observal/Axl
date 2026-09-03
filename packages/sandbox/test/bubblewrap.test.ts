@@ -59,11 +59,21 @@ test("builds the confinement argv: namespaces, masks, cleared environment", () =
     readableRoots: ["/repo"],
     protectedPaths: ["/home/user/.axl"],
   };
-  const argv = buildBubblewrapArgv(policy, "echo hi", "/repo", {
-    PATH: "/usr/bin",
-    HOME: "/home/user",
-  });
-  assert.equal(argv[0], "bwrap");
+  const argv = buildBubblewrapArgv(
+    policy,
+    "echo hi",
+    "/repo",
+    {
+      PATH: "/usr/bin",
+      HOME: "/home/user",
+    },
+    "/test/landlock-run",
+    "/test/seccomp.bpf",
+  );
+  assert.equal(argv[0], "/bin/sh");
+  assert.equal(argv.includes("bwrap"), true);
+  assert.equal(argv.includes("--seccomp"), true);
+  assert.equal(argv.includes("/test/seccomp.bpf"), true);
   assert.equal(argv.includes("--unshare-all"), true);
   assert.equal(argv.includes("--die-with-parent"), true);
   assert.equal(argv.includes("--clearenv"), true);
@@ -79,24 +89,39 @@ test("builds the confinement argv: namespaces, masks, cleared environment", () =
   ]);
   const maskIndex = argv.indexOf("--tmpfs", argv.indexOf("--bind"));
   assert.deepEqual(argv.slice(maskIndex, maskIndex + 2), ["--tmpfs", "/home/user/.axl"]);
-  assert.deepEqual(argv.slice(-5), ["--chdir", "/repo", "bash", "-c", "echo hi"]);
+  assert.equal(argv.includes("/run/axl/landlock-run"), true);
+  assert.equal(argv.includes("/test/landlock-run"), true);
+  assert.deepEqual(argv.slice(-3), ["bash", "-c", "echo hi"]);
   // No environment value leaks without an allowlist entry.
   assert.equal(argv.includes("AZURE_OPENAI_API_KEY"), false);
 });
 
-test("wraps long-lived extension processes without a shell", () => {
+test("wraps long-lived processes with fixed seccomp arguments and no interpolation", () => {
   const policy: WorkspacePolicy = {
     workspace: "/repo",
     readableRoots: ["/repo"],
     protectedPaths: ["/home/user/.axl"],
   };
-  const process = buildBubblewrapProcess(policy, "node", ["server.mjs"], "/repo", {
-    PATH: "/usr/bin",
-    HOME: "/home/user",
-    MCP_TOKEN: "secret",
-  });
-  assert.equal(process.command, "bwrap");
-  assert.deepEqual(process.args.slice(-4), ["--chdir", "/repo", "node", "server.mjs"]);
+  const process = buildBubblewrapProcess(
+    policy,
+    "node",
+    ["server.mjs"],
+    "/repo",
+    {
+      PATH: "/usr/bin",
+      HOME: "/home/user",
+      MCP_TOKEN: "secret",
+    },
+    "/test/landlock-run",
+    "/test/seccomp.bpf",
+  );
+  assert.equal(process.command, "/bin/sh");
+  assert.equal(process.args.includes("bwrap"), true);
+  assert.equal(process.args.includes("--seccomp"), true);
+  assert.equal(process.args.includes("/test/seccomp.bpf"), true);
+  assert.equal(process.args.includes("/run/axl/landlock-run"), true);
+  assert.equal(process.args.includes("/test/landlock-run"), true);
+  assert.deepEqual(process.args.slice(-2), ["node", "server.mjs"]);
   const homeMask = process.args.findIndex(
     (part, index) => part === "--tmpfs" && process.args[index + 1] === "/home/user",
   );
@@ -159,11 +184,18 @@ test("unsafe execution is explicit, unconfined, and reported as unenforced", asy
   });
 });
 
+test("functional detection requires complete Landlock filesystem mediation", integration, () => {
+  assert.equal(capabilities.landlockFilesystemComplete, true);
+  assert.equal(capabilities.seccompPolicyPath?.endsWith(".bpf"), true);
+});
+
 test("the configured payload reports provider and controls honestly", () => {
   const enforced = bubblewrapConfiguredPayload({ available: true, version: "x" });
   assert.equal(enforced.provider, "bubblewrap");
   assert.equal(enforced.enforced, true);
   assert.deepEqual(enforced.controls, [...BUBBLEWRAP_CONTROLS]);
+  assert.equal(enforced.details?.seccompPolicy, "axl-linux-deny-v1");
+  assert.equal(enforced.details?.landlock, "unknown");
   const missing = bubblewrapConfiguredPayload({ available: false, reason: "nope" });
   assert.deepEqual(missing, { provider: "bubblewrap", enforced: false, controls: [] });
 });
@@ -174,6 +206,25 @@ test("sandboxed commands run and workspace writes work", integration, async (con
   assert.equal(result.isError, false);
   assert.match(text(result), /made/);
   assert.equal(await readFile(join(workspace, "made.txt"), "utf8"), "made\n");
+});
+
+test("Landlock denies shell reads outside explicit roots", integration, async (context) => {
+  const root = await mkdtemp(join("/var/tmp", "axl-landlock-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = join(root, "workspace");
+  const outside = join(root, "outside.txt");
+  await mkdir(workspace);
+  await writeFile(outside, "host-private-data\n");
+  const tool = makeBubblewrapShellTool({
+    cwd: workspace,
+    overflowDirectory: join(workspace, ".output"),
+    policy: { workspace, readableRoots: [workspace], protectedPaths: [] },
+    capabilities,
+  });
+  const denied = await tool.execute({ command: `cat ${outside}` }, noSignal);
+  assert.equal(denied.isError, true);
+  assert.equal(text(denied).includes("host-private-data"), false);
+  assert.match(text(denied), /Permission denied/);
 });
 
 test(
@@ -222,22 +273,48 @@ test(
     const root = await mkdtemp(join(homedir(), ".axl-bwrap-test-"));
     context.after(() => rm(root, { recursive: true, force: true }));
     const workspace = join(root, "workspace");
+    const readable = join(root, "readable");
     const outside = join(root, "outside.txt");
     await mkdir(workspace);
+    await mkdir(readable);
     await writeFile(join(workspace, "inside.txt"), "inside\n");
+    await writeFile(join(readable, "allowed.txt"), "allowed\n");
     await writeFile(outside, "private-home-data\n");
     const tool = makeBubblewrapShellTool({
       cwd: workspace,
       overflowDirectory: join(workspace, ".output"),
-      policy: { workspace, readableRoots: [workspace], protectedPaths: [] },
+      policy: { workspace, readableRoots: [workspace, readable], protectedPaths: [] },
       capabilities,
     });
     const result = await tool.execute(
-      { command: `cat inside.txt; cat ${outside} 2>/dev/null || true` },
+      {
+        command: `cat inside.txt; cat ${join(readable, "allowed.txt")}; cat ${outside} 2>/dev/null || true`,
+      },
       noSignal,
     );
     assert.match(text(result), /inside/);
+    assert.match(text(result), /allowed/);
     assert.equal(text(result).includes("private-home-data"), false);
+  },
+);
+
+test(
+  "seccomp, no-new-privileges, capabilities, and rlimits are active",
+  integration,
+  async (context) => {
+    const { tool } = await makeLayout(context);
+    const result = await tool.execute(
+      {
+        command:
+          "printf 'nofile=%s\\n' \"$(ulimit -n)\"; grep -E '^(NoNewPrivs|Seccomp|CapEff):' /proc/self/status",
+      },
+      noSignal,
+    );
+    assert.equal(result.isError, false);
+    assert.match(text(result), /nofile=1024/);
+    assert.match(text(result), /NoNewPrivs:\s+1/);
+    assert.match(text(result), /Seccomp:\s+2/);
+    assert.match(text(result), /CapEff:\s+0+/);
   },
 );
 

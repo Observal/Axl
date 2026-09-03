@@ -122,6 +122,7 @@ export type EventPayloadMap = {
     readonly provider: string;
     readonly enforced: boolean;
     readonly controls: readonly string[];
+    readonly details?: JsonObject;
   };
   "sandbox.violation": { readonly capability: string; readonly reason: string };
   "context.compacted": {
@@ -443,10 +444,11 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "sandbox.configured": (payload, path) => {
-    exact(payload, path, ["provider", "enforced", "controls"]);
+    exact(payload, path, ["provider", "enforced", "controls"], ["details"]);
     string(payload.provider, `${path}.provider`);
     boolean(payload.enforced, `${path}.enforced`);
     validateStringArray(payload.controls, `${path}.controls`);
+    if (payload.details !== undefined) object(payload.details, `${path}.details`);
     return payload;
   },
   "sandbox.violation": (payload, path) => {

@@ -86,7 +86,12 @@ const validPayloads = {
     action: "accept",
     content: { answer: "yes" },
   },
-  "sandbox.configured": { provider: "bubblewrap", enforced: true, controls: ["filesystem"] },
+  "sandbox.configured": {
+    provider: "bubblewrap",
+    enforced: true,
+    controls: ["filesystem"],
+    details: { landlock: "full", seccompPolicy: "axl-linux-deny-v1" },
+  },
   "sandbox.violation": { capability: "filesystem.write", reason: "outside workspace" },
   "context.compacted": { summary: "Earlier work", replacedEventIds: [secondEventId] },
   "session.error": { code: "provider_failed", message: "Provider unavailable", retryable: true },
