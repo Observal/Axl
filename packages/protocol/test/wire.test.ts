@@ -448,6 +448,29 @@ test("validates server messages and newline framing", () => {
     },
   );
 
+  const presence = {
+    kind: "presence",
+    attachments: [
+      {
+        attachmentId: "attachment-1",
+        clientKind: "future_client",
+        connectedAt: 10,
+        lastSeenAt: 20,
+        subscribedSessionIds: [sessionId],
+        scope: "local_control",
+      },
+    ],
+  } as const;
+  assert.deepEqual(parseServerMessage(presence), presence);
+  assert.throws(
+    () =>
+      parseServerMessage({
+        ...presence,
+        attachments: [{ ...presence.attachments[0], lastSeenAt: 9 }],
+      }),
+    ProtocolValidationError,
+  );
+
   const activity = {
     kind: "activity",
     subscriptionId: "subscription-1",

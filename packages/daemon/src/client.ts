@@ -14,6 +14,7 @@ import {
   type CapabilityId,
   type ClientIdentity,
   type ConnectionInitializeResult,
+  type PresenceDelivery,
   type RpcMethod,
   type RpcParams,
   type RpcResult,
@@ -59,6 +60,8 @@ export class DaemonClient {
   private helloReceived = false;
   private closed = false;
   private initialized: ConnectionInitializeResult | undefined;
+  private heartbeatTimer: NodeJS.Timeout | undefined;
+  private latestPresence: PresenceDelivery | undefined;
   private readonly pending = new Map<
     number,
     {
@@ -69,6 +72,7 @@ export class DaemonClient {
   >();
   private readonly eventListeners = new Set<(event: WireEvent) => void>();
   private readonly activityListeners = new Set<(event: WireActivity) => void>();
+  private readonly presenceListeners = new Set<(presence: PresenceDelivery) => void>();
   private readonly disconnectListeners = new Set<(error: Error) => void>();
 
   private constructor(
@@ -203,6 +207,12 @@ export class DaemonClient {
     return () => this.activityListeners.delete(listener);
   }
 
+  onPresence(listener: (presence: PresenceDelivery) => void): () => void {
+    this.presenceListeners.add(listener);
+    if (this.latestPresence !== undefined) listener(this.latestPresence);
+    return () => this.presenceListeners.delete(listener);
+  }
+
   onDisconnect(listener: (error: Error) => void): () => void {
     this.disconnectListeners.add(listener);
     return () => this.disconnectListeners.delete(listener);
@@ -279,6 +289,7 @@ export class DaemonClient {
               return;
             }
             this.initialized = initialized;
+            this.startHeartbeat(initialized.heartbeatIntervalMs);
             this.settleReady?.();
           },
           (error: unknown) =>
@@ -341,9 +352,25 @@ export class DaemonClient {
       else this.rejectRequest(message.id, error);
     } else if (message.kind === "event") {
       for (const listener of this.eventListeners) listener(message);
-    } else {
+    } else if (message.kind === "activity") {
       for (const listener of this.activityListeners) listener(message);
+    } else {
+      this.latestPresence = message;
+      for (const listener of this.presenceListeners) listener(message);
     }
+  }
+
+  private startHeartbeat(intervalMs: number): void {
+    this.heartbeatTimer = setInterval(() => {
+      void this.sendRequest("connection.ping", {}).catch((error: unknown) => {
+        this.fail(
+          error instanceof Error
+            ? error
+            : new WireClientError("connection_error", "Daemon heartbeat failed"),
+        );
+      });
+    }, intervalMs);
+    this.heartbeatTimer.unref();
   }
 
   private rejectRequest(id: number, error: Error): void {
@@ -354,6 +381,8 @@ export class DaemonClient {
   private fail(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.heartbeatTimer !== undefined) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
     this.settleReady?.(error);
     for (const { reject } of this.pending.values()) reject(error);
     this.pending.clear();

@@ -236,6 +236,72 @@ test("requires version-4 initialization before session access", async (context) 
   }
 });
 
+test("publishes bounded attachment presence and subscription membership", async (context) => {
+  const fixture = await startDaemon(context);
+  const first = await DaemonClient.connect(fixture.socketPath, {
+    identity: { kind: "tui", version: "1.0.0", instanceId: "presence-one" },
+    requestedCapabilities: ["session.create", "session.subscribe", "session.presence"],
+  });
+  context.after(() => first.close());
+  const firstPresence: Array<
+    readonly { attachmentId: string; subscribedSessionIds: readonly string[] }[]
+  > = [];
+  first.onPresence((message) => firstPresence.push(message.attachments));
+  for (let attempt = 0; firstPresence.length === 0 && attempt < 100; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.equal(firstPresence.at(-1)?.length, 1);
+
+  const second = await DaemonClient.connect(fixture.socketPath, {
+    identity: { kind: "future_client", version: "2.0.0", instanceId: "presence-two" },
+    requestedCapabilities: ["session.presence"],
+  });
+  const secondPresence: Array<readonly { attachmentId: string; clientKind: string }[]> = [];
+  second.onPresence((message) => secondPresence.push(message.attachments));
+  for (let attempt = 0; (firstPresence.at(-1)?.length ?? 0) < 2 && attempt < 100; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.equal(firstPresence.at(-1)?.length, 2);
+  assert.deepEqual(
+    secondPresence
+      .at(-1)
+      ?.map((attachment) => attachment.clientKind)
+      .sort(),
+    ["future_client", "tui"],
+  );
+
+  const created = await first.request("session.create", { cwd: fixture.cwd });
+  const subscribed = await first.request("session.subscribe", { sessionId: created.sessionId });
+  const boundaryCursor = subscribed.snapshot?.boundaryCursor;
+  assert.ok(boundaryCursor);
+  await first.request("session.ack", {
+    subscriptionId: subscribed.subscriptionId,
+    cursor: boundaryCursor,
+  });
+  for (
+    let attempt = 0;
+    !firstPresence
+      .at(-1)
+      ?.some((attachment) => attachment.subscribedSessionIds.includes(created.sessionId)) &&
+    attempt < 100;
+    attempt += 1
+  ) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.equal(
+    firstPresence
+      .at(-1)
+      ?.some((attachment) => attachment.subscribedSessionIds.includes(created.sessionId)),
+    true,
+  );
+
+  second.close();
+  for (let attempt = 0; (firstPresence.at(-1)?.length ?? 0) !== 1 && attempt < 100; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.equal(firstPresence.at(-1)?.length, 1);
+});
+
 test("reports the daemon security mode", async (context) => {
   const sandboxed = await startDaemon(context);
   const sandboxedClient = await DaemonClient.connect(sandboxed.socketPath, {

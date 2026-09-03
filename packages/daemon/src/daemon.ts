@@ -9,7 +9,9 @@ import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import {
+  type AttachmentPresence,
   type CanonicalEvent,
+  type ClientIdentity,
   type EventCursor,
   type EventId,
   encodeWireMessage,
@@ -38,6 +40,7 @@ export interface DaemonOptions extends SessionManagerOptions {
 
 const MAX_REQUEST_BYTES = 1_048_576;
 const MAX_PENDING_REQUESTS = 64;
+const MAX_ATTACHMENTS = 256;
 const MAX_SNAPSHOT_PAGE_BYTES = 768 * 1024;
 const MAX_SNAPSHOT_PAGE_EVENTS = 5_000;
 const MAX_SNAPSHOT_TAIL_BYTES = 4 * 1024 * 1024;
@@ -80,9 +83,13 @@ interface ConnectionSubscription {
 interface ConnectionState {
   initialized: boolean;
   attachmentId?: string;
+  client?: ClientIdentity;
+  connectedAt?: number;
+  lastSeenAt?: number;
   grantedCapabilities: ReadonlySet<string>;
   pendingRequests: number;
   readonly subscriptions: Map<string, ConnectionSubscription>;
+  readonly send: (message: ServerMessage) => void;
 }
 
 type SocketIdentity = { readonly dev: number; readonly ino: number };
@@ -145,6 +152,7 @@ export class AxlDaemon {
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
+  private readonly connectionStates = new Set<ConnectionState>();
   private readonly cursors = new Map<EventCursor, CursorRecord>();
 
   constructor(options: DaemonOptions) {
@@ -203,15 +211,17 @@ export class AxlDaemon {
 
   private accept(socket: Socket): void {
     this.connections.add(socket);
+    const send = (message: ServerMessage): void => {
+      if (!socket.destroyed) socket.write(encodeWireMessage(message));
+    };
     const state: ConnectionState = {
       initialized: false,
       grantedCapabilities: new Set(),
       pendingRequests: 0,
       subscriptions: new Map(),
+      send,
     };
-    const send = (message: ServerMessage): void => {
-      if (!socket.destroyed) socket.write(encodeWireMessage(message));
-    };
+    this.connectionStates.add(state);
     send({
       kind: "hello",
       wireVersion: WIRE_PROTOCOL_VERSION,
@@ -276,10 +286,19 @@ export class AxlDaemon {
         }
       }
     });
+    const presenceTimer = setInterval(() => {
+      if (state.lastSeenAt !== undefined && Date.now() - state.lastSeenAt > PRESENCE_TIMEOUT_MS) {
+        socket.destroy();
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+    presenceTimer.unref();
     const cleanup = (): void => {
+      clearInterval(presenceTimer);
       for (const subscription of state.subscriptions.values()) subscription.unsubscribe();
       state.subscriptions.clear();
       this.connections.delete(socket);
+      this.connectionStates.delete(state);
+      this.publishPresence();
     };
     socket.once("close", cleanup);
     socket.once("error", () => socket.destroy());
@@ -324,14 +343,27 @@ export class AxlDaemon {
             "Connection is already initialized",
           );
         }
+        const attachmentCount = [...this.connectionStates].filter(
+          (connection) => connection.initialized,
+        ).length;
+        if (attachmentCount >= MAX_ATTACHMENTS) {
+          throw new DaemonError("rate_limited", "The daemon attachment limit has been reached");
+        }
+        const now = Date.now();
         state.initialized = true;
         state.attachmentId = randomUUID();
+        state.client = request.params.client;
+        state.connectedAt = now;
+        state.lastSeenAt = now;
         state.grantedCapabilities = new Set(
           request.params.requestedCapabilities.filter((capability) =>
             WIRE_CAPABILITIES.includes(capability as (typeof WIRE_CAPABILITIES)[number]),
           ),
         );
       } else {
+        if (request.method === "connection.ping" && state.initialized) {
+          state.lastSeenAt = Date.now();
+        }
         const capability = requiredCapability(request.method);
         if (capability !== undefined && !state.grantedCapabilities.has(capability)) {
           throw new DaemonError(
@@ -348,6 +380,14 @@ export class AxlDaemon {
         result,
       } as ServerMessage);
       this.activateReadySubscriptions(state, send);
+      if (
+        request.method === "connection.initialize" ||
+        request.method === "connection.ping" ||
+        request.method === "session.subscribe" ||
+        request.method === "session.unsubscribe"
+      ) {
+        this.publishPresence();
+      }
     } catch (error) {
       send({
         kind: "error",
@@ -811,6 +851,39 @@ export class AxlDaemon {
         });
       }
       subscription.bufferedActivity.length = 0;
+    }
+  }
+
+  private publishPresence(): void {
+    const attachments: AttachmentPresence[] = [];
+    for (const state of this.connectionStates) {
+      if (
+        !state.initialized ||
+        state.attachmentId === undefined ||
+        state.client === undefined ||
+        state.connectedAt === undefined ||
+        state.lastSeenAt === undefined
+      ) {
+        continue;
+      }
+      attachments.push({
+        attachmentId: state.attachmentId,
+        clientKind: state.client.kind,
+        connectedAt: state.connectedAt,
+        lastSeenAt: state.lastSeenAt,
+        subscribedSessionIds: [
+          ...new Set(
+            [...state.subscriptions.values()].map((subscription) => subscription.sessionId),
+          ),
+        ],
+        scope: "local_control",
+      });
+    }
+    attachments.sort((left, right) => left.attachmentId.localeCompare(right.attachmentId));
+    for (const state of this.connectionStates) {
+      if (state.initialized && state.grantedCapabilities.has("session.presence")) {
+        state.send({ kind: "presence", attachments });
+      }
     }
   }
 

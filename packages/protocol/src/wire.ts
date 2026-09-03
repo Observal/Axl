@@ -183,6 +183,7 @@ export const WIRE_CAPABILITIES = [
   "session.dispose",
   "session.subscribe",
   "session.activity",
+  "session.presence",
   "session.blob.start",
   "session.blob.chunk",
   "session.blob.commit",
@@ -467,6 +468,20 @@ export interface WireActivity {
   readonly frame: SessionActivityFrame;
 }
 
+export interface AttachmentPresence {
+  readonly attachmentId: string;
+  readonly clientKind: ClientKind;
+  readonly connectedAt: number;
+  readonly lastSeenAt: number;
+  readonly subscribedSessionIds: readonly SessionId[];
+  readonly scope: "local_control";
+}
+
+export interface PresenceDelivery {
+  readonly kind: "presence";
+  readonly attachments: readonly AttachmentPresence[];
+}
+
 export interface WireHello {
   readonly kind: "hello";
   readonly wireVersion: number;
@@ -482,7 +497,13 @@ export type WireRequest = RpcRequest;
 export type WireMethod = RpcMethod;
 export type WireResponse = RpcSuccess;
 export type WireError = RpcError;
-export type ServerMessage = RpcSuccess | RpcError | WireEvent | WireActivity | WireHello;
+export type ServerMessage =
+  | RpcSuccess
+  | RpcError
+  | WireEvent
+  | WireActivity
+  | PresenceDelivery
+  | WireHello;
 
 export interface SessionForkResult extends SessionOpenResult {
   readonly selectedText?: string;
@@ -1501,6 +1522,68 @@ export function parseServerMessage(value: unknown): ServerMessage {
           ? {}
           : { details: parseJsonObject(error.details, "message.error.details") }),
       },
+    };
+  }
+  if (kind === "presence") {
+    exact(message, "message", ["kind", "attachments"]);
+    if (!Array.isArray(message.attachments) || message.attachments.length > 256) {
+      throw new ProtocolValidationError(
+        "message.attachments",
+        "must contain at most 256 attachments",
+      );
+    }
+    return {
+      kind,
+      attachments: message.attachments.map((value, index): AttachmentPresence => {
+        const path = `message.attachments[${index}]`;
+        const attachment = object(value, path);
+        exact(attachment, path, [
+          "attachmentId",
+          "clientKind",
+          "connectedAt",
+          "lastSeenAt",
+          "subscribedSessionIds",
+          "scope",
+        ]);
+        if (attachment.scope !== "local_control") {
+          throw new ProtocolValidationError(`${path}.scope`, 'must be "local_control"');
+        }
+        const clientKind = boundedString(attachment.clientKind, `${path}.clientKind`, 64);
+        if (!/^[a-z][a-z0-9_-]*$/.test(clientKind)) {
+          throw new ProtocolValidationError(`${path}.clientKind`, "must be a protocol identifier");
+        }
+        if (
+          !Array.isArray(attachment.subscribedSessionIds) ||
+          attachment.subscribedSessionIds.length > 256
+        ) {
+          throw new ProtocolValidationError(
+            `${path}.subscribedSessionIds`,
+            "must contain at most 256 session IDs",
+          );
+        }
+        const subscribedSessionIds = attachment.subscribedSessionIds.map((sessionId, at) =>
+          parseSessionId(sessionId, `${path}.subscribedSessionIds[${at}]`),
+        );
+        if (new Set(subscribedSessionIds).size !== subscribedSessionIds.length) {
+          throw new ProtocolValidationError(
+            `${path}.subscribedSessionIds`,
+            "must not contain duplicates",
+          );
+        }
+        const connectedAt = nonNegativeInteger(attachment.connectedAt, `${path}.connectedAt`);
+        const lastSeenAt = nonNegativeInteger(attachment.lastSeenAt, `${path}.lastSeenAt`);
+        if (lastSeenAt < connectedAt) {
+          throw new ProtocolValidationError(`${path}.lastSeenAt`, "must not precede connectedAt");
+        }
+        return {
+          attachmentId: boundedString(attachment.attachmentId, `${path}.attachmentId`, 128),
+          clientKind,
+          connectedAt,
+          lastSeenAt,
+          subscribedSessionIds,
+          scope: attachment.scope,
+        };
+      }),
     };
   }
   if (kind === "event") {
