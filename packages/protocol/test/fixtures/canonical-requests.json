@@ -1,0 +1,35 @@
+{
+  "SPDX-FileCopyrightText": "2026 Hari Srinivasan",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "cases": [
+    {
+      "name": "sorted optional create parameters and UTF-8",
+      "method": "session.create",
+      "params": {
+        "thinkingLevel": "medium",
+        "cwd": "/tmp/é",
+        "modelId": "openai/gpt-5"
+      },
+      "canonical": "{\"method\":\"session.create\",\"params\":{\"cwd\":\"/tmp/é\",\"modelId\":\"openai/gpt-5\",\"thinkingLevel\":\"medium\"}}",
+      "sha256": "92c279b2b5c069ff07f5c36a79f5b376667feb046a778d0ac350b429bb732b43"
+    },
+    {
+      "name": "nested interaction content",
+      "method": "session.interaction.respond",
+      "params": {
+        "content": {
+          "details": {
+            "z": [3, null, "line\nfeed"],
+            "a": true
+          },
+          "answer": "yes"
+        },
+        "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+        "interactionId": "interaction-1",
+        "action": "accept"
+      },
+      "canonical": "{\"method\":\"session.interaction.respond\",\"params\":{\"action\":\"accept\",\"content\":{\"answer\":\"yes\",\"details\":{\"a\":true,\"z\":[3,null,\"line\\nfeed\"]}},\"interactionId\":\"interaction-1\",\"sessionId\":\"123e4567-e89b-42d3-a456-426614174000\"}}",
+      "sha256": "fd85e35594a7cfde884490d4ef815bf5176aab6d11547a7b4bab3577f0983e19"
+    }
+  ]
+}
