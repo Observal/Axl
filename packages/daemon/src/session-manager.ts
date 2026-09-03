@@ -403,12 +403,16 @@ export class SessionManager {
     }
     if (acceptance.method === "session.dispose") {
       return evidence.some((event) => event.type === "session.closed")
-        ? { disposed: true }
+        ? { disposed: true, historyPreserved: true }
         : undefined;
     }
     if (acceptance.method === "session.interaction.respond") {
-      if (evidence.some((event) => event.type === "interaction.resolved")) {
-        return { resolved: true };
+      const recordedResolution = evidence.find((event) => event.type === "interaction.resolved");
+      if (recordedResolution?.type === "interaction.resolved") {
+        return {
+          interactionId: recordedResolution.payload.interactionId,
+          resolutionEventId: recordedResolution.id,
+        };
       }
       if (acceptance.interactionId === undefined) {
         throw new DaemonError("corrupt_session", "Missing accepted interaction identity");
@@ -1039,15 +1043,15 @@ export class SessionManager {
     interactionId: string,
     response: SessionInteractionResponse,
     operationId?: OperationId,
-  ): Promise<void> {
+  ): Promise<{ interactionId: string; resolutionEventId: EventId }> {
     const managed = this.managed(sessionId);
-    if (
-      operationId !== undefined &&
-      managed.events.some(
+    if (operationId !== undefined) {
+      const recorded = managed.events.find(
         (event) => event.type === "interaction.resolved" && event.operationId === operationId,
-      )
-    ) {
-      return;
+      );
+      if (recorded?.type === "interaction.resolved") {
+        return { interactionId: recorded.payload.interactionId, resolutionEventId: recorded.id };
+      }
     }
     const pending = managed.interactions.get(interactionId);
     if (!pending) {
@@ -1055,8 +1059,12 @@ export class SessionManager {
     }
     managed.interactions.delete(interactionId);
     try {
-      await managed.session.resolveInteraction({ interactionId, ...response }, operationId);
+      const event = await managed.session.resolveInteraction(
+        { interactionId, ...response },
+        operationId,
+      );
       pending.resolve(response);
+      return { interactionId, resolutionEventId: event.id };
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error(String(error)));
       throw error;

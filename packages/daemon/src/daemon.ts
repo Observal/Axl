@@ -624,7 +624,7 @@ export class AxlDaemon {
       }
       case "session.interaction.respond": {
         const { sessionId, interactionId, action, content } = request.params;
-        await this.sessions.respondToInteraction(
+        return this.sessions.respondToInteraction(
           sessionId,
           interactionId,
           {
@@ -633,7 +633,6 @@ export class AxlDaemon {
           },
           this.mutationOperationId(acceptance),
         );
-        return { resolved: true };
       }
       case "session.subscribe":
         return this.subscribe(state, send, request.params);
@@ -666,7 +665,7 @@ export class AxlDaemon {
         return this.sessions.workspaceDiff(request.params.sessionId, request.params.scope);
       case "session.dispose":
         await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
-        return { disposed: true };
+        return { disposed: true, historyPreserved: true };
     }
   }
 

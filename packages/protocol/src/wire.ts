@@ -308,7 +308,7 @@ export interface RpcMethodMap {
       readonly action: InteractionAction;
       readonly content?: JsonObject;
     };
-    readonly result: { readonly resolved: true };
+    readonly result: { readonly interactionId: string; readonly resolutionEventId: EventId };
   };
   readonly "session.subscribe": {
     readonly params: SessionSubscribeParams;
@@ -359,7 +359,7 @@ export interface RpcMethodMap {
   };
   readonly "session.dispose": {
     readonly params: { readonly sessionId: SessionId };
-    readonly result: { readonly disposed: boolean };
+    readonly result: { readonly disposed: boolean; readonly historyPreserved: true };
   };
 }
 
@@ -1389,11 +1389,11 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseBoundaryResult(value, path);
   } else if (method === "session.interaction.respond") {
     const result = object(value, path);
-    exact(result, path, ["resolved"]);
-    if (result.resolved !== true) {
-      throw new ProtocolValidationError(`${path}.resolved`, "must be true");
-    }
-    parsed = { resolved: true };
+    exact(result, path, ["interactionId", "resolutionEventId"]);
+    parsed = {
+      interactionId: boundedString(result.interactionId, `${path}.interactionId`, 128),
+      resolutionEventId: parseEventId(result.resolutionEventId, `${path}.resolutionEventId`),
+    };
   } else if (method === "session.subscribe") {
     const result = object(value, path);
     exact(result, path, ["subscriptionId", "sessionId", "fromNodeId", "snapshot", "resumedFrom"]);
@@ -1484,7 +1484,15 @@ export function parseRpcResult<Method extends RpcMethod>(
   } else if (method === "session.blob.read") {
     parsed = parseBlobReadResult(value);
   } else if (method === "session.dispose") {
-    parsed = parseBooleanResult(value, path, "disposed");
+    const result = object(value, path);
+    exact(result, path, ["disposed", "historyPreserved"]);
+    if (typeof result.disposed !== "boolean") {
+      throw new ProtocolValidationError(`${path}.disposed`, "must be a boolean");
+    }
+    if (result.historyPreserved !== true) {
+      throw new ProtocolValidationError(`${path}.historyPreserved`, "must be true");
+    }
+    parsed = { disposed: result.disposed, historyPreserved: true };
   } else {
     const exhaustive: never = method;
     throw new ProtocolValidationError("success.method", `unknown method ${String(exhaustive)}`);
