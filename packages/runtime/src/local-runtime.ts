@@ -268,7 +268,9 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       tools.register(kernel.makeWriteTool({ cwd, ...(unsafe ? {} : { policy }) }));
       tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
       if (active.webFetch) tools.register(kernel.makeWebFetchTool());
-      const braveSearchKey = ai.nodeAuthContext.env("BRAVE_SEARCH_API_KEY");
+      const braveSearchKey = active.webSearch
+        ? ai.nodeAuthContext.env("BRAVE_SEARCH_API_KEY") || undefined
+        : undefined;
       if (active.webSearch) {
         tools.register(
           kernel.makeWebSearchTool({

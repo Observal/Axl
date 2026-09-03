@@ -132,7 +132,13 @@ test("preserves each OCI session's image alias", async (context) => {
   );
 });
 
-test("assembles an authoritative local runtime without a presentation client", async (context) => {
+test("assembles an authoritative local runtime and ignores an empty Brave key", async (context) => {
+  const previousBraveKey = process.env.BRAVE_SEARCH_API_KEY;
+  process.env.BRAVE_SEARCH_API_KEY = "";
+  context.after(() => {
+    if (previousBraveKey === undefined) delete process.env.BRAVE_SEARCH_API_KEY;
+    else process.env.BRAVE_SEARCH_API_KEY = previousBraveKey;
+  });
   const root = await mkdtemp(join(tmpdir(), "axl-runtime-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const axlHome = join(root, ".axl");
