@@ -125,7 +125,11 @@ async function requestOnce(
   readonly body: Buffer;
 }> {
   options.signal?.throwIfAborted();
-  const target = await resolvePublicAddress(url.hostname);
+  const hostname =
+    url.hostname.startsWith("[") && url.hostname.endsWith("]")
+      ? url.hostname.slice(1, -1)
+      : url.hostname;
+  const target = await resolvePublicAddress(hostname);
   return new Promise((resolvePromise, rejectPromise) => {
     const request = (url.protocol === "https:" ? requestHttps : requestHttp)(
       {
@@ -135,7 +139,7 @@ async function requestOnce(
         port: url.port || undefined,
         path: `${url.pathname}${url.search}`,
         method: "GET",
-        servername: url.hostname,
+        servername: isIP(hostname) === 0 ? hostname : undefined,
         headers: {
           accept:
             "text/html, text/plain, application/json, application/xml, text/xml;q=0.9, */*;q=0.1",

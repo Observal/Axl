@@ -315,6 +315,7 @@ test("web_fetch returns bounded readable content", async () => {
 
 test("web access blocks private destinations and search uses configured credentials", async () => {
   await assert.rejects(requestPublicUrl("http://127.0.0.1/private"), /private or reserved/);
+  await assert.rejects(requestPublicUrl("http://[::1]/private"), /private or reserved/);
   const keyless = makeWebSearchTool({
     request: async (url) => ({
       url,
