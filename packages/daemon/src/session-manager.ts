@@ -3,12 +3,11 @@
 
 import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, realpath, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 import {
   AgentSession,
-  type CompactionSettings,
   type EventLogOptions,
   type ExtensionHost,
   JsonlEventLog,
@@ -26,16 +25,13 @@ import {
   type InteractionAction,
   type JsonObject,
   type JsonValue,
-  MAX_HISTORY_PAGE_EVENTS,
   parseEvent,
   parseEventId,
   parseSessionId,
   type SessionActivityFrame,
-  type SessionConfiguration,
-  type SessionForkResult,
-  type SessionHistoryPage,
   type SessionId,
-  type SessionSelection,
+  type SessionModelSelection,
+  type SessionOpenResult,
   type SessionSummary,
   type UserContent,
   type WorkspaceDiff,
@@ -44,8 +40,6 @@ import {
 
 import { BlobStore, BlobStoreError } from "./blob-store.ts";
 import { WorkspaceCheckpointError, WorkspaceCheckpointStore } from "./workspace-checkpoint.ts";
-
-const MAX_HISTORY_PAGE_BYTES = 768 * 1024;
 
 export class DaemonError extends Error {
   readonly code: string;
@@ -64,21 +58,13 @@ export interface SessionRuntime {
   readonly system?: string;
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
-  readonly compaction?: Partial<CompactionSettings>;
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
-  readonly configProfile?: EventPayloadMap["config.profile"];
-  readonly configTools?: EventPayloadMap["config.tools"];
   readonly configDialect?: EventPayloadMap["config.dialect"];
 }
 
-export type SessionRuntimeBoundary =
-  | "session_start"
-  | "reload"
-  | "model_switch"
-  | "tool_change"
-  | "config_change";
+export type SessionRuntimeBoundary = "session_start" | "reload" | "model_switch" | "config_change";
 
 export interface SessionInteractionRequest {
   readonly kind: EventPayloadMap["interaction.requested"]["kind"];
@@ -96,7 +82,7 @@ export type SessionRuntimeFactory = (input: {
   readonly sessionId: SessionId;
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
-  readonly selection: SessionConfiguration;
+  readonly selection: SessionModelSelection;
   readonly interact: (
     request: SessionInteractionRequest,
     signal?: AbortSignal,
@@ -110,8 +96,7 @@ export interface SessionManagerOptions {
 }
 
 interface ActiveTurn {
-  readonly kind: "turn" | "shell" | "compaction";
-  controller: AbortController;
+  readonly controller: AbortController;
   readonly done: Promise<void>;
   finish(): void;
 }
@@ -133,21 +118,20 @@ interface ManagedSession {
     thinking: string;
     tools: Array<{ callId: string; name: string }>;
   };
-  selection: SessionConfiguration;
+  selection: SessionModelSelection;
   activeTurn?: ActiveTurn;
-  queuedInputs: Promise<void>;
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
   checkpointError?: WorkspaceCheckpointError;
   workspaceCheckpointsEnabled: boolean;
 }
 
-function deferredTurn(kind: ActiveTurn["kind"]): ActiveTurn {
+function deferredTurn(): ActiveTurn {
   let resolveDone = (): void => undefined;
   const done = new Promise<void>((resolvePromise) => {
     resolveDone = resolvePromise;
   });
-  return { kind, controller: new AbortController(), done, finish: resolveDone };
+  return { controller: new AbortController(), done, finish: resolveDone };
 }
 
 function userMessageText(event: CanonicalEvent): string | undefined {
@@ -171,11 +155,6 @@ function summarizeSession(events: readonly CanonicalEvent[]): SessionSummary {
   });
   const firstUserMessage = messages[0];
   const lastUserMessage = messages.at(-1);
-  const sandbox = events.findLast((event) => event.type === "sandbox.configured");
-  const image =
-    sandbox?.type === "sandbox.configured" && typeof sandbox.payload.details?.image === "string"
-      ? sandbox.payload.details.image
-      : undefined;
   return {
     sessionId: created.sessionId,
     cwd: created.payload.cwd,
@@ -187,43 +166,7 @@ function summarizeSession(events: readonly CanonicalEvent[]): SessionSummary {
     ...(created.payload.parentSessionId === undefined
       ? {}
       : { parentSessionId: created.payload.parentSessionId }),
-    ...(sandbox?.type !== "sandbox.configured"
-      ? {}
-      : {
-          securityMode: sandbox.payload.enforced ? ("sandboxed" as const) : ("unsafe" as const),
-          sandboxProvider: sandbox.payload.provider,
-        }),
-    ...(image === undefined ? {} : { sandboxImage: image }),
   };
-}
-
-export async function listStoredSessions(
-  dataDirectory: string,
-): Promise<readonly SessionSummary[]> {
-  const directory = join(resolve(dataDirectory), "sessions");
-  let entries: Dirent[];
-  try {
-    entries = await readdir(directory, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-  const summaries: SessionSummary[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-    const sessionId = parseSessionId(basename(entry.name, ".jsonl"), "session file name");
-    const raw = await readFile(join(directory, entry.name), "utf8");
-    const lines = raw.split("\n");
-    lines.pop(); // Ignore an absent or incomplete final newline without modifying the live log.
-    const events = lines
-      .filter((line) => line.length > 0)
-      .map((line) => parseEvent(JSON.parse(line) as unknown));
-    if (events.some((event) => event.sessionId !== sessionId)) {
-      throw new DaemonError("corrupt_session", `Session file ${entry.name} contains another ID`);
-    }
-    summaries.push(summarizeSession(events));
-  }
-  return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 /** Owns every live session. Clients never receive a mutable kernel object. */
@@ -257,7 +200,7 @@ export class SessionManager {
       tools: Array<{ callId: string; name: string }>;
     },
     boundary: SessionRuntimeBoundary,
-    selection: SessionConfiguration,
+    selection: SessionModelSelection,
   ): Promise<AgentSession> {
     const runtime = await this.options.runtime({
       sessionId,
@@ -275,12 +218,9 @@ export class SessionManager {
       ...(runtime.system === undefined ? {} : { system: runtime.system }),
       ...(runtime.log === undefined ? {} : { log: runtime.log }),
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
-      ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
-      ...(runtime.configProfile === undefined ? {} : { configProfile: runtime.configProfile }),
-      ...(runtime.configTools === undefined ? {} : { configTools: runtime.configTools }),
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
       onEvent: (event) => {
         events.push(event);
@@ -297,7 +237,7 @@ export class SessionManager {
   private async open(
     sessionId: SessionId,
     cwd: string,
-    selection: SessionConfiguration,
+    selection: SessionModelSelection,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [];
     const listeners = new Set<(event: CanonicalEvent) => void>();
@@ -329,7 +269,6 @@ export class SessionManager {
       activityListeners,
       activityState,
       selection,
-      queuedInputs: Promise.resolve(),
       interactions: new Map(),
       workspaceCheckpointsEnabled: false,
     };
@@ -339,18 +278,34 @@ export class SessionManager {
 
   async create(
     cwd: string,
-    selection: SessionConfiguration = {},
+    selection: SessionModelSelection = {},
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
       throw new DaemonError("invalid_cwd", `Cannot open working directory ${cwd}`, { cause });
     });
     await mkdir(join(this.options.dataDirectory, "sessions"), { recursive: true, mode: 0o700 });
     const sessionId = parseSessionId(randomUUID(), "sessionId");
-    const managed = await this.open(sessionId, canonicalCwd, {
-      ...selection,
-      profile: selection.profile ?? "standard",
-    });
+    const managed = await this.open(sessionId, canonicalCwd, selection);
     return { sessionId, events: [...managed.events] };
+  }
+
+  describe(sessionId: unknown): SessionOpenResult {
+    const managed = this.managed(sessionId);
+    const activeOperationId = managed.activityState.current?.operationId;
+    return {
+      sessionId: managed.session.log.sessionId,
+      cwd: managed.cwd,
+      runtime: {
+        state:
+          managed.interactions.size > 0
+            ? "waiting_interaction"
+            : managed.activeTurn !== undefined || managed.rebuilding !== undefined
+              ? "running"
+              : "idle",
+        ...(activeOperationId === undefined ? {} : { activeOperationId }),
+      },
+      profile: "minimal",
+    };
   }
 
   async list(): Promise<readonly SessionSummary[]> {
@@ -375,47 +330,14 @@ export class SessionManager {
     return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
-  history(
+  async fork(
     sessionId: unknown,
-    afterEventId?: unknown,
-    limit = MAX_HISTORY_PAGE_EVENTS,
-  ): SessionHistoryPage {
-    const managed = this.managed(sessionId);
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_HISTORY_PAGE_EVENTS) {
-      throw new DaemonError(
-        "invalid_history_limit",
-        `History page limit must be between 1 and ${MAX_HISTORY_PAGE_EVENTS}`,
-      );
-    }
-    let start = 0;
-    if (afterEventId !== undefined) {
-      const cursor = parseEventId(afterEventId, "afterEventId");
-      const index = managed.events.findIndex((event) => event.id === cursor);
-      if (index < 0)
-        throw new DaemonError("unknown_cursor", `Event ${cursor} is not in this session`);
-      start = index + 1;
-    }
-
-    const events: CanonicalEvent[] = [];
-    let bytes = 0;
-    for (let index = start; index < managed.events.length && events.length < limit; index += 1) {
-      const event = managed.events[index];
-      if (event === undefined) break;
-      const eventBytes = Buffer.byteLength(JSON.stringify(event)) + 1;
-      if (events.length > 0 && bytes + eventBytes > MAX_HISTORY_PAGE_BYTES) break;
-      if (eventBytes > MAX_HISTORY_PAGE_BYTES) {
-        throw new DaemonError(
-          "history_event_too_large",
-          `Event ${event.id} exceeds the history page byte limit`,
-        );
-      }
-      events.push(event);
-      bytes += eventBytes;
-    }
-    return { events, done: start + events.length >= managed.events.length };
-  }
-
-  async fork(sessionId: unknown, fromEventId: unknown): Promise<SessionForkResult> {
+    fromEventId: unknown,
+  ): Promise<{
+    readonly sessionId: SessionId;
+    readonly events: readonly CanonicalEvent[];
+    readonly selectedText?: string;
+  }> {
     const sourceId = parseSessionId(sessionId, "sessionId");
     await this.resume(sourceId);
     const source = this.managed(sourceId);
@@ -430,7 +352,11 @@ export class SessionManager {
     return this.copySession(sourceId, eventId, false, userMessageText(event));
   }
 
-  async clone(sessionId: unknown): Promise<SessionForkResult> {
+  async clone(sessionId: unknown): Promise<{
+    readonly sessionId: SessionId;
+    readonly events: readonly CanonicalEvent[];
+    readonly selectedText?: string;
+  }> {
     const sourceId = parseSessionId(sessionId, "sessionId");
     await this.resume(sourceId);
     const source = this.managed(sourceId);
@@ -470,7 +396,11 @@ export class SessionManager {
     targetId: EventId,
     includeTarget: boolean,
     selectedText?: string,
-  ): Promise<SessionForkResult> {
+  ): Promise<{
+    readonly sessionId: SessionId;
+    readonly events: readonly CanonicalEvent[];
+    readonly selectedText?: string;
+  }> {
     const source = this.managed(sourceId);
     const tree = SessionTree.fromEvents(sourceId, source.events);
     const lineage = tree.lineage(targetId);
@@ -561,25 +491,14 @@ export class SessionManager {
       throw new DaemonError("corrupt_session", `Session ${sessionId} has no creation event`);
     }
     let modelId: string | undefined;
-    let thinkingLevel: SessionConfiguration["thinkingLevel"];
-    let webFetch: boolean | undefined;
-    let webSearch: boolean | undefined;
-    let profile: SessionConfiguration["profile"];
+    let thinkingLevel: SessionModelSelection["thinkingLevel"];
     for (const event of events) {
       if (event.type === "config.model") modelId = event.payload.modelId;
       else if (event.type === "config.thinking") thinkingLevel = event.payload.requested;
-      else if (event.type === "config.profile") profile = event.payload.profile;
-      else if (event.type === "config.tools") {
-        webFetch = event.payload.webFetch;
-        webSearch = event.payload.webSearch;
-      }
     }
     return this.open(sessionId, created.payload.cwd, {
       ...(modelId === undefined ? {} : { modelId }),
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-      ...(webFetch === undefined ? {} : { webFetch }),
-      ...(webSearch === undefined ? {} : { webSearch }),
-      profile: profile ?? "standard",
     });
   }
 
@@ -595,7 +514,7 @@ export class SessionManager {
 
   async configure(
     sessionId: unknown,
-    update: SessionSelection,
+    update: SessionModelSelection,
   ): Promise<{ events: readonly CanonicalEvent[] }> {
     const managed = this.managed(sessionId);
     if (managed.activeTurn || managed.rebuilding) {
@@ -608,10 +527,7 @@ export class SessionManager {
     const boundary: SessionRuntimeBoundary =
       update.modelId !== undefined && update.modelId !== managed.selection.modelId
         ? "model_switch"
-        : (update.webFetch !== undefined && update.webFetch !== managed.selection.webFetch) ||
-            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch)
-          ? "tool_change"
-          : "config_change";
+        : "config_change";
     const before = managed.events.length;
     await this.rebuild(managed, boundary, selection);
     managed.selection = selection;
@@ -620,79 +536,19 @@ export class SessionManager {
 
   async send(sessionId: unknown, content: readonly UserContent[]): Promise<{ stopReason: string }> {
     const managed = this.managed(sessionId);
-    await this.assertContentBlobs(managed, content);
+    for (const item of content) {
+      if (item.type === "blob")
+        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+    }
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn("turn");
+    const active = deferredTurn();
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
-      let result = await managed.session.runTurn(content, active.controller.signal);
-      while (managed.session.hasQueuedMessages()) {
-        active.controller = new AbortController();
-        result = (await managed.session.continueQueued(active.controller.signal)) ?? result;
-      }
+      const result = await managed.session.runTurn(content, active.controller.signal);
       return { stopReason: result.stopReason };
-    } finally {
-      if (managed.activeTurn === active) delete managed.activeTurn;
-      active.finish();
-    }
-  }
-
-  steer(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
-    return this.queueInput(sessionId, content, "steer");
-  }
-
-  followUp(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
-    return this.queueInput(sessionId, content, "followUp");
-  }
-
-  private queueInput(
-    sessionId: unknown,
-    content: readonly UserContent[],
-    mode: "steer" | "followUp",
-  ): Promise<{ queued: true }> {
-    const managed = this.managed(sessionId);
-    const queued = managed.queuedInputs.then(async () => {
-      await this.assertContentBlobs(managed, content);
-      if (managed.activeTurn?.kind !== "turn" || managed.rebuilding) {
-        throw new DaemonError("operation_inactive", `No active model turn can receive ${mode}`);
-      }
-      managed.session[mode](content);
-      return { queued: true as const };
-    });
-    managed.queuedInputs = queued.then(
-      () => undefined,
-      () => undefined,
-    );
-    return queued;
-  }
-
-  private async assertContentBlobs(
-    managed: ManagedSession,
-    content: readonly UserContent[],
-  ): Promise<void> {
-    for (const item of content) {
-      if (item.type === "blob") {
-        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
-      }
-    }
-  }
-
-  async compact(
-    sessionId: unknown,
-    customInstructions?: string,
-  ): Promise<EventPayloadMap["context.compacted"]> {
-    const managed = this.managed(sessionId);
-    if (managed.activeTurn || managed.rebuilding) {
-      throw new DaemonError("operation_active", "An operation already owns this branch");
-    }
-    const active = deferredTurn("compaction");
-    managed.activeTurn = active;
-    try {
-      const event = await managed.session.compact(customInstructions, active.controller.signal);
-      return event.payload;
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
@@ -708,7 +564,7 @@ export class SessionManager {
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn("shell");
+    const active = deferredTurn();
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
@@ -831,21 +687,20 @@ export class SessionManager {
   subscribe(
     sessionId: unknown,
     listener: (event: CanonicalEvent) => void,
-    afterEventId?: EventId,
     activityListener?: (frame: SessionActivityFrame) => void,
+    fromNodeId?: EventId,
   ): {
     snapshot: readonly CanonicalEvent[];
+    allEvents: readonly CanonicalEvent[];
     activity?: SessionActivityFrame;
     unsubscribe: () => void;
   } {
     const managed = this.managed(sessionId);
-    let snapshot = [...managed.events];
-    if (afterEventId !== undefined) {
-      const index = snapshot.findIndex((event) => event.id === afterEventId);
-      if (index < 0)
-        throw new DaemonError("unknown_cursor", `Event ${afterEventId} is not in this session`);
-      snapshot = snapshot.slice(index + 1);
-    }
+    const allEvents = [...managed.events];
+    const snapshot =
+      fromNodeId === undefined
+        ? allEvents
+        : SessionTree.fromEvents(managed.session.log.sessionId, allEvents).lineage(fromNodeId);
     managed.listeners.add(listener);
     if (activityListener !== undefined) managed.activityListeners.add(activityListener);
     const current = managed.activityState.current;
@@ -862,6 +717,7 @@ export class SessionManager {
           };
     return {
       snapshot,
+      allEvents,
       ...(activity === undefined ? {} : { activity }),
       unsubscribe: () => {
         managed.listeners.delete(listener);
@@ -932,7 +788,7 @@ export class SessionManager {
   private async rebuild(
     managed: ManagedSession,
     boundary: SessionRuntimeBoundary,
-    selection: SessionConfiguration,
+    selection: SessionModelSelection,
   ): Promise<void> {
     const previous = managed.session;
     const rebuilding = (async () => {

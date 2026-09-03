@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
@@ -17,13 +17,14 @@ import type {
   ModelStreamEvent,
   SessionActivityFrame,
   SessionForkResult,
-  SessionHistoryPage,
+  SessionId,
+  SessionHistoryResult,
+  SessionSubscribeResult,
   SessionSummary,
   Usage,
 } from "@axl/protocol";
 import {
   encodeWireMessage,
-  parseEventId,
   parseServerMessage,
   parseSessionId,
   type ServerMessage,
@@ -31,13 +32,7 @@ import {
   type WireRequest,
 } from "@axl/protocol";
 
-import {
-  AxlDaemon,
-  DaemonClient,
-  type SessionSnapshot,
-  WireClientError,
-  type WireEvent,
-} from "../src/index.ts";
+import { AxlDaemon, DaemonClient, WireClientError, type WireEvent } from "../src/index.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const execute = promisify(execFile);
@@ -100,6 +95,40 @@ async function startDaemon(
 
 function types(events: readonly CanonicalEvent[]): readonly string[] {
   return events.map((event) => event.type);
+}
+
+async function subscribeAll(
+  client: DaemonClient,
+  sessionId: SessionId,
+  after?: string,
+): Promise<{
+  readonly subscription: SessionSubscribeResult;
+  readonly events: readonly CanonicalEvent[];
+}> {
+  const subscription = await client.request("session.subscribe", {
+    sessionId,
+    ...(after === undefined ? {} : { after }),
+  });
+  const descriptor = subscription.snapshot;
+  if (descriptor === undefined) return { subscription, events: [] };
+  const events = [...descriptor.page.events];
+  let page = descriptor.page;
+  while (!page.complete) {
+    const pageCursor = page.nextPageCursor;
+    assert.ok(pageCursor);
+    const result: SessionHistoryResult = await client.request("session.history", {
+      snapshotId: descriptor.snapshotId,
+      pageCursor,
+    });
+    assert.equal(result.snapshotId, descriptor.snapshotId);
+    page = result.page;
+    events.push(...page.events);
+  }
+  await client.request("session.ack", {
+    subscriptionId: subscription.subscriptionId,
+    cursor: descriptor.boundaryCursor,
+  });
+  return { subscription, events };
 }
 
 function rawConnection(socketPath: string): {
@@ -251,18 +280,17 @@ test("creates a session, streams the live tail, and answers sends", async (conte
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
 
-  const created = (await client.request("session.create", { cwd })) as SessionSnapshot;
-  assert.equal(types(created.events)[0], "session.created");
+  const created = await client.request("session.create", { cwd });
+  assert.equal(created.cwd, await realpath(cwd));
 
   const pushed: WireEvent[] = [];
   client.onEvent((event) => pushed.push(event));
-  const { snapshot } = (await client.request("session.subscribe", {
-    sessionId: created.sessionId,
-  })) as { snapshot: CanonicalEvent[] };
+  const { events: snapshot } = await subscribeAll(client, created.sessionId);
   assert.deepEqual(types(snapshot), ["session.created"]);
 
   const sent = (await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "hello" }],
   })) as { stopReason: string };
   assert.equal(sent.stopReason, "stop");
@@ -271,6 +299,146 @@ test("creates a session, streams the live tail, and answers sends", async (conte
     ["user.message", "assistant.message"],
   );
   assert.equal(pushed[0]?.sessionId, created.sessionId);
+  await assert.rejects(
+    client.request("session.send", {
+      sessionId: created.sessionId,
+      content: [{ type: "text", text: "steer" }],
+      delivery: "steer",
+    }),
+    (error) => error instanceof WireClientError && error.code === "unsupported_capability",
+  );
+});
+
+test("freezes paged snapshots and releases the buffered tail only after acknowledgement", async (context) => {
+  const largeReply: ModelPort = {
+    stream() {
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        for (let index = 0; index < 7; index += 1) {
+          yield { type: "text_delta", text: "x".repeat(60_000) };
+        }
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, largeReply);
+  const client = await DaemonClient.connect(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "first" }],
+  });
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "second" }],
+  });
+
+  const delivered: WireEvent[] = [];
+  client.onEvent((event) => delivered.push(event));
+  const subscription = await client.request("session.subscribe", {
+    sessionId: created.sessionId,
+  });
+  const descriptor = subscription.snapshot;
+  assert.ok(descriptor);
+  assert.equal(descriptor.page.complete, false);
+  const firstPageCursor = descriptor.page.nextPageCursor;
+  assert.ok(firstPageCursor);
+  const other = await DaemonClient.connect(socketPath);
+  context.after(() => other.close());
+  await assert.rejects(
+    other.request("session.history", {
+      snapshotId: descriptor.snapshotId,
+      pageCursor: firstPageCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+  );
+  const frozenEvents = [...descriptor.page.events];
+  await assert.rejects(
+    client.request("session.ack", {
+      subscriptionId: subscription.subscriptionId,
+      cursor: descriptor.boundaryCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+  );
+
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "after boundary" }],
+  });
+  assert.equal(delivered.length, 0);
+
+  let page = descriptor.page;
+  let verifiedStablePage = false;
+  while (!page.complete) {
+    const pageCursor = page.nextPageCursor;
+    assert.ok(pageCursor);
+    const next: SessionHistoryResult = await client.request("session.history", {
+      snapshotId: descriptor.snapshotId,
+      pageCursor,
+    });
+    if (!verifiedStablePage) {
+      assert.deepEqual(
+        await client.request("session.history", {
+          snapshotId: descriptor.snapshotId,
+          pageCursor,
+        }),
+        next,
+      );
+      verifiedStablePage = true;
+    }
+    page = next.page;
+    frozenEvents.push(...page.events);
+  }
+  assert.equal(frozenEvents.length, descriptor.eventCount);
+  assert.equal(
+    frozenEvents.some(
+      (event) =>
+        event.type === "user.message" &&
+        event.payload.content[0]?.type === "text" &&
+        event.payload.content[0].text === "after boundary",
+    ),
+    false,
+  );
+  assert.equal(delivered.length, 0);
+
+  await client.request("session.ack", {
+    subscriptionId: subscription.subscriptionId,
+    cursor: descriptor.boundaryCursor,
+  });
+  for (let attempt = 0; delivered.length < 2 && attempt < 100; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.deepEqual(types(delivered.map((item) => item.event)), [
+    "user.message",
+    "assistant.message",
+  ]);
+  assert.deepEqual(
+    delivered.map((item) => item.sequence),
+    [1, 2],
+  );
+});
+
+test("events appended between resume and subscribe enter the frozen snapshot", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context);
+  const owner = await DaemonClient.connect(socketPath);
+  const attaching = await DaemonClient.connect(socketPath);
+  context.after(() => {
+    owner.close();
+    attaching.close();
+  });
+  const created = await owner.request("session.create", { cwd });
+  await attaching.request("session.resume", { sessionId: created.sessionId });
+  await owner.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "between" }],
+  });
+
+  const { events } = await subscribeAll(attaching, created.sessionId);
+  assert.deepEqual(types(events), ["session.created", "user.message", "assistant.message"]);
 });
 
 test("streams transient deltas and resumes the latest accumulated activity", async (context) => {
@@ -296,30 +464,34 @@ test("streams transient deltas and resumes the latest accumulated activity", asy
     first.close();
     second.close();
   });
-  const created = (await first.request("session.create", { cwd })) as SessionSnapshot;
+  const created = await first.request("session.create", { cwd });
   const frames: string[] = [];
   first.onActivity((message) => frames.push(message.frame.type));
-  await first.request("session.subscribe", { sessionId: created.sessionId });
+  await subscribeAll(first, created.sessionId);
   const sending = first.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "go" }],
   });
   for (let attempt = 0; frames.length < 3 && attempt < 100; attempt += 1) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
   assert.deepEqual(frames, ["thinking_delta", "text_delta", "text_delta"]);
-  const resumed = (await second.request("session.subscribe", {
-    sessionId: created.sessionId,
-  })) as { activity?: SessionActivityFrame };
-  assert.equal(resumed.activity?.type, "snapshot");
-  assert.ok(resumed.activity?.operationId);
-  assert.equal(resumed.activity?.sequence, 3);
-  assert.equal(resumed.activity?.type, "snapshot");
-  if (resumed.activity?.type === "snapshot") {
-    assert.equal(resumed.activity.text.length, 65_536);
-    assert.equal(resumed.activity.text.endsWith("partial"), true);
-    assert.equal(resumed.activity.thinking, "checking ");
-    assert.deepEqual(resumed.activity.toolCalls, []);
+  const resumedFrames: SessionActivityFrame[] = [];
+  second.onActivity((message) => resumedFrames.push(message.frame));
+  await subscribeAll(second, created.sessionId);
+  for (let attempt = 0; resumedFrames.length === 0 && attempt < 100; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  const resumed = resumedFrames.at(-1);
+  assert.equal(resumed?.type, "snapshot");
+  assert.ok(resumed?.operationId);
+  assert.equal(resumed?.sequence, 3);
+  if (resumed?.type === "snapshot") {
+    assert.equal(resumed.text.length, 65_536);
+    assert.equal(resumed.text.endsWith("partial"), true);
+    assert.equal(resumed.thinking, "checking ");
+    assert.deepEqual(resumed.toolCalls, []);
   }
   release();
   await sending;
@@ -334,7 +506,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   await writeFile(orphan, "partial");
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
-  const created = (await client.request("session.create", { cwd })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd });
   const bytes = Buffer.alloc(32);
   bytes.set([0x89, 0x50, 0x4e, 0x47], 0);
   bytes.set(Buffer.from("IHDR"), 12);
@@ -360,6 +532,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   assert.equal(blob.mediaType, "image/png");
   await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "blob", blob }],
   });
   const range = (await client.request("session.blob.read", {
@@ -374,7 +547,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   assert.equal(log.includes(bytes.toString("base64")), false);
   assert.match(log, new RegExp(blob.sha256));
 
-  const other = (await client.request("session.create", { cwd })) as SessionSnapshot;
+  const other = await client.request("session.create", { cwd });
   await assert.rejects(
     client.request("session.blob.read", {
       sessionId: other.sessionId,
@@ -493,9 +666,10 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
 test("a session survives daemon termination and resumes with full history", async (context) => {
   const first = await startDaemon(context);
   const client = await DaemonClient.connect(first.socketPath);
-  const created = (await client.request("session.create", { cwd: first.cwd })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd: first.cwd });
   await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "before restart" }],
   });
   client.close();
@@ -515,92 +689,19 @@ test("a session survives daemon termination and resumes with full history", asyn
 
   const reconnected = await DaemonClient.connect(first.socketPath);
   context.after(() => reconnected.close());
-  const resumed = (await reconnected.request("session.resume", {
+  const resumed = await reconnected.request("session.resume", {
     sessionId: created.sessionId,
-  })) as SessionSnapshot;
-  assert.deepEqual(types(resumed.events), ["session.created", "user.message", "assistant.message"]);
-  const bounded = (await reconnected.request("session.resume", {
-    sessionId: created.sessionId,
-    includeEvents: false,
-  })) as SessionSnapshot;
-  assert.deepEqual(bounded, { sessionId: created.sessionId, events: [] });
-
-  const firstPage = (await reconnected.request("session.history", {
-    sessionId: created.sessionId,
-    limit: 2,
-  })) as SessionHistoryPage;
-  assert.deepEqual(types(firstPage.events), ["session.created", "user.message"]);
-  assert.equal(firstPage.done, false);
-  const firstPageCursor = firstPage.events.at(-1)?.id;
-  assert.ok(firstPageCursor);
-  const secondPage = (await reconnected.request("session.history", {
-    sessionId: created.sessionId,
-    afterEventId: firstPageCursor,
-    limit: 2,
-  })) as SessionHistoryPage;
-  assert.deepEqual(types(secondPage.events), ["assistant.message"]);
-  assert.equal(secondPage.done, true);
-  await assert.rejects(
-    reconnected.request("session.history", {
-      sessionId: created.sessionId,
-      afterEventId: parseEventId("00000000-0000-4000-8000-000000000099"),
-    }),
-    (error) => error instanceof WireClientError && error.code === "unknown_cursor",
-  );
+  });
+  assert.equal(resumed.sessionId, created.sessionId);
+  const { events: paged } = await subscribeAll(reconnected, created.sessionId);
+  assert.deepEqual(types(paged), ["session.created", "user.message", "assistant.message"]);
 
   const sent = (await reconnected.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "after restart" }],
   })) as { stopReason: string };
   assert.equal(sent.stopReason, "stop");
-});
-
-test("an exec profile survives daemon restart", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-profile-"));
-  context.after(() => rm(directory, { recursive: true, force: true }));
-  const socketPath = join(directory, "axl.sock");
-  const dataDirectory = join(directory, "data");
-  const observed: Array<string | undefined> = [];
-  const makeDaemon = (): AxlDaemon =>
-    new AxlDaemon({
-      socketPath,
-      dataDirectory,
-      runtime: ({ selection }) => {
-        observed.push(selection.profile);
-        return {
-          model: replyPort(),
-          tools: new ToolRegistry(),
-          configProfile: { profile: selection.profile ?? "standard" },
-        };
-      },
-    });
-
-  const first = makeDaemon();
-  await first.start();
-  const client = await DaemonClient.connect(socketPath);
-  const created = (await client.request("session.create", {
-    cwd: directory,
-    profile: "exec",
-  })) as SessionSnapshot;
-  client.close();
-  await first.stop();
-
-  const second = makeDaemon();
-  await second.start();
-  context.after(() => second.stop());
-  const resumedClient = await DaemonClient.connect(socketPath);
-  context.after(() => resumedClient.close());
-  const resumed = (await resumedClient.request("session.resume", {
-    sessionId: created.sessionId,
-  })) as SessionSnapshot;
-
-  assert.deepEqual(observed, ["exec", "exec"]);
-  assert.equal(
-    resumed.events
-      .flatMap((event) => (event.type === "config.profile" ? [event.payload.profile] : []))
-      .at(-1),
-    "exec",
-  );
 });
 
 test("serves bounded working and last-turn workspace diffs", async (context) => {
@@ -625,7 +726,7 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
 
   const client = await DaemonClient.connect(fixture.socketPath);
   context.after(() => client.close());
-  const created = (await client.request("session.create", { cwd: workspace })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd: workspace });
   await assert.rejects(
     client.request("session.workspace.diff", {
       sessionId: created.sessionId,
@@ -639,6 +740,7 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
   });
   await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "checkpoint" }],
   });
   await writeFile(join(workspace, "tracked.txt"), "after\n");
@@ -679,6 +781,7 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
   await truncate(oversized, 256 * 1024 * 1024 + 1);
   await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "bounded checkpoint" }],
   });
   await assert.rejects(
@@ -693,13 +796,15 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
 test("lists, forks, clones, and resumes sessions", async (context) => {
   const first = await startDaemon(context);
   const client = await DaemonClient.connect(first.socketPath);
-  const created = (await client.request("session.create", { cwd: first.cwd })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd: first.cwd });
   await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "first prompt" }],
   });
   await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "second prompt" }],
   });
 
@@ -710,23 +815,25 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
   assert.equal(listed[0]?.firstUserMessage, "first prompt");
   assert.equal(listed[0]?.lastUserMessage, "second prompt");
 
-  const source = (await client.request("session.resume", {
+  await client.request("session.resume", {
     sessionId: created.sessionId,
-  })) as SessionSnapshot;
-  const secondMessage = source.events.filter((event) => event.type === "user.message")[1];
+  });
+  const { events: sourceEvents } = await subscribeAll(client, created.sessionId);
+  const secondMessage = sourceEvents.filter((event) => event.type === "user.message")[1];
   assert.ok(secondMessage);
   const forked = (await client.request("session.fork", {
     sessionId: created.sessionId,
     fromEventId: secondMessage.id,
   })) as SessionForkResult;
   assert.equal(forked.selectedText, "second prompt");
-  assert.equal(forked.events[0]?.type, "session.created");
+  const { events: forkedEvents } = await subscribeAll(client, forked.sessionId);
+  assert.equal(forkedEvents[0]?.type, "session.created");
   assert.equal(
-    forked.events[0]?.type === "session.created" && forked.events[0].payload.parentSessionId,
+    forkedEvents[0]?.type === "session.created" && forkedEvents[0].payload.parentSessionId,
     created.sessionId,
   );
   assert.deepEqual(
-    forked.events
+    forkedEvents
       .filter((event) => event.type === "user.message")
       .map((event) => {
         const content = event.type === "user.message" ? event.payload.content[0] : undefined;
@@ -738,8 +845,9 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
   const cloned = (await client.request("session.clone", {
     sessionId: created.sessionId,
   })) as SessionForkResult;
+  const { events: clonedEvents } = await subscribeAll(client, cloned.sessionId);
   assert.deepEqual(
-    cloned.events
+    clonedEvents
       .filter((event) => event.type === "user.message")
       .map((event) => {
         const content = event.type === "user.message" ? event.payload.content[0] : undefined;
@@ -759,12 +867,14 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
   context.after(() => daemon.stop());
   const resumedClient = await DaemonClient.connect(first.socketPath);
   context.after(() => resumedClient.close());
-  const resumedFork = (await resumedClient.request("session.resume", {
+  await resumedClient.request("session.resume", {
     sessionId: forked.sessionId,
-  })) as SessionSnapshot;
-  const resumedClone = (await resumedClient.request("session.resume", {
+  });
+  await resumedClient.request("session.resume", {
     sessionId: cloned.sessionId,
-  })) as SessionSnapshot;
+  });
+  const resumedFork = await subscribeAll(resumedClient, forked.sessionId);
+  const resumedClone = await subscribeAll(resumedClient, cloned.sessionId);
   assert.equal(resumedFork.events[0]?.type, "session.created");
   assert.equal(resumedClone.events[0]?.type, "session.created");
 });
@@ -778,9 +888,10 @@ test("interrupt aborts the active operation from another connection", async (con
     interrupter.close();
   });
 
-  const created = (await sender.request("session.create", { cwd })) as SessionSnapshot;
+  const created = await sender.request("session.create", { cwd });
   const sending = sender.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "hang" }],
   });
 
@@ -801,66 +912,22 @@ test("interrupt aborts the active operation from another connection", async (con
   assert.equal(idle.interrupted, false);
 });
 
-test("a queued follow-up continues after the current model call is interrupted", async (context) => {
-  let calls = 0;
-  const prompts: string[] = [];
-  const model: ModelPort = {
-    stream(request) {
-      calls += 1;
-      const call = calls;
-      const lastUser = request.messages.findLast((message) => message.role === "user");
-      prompts.push(lastUser?.content[0]?.type === "text" ? lastUser.content[0].text : "<missing>");
-      return (async function* (): AsyncGenerator<ModelStreamEvent> {
-        if (call === 1) {
-          await new Promise<void>((resolvePromise) => {
-            if (request.signal?.aborted) resolvePromise();
-            else request.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
-          });
-          yield { type: "aborted" };
-          return;
-        }
-        yield { type: "text_delta", text: "follow-up answer" };
-        yield { type: "completed", stopReason: "stop", usage };
-      })();
-    },
-  };
-  const { socketPath, cwd } = await startDaemon(context, model);
-  const sender = await DaemonClient.connect(socketPath);
-  const controller = await DaemonClient.connect(socketPath);
-  context.after(() => {
-    sender.close();
-    controller.close();
-  });
-  const created = (await sender.request("session.create", { cwd })) as SessionSnapshot;
-  const sending = sender.request("session.send", {
-    sessionId: created.sessionId,
-    content: [{ type: "text", text: "start" }],
-  });
-  while (calls === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
-  await controller.request("session.followUp", {
-    sessionId: created.sessionId,
-    content: [{ type: "text", text: "continue afterward" }],
-  });
-  await controller.request("session.interrupt", { sessionId: created.sessionId });
-
-  assert.deepEqual(await sending, { stopReason: "stop" });
-  assert.deepEqual(prompts, ["start", "continue afterward"]);
-});
-
 test("concurrent sends conflict loudly instead of interleaving", async (context) => {
   const { socketPath, cwd } = await startDaemon(context, hangingPort());
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
 
-  const created = (await client.request("session.create", { cwd })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd });
   const first = client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "one" }],
   });
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
   await assert.rejects(
     client.request("session.send", {
       sessionId: created.sessionId,
+      delivery: "prompt",
       content: [{ type: "text", text: "two" }],
     }),
     (error) => error instanceof WireClientError && error.code === "operation_active",
@@ -869,84 +936,7 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
   await first;
 });
 
-test("steering and follow-ups cross clients through the daemon", async (context) => {
-  let releaseFirst = (): void => undefined;
-  context.after(() => releaseFirst());
-  let calls = 0;
-  const prompts: string[] = [];
-  const model: ModelPort = {
-    stream(request) {
-      calls += 1;
-      const call = calls;
-      const lastUser = request.messages.findLast((message) => message.role === "user");
-      prompts.push(lastUser?.content[0]?.type === "text" ? lastUser.content[0].text : "<missing>");
-      return (async function* (): AsyncGenerator<ModelStreamEvent> {
-        if (call === 1) {
-          await new Promise<void>((resolvePromise) => {
-            releaseFirst = resolvePromise;
-          });
-        }
-        yield { type: "text_delta", text: `reply ${call}` };
-        yield { type: "completed", stopReason: "stop", usage };
-      })();
-    },
-  };
-  const { socketPath, cwd } = await startDaemon(context, model);
-  const sender = await DaemonClient.connect(socketPath);
-  const controller = await DaemonClient.connect(socketPath);
-  context.after(() => {
-    sender.close();
-    controller.close();
-  });
-  const created = (await sender.request("session.create", { cwd })) as SessionSnapshot;
-  const sending = sender.request("session.send", {
-    sessionId: created.sessionId,
-    content: [{ type: "text", text: "start" }],
-  });
-  while (calls === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
-
-  assert.deepEqual(
-    await controller.request("session.steer", {
-      sessionId: created.sessionId,
-      content: [{ type: "text", text: "adjust" }],
-    }),
-    { queued: true },
-  );
-  await controller.request("session.followUp", {
-    sessionId: created.sessionId,
-    content: [{ type: "text", text: "then summarize" }],
-  });
-  await controller.request("session.followUp", {
-    sessionId: created.sessionId,
-    content: [{ type: "text", text: "then verify" }],
-  });
-  releaseFirst();
-  await sending;
-
-  assert.deepEqual(prompts, ["start", "adjust", "then summarize", "then verify"]);
-  const history = (await controller.request("session.resume", {
-    sessionId: created.sessionId,
-  })) as SessionSnapshot;
-  assert.deepEqual(
-    history.events
-      .filter((event) => event.type === "user.message")
-      .map((event) =>
-        event.type === "user.message" && event.payload.content[0]?.type === "text"
-          ? event.payload.content[0].text
-          : undefined,
-      ),
-    prompts,
-  );
-  await assert.rejects(
-    controller.request("session.steer", {
-      sessionId: created.sessionId,
-      content: [{ type: "text", text: "too late" }],
-    }),
-    (error) => error instanceof WireClientError && error.code === "operation_inactive",
-  );
-});
-
-test("subscribe supports an afterEventId cursor and multiple attached clients", async (context) => {
+test("subscribe supports opaque acknowledged cursors and multiple attachments", async (context) => {
   const { socketPath, cwd } = await startDaemon(context);
   const one = await DaemonClient.connect(socketPath);
   const two = await DaemonClient.connect(socketPath);
@@ -955,37 +945,69 @@ test("subscribe supports an afterEventId cursor and multiple attached clients", 
     two.close();
   });
 
-  const created = (await one.request("session.create", { cwd })) as SessionSnapshot;
+  const created = await one.request("session.create", { cwd });
   await one.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "first" }],
   });
 
-  const cursor = created.events[0]?.id;
-  const { snapshot } = (await two.request("session.subscribe", {
+  const oneDeliveries: WireEvent[] = [];
+  one.onEvent((event) => oneDeliveries.push(event));
+  await subscribeAll(one, created.sessionId);
+  await one.request("session.send", {
     sessionId: created.sessionId,
-    ...(cursor === undefined ? {} : { afterEventId: cursor }),
-  })) as { snapshot: CanonicalEvent[] };
-  assert.deepEqual(types(snapshot), ["user.message", "assistant.message"]);
+    delivery: "prompt",
+    content: [{ type: "text", text: "cursor source" }],
+  });
+  const cursor = oneDeliveries.at(-1)?.cursor;
+  assert.ok(cursor);
+  await assert.rejects(
+    two.request("session.subscribe", { sessionId: created.sessionId, after: cursor }),
+    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+  );
+  await one.request("session.ack", {
+    subscriptionId: oneDeliveries.at(-1)?.subscriptionId ?? "missing",
+    cursor,
+  });
+  const resumed = await subscribeAll(two, created.sessionId, cursor);
+  assert.equal(resumed.subscription.resumedFrom, cursor);
+  assert.deepEqual(resumed.events, []);
 
   const oneEvents: string[] = [];
   const twoEvents: string[] = [];
   one.onEvent((event) => oneEvents.push(event.event.type));
   two.onEvent((event) => twoEvents.push(event.event.type));
-  await one.request("session.subscribe", { sessionId: created.sessionId });
   await one.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "second" }],
   });
+  for (let attempt = 0; twoEvents.length < 2 && attempt < 100; attempt += 1) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
   assert.deepEqual(oneEvents, ["user.message", "assistant.message"]);
   assert.deepEqual(twoEvents, ["user.message", "assistant.message"]);
+
+  assert.deepEqual(
+    await two.request("session.unsubscribe", {
+      subscriptionId: resumed.subscription.subscriptionId,
+    }),
+    { unsubscribed: true },
+  );
+  await assert.rejects(
+    two.request("session.unsubscribe", {
+      subscriptionId: resumed.subscription.subscriptionId,
+    }),
+    (error) => error instanceof WireClientError && error.code === "unknown_subscription",
+  );
 
   await assert.rejects(
     two.request("session.subscribe", {
       sessionId: created.sessionId,
-      afterEventId: parseEventId("00000000-0000-4000-8000-00000000dead"),
+      after: "unknown-cursor",
     }),
-    (error) => error instanceof WireClientError && error.code === "unknown_cursor",
+    (error) => error instanceof WireClientError && error.code === "snapshot_required",
   );
 });
 
@@ -994,10 +1016,14 @@ test("dispose removes the session and errors surface typed codes", async (contex
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
 
-  const created = (await client.request("session.create", { cwd })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd });
   await client.request("session.dispose", { sessionId: created.sessionId });
   await assert.rejects(
-    client.request("session.send", { sessionId: created.sessionId, content: [] }),
+    client.request("session.send", {
+      sessionId: created.sessionId,
+      content: [],
+      delivery: "prompt",
+    }),
     (error) => error instanceof WireClientError && error.code === "unknown_session",
   );
 
@@ -1088,12 +1114,13 @@ test("routes runtime interaction requests to an attached client", async (context
   context.after(() => daemon.stop());
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
-  const created = (await client.request("session.create", { cwd: directory })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd: directory });
   const events: CanonicalEvent[] = [];
   client.onEvent((message) => events.push(message.event));
-  await client.request("session.subscribe", { sessionId: created.sessionId });
+  await subscribeAll(client, created.sessionId);
   const sending = client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "ask" }],
   });
 
@@ -1118,18 +1145,11 @@ test("routes runtime interaction requests to an attached client", async (context
   );
 });
 
-test("configuration changes preserve the selected profile", async (context) => {
+test("configuration changes rebuild and log the selected model and thinking", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "axl.sock");
-  const configured: Array<{
-    boundary: string;
-    model?: string;
-    thinking?: string;
-    profile?: string;
-    webFetch?: boolean;
-    webSearch?: boolean;
-  }> = [];
+  const configured: Array<{ boundary: string; model?: string; thinking?: string }> = [];
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
@@ -1138,9 +1158,6 @@ test("configuration changes preserve the selected profile", async (context) => {
         boundary,
         ...(selection.modelId === undefined ? {} : { model: selection.modelId }),
         ...(selection.thinkingLevel === undefined ? {} : { thinking: selection.thinkingLevel }),
-        ...(selection.profile === undefined ? {} : { profile: selection.profile }),
-        ...(selection.webFetch === undefined ? {} : { webFetch: selection.webFetch }),
-        ...(selection.webSearch === undefined ? {} : { webSearch: selection.webSearch }),
       });
       return {
         model: replyPort(),
@@ -1155,17 +1172,6 @@ test("configuration changes preserve the selected profile", async (context) => {
                 clamped: false,
               },
             }),
-        ...(selection.profile === undefined
-          ? {}
-          : { configProfile: { profile: selection.profile } }),
-        ...(selection.webFetch === undefined || selection.webSearch === undefined
-          ? {}
-          : {
-              configTools: {
-                webFetch: selection.webFetch,
-                webSearch: selection.webSearch,
-              },
-            }),
       };
     },
   });
@@ -1174,63 +1180,22 @@ test("configuration changes preserve the selected profile", async (context) => {
 
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
-  const created = (await client.request("session.create", {
+  const created = await client.request("session.create", {
     cwd: directory,
     modelId: "gpt-5",
     thinkingLevel: "medium",
-    profile: "exec",
-    webFetch: true,
-    webSearch: true,
-  })) as SessionSnapshot;
+  });
   const changed = (await client.request("session.configure", {
     sessionId: created.sessionId,
     modelId: "gpt-4.1",
     thinkingLevel: "high",
   })) as { events: CanonicalEvent[] };
 
-  const toolsChanged = (await client.request("session.configure", {
-    sessionId: created.sessionId,
-    webSearch: false,
-  })) as { events: CanonicalEvent[] };
-
   assert.deepEqual(configured, [
-    {
-      boundary: "session_start",
-      model: "gpt-5",
-      thinking: "medium",
-      profile: "exec",
-      webFetch: true,
-      webSearch: true,
-    },
-    {
-      boundary: "model_switch",
-      model: "gpt-4.1",
-      thinking: "high",
-      profile: "exec",
-      webFetch: true,
-      webSearch: true,
-    },
-    {
-      boundary: "tool_change",
-      model: "gpt-4.1",
-      thinking: "high",
-      profile: "exec",
-      webFetch: true,
-      webSearch: false,
-    },
+    { boundary: "session_start", model: "gpt-5", thinking: "medium" },
+    { boundary: "model_switch", model: "gpt-4.1", thinking: "high" },
   ]);
-  assert.deepEqual(types(changed.events), [
-    "config.model",
-    "config.thinking",
-    "config.profile",
-    "config.tools",
-  ]);
-  assert.deepEqual(types(toolsChanged.events), [
-    "config.model",
-    "config.thinking",
-    "config.profile",
-    "config.tools",
-  ]);
+  assert.deepEqual(types(changed.events), ["config.model", "config.thinking"]);
 });
 
 test("reload rebuilds the runtime as a logged boundary with live subscriptions", async (context) => {
@@ -1263,10 +1228,10 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
 
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
-  const created = (await client.request("session.create", { cwd: directory })) as SessionSnapshot;
+  const created = await client.request("session.create", { cwd: directory });
   const pushed: string[] = [];
   client.onEvent((message) => pushed.push(message.event.type));
-  await client.request("session.subscribe", { sessionId: created.sessionId });
+  await subscribeAll(client, created.sessionId);
 
   const reloaded = (await client.request("session.reload", { sessionId: created.sessionId })) as {
     events: CanonicalEvent[];
@@ -1279,6 +1244,7 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   // The session still works after the reload, on the same log.
   const sent = (await client.request("session.send", {
     sessionId: created.sessionId,
+    delivery: "prompt",
     content: [{ type: "text", text: "after reload" }],
   })) as { stopReason: string };
   assert.equal(sent.stopReason, "stop");

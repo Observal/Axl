@@ -2,18 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { FileCredentialStore } from "@axl/ai";
-import { AxlDaemon, DaemonClient, type SessionSnapshot } from "@axl/daemon";
-import { type ModelPort, ToolRegistry } from "@axl/kernel";
-import { EVENT_FORMAT_VERSION, type ModelStreamEvent } from "@axl/protocol";
+import { DaemonClient } from "@axl/daemon";
 
-import { listLocalSessions, localSandboxStateKey, startLocalDaemon } from "../src/index.ts";
+import { localSandboxStateKey, startLocalDaemon } from "../src/index.ts";
 
 test("OCI state keys require a digest and cannot traverse directories", () => {
   assert.equal(
@@ -35,110 +32,7 @@ test("OCI state keys require a digest and cannot traverse directories", () => {
   );
 });
 
-test("discovers native and unsafe histories with explicit placement labels", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "axl-runtime-catalog-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const axlHome = join(root, ".axl");
-  const workspace = join(root, "workspace");
-  await mkdir(workspace, { recursive: true });
-  const model: ModelPort = {
-    stream: () =>
-      (async function* (): AsyncGenerator<ModelStreamEvent> {
-        yield {
-          type: "completed",
-          stopReason: "stop",
-          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-        };
-      })(),
-  };
-  const start = async (directory: string, enforced: boolean) => {
-    const daemon = new AxlDaemon({
-      socketPath: join(directory, "test.sock"),
-      dataDirectory: directory,
-      securityMode: enforced ? "sandboxed" : "unsafe",
-      sandboxProvider: enforced ? "bubblewrap" : "none",
-      runtime: () => ({
-        model,
-        tools: new ToolRegistry(),
-        sandbox: { provider: enforced ? "bubblewrap" : "none", enforced, controls: [] },
-      }),
-    });
-    await daemon.start();
-    context.after(() => daemon.stop());
-    const snapshot = await daemon.sessions.create(workspace);
-    return snapshot.sessionId;
-  };
-  const nativeId = await start(axlHome, true);
-  const unsafeId = await start(join(axlHome, "unsafe"), false);
-  const sessions = await listLocalSessions(axlHome);
-  assert.deepEqual(
-    new Map(sessions.map((session) => [session.sessionId, session.placementLabel])),
-    new Map([
-      [nativeId, "SANDBOXED · native"],
-      [unsafeId, "UNSAFE"],
-    ]),
-  );
-});
-
-test("preserves each OCI session's image alias", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "axl-runtime-catalog-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
-  const axlHome = join(root, ".axl");
-  const digest = "a".repeat(64);
-  const sessionDirectory = join(axlHome, "oci", "docker", digest, "sessions");
-  await mkdir(sessionDirectory, { recursive: true });
-  const expected = new Map<string, string>();
-  for (const [index, name] of ["example.invalid/image", "example.invalid/alias"].entries()) {
-    const sessionId = randomUUID();
-    const createdId = randomUUID();
-    const image = `${name}@sha256:${digest}`;
-    expected.set(sessionId, image);
-    await writeFile(
-      join(sessionDirectory, `${sessionId}.jsonl`),
-      `${[
-        {
-          version: EVENT_FORMAT_VERSION,
-          id: createdId,
-          sessionId,
-          parentId: null,
-          timestamp: index * 2 + 1,
-          type: "session.created",
-          payload: { cwd: root },
-        },
-        {
-          version: EVENT_FORMAT_VERSION,
-          id: randomUUID(),
-          sessionId,
-          parentId: createdId,
-          timestamp: index * 2 + 2,
-          type: "sandbox.configured",
-          payload: { provider: "docker", enforced: true, controls: [], details: { image } },
-        },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join("\n")}\n`,
-    );
-  }
-
-  const sessions = await listLocalSessions(axlHome);
-  assert.deepEqual(
-    new Map(
-      sessions.map((session) => [
-        session.sessionId,
-        session.placement.type === "oci" ? session.placement.image : session.placement.type,
-      ]),
-    ),
-    expected,
-  );
-});
-
-test("assembles an authoritative local runtime and ignores an empty Brave key", async (context) => {
-  const previousBraveKey = process.env.BRAVE_SEARCH_API_KEY;
-  process.env.BRAVE_SEARCH_API_KEY = "";
-  context.after(() => {
-    if (previousBraveKey === undefined) delete process.env.BRAVE_SEARCH_API_KEY;
-    else process.env.BRAVE_SEARCH_API_KEY = previousBraveKey;
-  });
+test("assembles an authoritative local runtime without a presentation client", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-runtime-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const axlHome = join(root, ".axl");
@@ -172,68 +66,26 @@ test("assembles an authoritative local runtime and ignores an empty Brave key", 
     securityMode: "unsafe",
     sandboxProvider: "none",
   });
-  const snapshot = (await client.request("session.create", { cwd: workspace })) as SessionSnapshot;
-  const sandbox = snapshot.events.find((event) => event.type === "sandbox.configured");
+  const opened = await client.request("session.create", { cwd: workspace });
+  const subscription = await client.request("session.subscribe", {
+    sessionId: opened.sessionId,
+  });
+  assert.ok(subscription.snapshot?.page.complete);
+  const events = subscription.snapshot.page.events;
+  await client.request("session.ack", {
+    subscriptionId: subscription.subscriptionId,
+    cursor: subscription.snapshot.boundaryCursor,
+  });
+  const sandbox = events.find((event) => event.type === "sandbox.configured");
   assert.deepEqual(sandbox?.type === "sandbox.configured" ? sandbox.payload : undefined, {
     provider: "none",
     enforced: false,
     controls: [],
   });
   assert.deepEqual(
-    snapshot.events
+    events
       .filter((event) => event.type === "tool.schema")
       .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
-    ["bash", "read", "write", "edit", "web_fetch", "web_search"],
-  );
-  assert.deepEqual(snapshot.events.find((event) => event.type === "config.profile")?.payload, {
-    profile: "standard",
-  });
-  const disabled = (await client.request("session.create", {
-    cwd: workspace,
-    webFetch: false,
-    webSearch: false,
-  })) as SessionSnapshot;
-  assert.deepEqual(
-    disabled.events
-      .filter((event) => event.type === "tool.schema")
-      .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
-    ["bash", "read", "write", "edit"],
-  );
-  assert.deepEqual(disabled.events.find((event) => event.type === "config.tools")?.payload, {
-    webFetch: false,
-    webSearch: false,
-  });
-
-  // Exec must not parse disabled MCP configuration or discover Skills.
-  await mkdir(join(workspace, ".axl", "skills", "hidden"), { recursive: true });
-  await writeFile(
-    join(workspace, ".axl", "skills", "hidden", "SKILL.md"),
-    "---\nname: hidden\ndescription: must stay disabled\n---\nDo hidden work.\n",
-  );
-  await writeFile(join(workspace, ".axl", "mcp.json"), "not valid json\n");
-  const exec = (await client.request("session.create", {
-    cwd: workspace,
-    profile: "exec",
-  })) as SessionSnapshot;
-  assert.deepEqual(
-    exec.events
-      .filter((event) => event.type === "tool.schema")
-      .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
-    ["bash"],
-  );
-  assert.deepEqual(exec.events.find((event) => event.type === "config.profile")?.payload, {
-    profile: "exec",
-  });
-  assert.deepEqual(exec.events.find((event) => event.type === "config.tools")?.payload, {
-    webFetch: false,
-    webSearch: false,
-  });
-  assert.equal(
-    exec.events.some(
-      (event) =>
-        event.type === "prompt.section" &&
-        (event.payload.name === "skills" || event.payload.content.includes("hidden")),
-    ),
-    false,
+    ["shell", "read", "edit"],
   );
 });

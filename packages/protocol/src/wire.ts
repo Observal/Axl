@@ -20,9 +20,23 @@ import { parseBlobReference, parseEvent, parseUserContent } from "./events.ts";
 
 export const MAX_HISTORY_PAGE_EVENTS = 5_000;
 
+export type EventCursor = string;
+
+export type SessionProfile = "minimal" | "standard" | "chat";
+
 export interface SessionModelSelection {
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+}
+
+export interface SessionOpenResult {
+  readonly sessionId: SessionId;
+  readonly cwd: string;
+  readonly runtime: {
+    readonly state: "inactive" | "idle" | "running" | "waiting_interaction" | "disposing";
+    readonly activeOperationId?: OperationId;
+  };
+  readonly profile: SessionProfile;
 }
 
 export interface SessionSummary {
@@ -220,23 +234,27 @@ export interface RpcMethodMap {
   };
   readonly "session.create": {
     readonly params: { readonly cwd: string } & SessionModelSelection;
-    readonly result: SessionSnapshot;
+    readonly result: SessionOpenResult;
   };
   readonly "session.resume": {
-    readonly params: { readonly sessionId: SessionId; readonly includeEvents?: boolean };
-    readonly result: SessionSnapshot;
+    readonly params: { readonly sessionId: SessionId };
+    readonly result: SessionOpenResult;
   };
   readonly "session.list": {
     readonly params: Record<string, never>;
     readonly result: readonly SessionSummary[];
   };
   readonly "session.history": {
-    readonly params: {
-      readonly sessionId: SessionId;
-      readonly afterEventId?: EventId;
-      readonly limit?: number;
-    };
-    readonly result: SessionHistoryPage;
+    readonly params: SessionHistoryParams;
+    readonly result: SessionHistoryResult;
+  };
+  readonly "session.ack": {
+    readonly params: SessionAckParams;
+    readonly result: SessionAckResult;
+  };
+  readonly "session.unsubscribe": {
+    readonly params: SessionUnsubscribeParams;
+    readonly result: SessionUnsubscribeResult;
   };
   readonly "session.fork": {
     readonly params: { readonly sessionId: SessionId; readonly fromEventId: EventId };
@@ -247,7 +265,11 @@ export interface RpcMethodMap {
     readonly result: SessionForkResult;
   };
   readonly "session.send": {
-    readonly params: { readonly sessionId: SessionId; readonly content: readonly UserContent[] };
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly content: readonly UserContent[];
+      readonly delivery: "prompt" | "steer" | "follow_up";
+    };
     readonly result: { readonly stopReason: AssistantStopReason };
   };
   readonly "session.shell": {
@@ -280,11 +302,8 @@ export interface RpcMethodMap {
     readonly result: { readonly resolved: true };
   };
   readonly "session.subscribe": {
-    readonly params: { readonly sessionId: SessionId; readonly afterEventId?: EventId };
-    readonly result: {
-      readonly snapshot: readonly CanonicalEvent[];
-      readonly activity?: SessionActivityFrame;
-    };
+    readonly params: SessionSubscribeParams;
+    readonly result: SessionSubscribeResult;
   };
   readonly "session.workspace.diff": {
     readonly params: { readonly sessionId: SessionId; readonly scope: WorkspaceDiffScope };
@@ -343,7 +362,9 @@ export function requiredCapability(method: RpcMethod): CapabilityId | undefined 
     method === "daemon.info" ||
     method === "connection.initialize" ||
     method === "connection.ping" ||
-    method === "session.history"
+    method === "session.history" ||
+    method === "session.ack" ||
+    method === "session.unsubscribe"
   ) {
     return undefined;
   }
@@ -432,12 +453,16 @@ export interface RpcError {
 
 export interface WireEvent {
   readonly kind: "event";
+  readonly subscriptionId: string;
   readonly sessionId: SessionId;
+  readonly sequence: number;
+  readonly cursor: EventCursor;
   readonly event: CanonicalEvent;
 }
 
 export interface WireActivity {
   readonly kind: "activity";
+  readonly subscriptionId: string;
   readonly sessionId: SessionId;
   readonly frame: SessionActivityFrame;
 }
@@ -459,56 +484,113 @@ export type WireResponse = RpcSuccess;
 export type WireError = RpcError;
 export type ServerMessage = RpcSuccess | RpcError | WireEvent | WireActivity | WireHello;
 
-export interface SessionSnapshot {
-  readonly sessionId: SessionId;
-  readonly events: readonly CanonicalEvent[];
-}
-
-export interface SessionForkResult extends SessionSnapshot {
+export interface SessionForkResult extends SessionOpenResult {
   readonly selectedText?: string;
 }
 
-export interface SessionHistoryPage {
+export interface SnapshotPage {
   readonly events: readonly CanonicalEvent[];
-  readonly done: boolean;
+  readonly nextPageCursor?: string;
+  readonly complete: boolean;
 }
 
-export function parseSessionHistoryPage(
-  value: unknown,
-  expectedSessionId?: unknown,
-): SessionHistoryPage {
-  const page = object(value, "sessionHistoryPage");
-  exact(page, "sessionHistoryPage", ["events", "done"]);
+export interface SnapshotDescriptor {
+  readonly snapshotId: string;
+  readonly sessionId: SessionId;
+  readonly fromNodeId?: EventId;
+  readonly boundaryCursor: EventCursor;
+  readonly eventCount: number;
+  readonly page: SnapshotPage;
+}
+
+export interface SessionHistoryParams {
+  readonly snapshotId: string;
+  readonly pageCursor: string;
+}
+
+export interface SessionHistoryResult {
+  readonly snapshotId: string;
+  readonly page: SnapshotPage;
+}
+
+export interface SessionSubscribeParams {
+  readonly sessionId: SessionId;
+  readonly fromNodeId?: EventId;
+  readonly after?: EventCursor;
+}
+
+export interface SessionSubscribeResult {
+  readonly subscriptionId: string;
+  readonly sessionId: SessionId;
+  readonly fromNodeId?: EventId;
+  readonly snapshot?: SnapshotDescriptor;
+  readonly resumedFrom?: EventCursor;
+}
+
+export interface SessionAckParams {
+  readonly subscriptionId: string;
+  readonly cursor: EventCursor;
+}
+
+export interface SessionAckResult {
+  readonly cursor: EventCursor;
+}
+
+export interface SessionUnsubscribeParams {
+  readonly subscriptionId: string;
+}
+
+export interface SessionUnsubscribeResult {
+  readonly unsubscribed: boolean;
+}
+
+export function parseSnapshotPage(value: unknown, expectedSessionId?: unknown): SnapshotPage {
+  const page = object(value, "snapshotPage");
+  exact(page, "snapshotPage", ["events", "nextPageCursor", "complete"]);
   if (!Array.isArray(page.events) || page.events.length > MAX_HISTORY_PAGE_EVENTS) {
     throw new ProtocolValidationError(
-      "sessionHistoryPage.events",
+      "snapshotPage.events",
       `must contain at most ${MAX_HISTORY_PAGE_EVENTS} events`,
     );
   }
-  if (typeof page.done !== "boolean") {
-    throw new ProtocolValidationError("sessionHistoryPage.done", "must be a boolean");
+  if (typeof page.complete !== "boolean") {
+    throw new ProtocolValidationError("snapshotPage.complete", "must be a boolean");
   }
   const sessionId =
     expectedSessionId === undefined
       ? undefined
-      : parseSessionId(expectedSessionId, "sessionHistoryPage.sessionId");
+      : parseSessionId(expectedSessionId, "snapshotPage.sessionId");
   const events = page.events.map((event, index) => {
     const parsed = parseEvent(event);
     if (sessionId !== undefined && parsed.sessionId !== sessionId) {
       throw new ProtocolValidationError(
-        `sessionHistoryPage.events[${index}].sessionId`,
+        `snapshotPage.events[${index}].sessionId`,
         `must match session ${sessionId}`,
       );
     }
     return parsed;
   });
-  if (!page.done && events.length === 0) {
+  const nextPageCursor =
+    page.nextPageCursor === undefined
+      ? undefined
+      : boundedString(page.nextPageCursor, "snapshotPage.nextPageCursor", 512);
+  if (page.complete === (nextPageCursor !== undefined)) {
     throw new ProtocolValidationError(
-      "sessionHistoryPage.events",
+      "snapshotPage",
+      "complete pages cannot have a next cursor and incomplete pages require one",
+    );
+  }
+  if (!page.complete && events.length === 0) {
+    throw new ProtocolValidationError(
+      "snapshotPage.events",
       "must make progress when more history remains",
     );
   }
-  return { events, done: page.done };
+  return {
+    events,
+    ...(nextPageCursor === undefined ? {} : { nextPageCursor }),
+    complete: page.complete,
+  };
 }
 
 function object(value: unknown, path: string): Record<string, unknown> {
@@ -732,17 +814,11 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.resume") {
-    exact(params, "request.params", ["sessionId", "includeEvents"]);
-    if (params.includeEvents !== undefined && typeof params.includeEvents !== "boolean") {
-      throw new ProtocolValidationError("request.params.includeEvents", "must be a boolean");
-    }
+    exact(params, "request.params", ["sessionId"]);
     return {
       ...base,
       method,
-      params: {
-        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
-        ...(params.includeEvents === undefined ? {} : { includeEvents: params.includeEvents }),
-      },
+      params: { sessionId: parseSessionId(params.sessionId, "request.params.sessionId") },
     };
   }
   if (method === "session.list") {
@@ -750,26 +826,34 @@ export function parseWireRequest(value: unknown): WireRequest {
     return { ...base, method, params: {} };
   }
   if (method === "session.history") {
-    exact(params, "request.params", ["sessionId", "afterEventId", "limit"]);
-    const limit =
-      params.limit === undefined
-        ? undefined
-        : nonNegativeInteger(params.limit, "request.params.limit");
-    if (limit === 0 || (limit !== undefined && limit > MAX_HISTORY_PAGE_EVENTS)) {
-      throw new ProtocolValidationError(
-        "request.params.limit",
-        `must be between 1 and ${MAX_HISTORY_PAGE_EVENTS}`,
-      );
-    }
+    exact(params, "request.params", ["snapshotId", "pageCursor"]);
     return {
       ...base,
       method,
       params: {
-        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
-        ...(params.afterEventId === undefined
-          ? {}
-          : { afterEventId: parseEventId(params.afterEventId, "request.params.afterEventId") }),
-        ...(limit === undefined ? {} : { limit }),
+        snapshotId: boundedString(params.snapshotId, "request.params.snapshotId", 128),
+        pageCursor: boundedString(params.pageCursor, "request.params.pageCursor", 512),
+      },
+    };
+  }
+  if (method === "session.ack") {
+    exact(params, "request.params", ["subscriptionId", "cursor"]);
+    return {
+      ...base,
+      method,
+      params: {
+        subscriptionId: boundedString(params.subscriptionId, "request.params.subscriptionId", 128),
+        cursor: boundedString(params.cursor, "request.params.cursor", 512),
+      },
+    };
+  }
+  if (method === "session.unsubscribe") {
+    exact(params, "request.params", ["subscriptionId"]);
+    return {
+      ...base,
+      method,
+      params: {
+        subscriptionId: boundedString(params.subscriptionId, "request.params.subscriptionId", 128),
       },
     };
   }
@@ -793,13 +877,24 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.send") {
-    exact(params, "request.params", ["sessionId", "content"]);
+    exact(params, "request.params", ["sessionId", "content", "delivery"]);
+    if (
+      params.delivery !== "prompt" &&
+      params.delivery !== "steer" &&
+      params.delivery !== "follow_up"
+    ) {
+      throw new ProtocolValidationError(
+        "request.params.delivery",
+        "must be prompt, steer, or follow_up",
+      );
+    }
     return {
       ...base,
       method,
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
         content: parseUserContent(params.content, "request.params.content"),
+        delivery: params.delivery,
       },
     };
   }
@@ -862,15 +957,18 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.subscribe") {
-    exact(params, "request.params", ["sessionId", "afterEventId"]);
+    exact(params, "request.params", ["sessionId", "fromNodeId", "after"]);
     return {
       ...base,
       method,
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
-        ...(params.afterEventId === undefined
+        ...(params.fromNodeId === undefined
           ? {}
-          : { afterEventId: parseEventId(params.afterEventId, "request.params.afterEventId") }),
+          : { fromNodeId: parseEventId(params.fromNodeId, "request.params.fromNodeId") }),
+        ...(params.after === undefined
+          ? {}
+          : { after: boundedString(params.after, "request.params.after", 512) }),
       },
     };
   }
@@ -985,20 +1083,45 @@ function parseEventList(value: unknown, path: string): readonly CanonicalEvent[]
   return value.map((event) => parseEvent(event));
 }
 
-function parseSessionSnapshot(value: unknown, path: string): SessionSnapshot {
-  const snapshot = object(value, path);
-  exact(snapshot, path, ["sessionId", "events"]);
-  const sessionId = parseSessionId(snapshot.sessionId, `${path}.sessionId`);
-  const events = parseEventList(snapshot.events, `${path}.events`);
-  for (const [index, event] of events.entries()) {
-    if (event.sessionId !== sessionId) {
-      throw new ProtocolValidationError(
-        `${path}.events[${index}].sessionId`,
-        `must match session ${sessionId}`,
-      );
-    }
+function parseSessionOpenResult(
+  value: unknown,
+  path: string,
+  allowSelectedText = false,
+): SessionOpenResult {
+  const result = object(value, path);
+  exact(result, path, [
+    "sessionId",
+    "cwd",
+    "runtime",
+    "profile",
+    ...(allowSelectedText ? ["selectedText"] : []),
+  ]);
+  const runtime = object(result.runtime, `${path}.runtime`);
+  exact(runtime, `${path}.runtime`, ["state", "activeOperationId"]);
+  const states = ["inactive", "idle", "running", "waiting_interaction", "disposing"] as const;
+  if (!states.includes(runtime.state as (typeof states)[number])) {
+    throw new ProtocolValidationError(`${path}.runtime.state`, "is not a valid runtime state");
   }
-  return { sessionId, events };
+  const profiles: readonly SessionProfile[] = ["minimal", "standard", "chat"];
+  if (!profiles.includes(result.profile as SessionProfile)) {
+    throw new ProtocolValidationError(`${path}.profile`, "is not a valid session profile");
+  }
+  return {
+    sessionId: parseSessionId(result.sessionId, `${path}.sessionId`),
+    cwd: string(result.cwd, `${path}.cwd`),
+    runtime: {
+      state: runtime.state as SessionOpenResult["runtime"]["state"],
+      ...(runtime.activeOperationId === undefined
+        ? {}
+        : {
+            activeOperationId: parseOperationId(
+              runtime.activeOperationId,
+              `${path}.runtime.activeOperationId`,
+            ),
+          }),
+    },
+    profile: result.profile as SessionProfile,
+  };
 }
 
 function parseSessionSummary(value: unknown, path: string): SessionSummary {
@@ -1118,23 +1241,30 @@ export function parseRpcResult<Method extends RpcMethod>(
     exact(result, path, []);
     parsed = {};
   } else if (method === "session.create" || method === "session.resume") {
-    parsed = parseSessionSnapshot(value, path);
+    parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
     if (!Array.isArray(value) || value.length > 10_000) {
       throw new ProtocolValidationError(path, "must contain at most 10000 sessions");
     }
     parsed = value.map((summary, index) => parseSessionSummary(summary, `${path}[${index}]`));
   } else if (method === "session.history") {
-    parsed = parseSessionHistoryPage(value);
+    const result = object(value, path);
+    exact(result, path, ["snapshotId", "page"]);
+    parsed = {
+      snapshotId: boundedString(result.snapshotId, `${path}.snapshotId`, 128),
+      page: parseSnapshotPage(result.page),
+    };
+  } else if (method === "session.ack") {
+    const result = object(value, path);
+    exact(result, path, ["cursor"]);
+    parsed = { cursor: boundedString(result.cursor, `${path}.cursor`, 512) };
+  } else if (method === "session.unsubscribe") {
+    parsed = parseBooleanResult(value, path, "unsubscribed");
   } else if (method === "session.fork" || method === "session.clone") {
     const result = object(value, path);
-    exact(result, path, ["sessionId", "events", "selectedText"]);
-    const snapshot = parseSessionSnapshot(
-      { sessionId: result.sessionId, events: result.events },
-      path,
-    );
+    const opened = parseSessionOpenResult(value, path, true);
     parsed = {
-      ...snapshot,
+      ...opened,
       ...(result.selectedText === undefined
         ? {}
         : { selectedText: boundedText(result.selectedText, `${path}.selectedText`, 262_144) }),
@@ -1168,12 +1298,71 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = { resolved: true };
   } else if (method === "session.subscribe") {
     const result = object(value, path);
-    exact(result, path, ["snapshot", "activity"]);
+    exact(result, path, ["subscriptionId", "sessionId", "fromNodeId", "snapshot", "resumedFrom"]);
+    const sessionId = parseSessionId(result.sessionId, `${path}.sessionId`);
+    const fromNodeId =
+      result.fromNodeId === undefined
+        ? undefined
+        : parseEventId(result.fromNodeId, `${path}.fromNodeId`);
+    let snapshot: SnapshotDescriptor | undefined;
+    if (result.snapshot !== undefined) {
+      const descriptor = object(result.snapshot, `${path}.snapshot`);
+      exact(descriptor, `${path}.snapshot`, [
+        "snapshotId",
+        "sessionId",
+        "fromNodeId",
+        "boundaryCursor",
+        "eventCount",
+        "page",
+      ]);
+      const snapshotSessionId = parseSessionId(descriptor.sessionId, `${path}.snapshot.sessionId`);
+      if (snapshotSessionId !== sessionId) {
+        throw new ProtocolValidationError(`${path}.snapshot.sessionId`, "must match sessionId");
+      }
+      const snapshotFromNodeId =
+        descriptor.fromNodeId === undefined
+          ? undefined
+          : parseEventId(descriptor.fromNodeId, `${path}.snapshot.fromNodeId`);
+      if (snapshotFromNodeId !== fromNodeId) {
+        throw new ProtocolValidationError(`${path}.snapshot.fromNodeId`, "must match fromNodeId");
+      }
+      const page = parseSnapshotPage(descriptor.page, sessionId);
+      const eventCount = nonNegativeInteger(descriptor.eventCount, `${path}.snapshot.eventCount`);
+      if (page.events.length > eventCount || (page.complete && page.events.length !== eventCount)) {
+        throw new ProtocolValidationError(
+          `${path}.snapshot.eventCount`,
+          "must match the frozen snapshot pages",
+        );
+      }
+      snapshot = {
+        snapshotId: boundedString(descriptor.snapshotId, `${path}.snapshot.snapshotId`, 128),
+        sessionId: snapshotSessionId,
+        ...(snapshotFromNodeId === undefined ? {} : { fromNodeId: snapshotFromNodeId }),
+        boundaryCursor: boundedString(
+          descriptor.boundaryCursor,
+          `${path}.snapshot.boundaryCursor`,
+          512,
+        ),
+        eventCount,
+        page,
+      };
+    }
+    const resumedFrom =
+      result.resumedFrom === undefined
+        ? undefined
+        : boundedString(result.resumedFrom, `${path}.resumedFrom`, 512);
+    if ((snapshot === undefined) === (resumedFrom === undefined)) {
+      throw new ProtocolValidationError(
+        path,
+        "must contain exactly one of snapshot or resumedFrom",
+      );
+    }
     parsed = {
-      snapshot: parseEventList(result.snapshot, `${path}.snapshot`),
-      ...(result.activity === undefined
-        ? {}
-        : { activity: parseSessionActivityFrame(result.activity) }),
+      subscriptionId: boundedString(result.subscriptionId, `${path}.subscriptionId`, 128),
+      sessionId,
+      ...(fromNodeId === undefined ? {} : { fromNodeId }),
+      ...(snapshot === undefined ? {} : { snapshot }),
+      ...(resumedFrom === undefined ? {} : { resumedFrom }),
     };
   } else if (method === "session.workspace.diff") {
     parsed = parseWorkspaceDiff(value);
@@ -1213,6 +1402,8 @@ const RPC_METHODS = new Set<RpcMethod>([
   "session.resume",
   "session.list",
   "session.history",
+  "session.ack",
+  "session.unsubscribe",
   "session.fork",
   "session.clone",
   "session.send",
@@ -1313,18 +1504,37 @@ export function parseServerMessage(value: unknown): ServerMessage {
     };
   }
   if (kind === "event") {
-    exact(message, "message", ["kind", "sessionId", "event"]);
+    exact(message, "message", [
+      "kind",
+      "subscriptionId",
+      "sessionId",
+      "sequence",
+      "cursor",
+      "event",
+    ]);
     const sessionId = parseSessionId(message.sessionId, "message.sessionId");
     const event = parseEvent(message.event);
     if (event.sessionId !== sessionId) {
       throw new ProtocolValidationError("message.event.sessionId", "must match message.sessionId");
     }
-    return { kind, sessionId, event };
-  }
-  if (kind === "activity") {
-    exact(message, "message", ["kind", "sessionId", "frame"]);
+    const sequence = nonNegativeInteger(message.sequence, "message.sequence");
+    if (sequence < 1) {
+      throw new ProtocolValidationError("message.sequence", "must be at least 1");
+    }
     return {
       kind,
+      subscriptionId: boundedString(message.subscriptionId, "message.subscriptionId", 128),
+      sessionId,
+      sequence,
+      cursor: boundedString(message.cursor, "message.cursor", 512),
+      event,
+    };
+  }
+  if (kind === "activity") {
+    exact(message, "message", ["kind", "subscriptionId", "sessionId", "frame"]);
+    return {
+      kind,
+      subscriptionId: boundedString(message.subscriptionId, "message.subscriptionId", 128),
       sessionId: parseSessionId(message.sessionId, "message.sessionId"),
       frame: parseSessionActivityFrame(message.frame),
     };

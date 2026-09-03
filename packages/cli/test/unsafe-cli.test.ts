@@ -9,7 +9,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { AxlDaemon, DaemonClient, type SessionSnapshot } from "@axl/daemon";
+import { AxlDaemon, DaemonClient } from "@axl/daemon";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
 import type { ModelStreamEvent } from "@axl/protocol";
 
@@ -151,11 +151,20 @@ test("--unsafe starts a separate unenforced daemon and records the warning state
     sandboxProvider: "none",
   });
 
-  const created = (await client.request("session.create", { cwd: workspace })) as SessionSnapshot;
-  const sandbox = created.events.find((event) => event.type === "sandbox.configured");
+  const created = await client.request("session.create", { cwd: workspace });
+  const subscription = await client.request("session.subscribe", {
+    sessionId: created.sessionId,
+  });
+  assert.ok(subscription.snapshot?.page.complete);
+  const events = subscription.snapshot.page.events;
+  await client.request("session.ack", {
+    subscriptionId: subscription.subscriptionId,
+    cursor: subscription.snapshot.boundaryCursor,
+  });
+  const sandbox = events.find((event) => event.type === "sandbox.configured");
   assert.equal(sandbox?.type === "sandbox.configured" && sandbox.payload.enforced, false);
   assert.equal(sandbox?.type === "sandbox.configured" && sandbox.payload.provider, "none");
-  const constraints = created.events.filter(
+  const constraints = events.filter(
     (event) => event.type === "prompt.section" && event.payload.name === "constraints",
   );
   assert.equal(

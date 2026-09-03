@@ -4,4 +4,4 @@
 export * from "./client.ts";
 export * from "./daemon.ts";
 export * from "./session-manager.ts";
-export type { SessionSnapshot, WireEvent } from "@axl/protocol";
+export type { WireEvent } from "@axl/protocol";

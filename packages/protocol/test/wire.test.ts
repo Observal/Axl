@@ -8,7 +8,7 @@ import {
   encodeWireMessage,
   ProtocolValidationError,
   parseServerMessage,
-  parseSessionHistoryPage,
+  parseSnapshotPage,
   parseWireRequest,
   parseWorkspaceDiff,
   requiredCapability,
@@ -42,18 +42,26 @@ test("validates every request shape", () => {
       kind: "request",
       id: 2,
       method: "session.resume",
-      params: { sessionId, includeEvents: false },
+      params: { sessionId },
     },
     { kind: "request", id: 17, method: "session.list", params: {} },
     {
       kind: "request",
       id: 20,
       method: "session.history",
-      params: {
-        sessionId,
-        afterEventId: "00000000-0000-4000-8000-000000000001",
-        limit: 500,
-      },
+      params: { snapshotId: "snapshot-1", pageCursor: "page-1" },
+    },
+    {
+      kind: "request",
+      id: 24,
+      method: "session.ack",
+      params: { subscriptionId: "subscription-1", cursor: "cursor-1" },
+    },
+    {
+      kind: "request",
+      id: 25,
+      method: "session.unsubscribe",
+      params: { subscriptionId: "subscription-1" },
     },
     {
       kind: "request",
@@ -66,19 +74,11 @@ test("validates every request shape", () => {
       kind: "request",
       id: 3,
       method: "session.send",
-      params: { sessionId, content: [{ type: "text", text: "hello" }] },
-    },
-    {
-      kind: "request",
-      id: 23,
-      method: "session.steer",
-      params: { sessionId, content: [{ type: "text", text: "adjust" }] },
-    },
-    {
-      kind: "request",
-      id: 24,
-      method: "session.followUp",
-      params: { sessionId, content: [{ type: "text", text: "then summarize" }] },
+      params: {
+        sessionId,
+        content: [{ type: "text", text: "hello" }],
+        delivery: "prompt",
+      },
     },
     {
       kind: "request",
@@ -86,14 +86,13 @@ test("validates every request shape", () => {
       method: "session.shell",
       params: { sessionId, command: "pwd", excluded: false },
     },
+    { kind: "request", id: 5, method: "session.interrupt", params: { sessionId } },
     {
       kind: "request",
-      id: 22,
-      method: "session.compact",
-      params: { sessionId, instructions: "Focus on code changes" },
+      id: 5,
+      method: "session.subscribe",
+      params: { sessionId, after: "cursor-1" },
     },
-    { kind: "request", id: 5, method: "session.interrupt", params: { sessionId } },
-    { kind: "request", id: 5, method: "session.subscribe", params: { sessionId } },
     { kind: "request", id: 6, method: "session.reload", params: { sessionId } },
     { kind: "request", id: 7, method: "session.dispose", params: { sessionId } },
     {
@@ -106,14 +105,7 @@ test("validates every request shape", () => {
       kind: "request",
       id: 9,
       method: "session.create",
-      params: {
-        cwd: "/repo",
-        modelId: "gpt-5",
-        thinkingLevel: "medium",
-        webFetch: true,
-        webSearch: false,
-        profile: "exec",
-      },
+      params: { cwd: "/repo", modelId: "gpt-5", thinkingLevel: "medium" },
     },
     {
       kind: "request",
@@ -205,40 +197,38 @@ test("rejects malformed requests at the wire boundary", () => {
     },
     { kind: "request", id: 1, method: "unknown", params: {} },
     { kind: "request", id: 1, method: "session.create", params: { cwd: "" } },
-    {
-      kind: "request",
-      id: 1,
-      method: "session.create",
-      params: { cwd: "/repo", profile: "unknown" },
-    },
     { kind: "request", id: 1, method: "session.resume", params: { sessionId: "bad" } },
     {
       kind: "request",
       id: 1,
       method: "session.resume",
-      params: { sessionId, includeEvents: "no" },
+      params: { sessionId, includeEvents: false },
     },
     { kind: "request", id: 1, method: "session.list", params: { cwd: "/repo" } },
     {
       kind: "request",
       id: 1,
       method: "session.history",
-      params: { sessionId, limit: 0 },
+      params: { snapshotId: "snapshot-1", pageCursor: "" },
     },
     {
       kind: "request",
       id: 1,
-      method: "session.history",
-      params: { sessionId, limit: 5_001 },
+      method: "session.ack",
+      params: { subscriptionId: "", cursor: "cursor-1" },
     },
     { kind: "request", id: 1, method: "session.fork", params: { sessionId } },
-    { kind: "request", id: 1, method: "session.send", params: { sessionId, content: "bad" } },
-    { kind: "request", id: 1, method: "session.steer", params: { sessionId } },
     {
       kind: "request",
       id: 1,
-      method: "session.followUp",
-      params: { sessionId, content: [{ type: "video", text: "bad" }] },
+      method: "session.send",
+      params: { sessionId, content: "bad", delivery: "prompt" },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.send",
+      params: { sessionId, content: [], delivery: "later" },
     },
     {
       kind: "request",
@@ -252,19 +242,12 @@ test("rejects malformed requests at the wire boundary", () => {
       method: "session.shell",
       params: { sessionId, command: "pwd", excluded: "no" },
     },
-    { kind: "request", id: 1, method: "session.compact", params: { sessionId, instructions: "" } },
     { kind: "request", id: 1, method: "session.configure", params: { sessionId } },
     {
       kind: "request",
       id: 1,
       method: "session.configure",
       params: { sessionId, thinkingLevel: "extreme" },
-    },
-    {
-      kind: "request",
-      id: 1,
-      method: "session.configure",
-      params: { sessionId, webFetch: "yes" },
     },
     {
       kind: "request",
@@ -301,7 +284,7 @@ test("rejects malformed requests at the wire boundary", () => {
   }
 });
 
-test("validates session history pages", () => {
+test("validates frozen snapshot pages", () => {
   const event = {
     version: 1,
     id: "00000000-0000-4000-8000-000000000001",
@@ -311,20 +294,56 @@ test("validates session history pages", () => {
     type: "session.created",
     payload: { cwd: "/repo" },
   };
-  assert.deepEqual(parseSessionHistoryPage({ events: [event], done: true }, sessionId), {
+  assert.deepEqual(parseSnapshotPage({ events: [event], complete: true }, sessionId), {
     events: [event],
-    done: true,
+    complete: true,
   });
   assert.throws(
-    () => parseSessionHistoryPage({ events: [], done: false }, sessionId),
+    () => parseSnapshotPage({ events: [], complete: false }, sessionId),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () => parseSnapshotPage({ events: [event], complete: false }, sessionId),
     ProtocolValidationError,
   );
   assert.throws(
     () =>
-      parseSessionHistoryPage(
-        { events: [{ ...event, sessionId: "123e4567-e89b-42d3-a456-426614174001" }], done: true },
+      parseSnapshotPage(
+        {
+          events: [{ ...event, sessionId: "123e4567-e89b-42d3-a456-426614174001" }],
+          complete: true,
+        },
         sessionId,
       ),
+    ProtocolValidationError,
+  );
+
+  const subscribed = {
+    kind: "success",
+    id: 8,
+    method: "session.subscribe",
+    result: {
+      subscriptionId: "subscription-1",
+      sessionId,
+      snapshot: {
+        snapshotId: "snapshot-1",
+        sessionId,
+        boundaryCursor: "cursor-1",
+        eventCount: 1,
+        page: { events: [event], complete: true },
+      },
+    },
+  } as const;
+  assert.deepEqual(parseServerMessage(subscribed), subscribed);
+  assert.throws(
+    () =>
+      parseServerMessage({
+        ...subscribed,
+        result: {
+          ...subscribed.result,
+          snapshot: { ...subscribed.result.snapshot, eventCount: 2 },
+        },
+      }),
     ProtocolValidationError,
   );
 });
@@ -431,6 +450,7 @@ test("validates server messages and newline framing", () => {
 
   const activity = {
     kind: "activity",
+    subscriptionId: "subscription-1",
     sessionId,
     frame: {
       operationId: "123e4567-e89b-42d3-a456-426614174001",
@@ -440,6 +460,27 @@ test("validates server messages and newline framing", () => {
     },
   } as const;
   assert.deepEqual(parseServerMessage(activity), activity);
+  const deliveredEvent = {
+    kind: "event",
+    subscriptionId: "subscription-1",
+    sessionId,
+    sequence: 1,
+    cursor: "cursor-2",
+    event: {
+      version: 1,
+      id: "00000000-0000-4000-8000-000000000001",
+      sessionId,
+      parentId: null,
+      timestamp: 1,
+      type: "session.created",
+      payload: { cwd: "/repo" },
+    },
+  } as const;
+  assert.deepEqual(parseServerMessage(deliveredEvent), deliveredEvent);
+  assert.throws(
+    () => parseServerMessage({ ...deliveredEvent, sequence: 0 }),
+    ProtocolValidationError,
+  );
   assert.throws(
     () =>
       parseServerMessage({

@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import type { DaemonClient, SessionSnapshot } from "@axl/daemon";
+import type { DaemonClient, WireEvent } from "@axl/daemon";
 import {
   type CanonicalEvent,
   EVENT_FORMAT_VERSION,
@@ -62,6 +62,30 @@ class Output extends EventEmitter {
   }
 }
 
+function openResult(events: readonly CanonicalEvent[]) {
+  const created = events.find((event) => event.type === "session.created");
+  return {
+    sessionId,
+    cwd: created?.type === "session.created" ? created.payload.cwd : process.cwd(),
+    runtime: { state: "idle" },
+    profile: "minimal",
+  } as const;
+}
+
+function subscription(events: readonly CanonicalEvent[]) {
+  return {
+    subscriptionId: "00000000-0000-4000-8000-000000000100",
+    sessionId,
+    snapshot: {
+      snapshotId: "00000000-0000-4000-8000-000000000101",
+      sessionId,
+      boundaryCursor: "00000000-0000-4000-8000-000000000102",
+      eventCount: events.length,
+      page: { events, complete: true },
+    },
+  } as const;
+}
+
 function client(
   events: readonly CanonicalEvent[],
   requests: unknown[] = [],
@@ -70,8 +94,11 @@ function client(
   return {
     async request(method: string, params: unknown) {
       requests.push({ method, params });
-      if (method === "session.create") return { sessionId, events } satisfies SessionSnapshot;
-      if (method === "session.subscribe") return { snapshot: [] };
+      if (method === "session.create") return openResult(events);
+      if (method === "session.subscribe") return subscription(events);
+      if (method === "session.ack") {
+        return { cursor: "00000000-0000-4000-8000-000000000102" };
+      }
       if (method === "session.send") {
         if (sendError !== undefined) throw sendError;
         return { stopReason: "stop" };
@@ -106,10 +133,9 @@ function client(
 
 class ReconnectClient {
   private disconnectListener: ((error: Error) => void) | undefined;
-  private eventListener:
-    | ((message: { sessionId: typeof sessionId; event: CanonicalEvent }) => void)
-    | undefined;
+  private eventListener: ((message: WireEvent) => void) | undefined;
   readonly requests: string[] = [];
+  private eventSequence = 0;
   private readonly events: readonly CanonicalEvent[];
 
   constructor(events: readonly CanonicalEvent[]) {
@@ -119,16 +145,17 @@ class ReconnectClient {
   async request(method: string): Promise<unknown> {
     this.requests.push(method);
     if (method === "session.create" || method === "session.resume") {
-      return { sessionId, events: this.events } satisfies SessionSnapshot;
+      return openResult(this.events);
     }
-    if (method === "session.subscribe") return { snapshot: [] };
+    if (method === "session.subscribe") return subscription(this.events);
+    if (method === "session.ack") {
+      return { cursor: "00000000-0000-4000-8000-000000000102" };
+    }
     if (method === "session.workspace.checkpoint") return { enabled: false };
     throw new Error(`Unexpected request ${method}`);
   }
 
-  onEvent(
-    listener: (message: { sessionId: typeof sessionId; event: CanonicalEvent }) => void,
-  ): () => void {
+  onEvent(listener: (message: WireEvent) => void): () => void {
     this.eventListener = listener;
     return () => {
       this.eventListener = undefined;
@@ -147,7 +174,15 @@ class ReconnectClient {
   }
 
   emit(value: CanonicalEvent): void {
-    this.eventListener?.({ sessionId, event: value });
+    this.eventSequence += 1;
+    this.eventListener?.({
+      kind: "event",
+      subscriptionId: "00000000-0000-4000-8000-000000000100",
+      sessionId,
+      sequence: this.eventSequence,
+      cursor: `cursor-${this.eventSequence}`,
+      event: value,
+    });
   }
 
   close(): void {}
@@ -302,6 +337,7 @@ test("reconnects, resumes, and resubscribes after daemon loss", async () => {
     "session.resume",
     "session.workspace.checkpoint",
     "session.subscribe",
+    "session.ack",
   ]);
   assert.match(output.text, /daemon reconnected/);
   const connectedTerminal = new VirtualTerminal(80, 16);

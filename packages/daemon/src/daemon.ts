@@ -10,12 +10,16 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   type CanonicalEvent,
+  type EventCursor,
+  type EventId,
   encodeWireMessage,
   parseRpcResult,
   parseWireRequest,
   requiredCapability,
   type ServerMessage,
   type SessionActivityFrame,
+  type SessionId,
+  type SnapshotPage,
   WIRE_CAPABILITIES,
   WIRE_PROTOCOL_VERSION,
   type WireRequest,
@@ -34,15 +38,51 @@ export interface DaemonOptions extends SessionManagerOptions {
 
 const MAX_REQUEST_BYTES = 1_048_576;
 const MAX_PENDING_REQUESTS = 64;
+const MAX_SNAPSHOT_PAGE_BYTES = 768 * 1024;
+const MAX_SNAPSHOT_PAGE_EVENTS = 5_000;
+const MAX_SNAPSHOT_TAIL_BYTES = 4 * 1024 * 1024;
+const MAX_SNAPSHOT_TAIL_EVENTS = 1_024;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PRESENCE_TIMEOUT_MS = 60_000;
 const SOCKET_PROBE_TIMEOUT_MS = 500;
+
+interface CursorRecord {
+  readonly subscriptionId: string;
+  readonly sessionId: SessionId;
+  readonly fromNodeId?: EventId;
+  readonly position: number;
+  acknowledged: boolean;
+}
+
+interface ConnectionSubscription {
+  readonly id: string;
+  readonly sessionId: SessionId;
+  readonly fromNodeId?: EventId;
+  readonly boundaryCursor?: EventCursor;
+  readonly snapshotId?: string;
+  readonly snapshotEvents: readonly CanonicalEvent[];
+  readonly pageCursors: Map<string, number>;
+  readonly pageResults: Map<string, SnapshotPage>;
+  readonly bufferedEvents: Array<{ readonly event: CanonicalEvent; readonly position: number }>;
+  readonly bufferedActivity: SessionActivityFrame[];
+  unsubscribe: () => void;
+  nextPosition: number;
+  sequence: number;
+  bufferedEventBytes: number;
+  acknowledgedPosition: number;
+  acknowledgedCursor?: EventCursor;
+  active: boolean;
+  finalPageServed: boolean;
+  activateAfterResponse: boolean;
+  invalidated: boolean;
+}
 
 interface ConnectionState {
   initialized: boolean;
   attachmentId?: string;
   grantedCapabilities: ReadonlySet<string>;
   pendingRequests: number;
+  readonly subscriptions: Map<string, ConnectionSubscription>;
 }
 
 type SocketIdentity = { readonly dev: number; readonly ino: number };
@@ -105,6 +145,7 @@ export class AxlDaemon {
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
+  private readonly cursors = new Map<EventCursor, CursorRecord>();
 
   constructor(options: DaemonOptions) {
     this.sessions = new SessionManager(options);
@@ -162,11 +203,11 @@ export class AxlDaemon {
 
   private accept(socket: Socket): void {
     this.connections.add(socket);
-    const subscriptions = new Set<() => void>();
     const state: ConnectionState = {
       initialized: false,
       grantedCapabilities: new Set(),
       pendingRequests: 0,
+      subscriptions: new Map(),
     };
     const send = (message: ServerMessage): void => {
       if (!socket.destroyed) socket.write(encodeWireMessage(message));
@@ -229,15 +270,15 @@ export class AxlDaemon {
             continue;
           }
           state.pendingRequests += 1;
-          void this.handleLine(line, send, subscriptions, state).finally(() => {
+          void this.handleLine(line, send, state).finally(() => {
             state.pendingRequests -= 1;
           });
         }
       }
     });
     const cleanup = (): void => {
-      for (const unsubscribe of subscriptions) unsubscribe();
-      subscriptions.clear();
+      for (const subscription of state.subscriptions.values()) subscription.unsubscribe();
+      state.subscriptions.clear();
       this.connections.delete(socket);
     };
     socket.once("close", cleanup);
@@ -247,7 +288,6 @@ export class AxlDaemon {
   private async handleLine(
     line: string,
     send: (message: ServerMessage) => void,
-    subscriptions: Set<() => void>,
     state: ConnectionState,
   ): Promise<void> {
     let request: WireRequest;
@@ -300,16 +340,14 @@ export class AxlDaemon {
           );
         }
       }
-      const result = parseRpcResult(
-        request.method,
-        await this.dispatch(request, send, subscriptions, state),
-      );
+      const result = parseRpcResult(request.method, await this.dispatch(request, send, state));
       send({
         kind: "success",
         id: request.id,
         method: request.method,
         result,
       } as ServerMessage);
+      this.activateReadySubscriptions(state, send);
     } catch (error) {
       send({
         kind: "error",
@@ -327,7 +365,6 @@ export class AxlDaemon {
   private async dispatch(
     request: WireRequest,
     send: (message: ServerMessage) => void,
-    subscriptions: Set<() => void>,
     state: ConnectionState,
   ): Promise<unknown> {
     switch (request.method) {
@@ -351,41 +388,49 @@ export class AxlDaemon {
       case "connection.ping":
         return {};
       case "session.create": {
-        const { cwd, modelId, thinkingLevel, webFetch, webSearch, profile } = request.params;
-        return this.sessions.create(cwd, {
+        const { cwd, modelId, thinkingLevel } = request.params;
+        const created = await this.sessions.create(cwd, {
           ...(modelId === undefined ? {} : { modelId }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-          ...(webFetch === undefined ? {} : { webFetch }),
-          ...(webSearch === undefined ? {} : { webSearch }),
-          ...(profile === undefined ? {} : { profile }),
         });
+        return this.sessions.describe(created.sessionId);
       }
-      case "session.resume": {
-        const snapshot = await this.sessions.resume(request.params.sessionId);
-        return request.params.includeEvents === false
-          ? { sessionId: snapshot.sessionId, events: [] }
-          : snapshot;
-      }
+      case "session.resume":
+        await this.sessions.resume(request.params.sessionId);
+        return this.sessions.describe(request.params.sessionId);
       case "session.list":
         return this.sessions.list();
       case "session.history":
-        return this.sessions.history(
+        return this.snapshotPage(state, request.params.snapshotId, request.params.pageCursor);
+      case "session.ack":
+        return this.acknowledge(state, request.params.subscriptionId, request.params.cursor);
+      case "session.unsubscribe":
+        return this.unsubscribe(state, request.params.subscriptionId);
+      case "session.fork": {
+        const forked = await this.sessions.fork(
           request.params.sessionId,
-          request.params.afterEventId,
-          request.params.limit,
+          request.params.fromEventId,
         );
-      case "session.fork":
-        return this.sessions.fork(request.params.sessionId, request.params.fromEventId);
-      case "session.clone":
-        return this.sessions.clone(request.params.sessionId);
+        return {
+          ...this.sessions.describe(forked.sessionId),
+          ...(forked.selectedText === undefined ? {} : { selectedText: forked.selectedText }),
+        };
+      }
+      case "session.clone": {
+        const cloned = await this.sessions.clone(request.params.sessionId);
+        return {
+          ...this.sessions.describe(cloned.sessionId),
+          ...(cloned.selectedText === undefined ? {} : { selectedText: cloned.selectedText }),
+        };
+      }
       case "session.send":
+        if (request.params.delivery !== "prompt") {
+          throw new DaemonError(
+            "unsupported_capability",
+            `Delivery mode ${request.params.delivery} is not available`,
+          );
+        }
         return this.sessions.send(request.params.sessionId, request.params.content);
-      case "session.steer":
-        return this.sessions.steer(request.params.sessionId, request.params.content);
-      case "session.followUp":
-        return this.sessions.followUp(request.params.sessionId, request.params.content);
-      case "session.compact":
-        return this.sessions.compact(request.params.sessionId, request.params.instructions);
       case "session.shell":
         return this.sessions.shell(
           request.params.sessionId,
@@ -397,12 +442,10 @@ export class AxlDaemon {
       case "session.reload":
         return this.sessions.reload(request.params.sessionId);
       case "session.configure": {
-        const { sessionId, modelId, thinkingLevel, webFetch, webSearch } = request.params;
+        const { sessionId, modelId, thinkingLevel } = request.params;
         return this.sessions.configure(sessionId, {
           ...(modelId === undefined ? {} : { modelId }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-          ...(webFetch === undefined ? {} : { webFetch }),
-          ...(webSearch === undefined ? {} : { webSearch }),
         });
       }
       case "session.interaction.respond": {
@@ -413,23 +456,8 @@ export class AxlDaemon {
         });
         return { resolved: true };
       }
-      case "session.subscribe": {
-        const { sessionId, afterEventId } = request.params;
-        const listener = (event: CanonicalEvent): void => send({ kind: "event", sessionId, event });
-        const activityListener = (frame: SessionActivityFrame): void =>
-          send({ kind: "activity", sessionId, frame });
-        const subscription = this.sessions.subscribe(
-          sessionId,
-          listener,
-          afterEventId,
-          activityListener,
-        );
-        subscriptions.add(subscription.unsubscribe);
-        return {
-          snapshot: subscription.snapshot,
-          ...(subscription.activity === undefined ? {} : { activity: subscription.activity }),
-        };
-      }
+      case "session.subscribe":
+        return this.subscribe(state, send, request.params);
       case "session.blob.start":
         return this.sessions.startBlobUpload(request.params.sessionId, request.params);
       case "session.blob.chunk":
@@ -460,6 +488,329 @@ export class AxlDaemon {
       case "session.dispose":
         await this.sessions.dispose(request.params.sessionId);
         return { disposed: true };
+    }
+  }
+
+  private subscribe(
+    state: ConnectionState,
+    send: (message: ServerMessage) => void,
+    params: Extract<WireRequest, { readonly method: "session.subscribe" }>["params"],
+  ): unknown {
+    const subscriptionId = randomUUID();
+    let owned!: ConnectionSubscription;
+    const registered = this.sessions.subscribe(
+      params.sessionId,
+      (event) => {
+        const position = owned.nextPosition;
+        owned.nextPosition += 1;
+        if (owned.active) this.deliverEvent(owned, event, position, send);
+        else this.bufferSnapshotEvent(owned, event, position);
+      },
+      (frame) => {
+        if (owned.active) {
+          send({
+            kind: "activity",
+            subscriptionId: owned.id,
+            sessionId: owned.sessionId,
+            frame,
+          });
+        } else {
+          this.bufferSnapshotActivity(owned, frame);
+        }
+      },
+      params.fromNodeId,
+    );
+
+    const boundaryPosition = registered.allEvents.length - 1;
+    const after = params.after;
+    let resumedPosition: number | undefined;
+    if (after !== undefined) {
+      const cursor = this.cursors.get(after);
+      if (
+        cursor === undefined ||
+        !cursor.acknowledged ||
+        cursor.sessionId !== params.sessionId ||
+        cursor.fromNodeId !== params.fromNodeId
+      ) {
+        registered.unsubscribe();
+        throw new DaemonError("snapshot_required", "The event cursor cannot resume this view");
+      }
+      resumedPosition = cursor.position;
+    }
+
+    const snapshotId = resumedPosition === undefined ? randomUUID() : undefined;
+    const boundaryCursor =
+      resumedPosition === undefined
+        ? this.createCursor(subscriptionId, params.sessionId, params.fromNodeId, boundaryPosition)
+        : undefined;
+    owned = {
+      id: subscriptionId,
+      sessionId: params.sessionId,
+      ...(params.fromNodeId === undefined ? {} : { fromNodeId: params.fromNodeId }),
+      ...(boundaryCursor === undefined ? {} : { boundaryCursor }),
+      ...(snapshotId === undefined ? {} : { snapshotId }),
+      snapshotEvents: registered.snapshot,
+      pageCursors: new Map(),
+      pageResults: new Map(),
+      bufferedEvents: [],
+      bufferedActivity: registered.activity === undefined ? [] : [registered.activity],
+      unsubscribe: registered.unsubscribe,
+      nextPosition: registered.allEvents.length,
+      sequence: 0,
+      bufferedEventBytes: 0,
+      acknowledgedPosition: resumedPosition ?? -2,
+      ...(after === undefined ? {} : { acknowledgedCursor: after }),
+      active: false,
+      finalPageServed: false,
+      activateAfterResponse: resumedPosition !== undefined,
+      invalidated: false,
+    };
+    state.subscriptions.set(subscriptionId, owned);
+
+    if (resumedPosition !== undefined) {
+      for (const [offset, event] of registered.allEvents.slice(resumedPosition + 1).entries()) {
+        this.bufferSnapshotEvent(owned, event, resumedPosition + 1 + offset);
+      }
+      if (owned.invalidated) {
+        state.subscriptions.delete(subscriptionId);
+        throw new DaemonError(
+          "snapshot_required",
+          "The resumable tail exceeded its delivery limit",
+        );
+      }
+      return {
+        subscriptionId,
+        sessionId: params.sessionId,
+        ...(params.fromNodeId === undefined ? {} : { fromNodeId: params.fromNodeId }),
+        resumedFrom: after,
+      };
+    }
+
+    const firstPage = this.buildSnapshotPage(owned, 0);
+    owned.finalPageServed = firstPage.complete;
+    return {
+      subscriptionId,
+      sessionId: params.sessionId,
+      ...(params.fromNodeId === undefined ? {} : { fromNodeId: params.fromNodeId }),
+      snapshot: {
+        snapshotId,
+        sessionId: params.sessionId,
+        ...(params.fromNodeId === undefined ? {} : { fromNodeId: params.fromNodeId }),
+        boundaryCursor,
+        eventCount: registered.snapshot.length,
+        page: firstPage,
+      },
+    };
+  }
+
+  private snapshotPage(
+    state: ConnectionState,
+    snapshotId: string,
+    pageCursor: string,
+  ): { readonly snapshotId: string; readonly page: SnapshotPage } {
+    const subscription = [...state.subscriptions.values()].find(
+      (candidate) => candidate.snapshotId === snapshotId,
+    );
+    if (subscription === undefined) {
+      throw new DaemonError("snapshot_required", "The snapshot is unknown or no longer available");
+    }
+    const cached = subscription.pageResults.get(pageCursor);
+    if (cached !== undefined) return { snapshotId, page: cached };
+    if (subscription.invalidated) {
+      throw new DaemonError("snapshot_required", "The snapshot tail exceeded its delivery limit");
+    }
+    const offset = subscription.pageCursors.get(pageCursor);
+    if (offset === undefined) {
+      throw new DaemonError("unknown_cursor", "The page cursor does not belong to this snapshot");
+    }
+    const page = this.buildSnapshotPage(subscription, offset);
+    subscription.pageResults.set(pageCursor, page);
+    if (page.complete) subscription.finalPageServed = true;
+    return { snapshotId, page };
+  }
+
+  private acknowledge(
+    state: ConnectionState,
+    subscriptionId: string,
+    cursor: EventCursor,
+  ): { readonly cursor: EventCursor } {
+    const subscription = state.subscriptions.get(subscriptionId);
+    if (subscription === undefined) {
+      throw new DaemonError("unknown_subscription", "The subscription is not attached here");
+    }
+    if (subscription.invalidated) {
+      throw new DaemonError("snapshot_required", "The snapshot tail exceeded its delivery limit");
+    }
+    const record = this.cursors.get(cursor);
+    if (record === undefined || record.subscriptionId !== subscriptionId) {
+      throw new DaemonError("unknown_cursor", "The cursor does not belong to this subscription");
+    }
+    if (cursor === subscription.boundaryCursor) {
+      if (!subscription.finalPageServed) {
+        throw new DaemonError(
+          "snapshot_required",
+          "Finish the frozen snapshot before acknowledging it",
+        );
+      }
+      subscription.activateAfterResponse = true;
+    }
+    record.acknowledged = true;
+    if (record.position < subscription.acknowledgedPosition) {
+      return { cursor: subscription.acknowledgedCursor ?? cursor };
+    }
+    subscription.acknowledgedPosition = record.position;
+    subscription.acknowledgedCursor = cursor;
+    return { cursor };
+  }
+
+  private unsubscribe(
+    state: ConnectionState,
+    subscriptionId: string,
+  ): { readonly unsubscribed: boolean } {
+    const subscription = state.subscriptions.get(subscriptionId);
+    if (subscription === undefined) {
+      throw new DaemonError("unknown_subscription", "The subscription is not attached here");
+    }
+    subscription.unsubscribe();
+    state.subscriptions.delete(subscriptionId);
+    return { unsubscribed: true };
+  }
+
+  private buildSnapshotPage(subscription: ConnectionSubscription, start: number): SnapshotPage {
+    const events: CanonicalEvent[] = [];
+    let bytes = 0;
+    let offset = start;
+    while (
+      offset < subscription.snapshotEvents.length &&
+      events.length < MAX_SNAPSHOT_PAGE_EVENTS
+    ) {
+      const event = subscription.snapshotEvents[offset];
+      if (event === undefined) break;
+      const eventBytes = Buffer.byteLength(JSON.stringify(event));
+      if (eventBytes > MAX_SNAPSHOT_PAGE_BYTES) {
+        throw new DaemonError(
+          "event_migration_required",
+          `Event ${event.id} exceeds the canonical event limit`,
+        );
+      }
+      if (events.length > 0 && bytes + eventBytes > MAX_SNAPSHOT_PAGE_BYTES) break;
+      events.push(event);
+      bytes += eventBytes;
+      offset += 1;
+    }
+    const complete = offset >= subscription.snapshotEvents.length;
+    if (complete) return { events, complete: true };
+    const nextPageCursor = randomUUID();
+    subscription.pageCursors.set(nextPageCursor, offset);
+    return { events, nextPageCursor, complete: false };
+  }
+
+  private createCursor(
+    subscriptionId: string,
+    sessionId: SessionId,
+    fromNodeId: EventId | undefined,
+    position: number,
+  ): EventCursor {
+    const cursor = randomUUID();
+    this.cursors.set(cursor, {
+      subscriptionId,
+      sessionId,
+      ...(fromNodeId === undefined ? {} : { fromNodeId }),
+      position,
+      acknowledged: false,
+    });
+    return cursor;
+  }
+
+  private bufferSnapshotActivity(
+    subscription: ConnectionSubscription,
+    frame: SessionActivityFrame,
+  ): void {
+    if (subscription.invalidated) return;
+    const bytes = Buffer.byteLength(JSON.stringify(frame));
+    if (
+      subscription.bufferedActivity.length >= MAX_SNAPSHOT_TAIL_EVENTS ||
+      subscription.bufferedEventBytes + bytes > MAX_SNAPSHOT_TAIL_BYTES
+    ) {
+      this.invalidateSnapshot(subscription);
+      return;
+    }
+    subscription.bufferedActivity.push(frame);
+    subscription.bufferedEventBytes += bytes;
+  }
+
+  private bufferSnapshotEvent(
+    subscription: ConnectionSubscription,
+    event: CanonicalEvent,
+    position: number,
+  ): void {
+    if (subscription.invalidated) return;
+    const bytes = Buffer.byteLength(JSON.stringify(event));
+    if (
+      subscription.bufferedEvents.length >= MAX_SNAPSHOT_TAIL_EVENTS ||
+      subscription.bufferedEventBytes + bytes > MAX_SNAPSHOT_TAIL_BYTES
+    ) {
+      this.invalidateSnapshot(subscription);
+      return;
+    }
+    subscription.bufferedEvents.push({ event, position });
+    subscription.bufferedEventBytes += bytes;
+  }
+
+  private invalidateSnapshot(subscription: ConnectionSubscription): void {
+    subscription.invalidated = true;
+    subscription.bufferedEvents.length = 0;
+    subscription.bufferedActivity.length = 0;
+    subscription.bufferedEventBytes = 0;
+    subscription.unsubscribe();
+  }
+
+  private deliverEvent(
+    subscription: ConnectionSubscription,
+    event: CanonicalEvent,
+    position: number,
+    send: (message: ServerMessage) => void,
+  ): void {
+    subscription.sequence += 1;
+    send({
+      kind: "event",
+      subscriptionId: subscription.id,
+      sessionId: subscription.sessionId,
+      sequence: subscription.sequence,
+      cursor: this.createCursor(
+        subscription.id,
+        subscription.sessionId,
+        subscription.fromNodeId,
+        position,
+      ),
+      event,
+    });
+  }
+
+  private activateReadySubscriptions(
+    state: ConnectionState,
+    send: (message: ServerMessage) => void,
+  ): void {
+    for (const subscription of state.subscriptions.values()) {
+      if (!subscription.activateAfterResponse || subscription.active || subscription.invalidated) {
+        continue;
+      }
+      subscription.activateAfterResponse = false;
+      subscription.active = true;
+      for (const buffered of subscription.bufferedEvents) {
+        this.deliverEvent(subscription, buffered.event, buffered.position, send);
+      }
+      subscription.bufferedEvents.length = 0;
+      subscription.bufferedEventBytes = 0;
+      for (const frame of subscription.bufferedActivity) {
+        send({
+          kind: "activity",
+          subscriptionId: subscription.id,
+          sessionId: subscription.sessionId,
+          frame,
+        });
+      }
+      subscription.bufferedActivity.length = 0;
     }
   }
 
