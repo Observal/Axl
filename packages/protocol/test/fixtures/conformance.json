@@ -20,9 +20,7 @@
           "version": "1.0.0",
           "instanceId": "fixture-1"
         },
-        "requestedCapabilities": [
-          "session.create"
-        ]
+        "requestedCapabilities": ["session.create"]
       }
     },
     {
@@ -320,9 +318,7 @@
         "attachmentId": "attachment-1",
         "daemonInstanceId": "daemon-1",
         "wireVersion": 4,
-        "grantedCapabilities": [
-          "session.create"
-        ],
+        "grantedCapabilities": ["session.create"],
         "scope": "local_control",
         "heartbeatIntervalMs": 20000,
         "presenceTimeoutMs": 60000
@@ -491,9 +487,7 @@
       "id": 16,
       "method": "session.reload",
       "result": {
-        "boundaryEventIds": [
-          "00000000-0000-4000-8000-000000000001"
-        ]
+        "boundaryEventIds": ["00000000-0000-4000-8000-000000000001"]
       }
     },
     {
@@ -505,9 +499,7 @@
         "requestedThinkingLevel": "medium",
         "effectiveThinkingLevel": "medium",
         "profile": "minimal",
-        "boundaryEventIds": [
-          "00000000-0000-4000-8000-000000000001"
-        ]
+        "boundaryEventIds": ["00000000-0000-4000-8000-000000000001"]
       }
     },
     {
@@ -1192,9 +1184,7 @@
           "clientKind": "tui",
           "connectedAt": 1,
           "lastSeenAt": 2,
-          "subscribedSessionIds": [
-            "123e4567-e89b-42d3-a456-426614174000"
-          ],
+          "subscribedSessionIds": ["123e4567-e89b-42d3-a456-426614174000"],
           "scope": "local_control"
         }
       ]
@@ -1432,9 +1422,7 @@
         "description": "Read a file",
         "inputSchema": {
           "type": "object",
-          "required": [
-            "path"
-          ]
+          "required": ["path"]
         }
       }
     },
@@ -1538,9 +1526,7 @@
       "payload": {
         "provider": "bubblewrap",
         "enforced": true,
-        "controls": [
-          "filesystem"
-        ],
+        "controls": ["filesystem"],
         "details": {
           "landlock": "full"
         }
@@ -1569,9 +1555,7 @@
       "type": "context.compacted",
       "payload": {
         "summary": "Earlier work",
-        "replacedEventIds": [
-          "00000000-0000-4000-8000-000000000002"
-        ]
+        "replacedEventIds": ["00000000-0000-4000-8000-000000000002"]
       }
     },
     {

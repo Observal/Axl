@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+
+import { ConversationProjector } from "@axl/sdk";
 
 import {
   type CanonicalEvent,
@@ -11,9 +14,19 @@ import {
   type EventType,
   parseEvent,
   parseEventId,
+  parseSessionId,
 } from "@axl/protocol";
 
 import { PLAIN_PALETTE, SessionView } from "../src/index.ts";
+
+const conformanceEvents = (
+  JSON.parse(
+    await readFile(
+      new URL("../../protocol/test/fixtures/conformance.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { readonly events: readonly unknown[] }
+).events.map((value) => parseEvent(value));
 
 let counter = 0;
 function makeEvent<Type extends EventType>(
@@ -224,4 +237,21 @@ test("prompt sections contribute nothing and long lines wrap", () => {
     true,
   );
   assert.equal(wrapped.filter((line) => line.includes("aaaaaa")).length, 2);
+});
+
+test("presents the language-neutral corpus from the shared SDK projection", () => {
+  const fixtureSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+  const projector = new ConversationProjector(fixtureSessionId);
+  const view = new SessionView(80, PLAIN_PALETTE, [], undefined, projector);
+  const rows: string[] = [];
+  for (const canonicalEvent of conformanceEvents) {
+    assert.equal(projector.applyEvent(canonicalEvent), true);
+    rows.push(...view.present(canonicalEvent));
+  }
+
+  assert.equal(projector.state.records.length, conformanceEvents.length);
+  assert.match(rows.join("\n"), /hello/);
+  assert.equal(view.model, projector.state.model);
+  assert.equal(view.thinking, projector.state.thinking);
+  assert.equal(view.totalCostUsd, projector.state.usage.costUsd);
 });

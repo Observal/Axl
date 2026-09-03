@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -17,6 +18,14 @@ import {
 } from "../src/index.ts";
 
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+const conformanceEvents = (
+  JSON.parse(
+    await readFile(
+      new URL("../../protocol/test/fixtures/conformance.json", import.meta.url),
+      "utf8",
+    ),
+  ) as { readonly events: readonly unknown[] }
+).events.map((value) => parseEvent(value));
 let counter = 0;
 function event<Type extends EventType>(
   type: Type,
@@ -207,4 +216,15 @@ test("replaces activity by operation and clears it on canonical completion", () 
     (error) => error instanceof ProjectionError && error.code === "activity_sequence_gap",
   );
   assert.equal(projector.state.activity, undefined);
+});
+
+test("projects the language-neutral canonical event corpus deterministically", () => {
+  const first = new ConversationProjector(sessionId);
+  const second = new ConversationProjector(sessionId);
+  for (const canonicalEvent of conformanceEvents) {
+    first.applyEvent(canonicalEvent);
+    second.applyEvent(structuredClone(canonicalEvent));
+  }
+  assert.deepEqual(first.state, second.state);
+  assert.equal(first.state.records.length, conformanceEvents.length);
 });

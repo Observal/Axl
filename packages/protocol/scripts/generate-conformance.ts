@@ -395,7 +395,10 @@ const document = {
   serverMessages,
   events,
 };
-const output = `${JSON.stringify(document, null, 2)}\n`;
+const output = `${JSON.stringify(document, null, 2).replace(
+  /\[\n\s+("(?:[^"\\]|\\.)*")\n\s*\]/g,
+  "[$1]",
+)}\n`;
 const defaultTarget = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../test/fixtures/conformance.json",
