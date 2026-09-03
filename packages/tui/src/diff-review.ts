@@ -1,22 +1,36 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { WorkspaceDiff, WorkspaceDiffScope, WorkspaceFileDiff } from "@axl/protocol";
-
 import { decodeOneKey } from "./editor.ts";
 import type { Overlay } from "./overlay.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth } from "./render.ts";
 import type { Palette } from "./transcript.ts";
 
 export type DiffLayout = "unified" | "split";
+export type WorkspaceReviewScope = "working" | "last-turn";
+
+export interface WorkspaceReviewFile {
+  readonly path: string;
+  readonly status: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly patch: string;
+  readonly truncated: boolean;
+}
+
+export interface WorkspaceReview {
+  readonly scope: WorkspaceReviewScope;
+  readonly checkpointId?: string;
+  readonly files: readonly WorkspaceReviewFile[];
+}
 
 export interface DiffReviewOptions {
-  readonly initial: WorkspaceDiff;
+  readonly initial: WorkspaceReview;
   readonly layout: DiffLayout;
   readonly palette: () => Palette;
   readonly width: () => number;
   readonly height: () => number;
-  readonly load: (scope: WorkspaceDiffScope) => Promise<WorkspaceDiff>;
+  readonly load: (scope: WorkspaceReviewScope) => Promise<WorkspaceReview>;
   readonly onLayout: (layout: DiffLayout) => void;
   readonly onClose: () => void;
   readonly refresh: () => void;
@@ -37,13 +51,13 @@ function colored(line: string, palette: Palette): string {
   return line;
 }
 
-function unifiedRows(file: WorkspaceFileDiff, width: number, palette: Palette): string[] {
+function unifiedRows(file: WorkspaceReviewFile, width: number, palette: Palette): string[] {
   return sanitizeTerminalText(file.patch)
     .split("\n")
     .map((line) => colored(truncateToWidth(line, width, ""), palette));
 }
 
-function splitRows(file: WorkspaceFileDiff, width: number, palette: Palette): string[] {
+function splitRows(file: WorkspaceReviewFile, width: number, palette: Palette): string[] {
   const gap = " │ ";
   const column = Math.max(8, Math.floor((width - visibleWidth(gap)) / 2));
   return sanitizeTerminalText(file.patch)
@@ -59,7 +73,7 @@ function splitRows(file: WorkspaceFileDiff, width: number, palette: Palette): st
 /** Full-screen keyboard review over a bounded daemon-provided workspace diff. */
 export class DiffReviewOverlay implements Overlay {
   private readonly options: DiffReviewOptions;
-  private diff: WorkspaceDiff;
+  private diff: WorkspaceReview;
   private layout: DiffLayout;
   private fileIndex = 0;
   private scroll = 0;
@@ -188,7 +202,7 @@ export class DiffReviewOverlay implements Overlay {
     this.loading = true;
     this.error = undefined;
     this.options.refresh();
-    const scope: WorkspaceDiffScope = this.diff.scope === "working" ? "last-turn" : "working";
+    const scope: WorkspaceReviewScope = this.diff.scope === "working" ? "last-turn" : "working";
     try {
       this.diff = await this.options.load(scope);
       this.fileIndex = 0;

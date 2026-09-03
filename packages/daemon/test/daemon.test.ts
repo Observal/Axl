@@ -21,6 +21,7 @@ import type {
   SessionId,
   SessionSubscribeResult,
   Usage,
+  WorkspaceStatusResult,
 } from "@axl/protocol";
 import {
   encodeWireMessage,
@@ -299,7 +300,7 @@ test("cancels attachment-owned read requests without cancelling session operatio
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: fixture.cwd });
 
-  fixture.daemon.sessions.workspaceDiff = async (_sessionId, _scope, signal) =>
+  fixture.daemon.sessions.workspaceStatus = async (_sessionId, _params, signal) =>
     new Promise((_, reject) => {
       signal?.addEventListener(
         "abort",
@@ -307,7 +308,7 @@ test("cancels attachment-owned read requests without cancelling session operatio
         { once: true },
       );
     });
-  const pending = client.request("session.workspace.diff", {
+  const pending = client.request("session.workspace.status", {
     sessionId: created.sessionId,
     scope: "working",
   });
@@ -1147,7 +1148,7 @@ test("a session survives daemon termination and resumes with full history", asyn
   assert.equal(sent.stopReason, "stop");
 });
 
-test("serves bounded working and last-turn workspace diffs", async (context) => {
+test("serves generation-checked working and last-turn workspace status and diffs", async (context) => {
   const fixture = await startDaemon(context);
   const workspace = join(fixture.cwd, "workspace");
   await mkdir(workspace);
@@ -1166,21 +1167,27 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
   await writeFile(join(workspace, "tracked.txt"), "before\n");
   await execute("git", ["add", ".gitattributes", "tracked.txt"], { cwd: workspace });
   await execute("git", ["commit", "--quiet", "-m", "fixture"], { cwd: workspace });
+  const filterMarker = join(fixture.cwd, "filter-ran");
+  const hostileFilter = `${process.execPath} -e 'require("node:fs").writeFileSync(${JSON.stringify(filterMarker)},"ran")'`;
+  await execute("git", ["config", "filter.axlfilter.clean", hostileFilter], { cwd: workspace });
+  await execute("git", ["config", "filter.axlfilter.smudge", hostileFilter], { cwd: workspace });
+  await writeFile(join(workspace, ".gitattributes"), "tracked.txt diff=axl filter=axlfilter\n");
 
   const client = await DaemonClient.connect(fixture.socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: workspace });
   await assert.rejects(
-    client.request("session.workspace.diff", {
+    client.request("session.workspace.status", {
       sessionId: created.sessionId,
       scope: "last-turn",
     }),
     (error) => error instanceof WireClientError && error.code === "checkpoint_unavailable",
   );
-  await client.request("session.workspace.checkpoint", {
+  const checkpoint = await client.request("session.workspace.checkpoint", {
     sessionId: created.sessionId,
     enabled: true,
   });
+  assert.ok(checkpoint.checkpointId);
   await client.request("session.send", {
     sessionId: created.sessionId,
     delivery: "prompt",
@@ -1189,35 +1196,60 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
   await writeFile(join(workspace, "tracked.txt"), "after\n");
   await writeFile(join(workspace, "new.txt"), "new\n");
 
-  const lastTurn = (await client.request("session.workspace.diff", {
+  const lastTurn = await client.request("session.workspace.status", {
     sessionId: created.sessionId,
     scope: "last-turn",
-  })) as { files: readonly { path: string; status: string; additions: number }[] };
+  });
   assert.deepEqual(
-    lastTurn.files.map((file) => [file.path, file.status, file.additions]),
+    lastTurn.entries.map((entry) => [entry.path, entry.area, entry.kind]),
     [
-      ["new.txt", "added", 1],
-      ["tracked.txt", "modified", 1],
+      ["new.txt", "last-turn", "added"],
+      ["tracked.txt", "last-turn", "modified"],
     ],
+  );
+  const trackedEntry = lastTurn.entries.find((entry) => entry.path === "tracked.txt");
+  assert.ok(trackedEntry);
+  const trackedDiff = await client.request("session.workspace.diff", {
+    sessionId: created.sessionId,
+    entryId: trackedEntry.entryId,
+    contextLines: 3,
+    repositoryGeneration: lastTurn.repositoryGeneration,
+    maxBytes: 65_536,
+  });
+  assert.equal(
+    trackedDiff.hunks[0]?.lines.some((line) => line.text === "after"),
+    true,
   );
 
   const previousGitDirectory = process.env.GIT_DIR;
   process.env.GIT_DIR = join(workspace, "attacker-controlled-git-directory");
-  let working: { files: readonly { path: string }[] };
+  let working: WorkspaceStatusResult;
   try {
-    working = (await client.request("session.workspace.diff", {
+    working = await client.request("session.workspace.status", {
       sessionId: created.sessionId,
       scope: "working",
-    })) as { files: readonly { path: string }[] };
+    });
   } finally {
     if (previousGitDirectory === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = previousGitDirectory;
   }
   assert.deepEqual(
-    working.files.map((file) => file.path),
-    ["new.txt", "tracked.txt"],
+    working.entries.map((entry) => entry.path),
+    [".gitattributes", "new.txt", "tracked.txt"],
   );
   await assert.rejects(readFile(textconvMarker), { code: "ENOENT" });
+  await assert.rejects(readFile(filterMarker), { code: "ENOENT" });
+  await writeFile(join(workspace, "later.txt"), "changed generation\n");
+  await assert.rejects(
+    client.request("session.workspace.diff", {
+      sessionId: created.sessionId,
+      entryId: working.entries[0]?.entryId ?? "missing",
+      contextLines: 3,
+      repositoryGeneration: working.repositoryGeneration,
+      maxBytes: 65_536,
+    }),
+    (error) => error instanceof WireClientError && error.code === "repository_changed",
+  );
 
   const oversized = join(workspace, "too-large.bin");
   await writeFile(oversized, "");
@@ -1228,7 +1260,7 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
     content: [{ type: "text", text: "bounded checkpoint" }],
   });
   await assert.rejects(
-    client.request("session.workspace.diff", {
+    client.request("session.workspace.status", {
       sessionId: created.sessionId,
       scope: "last-turn",
     }),

@@ -496,7 +496,11 @@ export class AxlDaemon {
         }
       }
       const cancellable =
-        request.method === "session.history" || request.method === "session.workspace.diff";
+        request.method === "session.history" ||
+        request.method === "session.workspace.list" ||
+        request.method === "session.workspace.read" ||
+        request.method === "session.workspace.status" ||
+        request.method === "session.workspace.diff";
       const controller = cancellable ? new AbortController() : undefined;
       if (controller !== undefined) state.cancellableRequests.set(request.id, controller);
       let dispatched: unknown;
@@ -785,13 +789,29 @@ export class AxlDaemon {
           request.params.offset,
           request.params.length,
         );
+      case "session.workspace.list": {
+        if (state.attachmentId === undefined) throw new Error("Initialized attachment has no ID");
+        const { sessionId, ...params } = request.params;
+        return this.sessions.workspaceList(state.attachmentId, sessionId, params, signal);
+      }
+      case "session.workspace.read": {
+        if (state.attachmentId === undefined) throw new Error("Initialized attachment has no ID");
+        const { sessionId, ...params } = request.params;
+        return this.sessions.workspaceRead(state.attachmentId, sessionId, params, signal);
+      }
+      case "session.workspace.status": {
+        const { sessionId, ...params } = request.params;
+        return this.sessions.workspaceStatus(sessionId, params, signal);
+      }
       case "session.workspace.checkpoint":
         return this.sessions.setWorkspaceCheckpoints(
           request.params.sessionId,
           request.params.enabled,
         );
-      case "session.workspace.diff":
-        return this.sessions.workspaceDiff(request.params.sessionId, request.params.scope, signal);
+      case "session.workspace.diff": {
+        const { sessionId, ...params } = request.params;
+        return this.sessions.workspaceDiff(sessionId, params, signal);
+      }
       case "session.dispose":
         await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
         return { disposed: true, historyPreserved: true };

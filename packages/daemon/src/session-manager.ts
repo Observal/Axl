@@ -47,12 +47,19 @@ import {
   type SessionOpenResult,
   type SessionSummary,
   type UserContent,
-  type WorkspaceDiff,
-  type WorkspaceDiffScope,
+  type WorkspaceDiffParams,
+  type WorkspaceDiffResult,
+  type WorkspaceListParams,
+  type WorkspaceListResult,
+  type WorkspaceReadParams,
+  type WorkspaceReadResult,
+  type WorkspaceStatusParams,
+  type WorkspaceStatusResult,
 } from "@axl/protocol";
 
 import { BlobStore, BlobStoreError } from "./blob-store.ts";
 import { WorkspaceCheckpointError, WorkspaceCheckpointStore } from "./workspace-checkpoint.ts";
+import { WorkspaceError, WorkspaceService } from "./workspace-service.ts";
 
 export class DaemonError extends Error {
   readonly code: string;
@@ -108,6 +115,7 @@ export type SessionRuntimeFactory = (input: {
 export interface SessionManagerOptions {
   readonly dataDirectory: string;
   readonly runtime: SessionRuntimeFactory;
+  readonly workspaceDeniedPaths?: readonly string[];
 }
 
 interface ActiveTurn {
@@ -196,11 +204,17 @@ export class SessionManager {
   private readonly quarantined = new Map<SessionId, EventLogMigrationRequiredError>();
   private readonly incompleteMigrations = new Set<SessionId>();
   private readonly workspaceCheckpoints: WorkspaceCheckpointStore;
+  private readonly workspace: WorkspaceService;
   private readonly blobs: BlobStore;
 
   constructor(options: SessionManagerOptions) {
     this.options = { ...options, dataDirectory: resolve(options.dataDirectory) };
     this.workspaceCheckpoints = new WorkspaceCheckpointStore(this.options.dataDirectory);
+    this.workspace = new WorkspaceService(
+      this.options.dataDirectory,
+      this.workspaceCheckpoints,
+      this.options.workspaceDeniedPaths,
+    );
     this.blobs = new BlobStore(this.options.dataDirectory);
   }
 
@@ -1039,7 +1053,7 @@ export class SessionManager {
   async setWorkspaceCheckpoints(
     sessionId: unknown,
     enabled: boolean,
-  ): Promise<{ enabled: boolean }> {
+  ): Promise<{ enabled: boolean; checkpointId?: string }> {
     const managed = this.managed(sessionId);
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError(
@@ -1056,7 +1070,13 @@ export class SessionManager {
         });
       }
     }
-    return { enabled };
+    const checkpoint = enabled
+      ? await this.workspaceCheckpoints.read(managed.session.log.sessionId)
+      : undefined;
+    return {
+      enabled,
+      ...(checkpoint === undefined ? {} : { checkpointId: checkpoint.checkpointId }),
+    };
   }
 
   startBlobUpload(
@@ -1102,28 +1122,62 @@ export class SessionManager {
     }
   }
 
-  async workspaceDiff(
+  workspaceList(
+    owner: string,
     sessionId: unknown,
-    scope: WorkspaceDiffScope,
+    params: Omit<WorkspaceListParams, "sessionId">,
     signal?: AbortSignal,
-  ): Promise<WorkspaceDiff> {
-    if (signal?.aborted) throw new DaemonError("cancelled", "Workspace request was cancelled");
+  ): Promise<WorkspaceListResult> {
+    return this.workspaceOperation(sessionId, (managed) =>
+      this.workspace.list(owner, managed.session.log.sessionId, managed.cwd, params, signal),
+    );
+  }
+
+  workspaceRead(
+    owner: string,
+    sessionId: unknown,
+    params: Omit<WorkspaceReadParams, "sessionId">,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceReadResult> {
+    return this.workspaceOperation(sessionId, (managed) =>
+      this.workspace.read(owner, managed.session.log.sessionId, managed.cwd, params, signal),
+    );
+  }
+
+  workspaceStatus(
+    sessionId: unknown,
+    params: Omit<WorkspaceStatusParams, "sessionId">,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceStatusResult> {
     const managed = this.managed(sessionId);
-    if (scope === "last-turn" && managed.checkpointError !== undefined) {
+    if (params.scope === "last-turn" && managed.checkpointError !== undefined) {
       throw new DaemonError(managed.checkpointError.code, managed.checkpointError.message, {
         cause: managed.checkpointError,
       });
     }
+    return this.workspaceOperation(sessionId, (current) =>
+      this.workspace.status(current.session.log.sessionId, current.cwd, params, signal),
+    );
+  }
+
+  workspaceDiff(
+    sessionId: unknown,
+    params: Omit<WorkspaceDiffParams, "sessionId">,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDiffResult> {
+    return this.workspaceOperation(sessionId, (managed) =>
+      this.workspace.diff(managed.session.log.sessionId, managed.cwd, params, signal),
+    );
+  }
+
+  private async workspaceOperation<Result>(
+    sessionId: unknown,
+    operation: (managed: ManagedSession) => Promise<Result>,
+  ): Promise<Result> {
     try {
-      const result = await this.workspaceCheckpoints.diff(
-        managed.session.log.sessionId,
-        managed.cwd,
-        scope,
-      );
-      if (signal?.aborted) throw new DaemonError("cancelled", "Workspace request was cancelled");
-      return result;
+      return await operation(this.managed(sessionId));
     } catch (error) {
-      if (error instanceof WorkspaceCheckpointError) {
+      if (error instanceof WorkspaceCheckpointError || error instanceof WorkspaceError) {
         throw new DaemonError(error.code, error.message, { cause: error });
       }
       throw error;

@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { WorkspaceDiff } from "@axl/protocol";
-
+import type { WorkspaceReview } from "./diff-review.ts";
 import type { Component } from "./render.ts";
 import { truncateToWidth, visibleWidth } from "./render.ts";
 import type { Palette } from "./transcript.ts";
@@ -13,7 +12,7 @@ export interface DeveloperPanelState {
   readonly sandbox?: string;
   readonly connection: string;
   readonly phase: string;
-  readonly diff?: WorkspaceDiff;
+  readonly diff?: WorkspaceReview;
   readonly error?: string;
 }
 

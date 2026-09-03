@@ -121,64 +121,464 @@ export function parseBlobReadResult(value: unknown): BlobReadResult {
   };
 }
 
-export type WorkspaceDiffScope = "working" | "last-turn";
+export type WorkspaceStatusScope = "working" | "last-turn";
+export type GitChangeKind =
+  | "added"
+  | "modified"
+  | "deleted"
+  | "renamed"
+  | "conflicted"
+  | "untracked"
+  | "binary"
+  | "submodule";
 
-export interface WorkspaceFileDiff {
+export interface WorkspaceEntry {
   readonly path: string;
-  readonly status: "added" | "modified" | "deleted";
-  readonly additions: number;
-  readonly deletions: number;
-  readonly patch: string;
+  readonly name: string;
+  readonly type: "file" | "directory" | "symlink" | "other";
+  readonly sizeBytes?: number;
+  readonly mtimeMs?: number;
+  readonly linkTargetType?: "inside_workspace" | "outside_workspace" | "missing";
+}
+
+export interface WorkspaceListParams {
+  readonly sessionId: SessionId;
+  readonly path: string;
+  readonly pageSize: number;
+  readonly pageCursor?: string;
+  readonly ifWorkspaceGeneration?: string;
+}
+
+export interface WorkspaceListResult {
+  readonly workspaceGeneration: string;
+  readonly entries: readonly WorkspaceEntry[];
+  readonly nextPageCursor?: string;
+}
+
+export interface WorkspaceReadParams {
+  readonly sessionId: SessionId;
+  readonly path: string;
+  readonly startLine?: number;
+  readonly maxLines: number;
+  readonly maxBytes: number;
+  readonly ifWorkspaceGeneration?: string;
+  readonly ifFileRevision?: string;
+}
+
+export interface WorkspaceReadResult {
+  readonly workspaceGeneration: string;
+  readonly fileRevision: string;
+  readonly path: string;
+  readonly encoding: "utf-8";
+  readonly text: string;
+  readonly startLine: number;
+  readonly endLine: number;
+  readonly totalLines?: number;
   readonly truncated: boolean;
+  readonly truncationReason?: "line_limit" | "byte_limit";
 }
 
-export interface WorkspaceDiff {
-  readonly scope: WorkspaceDiffScope;
+export interface GitStatusEntry {
+  readonly entryId: string;
+  readonly path: string;
+  readonly previousPath?: string;
+  readonly area: "staged" | "unstaged" | "untracked" | "conflict" | "last-turn";
+  readonly kind: GitChangeKind;
+  readonly binary: boolean;
+  readonly submodule: boolean;
+}
+
+export interface WorkspaceStatusParams {
+  readonly sessionId: SessionId;
+  readonly scope: WorkspaceStatusScope;
+  readonly ifWorkspaceGeneration?: string;
+}
+
+export interface WorkspaceStatusResult {
+  readonly workspaceGeneration: string;
+  readonly repositoryGeneration: string;
+  readonly repositoryRoot: string;
   readonly checkpointId?: string;
-  readonly files: readonly WorkspaceFileDiff[];
+  readonly branch: {
+    readonly state: "branch" | "detached" | "unborn";
+    readonly name?: string;
+    readonly head?: string;
+  };
+  readonly sparseCheckout: boolean;
+  readonly entries: readonly GitStatusEntry[];
 }
 
-export function parseWorkspaceDiff(value: unknown): WorkspaceDiff {
-  const diff = object(value, "workspaceDiff");
-  exact(diff, "workspaceDiff", ["scope", "checkpointId", "files"]);
-  if (diff.scope !== "working" && diff.scope !== "last-turn") {
-    throw new ProtocolValidationError("workspaceDiff.scope", "must be working or last-turn");
+export interface WorkspaceDiffParams {
+  readonly sessionId: SessionId;
+  readonly entryId: string;
+  readonly contextLines: number;
+  readonly repositoryGeneration: string;
+  readonly maxBytes: number;
+}
+
+export interface DiffLine {
+  readonly kind: "context" | "addition" | "deletion" | "marker";
+  readonly oldLine?: number;
+  readonly newLine?: number;
+  readonly text: string;
+}
+
+export interface DiffHunk {
+  readonly header: string;
+  readonly lines: readonly DiffLine[];
+}
+
+export interface WorkspaceDiffResult {
+  readonly workspaceGeneration: string;
+  readonly repositoryGeneration: string;
+  readonly entry: GitStatusEntry;
+  readonly oldRevision?: string;
+  readonly newRevision?: string;
+  readonly hunks: readonly DiffHunk[];
+  readonly binary: boolean;
+}
+
+function generation(value: unknown, path: string): string {
+  return boundedString(value, path, 256);
+}
+
+function relativeWorkspacePath(value: unknown, path: string, allowRoot: boolean): string {
+  if (typeof value !== "string") throw new ProtocolValidationError(path, "must be a string");
+  if (new TextEncoder().encode(value).byteLength > 4096) {
+    throw new ProtocolValidationError(path, "must not exceed 4096 UTF-8 bytes");
   }
-  if (diff.checkpointId !== undefined) string(diff.checkpointId, "workspaceDiff.checkpointId");
-  if (!Array.isArray(diff.files) || diff.files.length > 500) {
-    throw new ProtocolValidationError("workspaceDiff.files", "must contain at most 500 files");
+  if (value === "" && allowRoot) return value;
+  if (
+    value === "" ||
+    value.startsWith("/") ||
+    value.startsWith("//") ||
+    /^[a-zA-Z]:/u.test(value) ||
+    value.includes("\\") ||
+    value.includes("\0") ||
+    value.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new ProtocolValidationError(path, "must be a normalized workspace-relative path");
   }
-  const files = diff.files.map((value, index): WorkspaceFileDiff => {
-    const path = `workspaceDiff.files[${index}]`;
-    const file = object(value, path);
-    exact(file, path, ["path", "status", "additions", "deletions", "patch", "truncated"]);
-    if (file.status !== "added" && file.status !== "modified" && file.status !== "deleted") {
-      throw new ProtocolValidationError(`${path}.status`, "must be added, modified, or deleted");
-    }
-    for (const field of ["additions", "deletions"] as const) {
-      if (!Number.isSafeInteger(file[field]) || (file[field] as number) < 0) {
-        throw new ProtocolValidationError(`${path}.${field}`, "must be a non-negative integer");
-      }
-    }
-    if (typeof file.patch !== "string") {
-      throw new ProtocolValidationError(`${path}.patch`, "must be a string");
-    }
-    if (typeof file.truncated !== "boolean") {
-      throw new ProtocolValidationError(`${path}.truncated`, "must be a boolean");
+  return value;
+}
+
+function parseWorkspaceEntry(value: unknown, path: string): WorkspaceEntry {
+  const entry = object(value, path);
+  exact(entry, path, ["path", "name", "type", "sizeBytes", "mtimeMs", "linkTargetType"]);
+  const types: readonly WorkspaceEntry["type"][] = ["file", "directory", "symlink", "other"];
+  if (!types.includes(entry.type as WorkspaceEntry["type"])) {
+    throw new ProtocolValidationError(`${path}.type`, "is not a supported workspace entry type");
+  }
+  const linkTypes: readonly NonNullable<WorkspaceEntry["linkTargetType"]>[] = [
+    "inside_workspace",
+    "outside_workspace",
+    "missing",
+  ];
+  if (
+    entry.linkTargetType !== undefined &&
+    !linkTypes.includes(entry.linkTargetType as NonNullable<WorkspaceEntry["linkTargetType"]>)
+  ) {
+    throw new ProtocolValidationError(`${path}.linkTargetType`, "is not a valid link target type");
+  }
+  if (entry.type !== "symlink" && entry.linkTargetType !== undefined) {
+    throw new ProtocolValidationError(`${path}.linkTargetType`, "is allowed only for symlinks");
+  }
+  const entryPath = relativeWorkspacePath(entry.path, `${path}.path`, false);
+  const name = boundedString(entry.name, `${path}.name`, 4096);
+  if (name.includes("/") || entryPath.split("/").at(-1) !== name) {
+    throw new ProtocolValidationError(`${path}.name`, "must be the final path segment");
+  }
+  return {
+    path: entryPath,
+    name,
+    type: entry.type as WorkspaceEntry["type"],
+    ...(entry.sizeBytes === undefined
+      ? {}
+      : { sizeBytes: nonNegativeInteger(entry.sizeBytes, `${path}.sizeBytes`) }),
+    ...(entry.mtimeMs === undefined
+      ? {}
+      : { mtimeMs: nonNegativeInteger(entry.mtimeMs, `${path}.mtimeMs`) }),
+    ...(entry.linkTargetType === undefined
+      ? {}
+      : { linkTargetType: entry.linkTargetType as NonNullable<WorkspaceEntry["linkTargetType"]> }),
+  };
+}
+
+export function parseWorkspaceListResult(value: unknown): WorkspaceListResult {
+  const result = object(value, "workspaceList");
+  exact(result, "workspaceList", ["workspaceGeneration", "entries", "nextPageCursor"]);
+  if (!Array.isArray(result.entries) || result.entries.length > 200) {
+    throw new ProtocolValidationError("workspaceList.entries", "must contain at most 200 entries");
+  }
+  return {
+    workspaceGeneration: generation(
+      result.workspaceGeneration,
+      "workspaceList.workspaceGeneration",
+    ),
+    entries: result.entries.map((entry, index) =>
+      parseWorkspaceEntry(entry, `workspaceList.entries[${index}]`),
+    ),
+    ...(result.nextPageCursor === undefined
+      ? {}
+      : {
+          nextPageCursor: boundedString(result.nextPageCursor, "workspaceList.nextPageCursor", 512),
+        }),
+  };
+}
+
+export function parseWorkspaceReadResult(value: unknown): WorkspaceReadResult {
+  const result = object(value, "workspaceRead");
+  exact(result, "workspaceRead", [
+    "workspaceGeneration",
+    "fileRevision",
+    "path",
+    "encoding",
+    "text",
+    "startLine",
+    "endLine",
+    "totalLines",
+    "truncated",
+    "truncationReason",
+  ]);
+  if (result.encoding !== "utf-8") {
+    throw new ProtocolValidationError("workspaceRead.encoding", 'must be "utf-8"');
+  }
+  if (typeof result.truncated !== "boolean") {
+    throw new ProtocolValidationError("workspaceRead.truncated", "must be a boolean");
+  }
+  if (
+    result.truncationReason !== undefined &&
+    result.truncationReason !== "line_limit" &&
+    result.truncationReason !== "byte_limit"
+  ) {
+    throw new ProtocolValidationError("workspaceRead.truncationReason", "is not valid");
+  }
+  if (result.truncated !== (result.truncationReason !== undefined)) {
+    throw new ProtocolValidationError("workspaceRead.truncationReason", "must match truncated");
+  }
+  const startLine = positiveInteger(result.startLine, "workspaceRead.startLine");
+  const endLine = nonNegativeInteger(result.endLine, "workspaceRead.endLine");
+  if (endLine + 1 < startLine) {
+    throw new ProtocolValidationError("workspaceRead.endLine", "must follow startLine");
+  }
+  return {
+    workspaceGeneration: generation(
+      result.workspaceGeneration,
+      "workspaceRead.workspaceGeneration",
+    ),
+    fileRevision: generation(result.fileRevision, "workspaceRead.fileRevision"),
+    path: relativeWorkspacePath(result.path, "workspaceRead.path", false),
+    encoding: result.encoding,
+    text: boundedText(result.text, "workspaceRead.text", 1024 * 1024),
+    startLine,
+    endLine,
+    ...(result.totalLines === undefined
+      ? {}
+      : { totalLines: nonNegativeInteger(result.totalLines, "workspaceRead.totalLines") }),
+    truncated: result.truncated,
+    ...(result.truncationReason === undefined ? {} : { truncationReason: result.truncationReason }),
+  };
+}
+
+function parseGitStatusEntry(value: unknown, path: string): GitStatusEntry {
+  const entry = object(value, path);
+  exact(entry, path, ["entryId", "path", "previousPath", "area", "kind", "binary", "submodule"]);
+  const areas: readonly GitStatusEntry["area"][] = [
+    "staged",
+    "unstaged",
+    "untracked",
+    "conflict",
+    "last-turn",
+  ];
+  const kinds: readonly GitChangeKind[] = [
+    "added",
+    "modified",
+    "deleted",
+    "renamed",
+    "conflicted",
+    "untracked",
+    "binary",
+    "submodule",
+  ];
+  if (!areas.includes(entry.area as GitStatusEntry["area"])) {
+    throw new ProtocolValidationError(`${path}.area`, "is not a valid status area");
+  }
+  if (!kinds.includes(entry.kind as GitChangeKind)) {
+    throw new ProtocolValidationError(`${path}.kind`, "is not a valid change kind");
+  }
+  if (typeof entry.binary !== "boolean" || typeof entry.submodule !== "boolean") {
+    throw new ProtocolValidationError(path, "binary and submodule must be booleans");
+  }
+  if ((entry.kind === "renamed") !== (entry.previousPath !== undefined)) {
+    throw new ProtocolValidationError(`${path}.previousPath`, "must be present only for renames");
+  }
+  return {
+    entryId: boundedString(entry.entryId, `${path}.entryId`, 256),
+    path: relativeWorkspacePath(entry.path, `${path}.path`, false),
+    ...(entry.previousPath === undefined
+      ? {}
+      : { previousPath: relativeWorkspacePath(entry.previousPath, `${path}.previousPath`, false) }),
+    area: entry.area as GitStatusEntry["area"],
+    kind: entry.kind as GitChangeKind,
+    binary: entry.binary,
+    submodule: entry.submodule,
+  };
+}
+
+export function parseWorkspaceStatusResult(value: unknown): WorkspaceStatusResult {
+  const result = object(value, "workspaceStatus");
+  exact(result, "workspaceStatus", [
+    "workspaceGeneration",
+    "repositoryGeneration",
+    "repositoryRoot",
+    "checkpointId",
+    "branch",
+    "sparseCheckout",
+    "entries",
+  ]);
+  const branch = object(result.branch, "workspaceStatus.branch");
+  exact(branch, "workspaceStatus.branch", ["state", "name", "head"]);
+  if (branch.state !== "branch" && branch.state !== "detached" && branch.state !== "unborn") {
+    throw new ProtocolValidationError("workspaceStatus.branch.state", "is not valid");
+  }
+  if (branch.state === "branch" && branch.name === undefined) {
+    throw new ProtocolValidationError("workspaceStatus.branch.name", "is required for a branch");
+  }
+  if (branch.state !== "unborn" && branch.head === undefined) {
+    throw new ProtocolValidationError(
+      "workspaceStatus.branch.head",
+      "is required for an existing HEAD",
+    );
+  }
+  if (branch.state === "unborn" && branch.head !== undefined) {
+    throw new ProtocolValidationError(
+      "workspaceStatus.branch.head",
+      "is not valid for unborn HEAD",
+    );
+  }
+  if (typeof result.sparseCheckout !== "boolean") {
+    throw new ProtocolValidationError("workspaceStatus.sparseCheckout", "must be a boolean");
+  }
+  if (!Array.isArray(result.entries) || result.entries.length > 5_000) {
+    throw new ProtocolValidationError(
+      "workspaceStatus.entries",
+      "must contain at most 5000 entries",
+    );
+  }
+  return {
+    workspaceGeneration: generation(
+      result.workspaceGeneration,
+      "workspaceStatus.workspaceGeneration",
+    ),
+    repositoryGeneration: generation(
+      result.repositoryGeneration,
+      "workspaceStatus.repositoryGeneration",
+    ),
+    repositoryRoot: relativeWorkspacePath(
+      result.repositoryRoot,
+      "workspaceStatus.repositoryRoot",
+      true,
+    ),
+    ...(result.checkpointId === undefined
+      ? {}
+      : { checkpointId: boundedString(result.checkpointId, "workspaceStatus.checkpointId", 128) }),
+    branch: {
+      state: branch.state,
+      ...(branch.name === undefined
+        ? {}
+        : { name: boundedString(branch.name, "workspaceStatus.branch.name", 1024) }),
+      ...(branch.head === undefined
+        ? {}
+        : { head: boundedString(branch.head, "workspaceStatus.branch.head", 128) }),
+    },
+    sparseCheckout: result.sparseCheckout,
+    entries: result.entries.map((entry, index) =>
+      parseGitStatusEntry(entry, `workspaceStatus.entries[${index}]`),
+    ),
+  };
+}
+
+function parseDiffLine(value: unknown, path: string): DiffLine {
+  const line = object(value, path);
+  exact(line, path, ["kind", "oldLine", "newLine", "text"]);
+  if (
+    line.kind !== "context" &&
+    line.kind !== "addition" &&
+    line.kind !== "deletion" &&
+    line.kind !== "marker"
+  ) {
+    throw new ProtocolValidationError(`${path}.kind`, "is not a valid diff line kind");
+  }
+  return {
+    kind: line.kind,
+    ...(line.oldLine === undefined
+      ? {}
+      : { oldLine: positiveInteger(line.oldLine, `${path}.oldLine`) }),
+    ...(line.newLine === undefined
+      ? {}
+      : { newLine: positiveInteger(line.newLine, `${path}.newLine`) }),
+    text: boundedText(line.text, `${path}.text`, 1024 * 1024),
+  };
+}
+
+export function parseWorkspaceDiffResult(value: unknown): WorkspaceDiffResult {
+  const result = object(value, "workspaceDiff");
+  exact(result, "workspaceDiff", [
+    "workspaceGeneration",
+    "repositoryGeneration",
+    "entry",
+    "oldRevision",
+    "newRevision",
+    "hunks",
+    "binary",
+  ]);
+  if (typeof result.binary !== "boolean") {
+    throw new ProtocolValidationError("workspaceDiff.binary", "must be a boolean");
+  }
+  if (!Array.isArray(result.hunks) || result.hunks.length > 10_000) {
+    throw new ProtocolValidationError("workspaceDiff.hunks", "contains too many hunks");
+  }
+  const entry = parseGitStatusEntry(result.entry, "workspaceDiff.entry");
+  if (result.binary !== entry.binary) {
+    throw new ProtocolValidationError("workspaceDiff.binary", "must match entry.binary");
+  }
+  const hunks = result.hunks.map((value, index): DiffHunk => {
+    const hunk = object(value, `workspaceDiff.hunks[${index}]`);
+    exact(hunk, `workspaceDiff.hunks[${index}]`, ["header", "lines"]);
+    if (!Array.isArray(hunk.lines) || hunk.lines.length > 100_000) {
+      throw new ProtocolValidationError(
+        `workspaceDiff.hunks[${index}].lines`,
+        "contains too many lines",
+      );
     }
     return {
-      path: string(file.path, `${path}.path`),
-      status: file.status,
-      additions: file.additions as number,
-      deletions: file.deletions as number,
-      patch: file.patch,
-      truncated: file.truncated,
+      header: boundedString(hunk.header, `workspaceDiff.hunks[${index}].header`, 4096),
+      lines: hunk.lines.map((line, at) =>
+        parseDiffLine(line, `workspaceDiff.hunks[${index}].lines[${at}]`),
+      ),
     };
   });
+  if (new TextEncoder().encode(JSON.stringify(hunks)).byteLength > 4 * 1024 * 1024) {
+    throw new ProtocolValidationError("workspaceDiff.hunks", "exceeds the structured diff limit");
+  }
   return {
-    scope: diff.scope,
-    ...(diff.checkpointId === undefined ? {} : { checkpointId: diff.checkpointId as string }),
-    files,
+    workspaceGeneration: generation(
+      result.workspaceGeneration,
+      "workspaceDiff.workspaceGeneration",
+    ),
+    repositoryGeneration: generation(
+      result.repositoryGeneration,
+      "workspaceDiff.repositoryGeneration",
+    ),
+    entry,
+    ...(result.oldRevision === undefined
+      ? {}
+      : { oldRevision: generation(result.oldRevision, "workspaceDiff.oldRevision") }),
+    ...(result.newRevision === undefined
+      ? {}
+      : { newRevision: generation(result.newRevision, "workspaceDiff.newRevision") }),
+    hunks,
+    binary: result.binary,
   };
 }
 
@@ -206,6 +606,9 @@ export const WIRE_CAPABILITIES = [
   "session.blob.commit",
   "session.blob.abort",
   "session.blob.read",
+  "session.workspace.list",
+  "session.workspace.read",
+  "session.workspace.status",
   "session.workspace.diff",
   "session.workspace.checkpoint",
 ] as const satisfies readonly CapabilityId[];
@@ -355,13 +758,25 @@ export interface RpcMethodMap {
     readonly params: SessionSubscribeParams;
     readonly result: SessionSubscribeResult;
   };
+  readonly "session.workspace.list": {
+    readonly params: WorkspaceListParams;
+    readonly result: WorkspaceListResult;
+  };
+  readonly "session.workspace.read": {
+    readonly params: WorkspaceReadParams;
+    readonly result: WorkspaceReadResult;
+  };
+  readonly "session.workspace.status": {
+    readonly params: WorkspaceStatusParams;
+    readonly result: WorkspaceStatusResult;
+  };
   readonly "session.workspace.diff": {
-    readonly params: { readonly sessionId: SessionId; readonly scope: WorkspaceDiffScope };
-    readonly result: WorkspaceDiff;
+    readonly params: WorkspaceDiffParams;
+    readonly result: WorkspaceDiffResult;
   };
   readonly "session.workspace.checkpoint": {
     readonly params: { readonly sessionId: SessionId; readonly enabled: boolean };
-    readonly result: { readonly enabled: boolean };
+    readonly result: { readonly enabled: boolean; readonly checkpointId?: string };
   };
   readonly "session.blob.start": {
     readonly params: {
@@ -505,6 +920,9 @@ export const RPC_ERROR_CODES = [
   "git_output_too_large",
   "unsupported_git_state",
   "repository_changed",
+  "checkpoint_unavailable",
+  "checkpoint_too_large",
+  "checkpoint_corrupt",
 ] as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number] | (string & {});
@@ -1158,13 +1576,86 @@ export function parseWireRequest(value: unknown): WireRequest {
       },
     };
   }
-  if (method === "session.workspace.diff") {
-    exact(params, "request.params", ["sessionId", "scope"]);
+  if (method === "session.workspace.list") {
+    exact(params, "request.params", [
+      "sessionId",
+      "path",
+      "pageSize",
+      "pageCursor",
+      "ifWorkspaceGeneration",
+    ]);
+    const pageSize = positiveInteger(params.pageSize, "request.params.pageSize");
+    if (pageSize > 200) {
+      throw new ProtocolValidationError("request.params.pageSize", "must not exceed 200");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        path: relativeWorkspacePath(params.path, "request.params.path", true),
+        pageSize,
+        ...(params.pageCursor === undefined
+          ? {}
+          : { pageCursor: boundedString(params.pageCursor, "request.params.pageCursor", 512) }),
+        ...(params.ifWorkspaceGeneration === undefined
+          ? {}
+          : {
+              ifWorkspaceGeneration: generation(
+                params.ifWorkspaceGeneration,
+                "request.params.ifWorkspaceGeneration",
+              ),
+            }),
+      },
+    };
+  }
+  if (method === "session.workspace.read") {
+    exact(params, "request.params", [
+      "sessionId",
+      "path",
+      "startLine",
+      "maxLines",
+      "maxBytes",
+      "ifWorkspaceGeneration",
+      "ifFileRevision",
+    ]);
+    const maxLines = positiveInteger(params.maxLines, "request.params.maxLines");
+    const maxBytes = positiveInteger(params.maxBytes, "request.params.maxBytes");
+    if (maxLines > 2_000) {
+      throw new ProtocolValidationError("request.params.maxLines", "must not exceed 2000");
+    }
+    if (maxBytes > 1024 * 1024) {
+      throw new ProtocolValidationError("request.params.maxBytes", "must not exceed 1048576");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        path: relativeWorkspacePath(params.path, "request.params.path", false),
+        ...(params.startLine === undefined
+          ? {}
+          : { startLine: positiveInteger(params.startLine, "request.params.startLine") }),
+        maxLines,
+        maxBytes,
+        ...(params.ifWorkspaceGeneration === undefined
+          ? {}
+          : {
+              ifWorkspaceGeneration: generation(
+                params.ifWorkspaceGeneration,
+                "request.params.ifWorkspaceGeneration",
+              ),
+            }),
+        ...(params.ifFileRevision === undefined
+          ? {}
+          : { ifFileRevision: generation(params.ifFileRevision, "request.params.ifFileRevision") }),
+      },
+    };
+  }
+  if (method === "session.workspace.status") {
+    exact(params, "request.params", ["sessionId", "scope", "ifWorkspaceGeneration"]);
     if (params.scope !== "working" && params.scope !== "last-turn") {
-      throw new ProtocolValidationError(
-        "request.params.scope",
-        "must be one of: working, last-turn",
-      );
+      throw new ProtocolValidationError("request.params.scope", "must be working or last-turn");
     }
     return {
       ...base,
@@ -1172,6 +1663,45 @@ export function parseWireRequest(value: unknown): WireRequest {
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
         scope: params.scope,
+        ...(params.ifWorkspaceGeneration === undefined
+          ? {}
+          : {
+              ifWorkspaceGeneration: generation(
+                params.ifWorkspaceGeneration,
+                "request.params.ifWorkspaceGeneration",
+              ),
+            }),
+      },
+    };
+  }
+  if (method === "session.workspace.diff") {
+    exact(params, "request.params", [
+      "sessionId",
+      "entryId",
+      "contextLines",
+      "repositoryGeneration",
+      "maxBytes",
+    ]);
+    const contextLines = nonNegativeInteger(params.contextLines, "request.params.contextLines");
+    const maxBytes = positiveInteger(params.maxBytes, "request.params.maxBytes");
+    if (contextLines > 100) {
+      throw new ProtocolValidationError("request.params.contextLines", "must not exceed 100");
+    }
+    if (maxBytes > 4 * 1024 * 1024) {
+      throw new ProtocolValidationError("request.params.maxBytes", "must not exceed 4194304");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        entryId: boundedString(params.entryId, "request.params.entryId", 256),
+        contextLines,
+        repositoryGeneration: generation(
+          params.repositoryGeneration,
+          "request.params.repositoryGeneration",
+        ),
+        maxBytes,
       },
     };
   }
@@ -1633,10 +2163,26 @@ export function parseRpcResult<Method extends RpcMethod>(
       ...(snapshot === undefined ? {} : { snapshot }),
       ...(resumedFrom === undefined ? {} : { resumedFrom }),
     };
+  } else if (method === "session.workspace.list") {
+    parsed = parseWorkspaceListResult(value);
+  } else if (method === "session.workspace.read") {
+    parsed = parseWorkspaceReadResult(value);
+  } else if (method === "session.workspace.status") {
+    parsed = parseWorkspaceStatusResult(value);
   } else if (method === "session.workspace.diff") {
-    parsed = parseWorkspaceDiff(value);
+    parsed = parseWorkspaceDiffResult(value);
   } else if (method === "session.workspace.checkpoint") {
-    parsed = parseBooleanResult(value, path, "enabled");
+    const result = object(value, path);
+    exact(result, path, ["enabled", "checkpointId"]);
+    if (typeof result.enabled !== "boolean") {
+      throw new ProtocolValidationError(`${path}.enabled`, "must be a boolean");
+    }
+    parsed = {
+      enabled: result.enabled,
+      ...(result.checkpointId === undefined
+        ? {}
+        : { checkpointId: boundedString(result.checkpointId, `${path}.checkpointId`, 128) }),
+    };
   } else if (method === "session.blob.start") {
     const result = object(value, path);
     exact(result, path, ["uploadId", "chunkBytes"]);
@@ -1691,6 +2237,9 @@ const RPC_METHODS = new Set<RpcMethod>([
   "session.configure",
   "session.interaction.respond",
   "session.subscribe",
+  "session.workspace.list",
+  "session.workspace.read",
+  "session.workspace.status",
   "session.workspace.diff",
   "session.workspace.checkpoint",
   "session.blob.start",

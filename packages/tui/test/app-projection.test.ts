@@ -111,20 +111,49 @@ function client(
       }
       if (method === "session.interrupt") return { interrupted: false };
       if (method === "session.workspace.checkpoint") return { enabled: true };
-      if (method === "session.workspace.diff") {
+      if (method === "session.workspace.status") {
         const scope = (params as { scope: "working" | "last-turn" }).scope;
         return {
-          scope,
-          files: [
+          workspaceGeneration: "workspace-1",
+          repositoryGeneration: `repository-${scope}`,
+          repositoryRoot: "",
+          branch: { state: "branch", name: "main", head: "a".repeat(40) },
+          sparseCheckout: false,
+          entries: [
             {
+              entryId: `entry-${scope}`,
               path: "src/example.ts",
-              status: "modified",
-              additions: 1,
-              deletions: 1,
-              patch: "@@ -1 +1 @@\n-old\n+new",
-              truncated: false,
+              area: scope === "working" ? "unstaged" : "last-turn",
+              kind: "modified",
+              binary: false,
+              submodule: false,
             },
           ],
+        };
+      }
+      if (method === "session.workspace.diff") {
+        const request = params as { entryId: string; repositoryGeneration: string };
+        return {
+          workspaceGeneration: "workspace-1",
+          repositoryGeneration: request.repositoryGeneration,
+          entry: {
+            entryId: request.entryId,
+            path: "src/example.ts",
+            area: request.entryId.endsWith("last-turn") ? "last-turn" : "unstaged",
+            kind: "modified",
+            binary: false,
+            submodule: false,
+          },
+          hunks: [
+            {
+              header: "@@ -1 +1 @@",
+              lines: [
+                { kind: "deletion", oldLine: 1, text: "old" },
+                { kind: "addition", newLine: 1, text: "new" },
+              ],
+            },
+          ],
+          binary: false,
         };
       }
       if (method === "session.interaction.respond") throw new Error("interaction response failed");

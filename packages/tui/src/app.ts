@@ -27,17 +27,19 @@ import type {
   SessionSummary,
   ThinkingLevel,
   WireEvent,
-  WorkspaceDiff,
-  WorkspaceDiffScope,
 } from "@axl/protocol";
-import { parseWorkspaceDiff } from "@axl/protocol";
 
 import { ActivityComponent } from "./activity.ts";
 import { droppedImages, type LocalAttachment, readImageFile } from "./attachments.ts";
 import { readClipboardText, writeClipboardText } from "./clipboard.ts";
 import { DeveloperPanelComponent } from "./developer-panel.ts";
 import { renderDialog } from "./dialog.ts";
-import { type DiffLayout, DiffReviewOverlay } from "./diff-review.ts";
+import {
+  type DiffLayout,
+  DiffReviewOverlay,
+  type WorkspaceReview,
+  type WorkspaceReviewScope,
+} from "./diff-review.ts";
 import { decodeOneKey, LineEditor } from "./editor.ts";
 import { EditorFrameComponent } from "./editor-frame.ts";
 import { ExtensionWidgetsComponent } from "./extension-ui.ts";
@@ -562,7 +564,7 @@ export class AxlApp {
   private readonly pendingAttachments: BlobReference[] = [];
   private attachmentBusy = false;
   private stashedPrompt: string | undefined;
-  private workspaceDiff: WorkspaceDiff | undefined;
+  private workspaceDiff: WorkspaceReview | undefined;
   private workspaceDiffError: string | undefined;
   private workspaceDiffGeneration = 0;
   private readonly developerPanel: DeveloperPanelComponent;
@@ -2141,7 +2143,7 @@ export class AxlApp {
         this.notice = this.view.palette.error(
           "✖ use /review working, /review last-turn, or /review off",
         );
-      } else void this.openDiffReview((argument || "working") as WorkspaceDiffScope);
+      } else void this.openDiffReview((argument || "working") as WorkspaceReviewScope);
       return;
     }
     if (command === "/status") {
@@ -2414,13 +2416,55 @@ export class AxlApp {
     if (this.developerPanelEnabled) void this.refreshWorkspaceDiff();
   }
 
-  private async loadWorkspaceDiff(scope: WorkspaceDiffScope): Promise<WorkspaceDiff> {
-    return parseWorkspaceDiff(
-      await this.client.request("session.workspace.diff", {
-        sessionId: this.sessionId,
-        scope,
+  private async loadWorkspaceDiff(scope: WorkspaceReviewScope): Promise<WorkspaceReview> {
+    const status = await this.client.request("session.workspace.status", {
+      sessionId: this.sessionId,
+      scope,
+    });
+    const files = await Promise.all(
+      status.entries.map(async (entry) => {
+        const diff = await this.client.request("session.workspace.diff", {
+          sessionId: this.sessionId,
+          entryId: entry.entryId,
+          contextLines: 3,
+          repositoryGeneration: status.repositoryGeneration,
+          maxBytes: 4 * 1024 * 1024,
+        });
+        const lines = diff.hunks.flatMap((hunk) => [
+          hunk.header,
+          ...hunk.lines.map((line) => {
+            const prefix =
+              line.kind === "addition"
+                ? "+"
+                : line.kind === "deletion"
+                  ? "-"
+                  : line.kind === "context"
+                    ? " "
+                    : "";
+            return `${prefix}${line.text}`;
+          }),
+        ]);
+        return {
+          path: entry.path,
+          status: entry.kind,
+          additions: diff.hunks.reduce(
+            (total, hunk) => total + hunk.lines.filter((line) => line.kind === "addition").length,
+            0,
+          ),
+          deletions: diff.hunks.reduce(
+            (total, hunk) => total + hunk.lines.filter((line) => line.kind === "deletion").length,
+            0,
+          ),
+          patch: entry.binary ? "Binary file" : lines.join("\n"),
+          truncated: false,
+        };
       }),
     );
+    return {
+      scope,
+      ...(status.checkpointId === undefined ? {} : { checkpointId: status.checkpointId }),
+      files,
+    };
   }
 
   private async refreshWorkspaceDiff(): Promise<void> {
@@ -2457,7 +2501,7 @@ export class AxlApp {
     }
   }
 
-  private async openDiffReview(scope: WorkspaceDiffScope): Promise<void> {
+  private async openDiffReview(scope: WorkspaceReviewScope): Promise<void> {
     if (this.overlays.active !== undefined) return;
     const newlyEnabled = !this.workspaceReviewEnabled;
     if (newlyEnabled && !(await this.configureWorkspaceReview(true))) {

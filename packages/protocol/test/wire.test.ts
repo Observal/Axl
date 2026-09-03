@@ -11,7 +11,10 @@ import {
   parseServerMessage,
   parseSnapshotPage,
   parseWireRequest,
-  parseWorkspaceDiff,
+  parseWorkspaceDiffResult,
+  parseWorkspaceListResult,
+  parseWorkspaceReadResult,
+  parseWorkspaceStatusResult,
   requiredCapability,
   WIRE_PROTOCOL_VERSION,
 } from "../src/index.ts";
@@ -138,12 +141,36 @@ test("validates every request shape", () => {
     {
       kind: "request",
       id: 10,
-      method: "session.workspace.diff",
-      params: { sessionId, scope: "last-turn" },
+      method: "session.workspace.list",
+      params: { sessionId, path: "", pageSize: 100 },
     },
     {
       kind: "request",
       id: 11,
+      method: "session.workspace.read",
+      params: { sessionId, path: "src/app.ts", startLine: 1, maxLines: 200, maxBytes: 65_536 },
+    },
+    {
+      kind: "request",
+      id: 12,
+      method: "session.workspace.status",
+      params: { sessionId, scope: "last-turn" },
+    },
+    {
+      kind: "request",
+      id: 13,
+      method: "session.workspace.diff",
+      params: {
+        sessionId,
+        entryId: "entry-1",
+        contextLines: 3,
+        repositoryGeneration: "repository-1",
+        maxBytes: 65_536,
+      },
+    },
+    {
+      kind: "request",
+      id: 14,
       method: "session.workspace.checkpoint",
       params: { sessionId, enabled: true },
     },
@@ -339,8 +366,32 @@ test("rejects malformed requests at the wire boundary", () => {
     {
       kind: "request",
       id: 1,
-      method: "session.workspace.diff",
+      method: "session.workspace.list",
+      params: { sessionId, path: "src/../secret", pageSize: 10 },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.workspace.read",
+      params: { sessionId, path: "/etc/passwd", maxLines: 10, maxBytes: 100 },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.workspace.status",
       params: { sessionId, scope: "everything" },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.workspace.diff",
+      params: {
+        sessionId,
+        entryId: "entry-1",
+        contextLines: 101,
+        repositoryGeneration: "repository-1",
+        maxBytes: 100,
+      },
     },
     {
       kind: "request",
@@ -429,28 +480,77 @@ test("validates frozen snapshot pages", () => {
   );
 });
 
-test("validates bounded workspace diff responses", () => {
-  const value = {
-    scope: "last-turn",
-    checkpointId: "123e4567-e89b-42d3-a456-426614174001",
-    files: [
+test("validates workspace list, read, status, and structured diff responses", () => {
+  const entry = {
+    entryId: "entry-1",
+    path: "src/app.ts",
+    area: "unstaged",
+    kind: "modified",
+    binary: false,
+    submodule: false,
+  } as const;
+  const listed = {
+    workspaceGeneration: "workspace-1",
+    entries: [{ path: "src", name: "src", type: "directory", mtimeMs: 1 }],
+    nextPageCursor: "page-2",
+  } as const;
+  assert.deepEqual(parseWorkspaceListResult(listed), listed);
+  assert.deepEqual(
+    parseWorkspaceReadResult({
+      workspaceGeneration: "workspace-1",
+      fileRevision: "file-1",
+      path: "src/app.ts",
+      encoding: "utf-8",
+      text: "one\n",
+      startLine: 1,
+      endLine: 1,
+      totalLines: 1,
+      truncated: false,
+    }),
+    {
+      workspaceGeneration: "workspace-1",
+      fileRevision: "file-1",
+      path: "src/app.ts",
+      encoding: "utf-8",
+      text: "one\n",
+      startLine: 1,
+      endLine: 1,
+      totalLines: 1,
+      truncated: false,
+    },
+  );
+  const status = {
+    workspaceGeneration: "workspace-1",
+    repositoryGeneration: "repository-1",
+    repositoryRoot: "",
+    branch: { state: "branch", name: "main", head: "a".repeat(40) },
+    sparseCheckout: false,
+    entries: [entry],
+  } as const;
+  assert.deepEqual(parseWorkspaceStatusResult(status), status);
+  const diff = {
+    workspaceGeneration: "workspace-1",
+    repositoryGeneration: "repository-1",
+    entry,
+    oldRevision: "a".repeat(40),
+    hunks: [
       {
-        path: "src/app.ts",
-        status: "modified",
-        additions: 2,
-        deletions: 1,
-        patch: "@@ -1 +1 @@",
-        truncated: false,
+        header: "@@ -1 +1 @@",
+        lines: [
+          { kind: "deletion", oldLine: 1, text: "old" },
+          { kind: "addition", newLine: 1, text: "new" },
+        ],
       },
     ],
-  };
-  assert.deepEqual(parseWorkspaceDiff(value), value);
+    binary: false,
+  } as const;
+  assert.deepEqual(parseWorkspaceDiffResult(diff), diff);
   assert.throws(
-    () => parseWorkspaceDiff({ ...value, files: [{ ...value.files[0], path: "" }] }),
+    () => parseWorkspaceStatusResult({ ...status, entries: [{ ...entry, path: "../secret" }] }),
     ProtocolValidationError,
   );
   assert.throws(
-    () => parseWorkspaceDiff({ ...value, files: [{ ...value.files[0], additions: -1 }] }),
+    () => parseWorkspaceDiffResult({ ...diff, hunks: [{ header: "", lines: [] }] }),
     ProtocolValidationError,
   );
 });

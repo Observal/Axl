@@ -4,17 +4,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { WorkspaceDiff } from "@axl/protocol";
-
 import {
   DeveloperPanelComponent,
   DiffReviewOverlay,
   LineEditor,
   PLAIN_PALETTE,
   VimModeController,
+  type WorkspaceReview,
 } from "../src/index.ts";
 
-const diff: WorkspaceDiff = {
+const diff: WorkspaceReview = {
   scope: "working",
   files: [
     {
