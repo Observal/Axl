@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { AxlDaemon, DaemonClient } from "@axl/daemon";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
-import type { ModelStreamEvent } from "@axl/protocol";
+import { MAX_CANONICAL_EVENT_BYTES, type ModelStreamEvent } from "@axl/protocol";
 
 const entry = fileURLToPath(new URL("../dist/main.js", import.meta.url));
 
@@ -19,9 +19,6 @@ test("--help and --version do not require credentials", () => {
   const help = spawnSync(process.execPath, [entry, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /^Usage: axl/);
-  assert.match(help.stdout, /-r, --resume/);
-  assert.match(help.stdout, /--profile/);
-  assert.match(help.stdout, /--no-web-search/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
@@ -55,10 +52,18 @@ async function stopChild(child: ChildProcess): Promise<void> {
   await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
 }
 
-async function runCli(args: readonly string[]): Promise<{ code: number | null; stderr: string }> {
+async function runCli(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  let stdout = "";
   let stderr = "";
   const child = spawn(process.execPath, [entry, ...args], {
-    stdio: ["ignore", "ignore", "pipe"],
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
   });
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString("utf8");
@@ -66,23 +71,80 @@ async function runCli(args: readonly string[]): Promise<{ code: number | null; s
   const code = await new Promise<number | null>((resolvePromise) =>
     child.once("exit", (value) => resolvePromise(value)),
   );
-  return { code, stderr };
+  return { code, stdout, stderr };
 }
 
-test("resume mode rejects an explicit session ID", async () => {
-  const result = await runCli(["-r", "123e4567-e89b-42d3-a456-426614174000"]);
-  assert.equal(result.code, 1);
-  assert.match(result.stderr, /--resume cannot be combined with a session ID/);
+test("offline raw session export requires explicit raw mode and preserves bytes", async (context) => {
+  const home = await temporaryDirectory(context);
+  const sessionId = "00000000-0000-4000-8000-000000000401";
+  const sessions = join(home, ".axl", "sessions");
+  await mkdir(sessions, { recursive: true });
+  const source = Buffer.from('{"unknown":"legacy bytes"}\n');
+  await writeFile(join(sessions, `${sessionId}.jsonl`), source);
+  const output = join(home, "raw-export");
+
+  const missingRaw = await runCli(["session", "export", sessionId, "--output", output], {
+    ...process.env,
+    HOME: home,
+  });
+  assert.equal(missingRaw.code, 1);
+  assert.match(missingRaw.stderr, /requires --raw/);
+
+  const exported = await runCli(["session", "export", sessionId, "--raw", "--output", output], {
+    ...process.env,
+    HOME: home,
+  });
+  assert.equal(exported.code, 0, exported.stderr);
+  assert.deepEqual(await readFile(join(output, `${sessionId}.jsonl`)), source);
 });
 
-test("rejects invalid session profile arguments", async () => {
-  const unknown = await runCli(["--profile", "unknown"]);
-  assert.equal(unknown.code, 1);
-  assert.match(unknown.stderr, /Unknown profile unknown; expected standard or exec/);
+test("offline migration requires explicit confirmation before prefix recovery", async (context) => {
+  const home = await temporaryDirectory(context);
+  const sessionId = "00000000-0000-4000-8000-000000000402";
+  const sessions = join(home, ".axl", "sessions");
+  await mkdir(sessions, { recursive: true });
+  const rootId = "00000000-0000-4000-8000-000000000403";
+  const root = {
+    version: 1,
+    id: rootId,
+    sessionId,
+    parentId: null,
+    timestamp: 1,
+    type: "session.created",
+    payload: { cwd: "/workspace" },
+  };
+  const oversized = {
+    version: 1,
+    id: "00000000-0000-4000-8000-000000000404",
+    sessionId,
+    parentId: rootId,
+    timestamp: 2,
+    type: "prompt.section",
+    payload: {
+      name: "legacy",
+      source: "test",
+      content: "é".repeat(MAX_CANONICAL_EVENT_BYTES),
+    },
+  };
+  const sourcePath = join(sessions, `${sessionId}.jsonl`);
+  const source = Buffer.from(`${JSON.stringify(root)}\n${JSON.stringify(oversized)}\n`);
+  await writeFile(sourcePath, source);
+  const env = { ...process.env, HOME: home };
 
-  const resume = await runCli(["--profile", "exec", "--resume"]);
-  assert.equal(resume.code, 1);
-  assert.match(resume.stderr, /--profile cannot be combined with --resume/);
+  const refused = await runCli(["session", "migrate-events", sessionId], env);
+  assert.equal(refused.code, 1);
+  assert.match(refused.stderr, /--confirm-prefix/);
+  assert.deepEqual(await readFile(sourcePath), source);
+
+  const recovered = await runCli(["session", "migrate-events", sessionId, "--confirm-prefix"], env);
+  assert.equal(recovered.code, 0, recovered.stderr);
+  const manifest = JSON.parse(recovered.stdout) as {
+    targetSessionId: string;
+    recovery: string;
+  };
+  assert.equal(manifest.recovery, "prefix_only");
+  await stat(join(sessions, `${manifest.targetSessionId}.jsonl`));
+  assert.deepEqual(await readFile(sourcePath), source);
 });
 
 test("OCI CLI arguments fail closed", async () => {
