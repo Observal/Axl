@@ -99,9 +99,15 @@ function client(
       if (method === "session.ack") {
         return { cursor: "00000000-0000-4000-8000-000000000102" };
       }
-      if (method === "session.send") {
+      if (method === "session.send" || method === "session.shell") {
         if (sendError !== undefined) throw sendError;
-        return { stopReason: "stop" };
+        return method === "session.send"
+          ? { stopReason: "stop" }
+          : {
+              operationId: "00000000-0000-4000-8000-000000000103",
+              isError: false,
+              resultEventId: "00000000-0000-4000-8000-000000000104",
+            };
       }
       if (method === "session.interrupt") return { interrupted: false };
       if (method === "session.workspace.checkpoint") return { enabled: true };
@@ -264,6 +270,35 @@ test("restores prompts instead of retrying uncertain daemon delivery", async () 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(output.text, /delivery unknown · prompts restored for review/);
   assert.match(output.text, /preserve me/);
+  app.stop();
+});
+
+test("reports an uncertain shell outcome without automatically repeating the command", async () => {
+  const requests: Array<{ method?: string; params?: { command?: string } }> = [];
+  const input = new Input();
+  const output = new Output();
+  const disconnect = Object.assign(new Error("connection lost"), { code: "disconnected" });
+  const app = await AxlApp.start({
+    client: client(
+      [event("session.created", { cwd: process.cwd() })],
+      requests as unknown[],
+      disconnect,
+    ),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+  });
+
+  input.write("!printf once\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.match(output.text, /shell delivery unknown · command restored/);
+  assert.match(output.text, /!printf once/);
+  assert.equal(requests.filter((request) => request.method === "session.shell").length, 1);
+  assert.equal(
+    requests.find((request) => request.method === "session.shell")?.params?.command,
+    "printf once",
+  );
   app.stop();
 });
 

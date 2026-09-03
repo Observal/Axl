@@ -4,8 +4,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, realpath, rm, truncate, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { createConnection, type Socket } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import test, { type TestContext } from "node:test";
@@ -17,8 +17,8 @@ import type {
   ModelStreamEvent,
   SessionActivityFrame,
   SessionForkResult,
-  SessionId,
   SessionHistoryResult,
+  SessionId,
   SessionSubscribeResult,
   SessionSummary,
   Usage,
@@ -130,6 +130,26 @@ async function subscribeAll(
     cursor: descriptor.boundaryCursor,
   });
   return { subscription, events };
+}
+
+async function removeCommandCompletions(
+  dataDirectory: string,
+  idempotencyKeys: ReadonlySet<string>,
+): Promise<void> {
+  const journalPath = join(dataDirectory, "commands.jsonl");
+  const records = (await readFile(journalPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter(
+      (record) =>
+        !(
+          (record.type === "succeeded" || record.type === "failed") &&
+          typeof record.idempotencyKey === "string" &&
+          idempotencyKeys.has(record.idempotencyKey)
+        ),
+    );
+  await writeFile(journalPath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
 }
 
 function rawConnection(socketPath: string): {
@@ -457,26 +477,21 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
       forkSnapshot.events[0].payload.sourceEventId,
     sourceMessage.id,
   );
+  const cloneKey = "00000000-0000-4000-8000-000000000109";
+  const cloned = await client.request(
+    "session.clone",
+    { sessionId: created.sessionId },
+    { idempotencyKey: cloneKey },
+  );
+  const cloneSnapshot = await subscribeAll(client, cloned.sessionId);
+  assert.equal(cloneSnapshot.events[0]?.operationId, cloneKey);
 
   client.close();
   await fixture.daemon.stop();
   const journalPath = join(fixture.dataDirectory, "commands.jsonl");
-  const beforeRecovery = (await readFile(journalPath, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  await writeFile(
-    journalPath,
-    `${beforeRecovery
-      .filter(
-        (record) =>
-          !(
-            record.type === "succeeded" &&
-            (record.idempotencyKey === sendKey || record.idempotencyKey === forkKey)
-          ),
-      )
-      .map((record) => JSON.stringify(record))
-      .join("\n")}\n`,
+  await removeCommandCompletions(
+    fixture.dataDirectory,
+    new Set([createKey, sendKey, forkKey, cloneKey]),
   );
   const restarted = new AxlDaemon({
     socketPath: fixture.socketPath,
@@ -489,18 +504,14 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  assert.equal(
-    recoveredBeforeRequests.some(
-      (record) => record.type === "succeeded" && record.idempotencyKey === sendKey,
-    ),
-    true,
-  );
-  assert.equal(
-    recoveredBeforeRequests.some(
-      (record) => record.type === "succeeded" && record.idempotencyKey === forkKey,
-    ),
-    true,
-  );
+  for (const key of [createKey, sendKey, forkKey, cloneKey]) {
+    assert.equal(
+      recoveredBeforeRequests.some(
+        (record) => record.type === "succeeded" && record.idempotencyKey === key,
+      ),
+      true,
+    );
+  }
   const reconnected = await DaemonClient.connect(fixture.socketPath);
   context.after(() => reconnected.close());
   assert.deepEqual(
@@ -510,6 +521,14 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
       { idempotencyKey: createKey },
     ),
     created,
+  );
+  await assert.rejects(
+    reconnected.request(
+      "session.dispose",
+      { sessionId: created.sessionId },
+      { idempotencyKey: createKey },
+    ),
+    (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
   );
   assert.deepEqual(
     await reconnected.request(
@@ -530,6 +549,14 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
       { idempotencyKey: sendKey },
     ),
     sent,
+  );
+  assert.deepEqual(
+    await reconnected.request(
+      "session.clone",
+      { sessionId: created.sessionId },
+      { idempotencyKey: cloneKey },
+    ),
+    cloned,
   );
   await reconnected.request("session.resume", { sessionId: created.sessionId });
   const afterRestart = await subscribeAll(reconnected, created.sessionId);
@@ -1246,6 +1273,179 @@ test("interrupt aborts the active operation from another connection", async (con
   assert.equal(idle.interrupted, false);
 });
 
+test("restart recovery preserves exact interrupt results", async (context) => {
+  const fixture = await startDaemon(context, hangingPort());
+  const client = await DaemonClient.connect(fixture.socketPath);
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const sendKey = "00000000-0000-4000-8000-000000000122";
+  const interruptKey = "00000000-0000-4000-8000-000000000123";
+  const sending = client.request(
+    "session.send",
+    {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "interrupt once" }],
+    },
+    { idempotencyKey: sendKey },
+  );
+  for (
+    let attempt = 0;
+    fixture.daemon.sessions.activeOperationId(created.sessionId) === undefined && attempt < 100;
+    attempt += 1
+  ) {
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  const interrupted = await client.request(
+    "session.interrupt",
+    { sessionId: created.sessionId },
+    { idempotencyKey: interruptKey },
+  );
+  assert.deepEqual(interrupted, { interrupted: true, operationId: sendKey });
+  await sending;
+
+  client.close();
+  await fixture.daemon.stop();
+  await removeCommandCompletions(fixture.dataDirectory, new Set([interruptKey]));
+  const restarted = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restarted.start();
+  const recoveredClient = await DaemonClient.connect(fixture.socketPath);
+  assert.deepEqual(
+    await recoveredClient.request(
+      "session.interrupt",
+      { sessionId: created.sessionId },
+      { idempotencyKey: interruptKey },
+    ),
+    interrupted,
+  );
+  await recoveredClient.request("session.resume", { sessionId: created.sessionId });
+
+  const idleKey = "00000000-0000-4000-8000-000000000124";
+  const idle = await recoveredClient.request(
+    "session.interrupt",
+    { sessionId: created.sessionId },
+    { idempotencyKey: idleKey },
+  );
+  assert.deepEqual(idle, { interrupted: false });
+  recoveredClient.close();
+  await restarted.stop();
+  await removeCommandCompletions(fixture.dataDirectory, new Set([idleKey]));
+  const restartedAgain = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restartedAgain.start();
+  context.after(() => restartedAgain.stop());
+  const finalClient = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => finalClient.close());
+  assert.deepEqual(
+    await finalClient.request(
+      "session.interrupt",
+      { sessionId: created.sessionId },
+      { idempotencyKey: idleKey },
+    ),
+    idle,
+  );
+  await finalClient.request("session.resume", { sessionId: created.sessionId });
+
+  const completedSend = await finalClient.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "already complete" }],
+  });
+  assert.deepEqual(
+    await restartedAgain.sessions.reconcileAcceptedMutation({
+      method: "session.interrupt",
+      operationId: "00000000-0000-4000-8000-000000000125",
+      targetSessionId: created.sessionId,
+      affectedOperationId: completedSend.operationId,
+    }),
+    { interrupted: false },
+  );
+});
+
+test("direct shell recovery returns canonical results without repeating effects", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const fixture = {
+    socketPath: join(directory, "axl.sock"),
+    dataDirectory: join(directory, "data"),
+    cwd: directory,
+  };
+  let executions = 0;
+  const runtime = () => {
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "shell",
+      description: "Record one test shell effect",
+      inputSchema: { type: "object" },
+      async execute() {
+        executions += 1;
+        return { content: [{ type: "text" as const, text: "effect" }], isError: false };
+      },
+    });
+    return { model: replyPort(), tools };
+  };
+  const daemon = new AxlDaemon({ ...fixture, runtime });
+  await daemon.start();
+  const client = await DaemonClient.connect(fixture.socketPath);
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const operationId = "00000000-0000-4000-8000-000000000126";
+  const command = "record effect";
+  const result = await client.request("session.shell", {
+    sessionId: created.sessionId,
+    operationId,
+    command,
+    excluded: false,
+  });
+  assert.deepEqual(
+    await client.request("session.shell", {
+      sessionId: created.sessionId,
+      operationId,
+      command,
+      excluded: false,
+    }),
+    result,
+  );
+  assert.equal(executions, 1);
+
+  client.close();
+  await daemon.stop();
+  const restarted = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime,
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recoveredClient = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => recoveredClient.close());
+  await recoveredClient.request("session.resume", { sessionId: created.sessionId });
+  assert.deepEqual(
+    await recoveredClient.request("session.shell", {
+      sessionId: created.sessionId,
+      operationId,
+      command,
+      excluded: false,
+    }),
+    result,
+  );
+  assert.equal(executions, 1);
+  await assert.rejects(
+    recoveredClient.request("session.shell", {
+      sessionId: created.sessionId,
+      operationId,
+      command: "printf 'different effect\\n'",
+      excluded: false,
+    }),
+    (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
+  );
+});
+
 test("concurrent sends conflict loudly instead of interleaving", async (context) => {
   const { socketPath, cwd } = await startDaemon(context, hangingPort());
   const client = await DaemonClient.connect(socketPath);
@@ -1258,16 +1458,32 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
     content: [{ type: "text", text: "one" }],
   });
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  const conflictKey = "00000000-0000-4000-8000-000000000120";
+  const conflictingRequest = () =>
+    client.request(
+      "session.send",
+      {
+        sessionId: created.sessionId,
+        delivery: "prompt",
+        content: [{ type: "text", text: "two" }],
+      },
+      { idempotencyKey: conflictKey },
+    );
   await assert.rejects(
-    client.request("session.send", {
-      sessionId: created.sessionId,
-      delivery: "prompt",
-      content: [{ type: "text", text: "two" }],
-    }),
+    conflictingRequest(),
     (error) => error instanceof WireClientError && error.code === "operation_active",
   );
   await client.request("session.interrupt", { sessionId: created.sessionId });
   await first;
+  await assert.rejects(
+    conflictingRequest(),
+    (error) =>
+      error instanceof WireClientError &&
+      error.code === "operation_active" &&
+      error.retryable === false,
+  );
+  const snapshot = await subscribeAll(client, created.sessionId);
+  assert.equal(snapshot.events.filter((event) => event.type === "user.message").length, 1);
 });
 
 test("subscribe supports opaque acknowledged cursors and multiple attachments", async (context) => {
@@ -1346,13 +1562,14 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
 });
 
 test("dispose removes the session and errors surface typed codes", async (context) => {
-  const { socketPath, cwd, dataDirectory } = await startDaemon(context);
+  const fixture = await startDaemon(context);
+  const { socketPath, cwd, dataDirectory } = fixture;
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
 
   const created = await client.request("session.create", { cwd });
   const disposeKey = "00000000-0000-4000-8000-000000000103";
-  await client.request(
+  const disposed = await client.request(
     "session.dispose",
     { sessionId: created.sessionId },
     { idempotencyKey: disposeKey },
@@ -1365,8 +1582,41 @@ test("dispose removes the session and errors surface typed codes", async (contex
     .map((line) => JSON.parse(line) as CanonicalEvent);
   assert.equal(persisted.at(-1)?.type, "session.closed");
   assert.equal(persisted.at(-1)?.operationId, disposeKey);
+
+  client.close();
+  await fixture.daemon.stop();
+  await removeCommandCompletions(dataDirectory, new Set([disposeKey]));
+  const restarted = new AxlDaemon({
+    socketPath,
+    dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recoveredClient = await DaemonClient.connect(socketPath);
+  context.after(() => recoveredClient.close());
+  assert.deepEqual(
+    await recoveredClient.request(
+      "session.dispose",
+      { sessionId: created.sessionId },
+      { idempotencyKey: disposeKey },
+    ),
+    disposed,
+  );
+  const recoveredEvents = (
+    await readFile(join(dataDirectory, "sessions", `${created.sessionId}.jsonl`), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent);
+  assert.equal(
+    recoveredEvents.filter(
+      (event) => event.type === "session.closed" && event.operationId === disposeKey,
+    ).length,
+    1,
+  );
   await assert.rejects(
-    client.request("session.send", {
+    recoveredClient.request("session.send", {
       sessionId: created.sessionId,
       content: [],
       delivery: "prompt",
@@ -1375,7 +1625,7 @@ test("dispose removes the session and errors surface typed codes", async (contex
   );
 
   await assert.rejects(
-    client.request("session.resume", {
+    recoveredClient.request("session.resume", {
       sessionId: parseSessionId("123e4567-e89b-42d3-a456-42661417ffff"),
     }),
     (error) => error instanceof WireClientError && error.code === "unknown_session",
@@ -1383,7 +1633,7 @@ test("dispose removes the session and errors surface typed codes", async (contex
 
   await assert.rejects(
     (
-      client.request as unknown as (
+      recoveredClient.request as unknown as (
         method: string,
         params: Record<string, unknown>,
       ) => Promise<unknown>
@@ -1481,15 +1731,25 @@ test("routes runtime interaction requests to an attached client", async (context
   }
   assert.ok(interaction);
   const responseKey = "00000000-0000-4000-8000-000000000104";
-  await client.request(
-    "session.interaction.respond",
-    {
-      sessionId: created.sessionId,
-      interactionId: interaction.payload.interactionId,
-      action: "accept",
-    },
-    { idempotencyKey: responseKey },
-  );
+  const responseParams = {
+    sessionId: created.sessionId,
+    interactionId: interaction.payload.interactionId,
+    action: "accept" as const,
+  };
+  const responseRequest = client.request("session.interaction.respond", responseParams, {
+    idempotencyKey: responseKey,
+  });
+  const losingKey = "00000000-0000-4000-8000-000000000121";
+  const losingRequest = client.request("session.interaction.respond", responseParams, {
+    idempotencyKey: losingKey,
+  });
+  const response = await responseRequest;
+  await assert.rejects(losingRequest, (error) => {
+    assert.ok(error instanceof WireClientError);
+    assert.equal(error.code, "interaction_already_resolved");
+    assert.deepEqual(error.details, { resolutionEventId: response.resolutionEventId });
+    return true;
+  });
   await sending;
   assert.deepEqual(
     events.filter((event) => event.type.startsWith("interaction.")).map((event) => event.type),
@@ -1498,6 +1758,55 @@ test("routes runtime interaction requests to an attached client", async (context
   assert.equal(
     events.find((event) => event.type === "interaction.resolved")?.operationId,
     responseKey,
+  );
+
+  await assert.rejects(
+    client.request("session.interaction.respond", responseParams, {
+      idempotencyKey: losingKey,
+    }),
+    (error) => {
+      assert.ok(error instanceof WireClientError);
+      assert.equal(error.code, "interaction_already_resolved");
+      assert.deepEqual(error.details, { resolutionEventId: response.resolutionEventId });
+      return true;
+    },
+  );
+  assert.equal(events.filter((event) => event.type === "interaction.resolved").length, 1);
+
+  client.close();
+  await daemon.stop();
+  await removeCommandCompletions(join(directory, "data"), new Set([responseKey]));
+  const restarted = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recoveredClient = await DaemonClient.connect(socketPath);
+  context.after(() => recoveredClient.close());
+  assert.deepEqual(
+    await recoveredClient.request("session.interaction.respond", responseParams, {
+      idempotencyKey: responseKey,
+    }),
+    response,
+  );
+  await assert.rejects(
+    recoveredClient.request("session.interaction.respond", responseParams, {
+      idempotencyKey: losingKey,
+    }),
+    (error) =>
+      error instanceof WireClientError &&
+      error.code === "interaction_already_resolved" &&
+      error.details?.resolutionEventId === response.resolutionEventId,
+  );
+  await recoveredClient.request("session.resume", { sessionId: created.sessionId });
+  const recovered = await subscribeAll(recoveredClient, created.sessionId);
+  assert.equal(
+    recovered.events.filter(
+      (event) => event.type === "interaction.resolved" && event.operationId === responseKey,
+    ).length,
+    1,
   );
 });
 
@@ -1737,6 +2046,49 @@ test("configuration changes rebuild and log the selected model and thinking", as
   assert.equal(changed.effectiveThinkingLevel, "high");
   assert.equal(changed.profile, "minimal");
   assert.equal(changed.boundaryEventIds.length, 2);
+
+  client.close();
+  await daemon.stop();
+  await removeCommandCompletions(join(directory, "data"), new Set([configureKey]));
+  const restarted = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: ({ selection }) => ({
+      model: replyPort(),
+      tools: new ToolRegistry(),
+      ...(selection.modelId === undefined ? {} : { configModel: { modelId: selection.modelId } }),
+      ...(selection.thinkingLevel === undefined
+        ? {}
+        : {
+            configThinking: {
+              requested: selection.thinkingLevel,
+              effective: selection.thinkingLevel,
+              clamped: false,
+            },
+          }),
+    }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recoveredClient = await DaemonClient.connect(socketPath);
+  context.after(() => recoveredClient.close());
+  assert.deepEqual(
+    await recoveredClient.request(
+      "session.configure",
+      {
+        sessionId: created.sessionId,
+        modelId: "gpt-4.1",
+        thinkingLevel: "high",
+      },
+      { idempotencyKey: configureKey },
+    ),
+    changed,
+  );
+  const recovered = await subscribeAll(recoveredClient, created.sessionId);
+  assert.deepEqual(
+    recovered.events.filter((event) => event.operationId === configureKey).map((event) => event.id),
+    changed.boundaryEventIds,
+  );
 });
 
 test("reload rebuilds the runtime as a logged boundary with live subscriptions", async (context) => {
@@ -1792,11 +2144,49 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
     true,
   );
 
-  // The session still works after the reload, on the same log.
-  const sent = (await client.request("session.send", {
+  client.close();
+  await daemon.stop();
+  await removeCommandCompletions(join(directory, "data"), new Set([reloadKey]));
+  const restarted = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: ({ boundary }) => ({
+      model: replyPort(),
+      tools: new ToolRegistry(),
+      ...(boundary === "config_change"
+        ? {}
+        : {
+            configDialect: {
+              dialectId: "generic" as const,
+              rosterFingerprint: "f".repeat(64),
+              reason: boundary,
+            },
+          }),
+    }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recoveredClient = await DaemonClient.connect(socketPath);
+  context.after(() => recoveredClient.close());
+  assert.deepEqual(
+    await recoveredClient.request(
+      "session.reload",
+      { sessionId: created.sessionId },
+      { idempotencyKey: reloadKey },
+    ),
+    reloaded,
+  );
+  const recovered = await subscribeAll(recoveredClient, created.sessionId);
+  assert.deepEqual(
+    recovered.events.filter((event) => event.operationId === reloadKey).map((event) => event.id),
+    reloaded.boundaryEventIds,
+  );
+
+  // The session still works after recovery, on the same log.
+  const sent = await recoveredClient.request("session.send", {
     sessionId: created.sessionId,
     delivery: "prompt",
     content: [{ type: "text", text: "after reload" }],
-  })) as { stopReason: string };
+  });
   assert.equal(sent.stopReason, "stop");
 });

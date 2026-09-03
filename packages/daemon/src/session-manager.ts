@@ -29,10 +29,10 @@ import {
 import {
   type BlobReference,
   type CanonicalEvent,
-  encodeCanonicalEvent,
   EVENT_FORMAT_VERSION,
   type EventId,
   type EventPayloadMap,
+  encodeCanonicalEvent,
   type InteractionAction,
   type JsonObject,
   type JsonValue,
@@ -120,6 +120,7 @@ interface ActiveTurn {
 interface PendingInteraction {
   readonly resolve: (response: SessionInteractionResponse) => void;
   readonly reject: (error: Error) => void;
+  resolution?: Promise<EventId>;
 }
 
 interface ManagedSession {
@@ -488,19 +489,25 @@ export class SessionManager {
           : parseOperationId(acceptance.affectedOperationId, "affectedOperationId");
       if (affected === undefined) return { interrupted: false };
       const affectedEvents = stored.filter((event) => event.operationId === affected);
-      const terminal = affectedEvents.some(
+      const terminal = affectedEvents.findLast(
         (event) =>
           (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
           event.type === "session.error",
       );
-      if (!terminal && affectedEvents.some((event) => event.type === "user.message")) {
+      if (terminal !== undefined) {
+        const interrupted =
+          terminal.type === "assistant.message" && terminal.payload.stopReason === "aborted";
+        return {
+          interrupted,
+          ...(interrupted ? { operationId: affected } : {}),
+        };
+      }
+      if (affectedEvents.some((event) => event.type === "user.message")) {
         await this.resume(target);
         await this.managed(target).session.abortRecoveredTurn(affected);
+        return { interrupted: true, operationId: affected };
       }
-      return {
-        interrupted: affectedEvents.length > 0,
-        ...(affectedEvents.length === 0 ? {} : { operationId: affected }),
-      };
+      return { interrupted: false };
     }
     if (acceptance.method === "session.dispose") {
       return evidence.some((event) => event.type === "session.closed")
@@ -1227,17 +1234,38 @@ export class SessionManager {
     }
     const pending = managed.interactions.get(interactionId);
     if (!pending) {
+      const resolved = managed.events.find(
+        (event) =>
+          event.type === "interaction.resolved" && event.payload.interactionId === interactionId,
+      );
+      if (resolved !== undefined) {
+        throw new DaemonError(
+          "interaction_already_resolved",
+          `Interaction ${interactionId} is already resolved`,
+          { details: { resolutionEventId: resolved.id } },
+        );
+      }
       throw new DaemonError("unknown_interaction", `Interaction ${interactionId} is not pending`);
     }
-    managed.interactions.delete(interactionId);
-    try {
-      const event = await managed.session.resolveInteraction(
-        { interactionId, ...response },
-        operationId,
+    if (pending.resolution !== undefined) {
+      const resolutionEventId = await pending.resolution;
+      throw new DaemonError(
+        "interaction_already_resolved",
+        `Interaction ${interactionId} is already resolved`,
+        { details: { resolutionEventId } },
       );
+    }
+    const resolving = managed.session
+      .resolveInteraction({ interactionId, ...response }, operationId)
+      .then((event) => event.id);
+    pending.resolution = resolving;
+    try {
+      const resolutionEventId = await resolving;
+      managed.interactions.delete(interactionId);
       pending.resolve(response);
-      return { interactionId, resolutionEventId: event.id };
+      return { interactionId, resolutionEventId };
     } catch (error) {
+      managed.interactions.delete(interactionId);
       pending.reject(error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
