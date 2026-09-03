@@ -487,8 +487,8 @@ async function main(): Promise<void> {
     sandbox: cli.sandbox,
     ...(cli.image === undefined ? {} : { image: cli.image }),
   };
-  const client = await connectTarget(currentTarget);
-  timing.mark("daemon connect");
+  const client = cli.resume ? undefined : await connectTarget(currentTarget);
+  if (client !== undefined) timing.mark("daemon connect");
 
   let resumeCatalog = new Map<string, LocalSessionDescriptor>();
   const loadResumeSessions = async () => {
@@ -533,7 +533,7 @@ async function main(): Promise<void> {
   ]);
   timing.mark("TUI modules");
   const app = await AxlApp.start({
-    client,
+    ...(client === undefined ? {} : { client }),
     input: process.stdin,
     output: process.stdout,
     cwd: cli.cwd,

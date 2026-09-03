@@ -245,7 +245,6 @@ test("initial resume opens the all-session picker without creating a throwaway s
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
     input,
     output,
     cwd: directory,
@@ -263,6 +262,10 @@ test("initial resume opens the all-session picker without creating a throwaway s
         unsafe: false,
       },
     ],
+    openResumeSession: async () => ({
+      client: await DaemonClient.connect(socketPath),
+      reconnectClient: () => DaemonClient.connect(socketPath),
+    }),
   });
   await until(() => text().includes("Resume Session (All)"), "initial resume selector");
   const listingClient = await DaemonClient.connect(socketPath);

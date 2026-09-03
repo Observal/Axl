@@ -455,7 +455,7 @@ export interface ResumeSessionConnection {
 }
 
 export interface AxlAppOptions {
-  readonly client: DaemonClient;
+  readonly client?: DaemonClient;
   readonly reconnectClient?: () => Promise<DaemonClient>;
   readonly listResumeSessions?: () => Promise<readonly ResumeSessionEntry[]>;
   readonly openResumeSession?: (session: ResumeSessionEntry) => Promise<ResumeSessionConnection>;
@@ -538,7 +538,7 @@ export class AxlApp {
   sessionId: string;
   private cwd: string;
   private readonly options: AxlAppOptions;
-  private client: DaemonClient;
+  private client: DaemonClient | undefined;
   private reconnectClient: (() => Promise<DaemonClient>) | undefined;
   private readonly screen: DifferentialScreen;
   private view: SessionView;
@@ -668,7 +668,7 @@ export class AxlApp {
     this.webSearchEnabled = options.webSearch ?? true;
     this.initialResumePending = options.initialResume ?? false;
     this.mediaCache = new MediaCache(
-      () => this.client,
+      () => this.requireClient(),
       sessionId,
       options.mediaCapabilities ?? detectTerminalMedia(),
       () => this.imageDisplay,
@@ -752,7 +752,22 @@ export class AxlApp {
       onResize: this.resizeListener,
       ...(options.suspendProcess === undefined ? {} : { suspendProcess: options.suspendProcess }),
     });
-    this.bindClient(options.client);
+    if (options.client !== undefined) this.bindClient(options.client);
+  }
+
+  private requireClient(): DaemonClient {
+    if (this.client === undefined) throw new Error("No daemon is connected");
+    return this.client;
+  }
+
+  private unbindClient(): void {
+    this.unsubscribeEvents();
+    this.unsubscribeActivity();
+    this.unsubscribeDisconnect();
+    this.unsubscribeEvents = () => undefined;
+    this.unsubscribeActivity = () => undefined;
+    this.unsubscribeDisconnect = () => undefined;
+    this.client = undefined;
   }
 
   private bindClient(client: DaemonClient): void {
@@ -883,19 +898,27 @@ export class AxlApp {
   static async start(options: AxlAppOptions): Promise<AxlApp> {
     assertInteractiveTerminal(options.input, options.output);
     const initialResume = options.initialResume === true && options.sessionId === undefined;
-    const snapshot = initialResume
-      ? undefined
-      : ((await (options.sessionId === undefined
-          ? options.client.request("session.create", {
-              cwd: options.cwd,
-              ...(options.currentModel === undefined ? {} : { modelId: options.currentModel }),
-              ...(options.currentThinking === undefined
-                ? {}
-                : { thinkingLevel: options.currentThinking }),
-              ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
-              ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
-            })
-          : resumeSnapshot(options.client, options.sessionId))) as SessionSnapshot);
+    let snapshot: SessionSnapshot | undefined;
+    if (initialResume) {
+      if (options.client === undefined && options.openResumeSession === undefined) {
+        throw new Error("Initial resume requires a daemon connection callback");
+      }
+    } else {
+      const client = options.client;
+      if (client === undefined)
+        throw new Error("A daemon connection is required to open a session");
+      snapshot = (await (options.sessionId === undefined
+        ? client.request("session.create", {
+            cwd: options.cwd,
+            ...(options.currentModel === undefined ? {} : { modelId: options.currentModel }),
+            ...(options.currentThinking === undefined
+              ? {}
+              : { thinkingLevel: options.currentThinking }),
+            ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
+            ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+          })
+        : resumeSnapshot(client, options.sessionId))) as SessionSnapshot;
+    }
     const created = snapshot?.events[0];
     if (snapshot !== undefined && created?.type !== "session.created") {
       throw new Error("Session has no creation event");
@@ -936,10 +959,10 @@ export class AxlApp {
       try {
         await app.extensionHost.dispose();
       } catch (cleanupError) {
-        options.client.close();
+        options.client?.close();
         throw new AggregateError([error, cleanupError], "Extension startup and cleanup failed");
       }
-      options.client.close();
+      options.client?.close();
       throw error;
     }
     if (options.clearStartupLine) options.output.write("\r\x1b[2K");
@@ -950,7 +973,7 @@ export class AxlApp {
         app.commitEvent(event, false);
       }
       const lastEventId = snapshot.events.at(-1)?.id;
-      const subscription = (await options.client.request("session.subscribe", {
+      const subscription = (await app.requireClient().request("session.subscribe", {
         sessionId: snapshot.sessionId,
         ...(lastEventId === undefined ? {} : { afterEventId: lastEventId }),
       })) as {
@@ -979,7 +1002,7 @@ export class AxlApp {
       app.terminal.start();
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
       app.redraw();
-      if (initialResume) void app.openResume();
+      if (initialResume) await app.openResume();
       return app;
     } catch (error) {
       try {
@@ -1039,8 +1062,10 @@ export class AxlApp {
     } catch (error) {
       failures.push(error);
     }
+    const client = this.client;
+    this.unbindClient();
     try {
-      this.client.close();
+      client?.close();
     } catch (error) {
       failures.push(error);
     }
@@ -1910,7 +1935,7 @@ export class AxlApp {
     this.redraw();
     try {
       const reference = await uploadBlob(
-        this.client,
+        this.requireClient(),
         this.sessionId,
         attachment.bytes,
         attachment.mediaType,
@@ -2448,7 +2473,7 @@ export class AxlApp {
 
   private async loadWorkspaceDiff(scope: WorkspaceDiffScope): Promise<WorkspaceDiff> {
     return parseWorkspaceDiff(
-      await this.client.request("session.workspace.diff", {
+      await this.requireClient().request("session.workspace.diff", {
         sessionId: this.sessionId,
         scope,
       }),
@@ -2473,7 +2498,7 @@ export class AxlApp {
 
   private async configureWorkspaceReview(enabled: boolean, persist = true): Promise<boolean> {
     try {
-      await this.client.request("session.workspace.checkpoint", {
+      await this.requireClient().request("session.workspace.checkpoint", {
         sessionId: this.sessionId,
         enabled,
       });
@@ -2959,7 +2984,7 @@ export class AxlApp {
     try {
       const sessions: readonly ResumeSessionEntry[] =
         this.options.listResumeSessions === undefined
-          ? ((await this.client.request("session.list", {})) as SessionSummary[]).map(
+          ? ((await this.requireClient().request("session.list", {})) as SessionSummary[]).map(
               (session) => ({
                 ...session,
                 resumeKey: session.sessionId,
@@ -3097,7 +3122,8 @@ export class AxlApp {
       this.notice = this.view.palette.error(
         `✖ ${error instanceof Error ? error.message : "could not list sessions"}`,
       );
-      this.redraw();
+      if (this.initialResumePending) this.stop();
+      else this.redraw();
     }
   }
 
@@ -3185,17 +3211,18 @@ export class AxlApp {
     try {
       candidate =
         typeof session === "string" ? undefined : await this.options.openResumeSession?.(session);
-      const client = candidate?.client ?? this.client;
+      const client = candidate?.client ?? this.requireClient();
       const snapshot = await resumeSnapshot(client, entry.sessionId);
       if (client !== this.client) this.bindClient(client);
       await this.switchSession(snapshot, "", `· resumed session · ${entry.placementLabel}`);
       if (candidate !== undefined) this.reconnectClient = candidate.reconnectClient;
-      if (previousClient !== client) previousClient.close();
+      if (previousClient !== client) previousClient?.close();
       this.initialResumePending = false;
     } catch (error) {
       if (candidate !== undefined && candidate.client !== previousClient) {
         candidate.client.close();
-        this.bindClient(previousClient);
+        if (previousClient === undefined) this.unbindClient();
+        else this.bindClient(previousClient);
         this.reconnectClient = previousReconnect;
       }
       this.notice = this.view.palette.error(
@@ -3209,7 +3236,7 @@ export class AxlApp {
   private async forkSession(fromEventId: string | undefined): Promise<void> {
     if (fromEventId === undefined) return;
     try {
-      const forked = (await this.client.request("session.fork", {
+      const forked = (await this.requireClient().request("session.fork", {
         sessionId: this.sessionId,
         fromEventId,
       })) as SessionForkResult;
@@ -3224,7 +3251,7 @@ export class AxlApp {
 
   private async cloneSession(): Promise<void> {
     try {
-      const cloned = (await this.client.request("session.clone", {
+      const cloned = (await this.requireClient().request("session.clone", {
         sessionId: this.sessionId,
       })) as SessionForkResult;
       await this.switchSession(cloned, "", "· cloned to new session");
@@ -3250,7 +3277,7 @@ export class AxlApp {
     const lastEventId = snapshot.events.at(-1)?.id;
     let subscription: { snapshot: readonly CanonicalEvent[]; activity?: SessionActivityFrame };
     try {
-      subscription = (await this.client.request("session.subscribe", {
+      subscription = (await this.requireClient().request("session.subscribe", {
         sessionId: snapshot.sessionId,
         ...(lastEventId === undefined ? {} : { afterEventId: lastEventId }),
       })) as { snapshot: readonly CanonicalEvent[]; activity?: SessionActivityFrame };
@@ -3324,7 +3351,7 @@ export class AxlApp {
     this.switchingActivityFrames = undefined;
     this.rebuildTranscript();
     try {
-      await this.client.request("session.workspace.checkpoint", {
+      await this.requireClient().request("session.workspace.checkpoint", {
         sessionId: snapshot.sessionId,
         enabled: this.workspaceReviewEnabled,
       });
@@ -3582,7 +3609,7 @@ export class AxlApp {
     this.interactionResponding = true;
     let resolved = false;
     try {
-      await this.client.request("session.interaction.respond", {
+      await this.requireClient().request("session.interaction.respond", {
         sessionId: this.sessionId,
         interactionId,
         action,
@@ -3695,7 +3722,7 @@ export class AxlApp {
     }
     this.configuring = true;
     try {
-      await this.client.request("session.configure", {
+      await this.requireClient().request("session.configure", {
         sessionId: this.sessionId,
         ...update,
       });
@@ -3716,7 +3743,7 @@ export class AxlApp {
     this.setWorking(true);
     this.redraw();
     try {
-      await this.client.request("session.shell", {
+      await this.requireClient().request("session.shell", {
         sessionId: this.sessionId,
         command,
         excluded,
@@ -3751,7 +3778,7 @@ export class AxlApp {
         this.view.beginResponse();
         this.redraw();
         try {
-          await this.client.request("session.send", {
+          await this.requireClient().request("session.send", {
             sessionId: this.sessionId,
             content: [
               ...(queued.text ? [{ type: "text" as const, text: queued.text }] : []),
@@ -3806,7 +3833,7 @@ export class AxlApp {
 
   private async reload(): Promise<void> {
     try {
-      await this.client.request("session.reload", { sessionId: this.sessionId });
+      await this.requireClient().request("session.reload", { sessionId: this.sessionId });
       for (const controller of this.extensionCommandControllers) controller.abort();
       this.extensionCommandControllers.clear();
       this.overlays.clear();
@@ -3823,7 +3850,7 @@ export class AxlApp {
 
   private async interrupt(): Promise<void> {
     try {
-      await this.client.request("session.interrupt", { sessionId: this.sessionId });
+      await this.requireClient().request("session.interrupt", { sessionId: this.sessionId });
     } catch {
       this.notice = this.view.palette.dim("· turn already finished");
       this.redraw();
