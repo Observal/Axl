@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { SessionActivityFrame } from "@axl/protocol";
+import type { ProjectedActivity } from "@axl/sdk";
 
 import { renderMarkdown } from "./markdown.ts";
 import type { Component } from "./render.ts";
@@ -13,8 +13,6 @@ const MAX_VISIBLE_CHARACTERS = 131_072;
 export class LiveAssistantComponent implements Component {
   private operationId: string | undefined;
   private sequence = -1;
-  private clearedOperationId: string | undefined;
-  private clearedSequence = -1;
   private readonly textChunks: string[] = [];
   private readonly thinkingChunks: string[] = [];
   private textCharacters = 0;
@@ -44,37 +42,27 @@ export class LiveAssistantComponent implements Component {
     return this.operationId !== undefined;
   }
 
-  apply(frame: SessionActivityFrame): boolean {
-    if (
-      (this.operationId === frame.operationId && frame.sequence <= this.sequence) ||
-      (this.clearedOperationId === frame.operationId && frame.sequence <= this.clearedSequence)
-    ) {
-      return false;
-    }
-    if (this.operationId !== frame.operationId) {
-      this.resetContent();
-      this.tools.length = 0;
-    }
-    this.operationId = frame.operationId;
-    this.sequence = frame.sequence;
-    if (frame.type === "clear") {
+  replace(activity: ProjectedActivity | undefined): boolean {
+    if (activity === undefined) {
+      if (!this.active) return false;
       this.clear();
       return true;
     }
-    if (frame.type === "snapshot") {
-      this.setChunks(this.textChunks, frame.text, "text");
-      this.setChunks(this.thinkingChunks, frame.thinking, "thinking");
-      this.tools.splice(0, this.tools.length, ...frame.toolCalls);
-    } else if (frame.type === "text_delta") {
-      this.appendChunk(this.textChunks, frame.text, "text");
-    } else if (frame.type === "thinking_delta") {
-      this.appendChunk(this.thinkingChunks, frame.text, "thinking");
-    } else if (
-      frame.type === "tool_call" &&
-      !this.tools.some((call) => call.callId === frame.call.callId)
+    if (
+      this.operationId === activity.operationId &&
+      this.sequence === activity.sequence &&
+      this.textChunks.slice(this.textStart).join("") === activity.text &&
+      this.thinkingChunks.slice(this.thinkingStart).join("") === activity.thinking &&
+      this.tools.length === activity.toolCalls.length &&
+      this.tools.every((tool, index) => tool.callId === activity.toolCalls[index]?.callId)
     ) {
-      this.tools.push(frame.call);
+      return false;
     }
+    this.operationId = activity.operationId;
+    this.sequence = activity.sequence;
+    this.setChunks(this.textChunks, activity.text, "text");
+    this.setChunks(this.thinkingChunks, activity.thinking, "thinking");
+    this.tools.splice(0, this.tools.length, ...activity.toolCalls);
     this.cache = undefined;
     return true;
   }
@@ -82,18 +70,12 @@ export class LiveAssistantComponent implements Component {
   reset(): void {
     this.operationId = undefined;
     this.sequence = -1;
-    this.clearedOperationId = undefined;
-    this.clearedSequence = -1;
     this.resetContent();
     this.tools.length = 0;
     this.cache = undefined;
   }
 
   clear(): void {
-    if (this.operationId !== undefined) {
-      this.clearedOperationId = this.operationId;
-      this.clearedSequence = this.sequence;
-    }
     this.operationId = undefined;
     this.resetContent();
     this.tools.length = 0;

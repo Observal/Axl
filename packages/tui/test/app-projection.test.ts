@@ -92,6 +92,7 @@ function client(
   sendError?: Error,
 ): AxlClient {
   return {
+    connection: { daemonInstanceId: "fixture-daemon" },
     async request(method: string, params: unknown) {
       requests.push({ method, params });
       if (method === "session.create") return openResult(events);
@@ -179,12 +180,19 @@ function client(
     onEvent() {
       return () => undefined;
     },
+    onActivity() {
+      return () => undefined;
+    },
+    onDisconnect() {
+      return () => undefined;
+    },
     close() {},
   } as unknown as AxlClient;
 }
 
 class ReconnectClient {
-  private disconnectListener: ((error: Error) => void) | undefined;
+  readonly connection = { daemonInstanceId: "fixture-daemon" };
+  private readonly disconnectListeners = new Set<(error: Error) => void>();
   private eventListener: ((message: WireEvent) => void) | undefined;
   readonly requests: string[] = [];
   private eventSequence = 0;
@@ -204,6 +212,7 @@ class ReconnectClient {
       return { cursor: "00000000-0000-4000-8000-000000000102" };
     }
     if (method === "session.workspace.checkpoint") return { enabled: false };
+    if (method === "session.unsubscribe") return { unsubscribed: true };
     throw new Error(`Unexpected request ${method}`);
   }
 
@@ -218,15 +227,19 @@ class ReconnectClient {
     };
   }
 
+  onActivity(): () => void {
+    return () => undefined;
+  }
+
   onDisconnect(listener: (error: Error) => void): () => void {
-    this.disconnectListener = listener;
+    this.disconnectListeners.add(listener);
     return () => {
-      this.disconnectListener = undefined;
+      this.disconnectListeners.delete(listener);
     };
   }
 
   disconnect(): void {
-    this.disconnectListener?.(new Error("fixture disconnected"));
+    for (const listener of this.disconnectListeners) listener(new Error("fixture disconnected"));
   }
 
   emit(value: CanonicalEvent): void {

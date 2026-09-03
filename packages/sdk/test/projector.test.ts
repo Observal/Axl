@@ -88,6 +88,58 @@ test("projects messages, configuration, usage, interactions, and generic tools d
   });
 });
 
+test("derives operation and interaction lifecycle from canonical events", () => {
+  const projector = new ConversationProjector(sessionId);
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000098");
+  projector.applyEvent({
+    ...event("user.message", { content: [{ type: "text", text: "work" }] }),
+    operationId,
+  });
+  assert.equal(projector.state.activeOperationId, operationId);
+  assert.equal(projector.state.operations[0]?.status, "running");
+  projector.applyEvent({
+    ...event("interaction.requested", {
+      interactionId: "approval-1",
+      kind: "mcp_tool",
+      source: "fixture",
+      message: "Continue?",
+    }),
+    operationId,
+  });
+  assert.equal(projector.state.operations[0]?.status, "waiting_interaction");
+  projector.applyEvent({
+    ...event("interaction.resolved", { interactionId: "approval-1", action: "accept" }),
+    operationId,
+  });
+  assert.equal(projector.state.operations[0]?.status, "running");
+  projector.applyEvent({
+    ...event("assistant.message", { content: [], stopReason: "aborted" }),
+    operationId,
+  });
+  assert.equal(projector.state.activeOperationId, undefined);
+  assert.equal(projector.state.operations[0]?.status, "aborted");
+});
+
+test("retains uncertain shell commands until canonical evidence arrives", () => {
+  const projector = new ConversationProjector(sessionId);
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000097");
+  projector.markShellUncertain(operationId, "printf once");
+  projector.reset(sessionId);
+  assert.deepEqual(projector.state.uncertainShellOperations, [
+    { operationId, command: "printf once" },
+  ]);
+  projector.applyEvent({
+    ...event("user.shell", {
+      command: "printf once",
+      content: [{ type: "text", text: "once" }],
+      isError: false,
+      excluded: false,
+    }),
+    operationId,
+  });
+  assert.deepEqual(projector.state.uncertainShellOperations, []);
+});
+
 test("deduplicates identical events and rejects altered duplicates and tool conflicts", () => {
   const projector = new ConversationProjector(sessionId);
   const call = event("tool.call", { callId: "call-1", name: "shell", input: { command: "pwd" } });
@@ -119,7 +171,18 @@ test("replaces activity by operation and clears it on canonical completion", () 
   assert.equal(projector.state.activity?.text, "hello");
   projector.applyEvent({
     ...event("assistant.message", {
-      content: [{ type: "text", text: "hello" }],
+      content: [],
+      stopReason: "tool_use",
+    }),
+    operationId,
+  });
+  assert.equal(projector.state.activity?.text, "hello");
+  projector.applyActivity({ operationId, sequence: 3, type: "clear" });
+  projector.applyActivity({ operationId, sequence: 4, type: "text_delta", text: "again" });
+  assert.equal(projector.state.activity?.text, "again");
+  projector.applyEvent({
+    ...event("assistant.message", {
+      content: [{ type: "text", text: "hello again" }],
       stopReason: "stop",
     }),
     operationId,

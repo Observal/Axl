@@ -1226,7 +1226,7 @@ export class SessionManager {
     if (activityListener !== undefined) managed.activityListeners.add(activityListener);
     const current = managed.activityState.current;
     const activity =
-      current === undefined || current.type === "clear"
+      current === undefined || (current.type === "clear" && managed.activeTurn === undefined)
         ? undefined
         : {
             operationId: current.operationId,

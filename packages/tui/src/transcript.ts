@@ -114,18 +114,20 @@ export class SessionView {
   tokensPerSecond: number | undefined;
   elapsedSeconds = 0;
   private responseStartedAt: number | undefined;
-  private readonly projection = new ConversationProjector();
+  private readonly projection: ConversationProjector;
 
   constructor(
     width: number,
     palette: Palette = PLAIN_PALETTE,
     models: readonly ModelInfo[] = [],
     renderBlob?: BlobRenderer,
+    projection: ConversationProjector = new ConversationProjector(),
   ) {
     this.width = width;
     this.palette = palette;
     this.models = models;
     this.renderBlob = renderBlob;
+    this.projection = projection;
   }
 
   setWidth(width: number): void {
@@ -205,10 +207,15 @@ export class SessionView {
   }
 
   apply(event: CanonicalEvent): readonly string[] {
+    if (!this.projection.applyEvent(event)) return EMPTY_ROWS;
+    return this.present(event);
+  }
+
+  /** Renders an event already reduced by the shared SDK subscription projector. */
+  present(event: CanonicalEvent): readonly string[] {
     const previousModel = this.model;
     const previousThinking = this.thinking;
     const previousSandbox = this.sandbox;
-    this.projection.applyEvent(event);
     const projected = this.projection.state;
     this.model = projected.model;
     this.thinking = projected.thinking;

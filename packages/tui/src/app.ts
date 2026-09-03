@@ -9,7 +9,12 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { ApiKeyCredential, AuthContext, CredentialStore } from "@axl/ai";
 import { type ModelInfo, supportedThinkingLevels, THINKING_LEVELS } from "@axl/ai/models";
-import { loadSessionSnapshot, type AxlClient } from "@axl/sdk";
+import {
+  type AxlClient,
+  ConversationProjector,
+  type SessionSubscription,
+  subscribeSession,
+} from "@axl/sdk";
 import {
   type TerminalCommandContext,
   type TerminalExtension,
@@ -23,12 +28,10 @@ import type {
   EventPayloadMap,
   JsonObject,
   JsonValue,
-  SessionActivityFrame,
   SessionId,
   SessionOpenResult,
   SessionSummary,
   ThinkingLevel,
-  WireEvent,
 } from "@axl/protocol";
 
 import { ActivityComponent } from "./activity.ts";
@@ -551,9 +554,8 @@ export class AxlApp {
   private spinnerTimer: NodeJS.Timeout | null = null;
   private completionIndex = 0;
   private completionText = "";
-  private unsubscribeEvents: () => void = () => undefined;
-  private unsubscribeActivity: () => void = () => undefined;
   private unsubscribeDisconnect: () => void = () => undefined;
+  private sessionSubscription: SessionSubscription | undefined;
   private readonly queued: Array<{
     readonly text: string;
     readonly attachments: readonly BlobReference[];
@@ -564,8 +566,6 @@ export class AxlApp {
   private branch: string | undefined;
   private currentTheme: string;
   private readonly seenEventIds = new Set<string>();
-  private bufferedEvents: WireEvent[] | undefined = [];
-  private eventDelivery: Promise<void> = Promise.resolve();
   private hydrating = true;
   private readonly interactionQueue: EventPayloadMap["interaction.requested"][] = [];
   private activeInteractionId: string | undefined;
@@ -579,11 +579,6 @@ export class AxlApp {
   private lastReconnectError: string | undefined;
   private focused = true;
   private lastAttentionAt = 0;
-  private subscriptionId: string | undefined;
-  private switchingSessionId: SessionId | undefined;
-  private switchingSubscriptionId: string | undefined;
-  private switchingEvents: WireEvent[] | undefined;
-  private switchingActivityFrames: SessionActivityFrame[] | undefined;
 
   private resizeTimer: NodeJS.Timeout | undefined;
   private activityRenderTimer: NodeJS.Timeout | undefined;
@@ -714,42 +709,29 @@ export class AxlApp {
 
   private bindClient(client: AxlClient): void {
     if (this.client !== client) this.client.close();
-    this.unsubscribeEvents();
-    this.unsubscribeActivity();
     this.unsubscribeDisconnect();
     this.client = client;
-    this.unsubscribeEvents = client.onEvent((message) => {
-      if (
-        message.sessionId === this.switchingSessionId &&
-        message.subscriptionId === this.switchingSubscriptionId
-      ) {
-        this.switchingEvents?.push(message);
-        return;
-      }
-      if (message.sessionId !== this.sessionId || message.subscriptionId !== this.subscriptionId) {
-        return;
-      }
-      if (this.bufferedEvents) this.bufferedEvents.push(message);
-      else this.enqueueEvent(message.event, message.subscriptionId, message.cursor);
+    this.unsubscribeDisconnect = client.onDisconnect((error) => {
+      if (!this.stopped) void this.reconnect(error);
     });
-    this.unsubscribeActivity =
-      client.onActivity?.((message) => {
-        if (
-          message.sessionId === this.switchingSessionId &&
-          message.subscriptionId === this.switchingSubscriptionId
-        ) {
-          this.switchingActivityFrames?.push(message.frame);
-        } else if (
-          message.sessionId === this.sessionId &&
-          message.subscriptionId === this.subscriptionId
-        ) {
-          this.commitActivity(message.frame);
-        }
-      }) ?? (() => undefined);
-    this.unsubscribeDisconnect =
-      client.onDisconnect?.((error) => {
-        if (!this.stopped) void this.reconnect(error);
-      }) ?? (() => undefined);
+  }
+
+  private subscriptionOptions(projector?: ConversationProjector) {
+    return {
+      ...(projector === undefined ? {} : { projector }),
+      onEvent: async (event: CanonicalEvent) => {
+        await this.prepareEventMedia(event);
+        if (!this.stopped) this.commitEvent(event, !this.hydrating);
+      },
+      onChange: (projection: ConversationProjector) => {
+        if (this.liveAssistant.replace(projection.state.activity)) this.scheduleActivityRender();
+      },
+      onResyncRequired: (error: Error) => {
+        if (this.stopped) return;
+        this.notice = this.view.palette.error(`✖ event resync: ${error.message}`);
+        this.redraw();
+      },
+    };
   }
 
   private async reconnect(error: Error): Promise<void> {
@@ -805,17 +787,9 @@ export class AxlApp {
               : "workspace review restoration failed";
           this.workspaceDiffError = workspaceReconnectError;
         }
-        await loadSessionSnapshot(
-          candidate,
-          this.sessionId,
-          (subscriptionId) => {
-            this.subscriptionId = subscriptionId;
-          },
-          async (event) => {
-            await this.prepareEventMedia(event);
-            this.commitEvent(event, false);
-          },
-        );
+        const subscription = this.sessionSubscription;
+        if (subscription === undefined) throw new Error("Session subscription is unavailable");
+        await subscription.reconnect(candidate);
         this.connectionState = "connected";
         this.notice =
           workspaceReconnectError === undefined
@@ -891,23 +865,11 @@ export class AxlApp {
     }
     if (options.clearStartupLine) options.output.write("\r\x1b[2K");
     app.commitLines(app.welcomeLines(cwd, options.sessionId !== undefined), false);
-    await loadSessionSnapshot(
+    app.sessionSubscription = await subscribeSession(
       options.client,
       opened.sessionId,
-      (subscriptionId) => {
-        app.subscriptionId = subscriptionId;
-      },
-      async (event) => {
-        await app.prepareEventMedia(event);
-        app.commitEvent(event, false);
-      },
+      app.subscriptionOptions(),
     );
-    for (const delivery of app.bufferedEvents ?? []) {
-      await app.prepareEventMedia(delivery.event);
-      app.commitEvent(delivery.event, false);
-      await app.acknowledgeEvent(delivery.subscriptionId, delivery.cursor);
-    }
-    app.bufferedEvents = undefined;
     app.hydrating = false;
     app.openNextInteraction();
     if (options.workspaceReview !== undefined) {
@@ -956,9 +918,8 @@ export class AxlApp {
     }
     this.reconnectGeneration += 1;
     try {
-      this.unsubscribeEvents();
-      this.unsubscribeActivity();
       this.unsubscribeDisconnect();
+      this.sessionSubscription?.detach();
     } catch (error) {
       failures.push(error);
     }
@@ -1366,11 +1327,9 @@ export class AxlApp {
     this.fullscreen.invalidate();
   }
 
-  private commitActivity(frame: SessionActivityFrame): void {
-    if (!this.liveAssistant.apply(frame)) return;
-    if (frame.type === "tool_call") return;
+  private scheduleActivityRender(): void {
     this.invalidateFullscreenRows();
-    if (frame.type === "clear") {
+    if (!this.liveAssistant.active) {
       this.cancelActivityRender();
       if (!this.sending) this.setWorking(false);
       this.redraw();
@@ -1415,28 +1374,6 @@ export class AxlApp {
       this.spinnerTimer = null;
       this.view.elapsedSeconds = 0;
     }
-  }
-
-  private enqueueEvent(event: CanonicalEvent, subscriptionId: string, cursor: string): void {
-    this.eventDelivery = this.eventDelivery
-      .then(async () => {
-        await this.prepareEventMedia(event);
-        if (!this.stopped) {
-          this.commitEvent(event);
-          await this.acknowledgeEvent(subscriptionId, cursor);
-        }
-      })
-      .catch((error: unknown) => {
-        if (this.stopped) return;
-        this.notice = this.view.palette.error(
-          `✖ ${error instanceof Error ? error.message : "event delivery failed"}`,
-        );
-        this.redraw();
-      });
-  }
-
-  private async acknowledgeEvent(subscriptionId: string, cursor: string): Promise<void> {
-    await this.client.request("session.ack", { subscriptionId, cursor });
   }
 
   private async prepareEventMedia(event: CanonicalEvent): Promise<void> {
@@ -3158,48 +3095,44 @@ export class AxlApp {
     notice: string,
   ): Promise<void> {
     const branch = await readGitBranch(opened.cwd);
-    this.switchingSessionId = opened.sessionId;
-    this.switchingEvents = [];
-    this.switchingActivityFrames = [];
-    const subscriptionEvents: CanonicalEvent[] = [];
-    const previousSubscriptionId = this.subscriptionId;
-    try {
-      await loadSessionSnapshot(
-        this.client,
-        opened.sessionId,
-        (subscriptionId) => {
-          this.switchingSubscriptionId = subscriptionId;
-        },
-        (event) => {
-          subscriptionEvents.push(event);
-        },
-      );
-    } catch (error) {
-      const failedSubscriptionId = this.switchingSubscriptionId;
-      this.switchingSessionId = undefined;
-      this.switchingSubscriptionId = undefined;
-      this.switchingEvents = undefined;
-      this.switchingActivityFrames = undefined;
-      if (failedSubscriptionId !== undefined) {
-        try {
-          await this.client.request("session.unsubscribe", {
-            subscriptionId: failedSubscriptionId,
-          });
-        } catch (cleanupError) {
-          throw new AggregateError(
-            [error, cleanupError],
-            "Session switch and subscription cleanup failed",
-          );
+    const projectionEvents: CanonicalEvent[] = [];
+    const projection = new ConversationProjector(opened.sessionId);
+    let activated = false;
+    const nextSubscription = await subscribeSession(this.client, opened.sessionId, {
+      projector: projection,
+      onEvent: async (event) => {
+        if (!activated) {
+          projectionEvents.push(event);
+          return;
         }
-      }
+        await this.prepareEventMedia(event);
+        if (!this.stopped) this.commitEvent(event, !this.hydrating);
+      },
+      onChange: (projector) => {
+        if (activated && this.liveAssistant.replace(projector.state.activity)) {
+          this.scheduleActivityRender();
+        }
+      },
+      onResyncRequired: (error) => {
+        if (!activated || this.stopped) return;
+        this.notice = this.view.palette.error(`✖ event resync: ${error.message}`);
+        this.redraw();
+      },
+    });
+
+    const previousSubscription = this.sessionSubscription;
+    try {
+      await previousSubscription?.close();
+    } catch (error) {
+      await nextSubscription.close().catch(() => undefined);
       throw error;
     }
-
     if (this.tuiMode === "regular") this.options.output.write(this.screen.clear());
     this.reconnectGeneration += 1;
     this.liveAssistant.reset();
     this.cancelActivityRender();
     this.cwd = opened.cwd;
+    this.sessionId = opened.sessionId;
     this.mediaCache.setSession(opened.sessionId);
     this.branch = branch;
     this.seenEventIds.clear();
@@ -3233,32 +3166,18 @@ export class AxlApp {
     this.view.thinkingDisplay = thinkingDisplay;
     this.view.toolOutputDisplay = toolOutputDisplay;
     this.commitLines(this.welcomeLines(this.cwd, true), false);
-    for (const event of subscriptionEvents) {
-      void this.prepareEventMedia(event);
+    for (const event of projectionEvents) {
+      await this.prepareEventMedia(event);
       this.commitEvent(event, false);
     }
-    for (const delivery of this.switchingEvents ?? []) {
-      void this.prepareEventMedia(delivery.event);
-      this.commitEvent(delivery.event, false);
-      void this.acknowledgeEvent(delivery.subscriptionId, delivery.cursor);
-    }
-    for (const frame of this.switchingActivityFrames ?? []) this.liveAssistant.apply(frame);
+    this.sessionSubscription = nextSubscription;
+    activated = true;
+    this.liveAssistant.replace(projection.state.activity);
     this.hydrating = false;
     this.editor.setText(draft);
     this.notice = this.view.palette.dim(notice);
     this.openNextInteraction();
-    this.sessionId = opened.sessionId;
-    this.subscriptionId = this.switchingSubscriptionId;
-    this.switchingSessionId = undefined;
-    this.switchingSubscriptionId = undefined;
-    this.switchingEvents = undefined;
-    this.switchingActivityFrames = undefined;
     this.rebuildTranscript();
-    if (previousSubscriptionId !== undefined) {
-      await this.client.request("session.unsubscribe", {
-        subscriptionId: previousSubscriptionId,
-      });
-    }
     try {
       await this.client.request("session.workspace.checkpoint", {
         sessionId: opened.sessionId,
@@ -3647,19 +3566,22 @@ export class AxlApp {
     this.sending = true;
     this.setWorking(true);
     this.redraw();
+    const operationId = parseOperationId(randomUUID());
     try {
       const outcome = await this.client.shell({
         sessionId: this.sessionId,
-        operationId: parseOperationId(randomUUID()),
+        operationId,
         command,
         excluded,
       });
       if (outcome.state === "uncertain") {
+        this.sessionSubscription?.projector.markShellUncertain(operationId, command);
         this.editor.setText(`${excluded ? "!!" : "!"}${command}`);
         this.notice = this.view.palette.error("✖ shell delivery unknown · command restored");
       }
     } catch (error) {
       if (this.isConnectionFailure(error)) {
+        this.sessionSubscription?.projector.markShellUncertain(operationId, command);
         this.editor.setText(`${excluded ? "!!" : "!"}${command}`);
         this.notice = this.view.palette.error("✖ shell delivery unknown · command restored");
       } else {

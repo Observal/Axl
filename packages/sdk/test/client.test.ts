@@ -11,6 +11,8 @@ import {
   type AxlTransportFactory,
 } from "../src/index.ts";
 import {
+  EVENT_FORMAT_VERSION,
+  parseEvent,
   parseOperationId,
   parseSessionId,
   WIRE_CAPABILITIES,
@@ -170,6 +172,58 @@ test("retries a mutation after reconnect with the same idempotency key", async (
   });
   assert.deepEqual(await result, { interrupted: false });
   client.close();
+});
+
+test("coalesces concurrent reconnect attempts onto one new transport", async () => {
+  const factory = new Factory();
+  const { client } = await connect(factory);
+  await Promise.all([client.reconnect(), client.reconnect()]);
+  assert.equal(factory.transports.length, 2);
+  client.close();
+});
+
+test("direct shell response loss returns an observed canonical result", async () => {
+  const { client, transport } = await connect();
+  const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000009");
+  const result = client.shell({ sessionId, operationId, command: "printf once", excluded: false });
+  transport.emit({
+    kind: "event",
+    subscriptionId: "subscription-1",
+    sessionId,
+    sequence: 1,
+    cursor: "cursor-1",
+    event: parseEvent({
+      version: EVENT_FORMAT_VERSION,
+      id: "00000000-0000-4000-8000-000000000019",
+      sessionId,
+      parentId: null,
+      operationId,
+      timestamp: 1,
+      type: "user.shell",
+      payload: {
+        command: "printf once",
+        content: [{ type: "text", text: "once" }],
+        isError: false,
+        excluded: false,
+      },
+    }),
+  });
+  transport.closeListener?.(new Error("lost response"));
+  assert.deepEqual(await result, {
+    state: "completed",
+    result: {
+      operationId,
+      isError: false,
+      resultEventId: "00000000-0000-4000-8000-000000000019",
+    },
+  });
+  assert.equal(
+    transport.messages.filter(
+      (message) => (message as { method?: string }).method === "session.shell",
+    ).length,
+    1,
+  );
 });
 
 test("direct shell transport loss is uncertain and never resent", async () => {

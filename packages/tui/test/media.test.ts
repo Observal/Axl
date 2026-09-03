@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { parseOperationId, parseSessionId } from "@axl/protocol";
+import { ConversationProjector } from "@axl/sdk";
+import { parseOperationId, parseSessionId, type SessionActivityFrame } from "@axl/protocol";
 
 import {
   detectImageMediaType,
@@ -20,6 +21,16 @@ import {
   renderInlineImage,
   uploadBlob,
 } from "../src/index.ts";
+
+function projectActivity(
+  projector: ConversationProjector,
+  component: LiveAssistantComponent,
+  frame: SessionActivityFrame,
+): boolean {
+  const changed = projector.applyActivity(frame);
+  if (changed) component.replace(projector.state.activity);
+  return changed;
+}
 
 function png(width = 2, height = 1): Buffer {
   const bytes = Buffer.alloc(32);
@@ -122,26 +133,48 @@ test("live assistant ignores stale frames and clears finalized content", () => {
     () => "show",
   );
   const operationId = parseOperationId("123e4567-e89b-42d3-a456-426614174001");
+  const projector = new ConversationProjector();
   assert.equal(
-    component.apply({ operationId, sequence: 1, type: "thinking_delta", text: "plan" }),
+    projectActivity(projector, component, {
+      operationId,
+      sequence: 1,
+      type: "thinking_delta",
+      text: "plan",
+    }),
     true,
   );
-  component.apply({ operationId, sequence: 2, type: "text_delta", text: "answer" });
+  projectActivity(projector, component, {
+    operationId,
+    sequence: 2,
+    type: "text_delta",
+    text: "answer",
+  });
   assert.match(component.render(40).join("\n"), /plan/);
   assert.match(component.render(40).join("\n"), /answer/);
   assert.equal(
-    component.apply({ operationId, sequence: 1, type: "text_delta", text: "stale" }),
+    projectActivity(projector, component, {
+      operationId,
+      sequence: 1,
+      type: "text_delta",
+      text: "stale",
+    }),
     false,
   );
-  component.apply({ operationId, sequence: 3, type: "clear" });
+  projectActivity(projector, component, { operationId, sequence: 3, type: "clear" });
   assert.deepEqual(component.render(40), []);
   assert.equal(
-    component.apply({ operationId, sequence: 2, type: "text_delta", text: "delayed" }),
+    projectActivity(projector, component, {
+      operationId,
+      sequence: 2,
+      type: "text_delta",
+      text: "delayed",
+    }),
     false,
   );
   component.reset();
+  projector.resetActivity();
   assert.equal(
-    component.apply({
+    projectActivity(projector, component, {
       operationId,
       sequence: 3,
       type: "snapshot",
@@ -160,7 +193,8 @@ test("tool-call activity waits for the canonical retained card", () => {
     () => "compact",
   );
   const operationId = parseOperationId("123e4567-e89b-42d3-a456-426614174001");
-  component.apply({
+  const projector = new ConversationProjector();
+  projectActivity(projector, component, {
     operationId,
     sequence: 1,
     type: "tool_call",
@@ -175,7 +209,8 @@ test("regular streaming rows stay within their viewport budget", () => {
     () => "show",
   );
   const operationId = parseOperationId("123e4567-e89b-42d3-a456-426614174001");
-  component.apply({
+  const projector = new ConversationProjector();
+  projectActivity(projector, component, {
     operationId,
     sequence: 1,
     type: "text_delta",
@@ -194,9 +229,11 @@ test("one hundred thousand deltas remain bounded and render the latest tail", ()
     () => "compact",
   );
   const operationId = parseOperationId("123e4567-e89b-42d3-a456-426614174001");
+  const projector = new ConversationProjector();
   for (let sequence = 1; sequence <= 100_000; sequence += 1) {
-    component.apply({ operationId, sequence, type: "text_delta", text: `t${sequence} ` });
+    projector.applyActivity({ operationId, sequence, type: "text_delta", text: `t${sequence} ` });
   }
+  component.replace(projector.state.activity);
   const rows = component.render(80);
   assert.equal(rows.join("\n").includes("t1 "), false);
   assert.equal(rows.join("\n").includes("t100000 "), true);

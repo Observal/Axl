@@ -121,6 +121,7 @@ export class AxlClient {
     | { readonly resolve: () => void; readonly reject: (error: Error) => void }
     | undefined;
   private deliberatelyClosed = false;
+  private reconnectPromise: Promise<void> | undefined;
 
   private constructor(options: AxlClientOptions<unknown>) {
     this.options = options;
@@ -147,11 +148,20 @@ export class AxlClient {
     if (this.deliberatelyClosed) {
       throw new AxlClientError("disconnected", "Client was closed");
     }
-    this.detachTransport();
-    this.initialized = undefined;
-    this.helloReceived = false;
-    this.latestPresence = undefined;
-    await this.open("reconnecting");
+    if (this.reconnectPromise !== undefined) return this.reconnectPromise;
+    const reconnect = (async () => {
+      this.detachTransport();
+      this.initialized = undefined;
+      this.helloReceived = false;
+      this.latestPresence = undefined;
+      await this.open("reconnecting");
+    })();
+    this.reconnectPromise = reconnect;
+    try {
+      await reconnect;
+    } finally {
+      if (this.reconnectPromise === reconnect) this.reconnectPromise = undefined;
+    }
   }
 
   request<Method extends RpcMethod>(

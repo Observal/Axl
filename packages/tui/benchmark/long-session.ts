@@ -3,6 +3,7 @@
 
 import { performance } from "node:perf_hooks";
 
+import { ConversationProjector } from "@axl/sdk";
 import {
   type CanonicalEvent,
   EVENT_FORMAT_VERSION,
@@ -121,9 +122,11 @@ function benchmarkDeltas(width: number): number {
     () => "compact",
   );
   const timings: number[] = [];
+  const projector = new ConversationProjector();
   for (let index = 1; index <= 1_000; index += 1) {
     const started = performance.now();
-    component.apply({ operationId, sequence: index, type: "text_delta", text: "token " });
+    projector.applyActivity({ operationId, sequence: index, type: "text_delta", text: "token " });
+    component.replace(projector.state.activity);
     component.render(width);
     timings.push(performance.now() - started);
   }

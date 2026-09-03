@@ -69,12 +69,25 @@ export interface UsageTotals extends Usage {
   readonly costUsd: number;
 }
 
+export interface ProjectedOperation {
+  readonly operationId: OperationId;
+  readonly status: "running" | "waiting_interaction" | "succeeded" | "failed" | "aborted";
+}
+
+export interface UncertainShellOperation {
+  readonly operationId: OperationId;
+  readonly command: string;
+}
+
 export interface ConversationState {
   readonly sessionId?: SessionId;
   readonly selectedNodeId?: EventId;
   readonly records: readonly ConversationRecord[];
   readonly tools: readonly ProjectedToolCall[];
   readonly interactions: readonly ProjectedInteraction[];
+  readonly operations: readonly ProjectedOperation[];
+  readonly activeOperationId?: OperationId;
+  readonly uncertainShellOperations: readonly UncertainShellOperation[];
   readonly model?: string;
   readonly provider?: string;
   readonly entitlement?: string;
@@ -86,6 +99,9 @@ export interface ConversationState {
   readonly lastError?: CanonicalEvent<"session.error">;
   readonly lastCompaction?: CanonicalEvent<"context.compacted">;
 }
+
+const MAX_PROJECTED_ACTIVITY_CHARACTERS = 131_072;
+const ACTIVITY_TRIM_BATCH_CHARACTERS = 16_384;
 
 const EMPTY_USAGE: UsageTotals = {
   inputTokens: 0,
@@ -120,6 +136,13 @@ function renderIntent(name: string): ProjectedToolCall["renderIntent"] {
   return "generic";
 }
 
+function boundedActivityText(current: string, addition: string): string {
+  const combined = current + addition;
+  return combined.length <= MAX_PROJECTED_ACTIVITY_CHARACTERS + ACTIVITY_TRIM_BATCH_CHARACTERS
+    ? combined
+    : combined.slice(-MAX_PROJECTED_ACTIVITY_CHARACTERS);
+}
+
 function addUsage(total: UsageTotals, usage: Usage | undefined): UsageTotals {
   if (usage === undefined) return total;
   return {
@@ -140,6 +163,9 @@ export class ConversationProjector {
   private readonly events = new Map<string, string>();
   private readonly tools = new Map<string, ProjectedToolCall>();
   private readonly interactions = new Map<string, ProjectedInteraction>();
+  private readonly operations = new Map<OperationId, ProjectedOperation>();
+  private readonly uncertainShellOperations = new Map<OperationId, UncertainShellOperation>();
+  private activeOperationId: OperationId | undefined;
   private model: string | undefined;
   private provider: string | undefined;
   private entitlement: string | undefined;
@@ -147,6 +173,9 @@ export class ConversationProjector {
   private sandbox: ConversationState["sandbox"];
   private usage: UsageTotals = EMPTY_USAGE;
   private activity: ProjectedActivity | undefined;
+  private readonly activitySequences = new Map<OperationId, number>();
+  private readonly retiredActivityOperations = new Set<OperationId>();
+  private latestActivityOperationId: OperationId | undefined;
   private closed = false;
   private lastError: CanonicalEvent<"session.error"> | undefined;
   private lastCompaction: CanonicalEvent<"context.compacted"> | undefined;
@@ -163,6 +192,11 @@ export class ConversationProjector {
       records: Object.freeze([...this.records]),
       tools: Object.freeze([...this.tools.values()]),
       interactions: Object.freeze([...this.interactions.values()]),
+      operations: Object.freeze([...this.operations.values()]),
+      ...(this.activeOperationId === undefined
+        ? {}
+        : { activeOperationId: this.activeOperationId }),
+      uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
       ...(this.model === undefined ? {} : { model: this.model }),
       ...(this.provider === undefined ? {} : { provider: this.provider }),
       ...(this.entitlement === undefined ? {} : { entitlement: this.entitlement }),
@@ -186,12 +220,17 @@ export class ConversationProjector {
   }
 
   reset(sessionId = this.expectedSessionId, selectedNodeId = this.selectedNodeId): void {
+    const keepUncertainShells =
+      sessionId === this.expectedSessionId && selectedNodeId === this.selectedNodeId;
     this.expectedSessionId = sessionId;
     this.selectedNodeId = selectedNodeId;
     this.records.length = 0;
     this.events.clear();
     this.tools.clear();
     this.interactions.clear();
+    this.operations.clear();
+    this.activeOperationId = undefined;
+    if (!keepUncertainShells) this.uncertainShellOperations.clear();
     this.model = undefined;
     this.provider = undefined;
     this.entitlement = undefined;
@@ -199,6 +238,9 @@ export class ConversationProjector {
     this.sandbox = undefined;
     this.usage = EMPTY_USAGE;
     this.activity = undefined;
+    this.activitySequences.clear();
+    this.retiredActivityOperations.clear();
+    this.latestActivityOperationId = undefined;
     this.closed = false;
     this.lastError = undefined;
     this.lastCompaction = undefined;
@@ -224,7 +266,16 @@ export class ConversationProjector {
     this.records.push({ kind: "event", event });
 
     switch (event.type) {
+      case "user.message":
+        this.updateOperation(event.operationId, "running");
+        break;
+      case "user.shell":
+        this.updateOperation(event.operationId, event.payload.isError ? "failed" : "succeeded");
+        if (event.operationId !== undefined)
+          this.uncertainShellOperations.delete(event.operationId);
+        break;
       case "tool.call": {
+        this.updateOperation(event.operationId, "running");
         if (this.tools.has(event.payload.callId)) {
           throw new ProjectionError(
             "tool_identity_conflict",
@@ -278,6 +329,7 @@ export class ConversationProjector {
           interactionId: event.payload.interactionId,
           request: event,
         });
+        this.updateOperation(event.operationId, "waiting_interaction");
         break;
       case "interaction.resolved": {
         const interaction = this.interactions.get(event.payload.interactionId);
@@ -288,6 +340,7 @@ export class ConversationProjector {
           );
         }
         this.interactions.set(event.payload.interactionId, { ...interaction, resolution: event });
+        this.updateOperation(event.operationId, "running");
         break;
       }
       case "config.model":
@@ -307,9 +360,19 @@ export class ConversationProjector {
         break;
       case "assistant.message":
         this.usage = addUsage(this.usage, event.payload.usage);
-        if (event.payload.stopReason === "aborted" || event.payload.stopReason === "error") {
+        if (event.payload.stopReason === "tool_use") {
+          this.updateOperation(event.operationId, "running");
+        } else {
+          this.updateOperation(
+            event.operationId,
+            event.payload.stopReason === "aborted"
+              ? "aborted"
+              : event.payload.stopReason === "error"
+                ? "failed"
+                : "succeeded",
+          );
           this.clearActivity(event.operationId);
-        } else this.clearActivity(event.operationId);
+        }
         break;
       case "context.compacted":
         this.usage = addUsage(this.usage, event.payload.usage);
@@ -317,11 +380,14 @@ export class ConversationProjector {
         break;
       case "session.error":
         this.lastError = event;
+        this.updateOperation(event.operationId, "failed");
         this.clearActivity(event.operationId);
         break;
       case "session.closed":
         this.closed = true;
-        this.activity = undefined;
+        this.updateOperation(event.operationId, "succeeded");
+        this.activeOperationId = undefined;
+        this.clearActivity(event.operationId);
         break;
       default:
         break;
@@ -349,25 +415,33 @@ export class ConversationProjector {
   }
 
   applyActivity(frame: SessionActivityFrame): boolean {
-    const current = this.activity;
-    if (current !== undefined && current.operationId === frame.operationId) {
-      if (frame.sequence <= current.sequence) return false;
-      if (frame.sequence !== current.sequence + 1) {
-        this.activity = undefined;
+    if (this.retiredActivityOperations.has(frame.operationId)) return false;
+    const priorSequence = this.activitySequences.get(frame.operationId);
+    if (priorSequence !== undefined) {
+      if (frame.sequence <= priorSequence) return false;
+      if (frame.sequence !== priorSequence + 1) {
+        if (this.activity?.operationId === frame.operationId) this.activity = undefined;
         throw new ProjectionError(
           "activity_sequence_gap",
-          "Transient activity requires a snapshot",
+          `Transient activity sequence gap: expected ${priorSequence + 1}, received ${frame.sequence}`,
         );
       }
+    } else if (frame.type !== "snapshot" && frame.sequence !== 0 && frame.sequence !== 1) {
+      this.activity = undefined;
+      throw new ProjectionError(
+        "activity_sequence_gap",
+        `Transient activity must start at sequence 0 or 1, received ${frame.sequence}`,
+      );
     }
-    if (current === undefined || current.operationId !== frame.operationId) {
-      if (frame.type !== "snapshot" && frame.sequence !== 0 && frame.sequence !== 1) {
-        this.activity = undefined;
-        throw new ProjectionError(
-          "activity_sequence_gap",
-          "Transient activity requires a snapshot",
-        );
-      }
+
+    if (
+      this.latestActivityOperationId !== undefined &&
+      this.latestActivityOperationId !== frame.operationId
+    ) {
+      this.retireActivity(this.latestActivityOperationId);
+    }
+    this.latestActivityOperationId = frame.operationId;
+    if (this.activity === undefined || this.activity.operationId !== frame.operationId) {
       this.activity = {
         operationId: frame.operationId,
         sequence: frame.sequence - 1,
@@ -376,21 +450,30 @@ export class ConversationProjector {
         toolCalls: [],
       };
     }
-    const base = this.activity as ProjectedActivity;
+    this.rememberActivitySequence(frame.operationId, frame.sequence);
+    const base = this.activity;
     if (frame.type === "clear") {
       this.activity = undefined;
     } else if (frame.type === "snapshot") {
       this.activity = {
         operationId: frame.operationId,
         sequence: frame.sequence,
-        text: frame.text,
-        thinking: frame.thinking,
+        text: boundedActivityText("", frame.text),
+        thinking: boundedActivityText("", frame.thinking),
         toolCalls: [...frame.toolCalls],
       };
     } else if (frame.type === "text_delta") {
-      this.activity = { ...base, sequence: frame.sequence, text: base.text + frame.text };
+      this.activity = {
+        ...base,
+        sequence: frame.sequence,
+        text: boundedActivityText(base.text, frame.text),
+      };
     } else if (frame.type === "thinking_delta") {
-      this.activity = { ...base, sequence: frame.sequence, thinking: base.thinking + frame.text };
+      this.activity = {
+        ...base,
+        sequence: frame.sequence,
+        thinking: boundedActivityText(base.thinking, frame.text),
+      };
     } else if (frame.type === "tool_call") {
       this.activity = base.toolCalls.some((call) => call.callId === frame.call.callId)
         ? { ...base, sequence: frame.sequence }
@@ -403,9 +486,61 @@ export class ConversationProjector {
     return true;
   }
 
-  clearActivity(operationId?: OperationId): void {
-    if (operationId === undefined || this.activity?.operationId === operationId) {
-      this.activity = undefined;
+  markShellUncertain(operationId: OperationId, command: string): void {
+    this.uncertainShellOperations.set(operationId, { operationId, command });
+  }
+
+  private updateOperation(
+    operationId: OperationId | undefined,
+    status: ProjectedOperation["status"],
+  ): void {
+    if (operationId === undefined) return;
+    this.operations.set(operationId, { operationId, status });
+    if (status === "running" || status === "waiting_interaction") {
+      this.activeOperationId = operationId;
+    } else if (this.activeOperationId === operationId) {
+      this.activeOperationId = undefined;
     }
+  }
+
+  resetActivity(): void {
+    this.activity = undefined;
+    this.activitySequences.clear();
+    this.retiredActivityOperations.clear();
+    this.latestActivityOperationId = undefined;
+  }
+
+  clearActivity(operationId?: OperationId): void {
+    if (operationId === undefined) {
+      if (this.latestActivityOperationId !== undefined) {
+        this.retireActivity(this.latestActivityOperationId);
+      }
+      this.activity = undefined;
+      this.latestActivityOperationId = undefined;
+    } else {
+      if (this.activity?.operationId === operationId) this.activity = undefined;
+      this.retireActivity(operationId);
+      if (this.latestActivityOperationId === operationId)
+        this.latestActivityOperationId = undefined;
+    }
+  }
+
+  private rememberActivitySequence(operationId: OperationId, sequence: number): void {
+    this.activitySequences.delete(operationId);
+    this.activitySequences.set(operationId, sequence);
+    while (this.activitySequences.size > 128) {
+      const oldest = this.activitySequences.keys().next().value;
+      if (oldest === undefined) break;
+      this.activitySequences.delete(oldest);
+      this.retiredActivityOperations.delete(oldest);
+    }
+  }
+
+  private retireActivity(operationId: OperationId): void {
+    this.retiredActivityOperations.add(operationId);
+    this.rememberActivitySequence(
+      operationId,
+      this.activitySequences.get(operationId) ?? this.activity?.sequence ?? 0,
+    );
   }
 }
