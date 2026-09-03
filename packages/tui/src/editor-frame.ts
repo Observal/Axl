@@ -56,8 +56,13 @@ export class EditorFrameComponent implements Component {
     const prefix = this.state.mode ? `${this.state.mode.slice(0, 1)} > ` : "> ";
     const editorWidth = Math.max(1, width - visibleWidth(prefix));
     const rendered = this.editor.render(editorWidth);
+    const model = view.modelLabel();
+    const separator = " · ";
+    const locationWidth = width - visibleWidth(separator) - visibleWidth(model);
     const footer = view.palette.dim(
-      truncateToWidth(`${this.state.location} · ${view.modelLabel()}`, width, ""),
+      locationWidth > 0
+        ? `${truncateToWidth(this.state.location, locationWidth, "")}${separator}${model}`
+        : truncateToWidth(model, width, ""),
     );
     const lines = [
       "",

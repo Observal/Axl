@@ -106,6 +106,21 @@ function normalizedPath(path: string, allowRoot: boolean): string {
   return path;
 }
 
+function normalizedGitPath(path: string): string {
+  try {
+    return normalizedPath(path, false);
+  } catch (error) {
+    if (error instanceof WorkspaceError && error.code === "invalid_path") {
+      throw new WorkspaceError(
+        "unsupported_filename_encoding",
+        "Git returned a filename that cannot be represented as a workspace path",
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
 function statusKind(code: string, binary: boolean, submodule: boolean): GitChangeKind {
   if (submodule) return "submodule";
   if (binary) return "binary";
@@ -702,7 +717,7 @@ export class WorkspaceService {
       if (!record || record.startsWith("# ") || record.startsWith("! ")) continue;
       if (record.startsWith("? ")) {
         const path = record.slice(2);
-        normalizedPath(path, false);
+        normalizedGitPath(path);
         const isBinary = await this.fileLooksBinary(join(repositoryRoot, ...path.split("/")));
         entries.push({
           path,
@@ -718,7 +733,7 @@ export class WorkspaceService {
         if (!match)
           throw new WorkspaceError("unsupported_git_state", "Cannot parse conflicted Git status");
         const path = match[3] as string;
-        normalizedPath(path, false);
+        normalizedGitPath(path);
         entries.push({
           path,
           area: "conflict",
@@ -738,8 +753,8 @@ export class WorkspaceService {
       const sub = match?.[2] as string;
       const path = match?.[3] as string;
       const previousPath = renamed ? records[++index] : undefined;
-      normalizedPath(path, false);
-      if (previousPath !== undefined) normalizedPath(previousPath, false);
+      normalizedGitPath(path);
+      if (previousPath !== undefined) normalizedGitPath(previousPath);
       const submodule = sub.startsWith("S");
       for (const [at, area] of [
         [0, "staged"],
@@ -799,8 +814,8 @@ export class WorkspaceService {
       }
       if (!path)
         throw new WorkspaceError("unsupported_git_state", "Checkpoint status omitted a path");
-      normalizedPath(path, false);
-      if (previousPath !== undefined) normalizedPath(previousPath, false);
+      normalizedGitPath(path);
+      if (previousPath !== undefined) normalizedGitPath(previousPath);
       const isBinary = binary.has(path);
       const submodule = submodules.has(path);
       entries.push({

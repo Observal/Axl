@@ -1422,10 +1422,11 @@ export class AxlApp {
 
     if (event.type === "queue.started" && !this.hydrating) this.setWorking(true);
 
+    const completesOperation =
+      event.type === "assistant.message" && event.payload.stopReason !== "tool_use";
     if (event.type === "assistant.message") {
       this.liveAssistant.clear();
       this.cancelActivityRender();
-      if (event.payload.stopReason !== "tool_use" && !this.sending) this.setWorking(false);
     }
 
     let absorbedSandboxViolation = false;
@@ -1477,11 +1478,8 @@ export class AxlApp {
         prompt: event.type === "user.message",
       });
     }
-    if (
-      this.developerPanelEnabled &&
-      (event.type === "tool.result" ||
-        (event.type === "assistant.message" && event.payload.stopReason !== "tool_use"))
-    ) {
+    if (completesOperation) this.setWorking(false);
+    if (this.developerPanelEnabled && (event.type === "tool.result" || completesOperation)) {
       void this.refreshWorkspaceDiff();
     }
     if (redraw) this.redraw();

@@ -745,7 +745,11 @@ export class SessionManager {
     const source = this.managed(sourceId);
     const tree = SessionTree.fromEvents(sourceId, source.events);
     const lineage = tree.lineage(targetId);
-    const copied = includeTarget ? lineage.slice(1) : lineage.slice(1, -1);
+    const targetOperationId = lineage.at(-1)?.operationId;
+    const copied = (includeTarget ? lineage.slice(1) : lineage.slice(1, -1)).filter(
+      (event) =>
+        includeTarget || targetOperationId === undefined || event.operationId !== targetOperationId,
+    );
     const sessionId = reservation?.sessionId ?? parseSessionId(randomUUID(), "sessionId");
     const path = this.logPath(sessionId);
     const stagingPath =
@@ -807,6 +811,20 @@ export class SessionManager {
         const payload = structuredClone(event.payload) as Record<string, JsonValue>;
         if (event.type === "permission.resolved" && typeof payload.requestId === "string") {
           payload.requestId = eventIds.get(payload.requestId) ?? payload.requestId;
+        } else if (
+          (event.type === "queue.requeued" ||
+            event.type === "queue.started" ||
+            event.type === "queue.paused") &&
+          typeof payload.queueItemId === "string"
+        ) {
+          const queueItemId = eventIds.get(payload.queueItemId);
+          if (queueItemId === undefined) {
+            throw new DaemonError(
+              "corrupt_session",
+              `Queue lifecycle event ${event.id} references an event outside its lineage`,
+            );
+          }
+          payload.queueItemId = queueItemId;
         } else if (event.type === "context.compacted" && Array.isArray(payload.replacedEventIds)) {
           payload.replacedEventIds = payload.replacedEventIds.flatMap((id) => {
             const replacement = typeof id === "string" ? eventIds.get(id) : undefined;

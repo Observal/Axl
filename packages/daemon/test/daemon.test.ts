@@ -39,6 +39,7 @@ import {
   encodeWireMessage,
   isRpcErrorAllowed,
   MAX_CANONICAL_EVENT_BYTES,
+  parseEventId,
   parseOperationId,
   parseServerMessage,
   parseSessionId,
@@ -339,6 +340,29 @@ test("the daemon response boundary enforces every method's allowed-error matrix"
     }
     assert.equal(normalizeDaemonRpcErrorCode(method, "future_daemon_typo"), "internal_error");
   }
+});
+
+test("internal RPC failures do not expose subsystem messages", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const sensitiveMessage = `ENOENT: ${fixture.dataDirectory}/private-state`;
+  fixture.daemon.sessions.workspaceStatus = async () => {
+    throw new Error(sensitiveMessage);
+  };
+
+  await assert.rejects(
+    client.request("session.workspace.status", {
+      sessionId: created.sessionId,
+      scope: "working",
+    }),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "internal_error" &&
+      error.message === "Request failed" &&
+      !error.message.includes(fixture.dataDirectory),
+  );
 });
 
 test("requires version-4 initialization before session access", async (context) => {
@@ -1838,6 +1862,18 @@ test("serves generation-checked working and last-turn workspace status and diffs
     (error) => error instanceof AxlClientError && error.code === "path_denied",
   );
   await rm(join(workspace, ".env"));
+  if (process.platform !== "win32") {
+    const unrepresentable = join(workspace, "back\\slash.txt");
+    await writeFile(unrepresentable, "cannot be represented by a protocol path\n");
+    await assert.rejects(
+      client.request("session.workspace.status", {
+        sessionId: created.sessionId,
+        scope: "working",
+      }),
+      (error) => error instanceof AxlClientError && error.code === "unsupported_filename_encoding",
+    );
+    await rm(unrepresentable);
+  }
   await assert.rejects(readFile(textconvMarker), { code: "ENOENT" });
   await assert.rejects(readFile(filterMarker), { code: "ENOENT" });
   await writeFile(join(workspace, "later.txt"), "changed generation\n");
@@ -2345,11 +2381,20 @@ test("daemon-owned queued prompts are canonical and execute in priority order", 
         ?.status === "completed",
     "queued prompt completion",
   );
-  assert.equal(
-    subscription.projector.state.records.filter((record) => record.event.type === "user.message")
-      .length,
-    2,
+  const messages = subscription.projector.state.records.filter(
+    (record) => record.event.type === "user.message",
   );
+  assert.equal(messages.length, 2);
+
+  const selected = messages[1]?.event;
+  assert.ok(selected);
+  const forked = await client.request("session.fork", {
+    sessionId: created.sessionId,
+    fromEventId: parseEventId(selected.id),
+  });
+  const forkSubscription = await subscribeSession(client, forked.sessionId);
+  context.after(() => forkSubscription.close());
+  assert.deepEqual(forkSubscription.projector.state.queue, []);
 });
 
 test("queued prompts become paused after restart and require explicit re-queueing", async (context) => {

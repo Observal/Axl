@@ -626,7 +626,12 @@ export class AxlDaemon {
         method: request.method,
         error: {
           code,
-          message: error instanceof Error ? error.message : "Request failed",
+          message:
+            code === "internal_error"
+              ? "Request failed"
+              : error instanceof Error
+                ? error.message
+                : "Request failed",
           retryable: isRpcErrorRetryable(code),
           ...((error instanceof DaemonError || error instanceof CommandJournalError) &&
           error.details !== undefined
