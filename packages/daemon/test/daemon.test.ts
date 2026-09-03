@@ -3,7 +3,18 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, truncate, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  truncate,
+  writeFile,
+} from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,6 +51,7 @@ import {
   WireClientError,
   type WireEvent,
 } from "../src/index.ts";
+import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const execute = promisify(execFile);
@@ -1146,6 +1158,357 @@ test("a session survives daemon termination and resumes with full history", asyn
     content: [{ type: "text", text: "after restart" }],
   })) as { stopReason: string };
   assert.equal(sent.stopReason, "stop");
+});
+
+test("lists and reads only bounded policy-checked workspace paths", async (context) => {
+  const fixture = await startDaemon(context);
+  const workspace = join(fixture.cwd, "explorer");
+  await mkdir(join(workspace, "src"), { recursive: true });
+  await mkdir(join(workspace, ".axl"));
+  await writeFile(join(workspace, "a.txt"), "one\ntwo\nthree\n");
+  await writeFile(join(workspace, "src", "b.txt"), "bee\n");
+  await writeFile(join(workspace, ".env"), "SECRET=hidden\n");
+  await writeFile(join(workspace, ".axl", "credentials.json"), "hidden\n");
+  await writeFile(join(workspace, "binary.bin"), Buffer.from([1, 0, 2]));
+  await writeFile(join(workspace, "invalid.txt"), Buffer.from([0xc3, 0x28]));
+  await symlink(fixture.cwd, join(workspace, "escape"));
+  if (process.platform !== "win32") await execute("mkfifo", [join(workspace, "named-pipe")]);
+
+  const client = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: workspace });
+  const first = await client.request("session.workspace.list", {
+    sessionId: created.sessionId,
+    path: "",
+    pageSize: 2,
+  });
+  assert.equal(first.entries.length, 2);
+  assert.ok(first.nextPageCursor);
+  assert.deepEqual(
+    first.entries.map((entry) => entry.name),
+    [".axl", ".env"],
+  );
+  const otherClient = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => otherClient.close());
+  await assert.rejects(
+    otherClient.request("session.workspace.list", {
+      sessionId: created.sessionId,
+      path: "",
+      pageSize: 2,
+      pageCursor: first.nextPageCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "workspace_changed",
+  );
+  const complete = await client.request("session.workspace.list", {
+    sessionId: created.sessionId,
+    path: "",
+    pageSize: 200,
+    ifWorkspaceGeneration: first.workspaceGeneration,
+  });
+  assert.equal(
+    complete.entries.find((entry) => entry.name === "escape")?.linkTargetType,
+    "outside_workspace",
+  );
+  if (process.platform !== "win32") {
+    assert.equal(complete.entries.find((entry) => entry.name === "named-pipe")?.type, "other");
+  }
+
+  const read = await client.request("session.workspace.read", {
+    sessionId: created.sessionId,
+    path: "a.txt",
+    startLine: 2,
+    maxLines: 1,
+    maxBytes: 32,
+    ifWorkspaceGeneration: first.workspaceGeneration,
+  });
+  assert.equal(read.text, "two\n");
+  assert.equal(read.truncationReason, "line_limit");
+  const byteLimited = await client.request("session.workspace.read", {
+    sessionId: created.sessionId,
+    path: "a.txt",
+    maxLines: 20,
+    maxBytes: 3,
+  });
+  assert.equal(byteLimited.text, "");
+  assert.equal(byteLimited.truncationReason, "byte_limit");
+
+  for (const [path, code] of [
+    ["../outside", "bad_request"],
+    ["escape/file", "symlink_escape"],
+    [".env", "path_denied"],
+    [".axl/credentials.json", "path_denied"],
+    ["binary.bin", "binary_file"],
+    ["invalid.txt", "invalid_encoding"],
+    ...(process.platform === "win32" ? [] : ([["named-pipe", "unsupported_file_type"]] as const)),
+  ] as const) {
+    await assert.rejects(
+      client.request("session.workspace.read", {
+        sessionId: created.sessionId,
+        path,
+        maxLines: 20,
+        maxBytes: 1024,
+      }),
+      (error) => error instanceof WireClientError && error.code === code,
+    );
+  }
+
+  await writeFile(join(workspace, "new-page-entry"), "new\n");
+  await assert.rejects(
+    client.request("session.workspace.list", {
+      sessionId: created.sessionId,
+      path: "",
+      pageSize: 2,
+      pageCursor: first.nextPageCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "workspace_changed",
+  );
+  await writeFile(join(workspace, "a.txt"), "changed\n");
+  await assert.rejects(
+    client.request("session.workspace.read", {
+      sessionId: created.sessionId,
+      path: "a.txt",
+      maxLines: 20,
+      maxBytes: 1024,
+      ifFileRevision: read.fileRevision,
+    }),
+    (error) => error instanceof WireClientError && error.code === "workspace_changed",
+  );
+});
+
+test("represents staged, unstaged, rename, delete, binary, submodule, and branch states", async (context) => {
+  const fixture = await startDaemon(context);
+  const workspace = join(fixture.cwd, "git-states");
+  await mkdir(workspace);
+  await execute("git", ["init", "--quiet"], { cwd: workspace });
+  await execute("git", ["config", "user.name", "Axl Test"], { cwd: workspace });
+  await execute("git", ["config", "user.email", "axl@example.invalid"], { cwd: workspace });
+  const trackedFiles: readonly (readonly [string, string])[] = [
+    ["both.txt", "base\n"],
+    ["rename.txt", "rename\n"],
+    ["delete.txt", "delete\n"],
+  ];
+  for (const [name, content] of trackedFiles) await writeFile(join(workspace, name), content);
+  await writeFile(join(workspace, "binary.bin"), Buffer.from([1, 0, 2]));
+  await execute("git", ["add", "."], { cwd: workspace });
+  await execute("git", ["commit", "--quiet", "-m", "base"], { cwd: workspace });
+  const head = (await execute("git", ["rev-parse", "HEAD"], { cwd: workspace })).stdout.trim();
+  await execute("git", ["update-index", "--add", "--cacheinfo", "160000", head, "vendor"], {
+    cwd: workspace,
+  });
+  await execute("git", ["commit", "--quiet", "-m", "gitlink"], { cwd: workspace });
+
+  await writeFile(join(workspace, "both.txt"), "staged\n");
+  await execute("git", ["add", "both.txt"], { cwd: workspace });
+  await writeFile(join(workspace, "both.txt"), "unstaged\n");
+  await execute("git", ["mv", "rename.txt", "renamed.txt"], { cwd: workspace });
+  await rm(join(workspace, "delete.txt"));
+  await writeFile(join(workspace, "binary.bin"), Buffer.from([3, 0, 4]));
+  await writeFile(join(workspace, "untracked.txt"), "new\n");
+  await writeFile(join(workspace, "-option.txt"), "option\n");
+  await writeFile(join(workspace, "tab\tnewline\nname.txt"), "odd name\n");
+  await writeFile(join(workspace, "日本語.txt"), "unicode\n");
+
+  const client = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: workspace });
+  const status = await client.request("session.workspace.status", {
+    sessionId: created.sessionId,
+    scope: "working",
+  });
+  assert.equal(
+    status.entries.some((entry) => entry.path === "both.txt" && entry.area === "staged"),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "both.txt" && entry.area === "unstaged"),
+    true,
+  );
+  assert.equal(
+    status.entries.some(
+      (entry) =>
+        entry.path === "renamed.txt" &&
+        entry.kind === "renamed" &&
+        entry.previousPath === "rename.txt",
+    ),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "delete.txt" && entry.kind === "deleted"),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "untracked.txt" && entry.kind === "untracked"),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "-option.txt"),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "tab\tnewline\nname.txt"),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "日本語.txt"),
+    true,
+  );
+  assert.equal(
+    status.entries.some((entry) => entry.path === "binary.bin" && entry.binary),
+    true,
+  );
+  const submodule = status.entries.find((entry) => entry.path === "vendor" && entry.submodule);
+  assert.ok(submodule);
+  const submoduleDiff = await client.request("session.workspace.diff", {
+    sessionId: created.sessionId,
+    entryId: submodule.entryId,
+    contextLines: 1,
+    repositoryGeneration: status.repositoryGeneration,
+    maxBytes: 65_536,
+  });
+  assert.equal(submoduleDiff.oldRevision, head);
+  assert.equal(submoduleDiff.hunks.length, 0);
+
+  const untracked = status.entries.find((entry) => entry.path === "untracked.txt");
+  assert.ok(untracked);
+  const untrackedDiff = await client.request("session.workspace.diff", {
+    sessionId: created.sessionId,
+    entryId: untracked.entryId,
+    contextLines: 1,
+    repositoryGeneration: status.repositoryGeneration,
+    maxBytes: 65_536,
+  });
+  assert.equal(
+    untrackedDiff.hunks.some((hunk) => hunk.lines.some((line) => line.text === "new")),
+    true,
+  );
+  await assert.rejects(
+    client.request("session.workspace.diff", {
+      sessionId: created.sessionId,
+      entryId: untracked.entryId,
+      contextLines: 1,
+      repositoryGeneration: status.repositoryGeneration,
+      maxBytes: 8,
+    }),
+    (error) => error instanceof WireClientError && error.code === "git_output_too_large",
+  );
+
+  await execute("git", ["config", "core.sparseCheckout", "true"], { cwd: workspace });
+  await execute("git", ["checkout", "--detach"], { cwd: workspace });
+  const detached = await client.request("session.workspace.status", {
+    sessionId: created.sessionId,
+    scope: "working",
+  });
+  assert.equal(detached.branch.state, "detached");
+  assert.equal(detached.sparseCheckout, true);
+
+  await rename(join(workspace, ".git"), join(workspace, ".git-replaced"));
+  await execute("git", ["init", "--quiet"], { cwd: workspace });
+  await assert.rejects(
+    client.request("session.workspace.diff", {
+      sessionId: created.sessionId,
+      entryId: untracked.entryId,
+      contextLines: 1,
+      repositoryGeneration: status.repositoryGeneration,
+      maxBytes: 65_536,
+    }),
+    (error) => error instanceof WireClientError && error.code === "repository_changed",
+  );
+});
+
+test("bounds Git execution time and output without invoking a shell", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-fake-git-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = join(directory, "git");
+  await writeFile(
+    executable,
+    '#!/bin/sh\ncase " $* " in *" config --local "*) exit 1;; esac\nsleep 2\n',
+  );
+  await chmod(executable, 0o700);
+  const previousPath = process.env.PATH;
+  process.env.PATH = directory;
+  try {
+    await assert.rejects(
+      runGit(directory, ["status"], { timeoutMs: 10 }),
+      (error) => error instanceof GitExecutionError && error.code === "git_timeout",
+    );
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+  }
+});
+
+test("rejects invalid-byte Git output without lossy filename replacement", () => {
+  assert.throws(
+    () => decodeGit(Buffer.from([0x4d, 0, 0xff, 0])),
+    (error) => error instanceof GitExecutionError && error.code === "unsupported_filename_encoding",
+  );
+});
+
+test("represents conflicts and unborn repositories and rejects invalid-byte filenames", async (context) => {
+  const fixture = await startDaemon(context);
+  const conflict = join(fixture.cwd, "conflict");
+  await mkdir(conflict);
+  await execute("git", ["init", "--quiet"], { cwd: conflict });
+  await execute("git", ["config", "user.name", "Axl Test"], { cwd: conflict });
+  await execute("git", ["config", "user.email", "axl@example.invalid"], { cwd: conflict });
+  await writeFile(join(conflict, "file.txt"), "base\n");
+  await execute("git", ["add", "."], { cwd: conflict });
+  await execute("git", ["commit", "--quiet", "-m", "base"], { cwd: conflict });
+  const main = (
+    await execute("git", ["branch", "--show-current"], { cwd: conflict })
+  ).stdout.trim();
+  await execute("git", ["checkout", "-q", "-b", "other"], { cwd: conflict });
+  await writeFile(join(conflict, "file.txt"), "other\n");
+  await execute("git", ["commit", "-qam", "other"], { cwd: conflict });
+  await execute("git", ["checkout", "-q", main], { cwd: conflict });
+  await writeFile(join(conflict, "file.txt"), "main\n");
+  await execute("git", ["commit", "-qam", "main"], { cwd: conflict });
+  await execute("git", ["merge", "other"], { cwd: conflict }).catch(() => undefined);
+
+  const client = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => client.close());
+  const conflictedSession = await client.request("session.create", { cwd: conflict });
+  const conflicted = await client.request("session.workspace.status", {
+    sessionId: conflictedSession.sessionId,
+    scope: "working",
+  });
+  assert.equal(
+    conflicted.entries.some((entry) => entry.area === "conflict" && entry.kind === "conflicted"),
+    true,
+  );
+
+  const unborn = join(fixture.cwd, "unborn");
+  await mkdir(unborn);
+  await execute("git", ["init", "--quiet"], { cwd: unborn });
+  await writeFile(join(unborn, "new.txt"), "new\n");
+  const unbornSession = await client.request("session.create", { cwd: unborn });
+  const unbornStatus = await client.request("session.workspace.status", {
+    sessionId: unbornSession.sessionId,
+    scope: "working",
+  });
+  assert.equal(unbornStatus.branch.state, "unborn");
+  assert.equal(unbornStatus.entries[0]?.kind, "untracked");
+
+  if (process.platform !== "win32") {
+    const invalidPath = Buffer.concat([Buffer.from(`${unborn}/invalid-`), Buffer.from([0xff])]);
+    let invalidNameSupported = true;
+    try {
+      await writeFile(invalidPath, "bad\n");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EILSEQ") invalidNameSupported = false;
+      else throw error;
+    }
+    if (invalidNameSupported) {
+      await assert.rejects(
+        client.request("session.workspace.status", {
+          sessionId: unbornSession.sessionId,
+          scope: "working",
+        }),
+        (error) =>
+          error instanceof WireClientError && error.code === "unsupported_filename_encoding",
+      );
+    }
+  }
 });
 
 test("serves generation-checked working and last-turn workspace status and diffs", async (context) => {
