@@ -52,6 +52,18 @@ test("validates every request shape", () => {
     },
     {
       kind: "request",
+      id: 23,
+      method: "session.steer",
+      params: { sessionId, content: [{ type: "text", text: "adjust" }] },
+    },
+    {
+      kind: "request",
+      id: 24,
+      method: "session.followUp",
+      params: { sessionId, content: [{ type: "text", text: "then summarize" }] },
+    },
+    {
+      kind: "request",
       id: 4,
       method: "session.shell",
       params: { sessionId, command: "pwd", excluded: false },
@@ -169,6 +181,13 @@ test("rejects malformed requests at the wire boundary", () => {
     },
     { kind: "request", id: 1, method: "session.fork", params: { sessionId } },
     { kind: "request", id: 1, method: "session.send", params: { sessionId, content: "bad" } },
+    { kind: "request", id: 1, method: "session.steer", params: { sessionId } },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.followUp",
+      params: { sessionId, content: [{ type: "video", text: "bad" }] },
+    },
     {
       kind: "request",
       id: 1,

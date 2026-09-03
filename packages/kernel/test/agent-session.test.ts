@@ -297,6 +297,75 @@ test("dispatches tool calls, pairs results, and feeds them back", async (context
   assert.equal(operationIds.size, 1);
 });
 
+test("steering waits for the complete tool batch and follow-ups run afterward", async (context) => {
+  let releaseFirst = (): void => undefined;
+  let markFirstStarted = (): void => undefined;
+  const firstStarted = new Promise<void>((resolvePromise) => {
+    markFirstStarted = resolvePromise;
+  });
+  const firstGate = new Promise<void>((resolvePromise) => {
+    releaseFirst = resolvePromise;
+  });
+  const executed: string[] = [];
+  const registry = new ToolRegistry();
+  registry.register({
+    name: "echo",
+    description: "Echo the input back",
+    inputSchema: { type: "object" },
+    async execute(input) {
+      const value = String(input.value);
+      if (value === "first") {
+        markFirstStarted();
+        await firstGate;
+      }
+      executed.push(value);
+      return { content: [{ type: "text", text: value }], isError: false };
+    },
+  });
+  const port = makePort([
+    [
+      { type: "tool_call", callId: "call-1", name: "echo", input: { value: "first" } },
+      { type: "tool_call", callId: "call-2", name: "echo", input: { value: "second" } },
+      { type: "completed", stopReason: "tool_use", usage },
+    ],
+    say("steered"),
+    say("followed once"),
+    say("followed twice"),
+  ]);
+  const { session } = await makeSession(context, port, registry);
+
+  const running = session.runTurn([{ type: "text", text: "start" }]);
+  await firstStarted;
+  session.steer([{ type: "text", text: "adjust" }]);
+  session.followUp([{ type: "text", text: "then summarize" }]);
+  session.followUp([{ type: "text", text: "then verify" }]);
+  releaseFirst();
+
+  const result = await running;
+  assert.equal(result.stopReason, "stop");
+  assert.deepEqual(executed, ["first", "second"]);
+  assert.deepEqual(
+    port.requests.map((request) => {
+      const lastUser = request.messages.findLast((message) => message.role === "user");
+      return lastUser?.content[0]?.type === "text" ? lastUser.content[0].text : undefined;
+    }),
+    ["start", "adjust", "then summarize", "then verify"],
+  );
+  assert.deepEqual(
+    result.events
+      .filter((event) => event.type === "user.message")
+      .map((event) =>
+        event.type === "user.message" && event.payload.content[0]?.type === "text"
+          ? event.payload.content[0].text
+          : undefined,
+      ),
+    ["start", "adjust", "then summarize", "then verify"],
+  );
+  assert.throws(() => session.steer([{ type: "text", text: "too late" }]), /No active/);
+  assert.throws(() => session.followUp([{ type: "text", text: "too late" }]), /No active/);
+  await session.dispose();
+});
+
 test("split-turn compaction keeps tool calls paired with their results", async (context) => {
   const port = makePort([callTool("call-1", { value: 1 }), say("done"), say("summary")]);
   const registry = new ToolRegistry();

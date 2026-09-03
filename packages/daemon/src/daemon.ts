@@ -266,6 +266,10 @@ export class AxlDaemon {
         return this.sessions.clone(request.params.sessionId);
       case "session.send":
         return this.sessions.send(request.params.sessionId, request.params.content);
+      case "session.steer":
+        return this.sessions.steer(request.params.sessionId, request.params.content);
+      case "session.followUp":
+        return this.sessions.followUp(request.params.sessionId, request.params.content);
       case "session.compact":
         return this.sessions.compact(request.params.sessionId, request.params.instructions);
       case "session.shell":

@@ -137,6 +137,9 @@ export class AgentSession {
   private tip: EventId | null;
   private messages: ModelMessage[];
   private activeOperation: OperationId | null = null;
+  private acceptingQueuedMessages = false;
+  private readonly steeringMessages: Array<readonly UserContent[]> = [];
+  private readonly followUpMessages: Array<readonly UserContent[]> = [];
 
   private constructor(
     log: JsonlEventLog,
@@ -281,6 +284,33 @@ export class AgentSession {
     return event;
   }
 
+  /** Queues user input for the next model boundary of the active turn. */
+  steer(content: readonly UserContent[]): void {
+    if (!this.acceptingQueuedMessages) {
+      throw new OperationConflictError("No active model turn can receive steering");
+    }
+    this.steeringMessages.push([...content]);
+  }
+
+  /** Queues user input until the active turn would otherwise finish. */
+  followUp(content: readonly UserContent[]): void {
+    if (!this.acceptingQueuedMessages) {
+      throw new OperationConflictError("No active model turn can receive a follow-up");
+    }
+    this.followUpMessages.push([...content]);
+  }
+
+  hasQueuedMessages(): boolean {
+    return this.steeringMessages.length > 0 || this.followUpMessages.length > 0;
+  }
+
+  /** Starts a fresh turn for input left queued after an error or interruption. */
+  async continueQueued(signal?: AbortSignal): Promise<TurnResult | undefined> {
+    const queue = this.steeringMessages.length > 0 ? this.steeringMessages : this.followUpMessages;
+    const content = queue.shift();
+    return content === undefined ? undefined : this.runTurn(content, signal);
+  }
+
   async dispose(): Promise<void> {
     await this.host.dispose();
     await this.log.drain();
@@ -367,7 +397,7 @@ export class AgentSession {
     }
   }
 
-  /** Runs one user turn: model calls and tool executions until a final stop. */
+  /** Runs one user turn: model calls, steering, follow-ups, and tools until a final stop. */
   async runTurn(content: readonly UserContent[], signal?: AbortSignal): Promise<TurnResult> {
     if (this.activeOperation !== null) {
       throw new OperationConflictError(
@@ -376,10 +406,10 @@ export class AgentSession {
     }
     const operationId = parseOperationId(randomUUID(), "operationId");
     this.activeOperation = operationId;
+    this.acceptingQueuedMessages = true;
     const appended: CanonicalEvent[] = [];
     try {
-      appended.push(await this.append(operationId, "user.message", { content }));
-      this.messages.push({ role: "user", content });
+      await this.appendUserMessage(operationId, content, appended);
 
       const activity = { sequence: 0 };
       for (let call = 0; ; call += 1) {
@@ -414,30 +444,64 @@ export class AgentSession {
           type: "clear",
         });
 
-        if (outcome.stopReason !== "tool_use") {
+        if (outcome.stopReason === "error" || outcome.stopReason === "aborted") {
           return { events: appended, stopReason: outcome.stopReason };
         }
-        if (outcome.toolCalls.length === 0) {
-          appended.push(
-            await this.append(operationId, "session.error", {
-              code: "missing_tool_call",
-              message: "Model ended with tool_use but supplied no tool call",
-              retryable: false,
-            }),
+
+        if (outcome.stopReason === "tool_use") {
+          if (outcome.toolCalls.length === 0) {
+            appended.push(
+              await this.append(operationId, "session.error", {
+                code: "missing_tool_call",
+                message: "Model ended with tool_use but supplied no tool call",
+                retryable: false,
+              }),
+            );
+            return { events: appended, stopReason: "error" };
+          }
+          const aborted = await this.executeToolCalls(
+            operationId,
+            outcome.toolCalls,
+            appended,
+            signal,
           );
-          return { events: appended, stopReason: "error" };
+          if (aborted) return { events: appended, stopReason: "aborted" };
         }
-        const aborted = await this.executeToolCalls(
-          operationId,
-          outcome.toolCalls,
-          appended,
-          signal,
-        );
-        if (aborted) return { events: appended, stopReason: "aborted" };
+
+        if (await this.appendNextQueuedMessage(this.steeringMessages, operationId, appended)) {
+          continue;
+        }
+        if (outcome.stopReason === "tool_use") continue;
+        if (await this.appendNextQueuedMessage(this.followUpMessages, operationId, appended)) {
+          continue;
+        }
+        return { events: appended, stopReason: outcome.stopReason };
       }
     } finally {
+      this.acceptingQueuedMessages = false;
       this.activeOperation = null;
     }
+  }
+
+  private async appendUserMessage(
+    operationId: OperationId,
+    content: readonly UserContent[],
+    appended: CanonicalEvent[],
+  ): Promise<void> {
+    appended.push(await this.append(operationId, "user.message", { content }));
+    this.messages.push({ role: "user", content });
+  }
+
+  private async appendNextQueuedMessage(
+    queue: Array<readonly UserContent[]>,
+    operationId: OperationId,
+    appended: CanonicalEvent[],
+  ): Promise<boolean> {
+    const content = queue[0];
+    if (content === undefined) return false;
+    await this.appendUserMessage(operationId, content, appended);
+    queue.shift();
+    return true;
   }
 
   private async modelTurn(

@@ -624,6 +624,52 @@ test("interrupt aborts the active operation from another connection", async (con
   assert.equal(idle.interrupted, false);
 });
 
+test("a queued follow-up continues after the current model call is interrupted", async (context) => {
+  let calls = 0;
+  const prompts: string[] = [];
+  const model: ModelPort = {
+    stream(request) {
+      calls += 1;
+      const call = calls;
+      const lastUser = request.messages.findLast((message) => message.role === "user");
+      prompts.push(lastUser?.content[0]?.type === "text" ? lastUser.content[0].text : "<missing>");
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          await new Promise<void>((resolvePromise) => {
+            if (request.signal?.aborted) resolvePromise();
+            else request.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
+          });
+          yield { type: "aborted" };
+          return;
+        }
+        yield { type: "text_delta", text: "follow-up answer" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model);
+  const sender = await DaemonClient.connect(socketPath);
+  const controller = await DaemonClient.connect(socketPath);
+  context.after(() => {
+    sender.close();
+    controller.close();
+  });
+  const created = (await sender.request("session.create", { cwd })) as SessionSnapshot;
+  const sending = sender.request("session.send", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "start" }],
+  });
+  while (calls === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  await controller.request("session.followUp", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "continue afterward" }],
+  });
+  await controller.request("session.interrupt", { sessionId: created.sessionId });
+
+  assert.deepEqual(await sending, { stopReason: "stop" });
+  assert.deepEqual(prompts, ["start", "continue afterward"]);
+});
+
 test("concurrent sends conflict loudly instead of interleaving", async (context) => {
   const { socketPath, cwd } = await startDaemon(context, hangingPort());
   const client = await DaemonClient.connect(socketPath);
@@ -644,6 +690,83 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
   );
   await client.request("session.interrupt", { sessionId: created.sessionId });
   await first;
+});
+
+test("steering and follow-ups cross clients through the daemon", async (context) => {
+  let releaseFirst = (): void => undefined;
+  context.after(() => releaseFirst());
+  let calls = 0;
+  const prompts: string[] = [];
+  const model: ModelPort = {
+    stream(request) {
+      calls += 1;
+      const call = calls;
+      const lastUser = request.messages.findLast((message) => message.role === "user");
+      prompts.push(lastUser?.content[0]?.type === "text" ? lastUser.content[0].text : "<missing>");
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          await new Promise<void>((resolvePromise) => {
+            releaseFirst = resolvePromise;
+          });
+        }
+        yield { type: "text_delta", text: `reply ${call}` };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model);
+  const sender = await DaemonClient.connect(socketPath);
+  const controller = await DaemonClient.connect(socketPath);
+  context.after(() => {
+    sender.close();
+    controller.close();
+  });
+  const created = (await sender.request("session.create", { cwd })) as SessionSnapshot;
+  const sending = sender.request("session.send", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "start" }],
+  });
+  while (calls === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+
+  assert.deepEqual(
+    await controller.request("session.steer", {
+      sessionId: created.sessionId,
+      content: [{ type: "text", text: "adjust" }],
+    }),
+    { queued: true },
+  );
+  await controller.request("session.followUp", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "then summarize" }],
+  });
+  await controller.request("session.followUp", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "then verify" }],
+  });
+  releaseFirst();
+  await sending;
+
+  assert.deepEqual(prompts, ["start", "adjust", "then summarize", "then verify"]);
+  const history = (await controller.request("session.resume", {
+    sessionId: created.sessionId,
+  })) as SessionSnapshot;
+  assert.deepEqual(
+    history.events
+      .filter((event) => event.type === "user.message")
+      .map((event) =>
+        event.type === "user.message" && event.payload.content[0]?.type === "text"
+          ? event.payload.content[0].text
+          : undefined,
+      ),
+    prompts,
+  );
+  await assert.rejects(
+    controller.request("session.steer", {
+      sessionId: created.sessionId,
+      content: [{ type: "text", text: "too late" }],
+    }),
+    (error) => error instanceof WireClientError && error.code === "operation_inactive",
+  );
 });
 
 test("subscribe supports an afterEventId cursor and multiple attached clients", async (context) => {

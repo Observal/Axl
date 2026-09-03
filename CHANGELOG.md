@@ -24,6 +24,7 @@ This file records notable user-facing changes.
 - An authoritative Unix-socket daemon with required operating-system sandboxing and resumable, forkable sessions
 - `axl -r` and `axl --resume` startup selection across native, OCI, and visibly labeled unsafe histories
 - Manual `/compact [instructions]` context compaction with durable summaries, recent-context retention, and complete JSONL history
+- Daemon-owned steering and ordered follow-up messages over the local wire protocol
 - A terminal client with multiline editing, resize-safe rendering, session metrics, rich tool output, syntax-highlighted line-numbered diffs, full-width selectors, global preferences, prompt queues, and reconnect support
 - Buffered terminal input and fail-closed terminal lifecycle handling for fragmented escape sequences, large pastes, redirected streams, and cleanup failures
 - A retained responsive editor frame with rounded Axl styling and a compact borderless narrow-terminal layout
@@ -46,7 +47,7 @@ This file records notable user-facing changes.
 - Local provider, tool, extension, and sandbox assembly now lives outside the terminal client, so clients remain replaceable projections over the daemon protocol.
 - File tools now require explicit readable roots, and the default runtime limits them to the workspace.
 - The canonical command tool is named `bash`; historical `shell` calls remain replayable.
-- The exact-match local wire protocol is version 5 for manual session compaction.
+- The exact-match local wire protocol is version 6 for manual compaction, steering, and follow-ups.
 - Bubblewrap masks the user's home directory while rebinding the authorized workspace.
 - Shell cancellation now terminates the complete process group and refuses to start with an already-aborted signal.
 

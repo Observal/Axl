@@ -204,7 +204,7 @@ export type WireRequest =
   | {
       readonly kind: "request";
       readonly id: number;
-      readonly method: "session.send";
+      readonly method: "session.send" | "session.steer" | "session.followUp";
       readonly params: { readonly sessionId: SessionId; readonly content: readonly UserContent[] };
     }
   | {
@@ -629,7 +629,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       params: { sessionId: parseSessionId(params.sessionId, "request.params.sessionId") },
     };
   }
-  if (method === "session.send") {
+  if (method === "session.send" || method === "session.steer" || method === "session.followUp") {
     exact(params, "request.params", ["sessionId", "content"]);
     return {
       ...base,

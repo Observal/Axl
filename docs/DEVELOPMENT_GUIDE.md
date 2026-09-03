@@ -309,9 +309,9 @@ Session switching, forking, cloning, login, and reload wait until the active tur
 
 | Key | Behavior |
 | --- | --- |
-| Enter | Send the current prompt, or queue it while a turn runs |
+| Enter | Send the current prompt, or steer after the active turn's complete tool-call batch |
 | Shift+Enter | Insert a newline |
-| Alt+Enter | Prioritize a follow-up prompt |
+| Alt+Enter | Queue a follow-up after the active turn would otherwise finish |
 | Shift+Tab | Cycle reasoning effort |
 | Ctrl+T | Cycle thought display |
 | Ctrl+O | Toggle tool output detail |

@@ -51,7 +51,7 @@ axl doctor
 
 The resume picker includes native, OCI, and unsafe histories. Every row shows its placement, and unsafe sessions are marked `UNSAFE` before selection.
 
-The TUI supports multiline editing, model and theme selection, queued prompts, manual context compaction with `/compact [instructions]`, compact tool output, session metrics, and terminal scrollback. Run `/help` for commands and keys. Run `/quit` to detach without stopping the session.
+The TUI supports multiline editing, model and theme selection, daemon-owned steering and follow-up prompts, manual context compaction with `/compact [instructions]`, compact tool output, session metrics, and terminal scrollback. While a turn runs, Enter steers it after the current tool-call batch and Alt+Enter queues a follow-up for when it would otherwise finish. Run `/help` for commands and keys. Run `/quit` to detach without stopping the session.
 
 Axl will not run shell tools when the required sandbox is unavailable. On Linux, the native provider requires working Bubblewrap, Landlock, and the versioned Axl seccomp policy. `axl doctor` reports the controls available on the host.
 

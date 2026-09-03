@@ -1079,7 +1079,7 @@ test("Ctrl+Z suspends and resumes without detaching the session", async (context
   app.stop();
 });
 
-test("prompts entered while working queue in order", async (context) => {
+test("Enter steers and Alt+Enter queues a follow-up while working", async (context) => {
   let releaseFirst = (): void => undefined;
   let calls = 0;
   const prompts: string[] = [];
@@ -1087,7 +1087,7 @@ test("prompts entered while working queue in order", async (context) => {
     stream(request) {
       calls += 1;
       const turn = calls;
-      const last = request.messages.at(-1);
+      const last = request.messages.findLast((message) => message.role === "user");
       if (last?.role === "user") {
         prompts.push(last.content.map((item) => (item.type === "text" ? item.text : "")).join(""));
       }
@@ -1105,18 +1105,23 @@ test("prompts entered while working queue in order", async (context) => {
   const { socketPath, directory } = await startStack(context, queuedPort);
   const input = new PassThrough();
   const { output, text } = captureOutput();
-  const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
-    input,
-    output,
-    cwd: directory,
-    color: false,
-  });
+  const client = await DaemonClient.connect(socketPath);
+  const methods: string[] = [];
+  const request = client.request.bind(client);
+  client.request = (method, params) => {
+    methods.push(method);
+    return request(method, params);
+  };
+  const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
 
   input.write("one\r");
   await until(() => calls === 1, "first model call");
-  input.write("two\rthree\r");
-  await until(() => text().includes("queued follow-up"), "queue notice");
+  input.write("two\rthree\x1b[13;3u");
+  await until(
+    () => methods.includes("session.steer") && methods.includes("session.followUp"),
+    "queued RPCs",
+  );
+  assert.match(text(), /STEER/);
   assert.equal(calls, 1);
   releaseFirst();
   await until(() => calls === 3, "queued model calls");

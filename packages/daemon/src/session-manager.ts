@@ -108,7 +108,8 @@ export interface SessionManagerOptions {
 }
 
 interface ActiveTurn {
-  readonly controller: AbortController;
+  readonly kind: "turn" | "shell" | "compaction";
+  controller: AbortController;
   readonly done: Promise<void>;
   finish(): void;
 }
@@ -132,18 +133,19 @@ interface ManagedSession {
   };
   selection: SessionSelection;
   activeTurn?: ActiveTurn;
+  queuedInputs: Promise<void>;
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
   checkpointError?: WorkspaceCheckpointError;
   workspaceCheckpointsEnabled: boolean;
 }
 
-function deferredTurn(): ActiveTurn {
+function deferredTurn(kind: ActiveTurn["kind"]): ActiveTurn {
   let resolveDone = (): void => undefined;
   const done = new Promise<void>((resolvePromise) => {
     resolveDone = resolvePromise;
   });
-  return { controller: new AbortController(), done, finish: resolveDone };
+  return { kind, controller: new AbortController(), done, finish: resolveDone };
 }
 
 function userMessageText(event: CanonicalEvent): string | undefined {
@@ -324,6 +326,7 @@ export class SessionManager {
       activityListeners,
       activityState,
       selection,
+      queuedInputs: Promise.resolve(),
       interactions: new Map(),
       workspaceCheckpointsEnabled: false,
     };
@@ -608,22 +611,63 @@ export class SessionManager {
 
   async send(sessionId: unknown, content: readonly UserContent[]): Promise<{ stopReason: string }> {
     const managed = this.managed(sessionId);
-    for (const item of content) {
-      if (item.type === "blob")
-        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
-    }
+    await this.assertContentBlobs(managed, content);
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn();
+    const active = deferredTurn("turn");
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
-      const result = await managed.session.runTurn(content, active.controller.signal);
+      let result = await managed.session.runTurn(content, active.controller.signal);
+      while (managed.session.hasQueuedMessages()) {
+        active.controller = new AbortController();
+        result = (await managed.session.continueQueued(active.controller.signal)) ?? result;
+      }
       return { stopReason: result.stopReason };
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
+    }
+  }
+
+  steer(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
+    return this.queueInput(sessionId, content, "steer");
+  }
+
+  followUp(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
+    return this.queueInput(sessionId, content, "followUp");
+  }
+
+  private queueInput(
+    sessionId: unknown,
+    content: readonly UserContent[],
+    mode: "steer" | "followUp",
+  ): Promise<{ queued: true }> {
+    const managed = this.managed(sessionId);
+    const queued = managed.queuedInputs.then(async () => {
+      await this.assertContentBlobs(managed, content);
+      if (managed.activeTurn?.kind !== "turn" || managed.rebuilding) {
+        throw new DaemonError("operation_inactive", `No active model turn can receive ${mode}`);
+      }
+      managed.session[mode](content);
+      return { queued: true as const };
+    });
+    managed.queuedInputs = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  private async assertContentBlobs(
+    managed: ManagedSession,
+    content: readonly UserContent[],
+  ): Promise<void> {
+    for (const item of content) {
+      if (item.type === "blob") {
+        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+      }
     }
   }
 
@@ -635,7 +679,7 @@ export class SessionManager {
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn();
+    const active = deferredTurn("compaction");
     managed.activeTurn = active;
     try {
       const event = await managed.session.compact(customInstructions, active.controller.signal);
@@ -655,7 +699,7 @@ export class SessionManager {
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn();
+    const active = deferredTurn("shell");
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);

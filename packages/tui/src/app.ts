@@ -377,10 +377,10 @@ function isReservedExtensionShortcut(value: string): boolean {
 }
 
 const HOTKEYS: readonly { readonly key: string; readonly action: string }[] = [
-  { key: "Enter", action: "Send or queue the prompt" },
+  { key: "Enter", action: "Send, or steer the active turn" },
   { key: "Shift+Enter / Ctrl+J", action: "Insert a newline" },
   { key: "\\ then Enter", action: "Insert a newline in every terminal" },
-  { key: "Alt+Enter", action: "Prioritize a follow-up prompt" },
+  { key: "Alt+Enter", action: "Queue a follow-up after the active turn" },
   { key: "Ctrl+A", action: "Select the entire prompt" },
   { key: "Ctrl+C", action: "Copy selection, interrupt, or clear" },
   { key: "Ctrl+X", action: "Cut the selection" },
@@ -416,7 +416,7 @@ const HOTKEYS: readonly { readonly key: string; readonly action: string }[] = [
 ];
 
 const KEY_HELP: readonly string[] = [
-  "Enter send · Shift+Enter/Ctrl+J newline · Ctrl+A select all · Ctrl+V paste",
+  "Enter send/steer · Alt+Enter follow-up · Shift+Enter/Ctrl+J newline",
   "Esc/Ctrl+C interrupt · Ctrl+O tool details · /hotkeys for every shortcut",
 ];
 
@@ -597,6 +597,7 @@ export class AxlApp {
     readonly attachments: readonly BlobReference[];
   }> = [];
   private sending = false;
+  private activeRequest: "turn" | "shell" | "compaction" | undefined;
   private configuring = false;
   private webFetchEnabled: boolean;
   private webSearchEnabled: boolean;
@@ -1229,9 +1230,20 @@ export class AxlApp {
       queued: this.queued.length,
     });
     const completion = this.completions();
+    const inputMode = this.view.working
+      ? this.activeRequest === "shell" || this.activeRequest === "compaction"
+        ? "FOLLOW-UP"
+        : "STEER"
+      : undefined;
+    const editorMode = [
+      this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined,
+      inputMode,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     this.editorFrame.update({
       ...(this.notice === undefined ? {} : { notice: this.notice }),
-      ...(this.editorMode === "vim" ? { mode: this.vim.mode.toUpperCase() } : {}),
+      ...(editorMode ? { mode: editorMode } : {}),
       location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
         this.view.sandbox ? `  sandbox:${this.view.sandbox}` : ""
       }${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.extensionHost
@@ -2276,8 +2288,15 @@ export class AxlApp {
 
     const queued = { text: line, attachments: [...this.pendingAttachments] };
     this.pendingAttachments.length = 0;
-    if (prioritize) this.queued.unshift(queued);
-    else this.queued.push(queued);
+    if (
+      this.view.working &&
+      this.activeRequest !== "shell" &&
+      this.activeRequest !== "compaction"
+    ) {
+      void this.queueDuringTurn(queued, prioritize ? "followUp" : "steer");
+      return;
+    }
+    this.queued.push(queued);
     this.invalidateFullscreenRows();
     this.notice = this.view.working
       ? this.view.palette.dim(`· queued follow-up (${this.queued.length})`)
@@ -3742,6 +3761,7 @@ export class AxlApp {
 
   private async runShell(command: string, excluded: boolean): Promise<void> {
     this.sending = true;
+    this.activeRequest = "shell";
     this.setWorking(true);
     this.redraw();
     try {
@@ -3762,14 +3782,41 @@ export class AxlApp {
     } finally {
       this.setWorking(false);
       this.sending = false;
+      this.activeRequest = undefined;
       this.redraw();
       void this.drainQueue();
     }
   }
 
+  private async queueDuringTurn(
+    queued: { readonly text: string; readonly attachments: readonly BlobReference[] },
+    mode: "steer" | "followUp",
+  ): Promise<void> {
+    try {
+      await this.requireClient().request(`session.${mode}`, {
+        sessionId: this.sessionId,
+        content: [
+          ...(queued.text ? [{ type: "text" as const, text: queued.text }] : []),
+          ...queued.attachments.map((blob) => ({ type: "blob" as const, blob })),
+        ],
+      });
+      this.notice = this.view.palette.dim(
+        mode === "steer" ? "· steering queued" : "· follow-up queued",
+      );
+    } catch (error) {
+      this.pendingAttachments.unshift(...queued.attachments);
+      this.editor.setText([queued.text, this.editor.text].filter(Boolean).join("\n\n"));
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : `${mode} failed`} · prompt restored`,
+      );
+    }
+    this.redraw();
+  }
+
   private async drainQueue(): Promise<void> {
     if (this.sending || this.stopped) return;
     this.sending = true;
+    this.activeRequest = "turn";
     try {
       while (this.queued.length > 0 && !this.stopped) {
         const queued = this.queued.shift() as {
@@ -3815,6 +3862,7 @@ export class AxlApp {
       }
     } finally {
       this.sending = false;
+      this.activeRequest = undefined;
       this.setWorking(false);
       this.redraw();
     }
@@ -3835,6 +3883,7 @@ export class AxlApp {
 
   private async compact(instructions?: string): Promise<void> {
     this.sending = true;
+    this.activeRequest = "compaction";
     this.setWorking(true);
     this.notice = this.view.palette.dim("· compacting context");
     this.redraw();
@@ -3850,6 +3899,7 @@ export class AxlApp {
       );
     } finally {
       this.sending = false;
+      this.activeRequest = undefined;
       this.setWorking(false);
       this.redraw();
       void this.drainQueue();

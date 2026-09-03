@@ -286,8 +286,8 @@ Media moves through the blob channel, while the event log stores references (sec
 
 Typing at a running agent must never be a mystery. There are exactly four kinds of mid-run input, each with defined semantics, available from every client:
 
-- **Steer** (the default): the message is injected into the current turn at the next tool boundary. The agent sees it mid-task and adjusts course without abandoning work in progress.
-- **Follow-up**: the message queues until the current turn completes, then arrives as the next prompt. Multiple follow-ups queue in order.
+- **Steer** (the default): the message is injected after the current assistant response and its complete tool-call batch, before the next model request. The agent sees it mid-task and adjusts course without abandoning work in progress.
+- **Follow-up**: the message queues until the current turn would otherwise complete, then arrives as the next prompt. Multiple follow-ups queue in order.
 - **Interrupt**: stop at the next safe checkpoint, then deliver the message. Work already done is preserved in the tree.
 - **Side question** (`/btw`, section 6.5): opens a side branch that does not interrupt or enter the main agent's context.
 
@@ -1822,7 +1822,8 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 - [ ] Persist batch request IDs, idempotency keys, state transitions, usage, and cost so pending requests survive daemon restart.
 - [ ] Reconcile uncertain submissions before retrying and implement provider cancellation where available.
 - [ ] Keep steering and follow-ups queued until the pending batch request reaches a terminal state.
-- [ ] Implement steer, follow-up, and interrupt semantics.
+- [x] Implement daemon-owned steer and follow-up semantics at complete tool-call and turn boundaries.
+- [ ] Complete interrupt-and-deliver semantics.
 - [x] Queue multiple follow-ups in order.
 - [x] Add `/fork` from a selected user message and `/clone` from the current tip.
 - [ ] Add in-session branch and tree navigation.
