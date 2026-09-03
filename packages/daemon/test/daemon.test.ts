@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmod,
   mkdir,
@@ -46,8 +47,15 @@ import {
 } from "@axl/protocol";
 
 import { AxlDaemon, DaemonError } from "../src/index.ts";
-import { type AxlClient, AxlClientError, type WireEvent } from "@axl/sdk";
-import { connectUnixClient } from "@axl/sdk/unix";
+import {
+  AxlClient,
+  AxlClientError,
+  type AxlTransport,
+  type AxlTransportFactory,
+  subscribeSession,
+  type WireEvent,
+} from "@axl/sdk";
+import { connectUnixClient, nodeIdempotencyKeys, UnixSocketTransportFactory } from "@axl/sdk/unix";
 import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -67,6 +75,26 @@ function replyPort(): ModelPort {
         yield { type: "text_delta", text: `reply ${turn}` };
         yield { type: "completed", stopReason: "stop", usage };
       })();
+    },
+  };
+}
+
+function pausedActivityPort(): { readonly port: ModelPort; readonly finish: () => void } {
+  let finish!: () => void;
+  const pause = new Promise<void>((resolvePromise) => {
+    finish = resolvePromise;
+  });
+  return {
+    finish,
+    port: {
+      stream() {
+        return (async function* (): AsyncGenerator<ModelStreamEvent> {
+          yield { type: "text_delta", text: "first " };
+          yield { type: "text_delta", text: "second" };
+          await pause;
+          yield { type: "completed", stopReason: "stop", usage };
+        })();
+      },
     },
   };
 }
@@ -111,6 +139,56 @@ async function startDaemon(
 
 function types(events: readonly CanonicalEvent[]): readonly string[] {
   return events.map((event) => event.type);
+}
+
+type TransportFault = {
+  readonly incoming?: (message: unknown) => unknown | undefined;
+  readonly outgoing?: (message: string) => string;
+};
+
+class FaultTransportFactory implements AxlTransportFactory<never> {
+  private readonly delegate: UnixSocketTransportFactory;
+  private readonly fault: TransportFault;
+
+  constructor(socketPath: string, fault: TransportFault) {
+    this.delegate = new UnixSocketTransportFactory(socketPath);
+    this.fault = fault;
+  }
+
+  async connect(): Promise<AxlTransport> {
+    const transport = await this.delegate.connect();
+    return {
+      send: (message) => transport.send(this.fault.outgoing?.(message) ?? message),
+      onMessage: (listener) =>
+        transport.onMessage((message) => {
+          const delivered =
+            this.fault.incoming === undefined ? message : this.fault.incoming(message);
+          if (delivered !== undefined) listener(delivered);
+        }),
+      onClose: (listener) => transport.onClose(listener),
+      close: () => transport.close(),
+    };
+  }
+}
+
+function connectFaultClient(
+  socketPath: string,
+  fault: TransportFault,
+  kind = "headless",
+): Promise<AxlClient> {
+  return AxlClient.connect({
+    transport: new FaultTransportFactory(socketPath, fault),
+    identity: { kind, version: "0.0.0", instanceId: randomUUID() },
+    idempotencyKeys: nodeIdempotencyKeys,
+  });
+}
+
+async function waitFor(check: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (check()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  assert.fail(`Timed out waiting for ${label}`);
 }
 
 async function subscribeAll(
@@ -2115,6 +2193,222 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
     }),
     (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
+});
+
+test("SDK automatically recovers a canonical sequence gap from the daemon", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context);
+  let dropNextEvent = false;
+  const client = await connectFaultClient(socketPath, {
+    incoming(message) {
+      if (
+        dropNextEvent &&
+        typeof message === "object" &&
+        message !== null &&
+        (message as { kind?: string }).kind === "event"
+      ) {
+        dropNextEvent = false;
+        return undefined;
+      }
+      return message;
+    },
+  });
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const recoveries: Error[] = [];
+  const subscription = await subscribeSession(client, created.sessionId, {
+    onResyncRequired: (error) => recoveries.push(error),
+  });
+  context.after(() => subscription.close());
+
+  dropNextEvent = true;
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "recover the canonical gap" }],
+  });
+  await waitFor(
+    () =>
+      subscription.projector.state.records.some(
+        (record) => record.event.type === "assistant.message",
+      ),
+    "canonical gap recovery",
+  );
+
+  assert.match(recoveries[0]?.message ?? "", /out of order/);
+  assert.deepEqual(
+    subscription.projector.state.records.map((record) => record.event.type),
+    ["session.created", "user.message", "assistant.message"],
+  );
+});
+
+test("SDK automatically replaces gapped activity from the daemon snapshot", async (context) => {
+  const paused = pausedActivityPort();
+  const { socketPath, cwd } = await startDaemon(context, paused.port);
+  let dropNextActivity = false;
+  const observedActivity: Array<{ readonly sequence?: number; readonly type?: string }> = [];
+  const client = await connectFaultClient(socketPath, {
+    incoming(message) {
+      if (
+        typeof message === "object" &&
+        message !== null &&
+        (message as { kind?: string }).kind === "activity"
+      ) {
+        const frame = (message as { frame: { sequence?: number; type?: string } }).frame;
+        observedActivity.push(frame);
+        if (dropNextActivity) {
+          dropNextActivity = false;
+          return undefined;
+        }
+      }
+      return message;
+    },
+  });
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const recoveries: Error[] = [];
+  const subscription = await subscribeSession(client, created.sessionId, {
+    onResyncRequired: (error) => recoveries.push(error),
+  });
+  context.after(() => subscription.close());
+
+  dropNextActivity = true;
+  const send = client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "recover activity" }],
+  });
+  try {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (subscription.projector.state.activity?.text === "first second") break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    }
+    assert.equal(
+      subscription.projector.state.activity?.text,
+      "first second",
+      JSON.stringify({
+        observedActivity,
+        recoveries: recoveries.map((error) => error.message),
+        state: subscription.projector.state.activity,
+      }),
+    );
+    assert.match(recoveries[0]?.message ?? "", /sequence/);
+  } finally {
+    paused.finish();
+    await send;
+  }
+  await waitFor(
+    () => subscription.projector.state.activity === undefined,
+    "canonical activity completion",
+  );
+});
+
+test("SDK replaces an expired reconnect cursor with an authoritative snapshot", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context);
+  let expireNextResume = false;
+  let resumedRequests = 0;
+  let freshRequests = 0;
+  const client = await connectFaultClient(socketPath, {
+    outgoing(message) {
+      const parsed = JSON.parse(message) as {
+        method?: string;
+        params?: { sessionId?: string; after?: string };
+      };
+      if (parsed.method !== "session.subscribe") return message;
+      if (parsed.params?.after === undefined) {
+        freshRequests += 1;
+        return message;
+      }
+      resumedRequests += 1;
+      if (!expireNextResume) return message;
+      expireNextResume = false;
+      return `${JSON.stringify({
+        ...parsed,
+        params: { ...parsed.params, after: "expired-cursor" },
+      })}\n`;
+    },
+  });
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const subscription = await subscribeSession(client, created.sessionId);
+  context.after(() => subscription.close());
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "authoritative replacement" }],
+  });
+  await waitFor(() => subscription.projector.state.records.length === 3, "initial live delivery");
+  const expected = subscription.projector.state;
+
+  expireNextResume = true;
+  await client.reconnect();
+  await subscription.reconnect(client);
+
+  assert.equal(resumedRequests, 1);
+  assert.equal(freshRequests, 2);
+  assert.deepEqual(subscription.projector.state, expected);
+});
+
+test("SDK preserves the selected node while rebinding to another attachment", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context);
+  const creator = await connectUnixClient(socketPath);
+  const first = await connectUnixClient(socketPath);
+  const replacement = await connectUnixClient(socketPath);
+  context.after(() => {
+    creator.close();
+    first.close();
+    replacement.close();
+  });
+  const created = await creator.request("session.create", { cwd });
+  await creator.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "selected branch" }],
+  });
+  const authoritative = await subscribeAll(creator, created.sessionId);
+  const selectedNodeId = authoritative.events.at(-1)?.id;
+  assert.ok(selectedNodeId);
+
+  const subscription = await subscribeSession(first, created.sessionId, {
+    fromNodeId: selectedNodeId,
+  });
+  context.after(() => subscription.close());
+  const expected = subscription.projector.state;
+  await subscription.reconnect(replacement);
+
+  assert.equal(subscription.projector.state.selectedNodeId, selectedNodeId);
+  assert.deepEqual(subscription.projector.state, expected);
+});
+
+test("TUI-style and SDK attachments observe identical canonical state", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context);
+  const tui = await connectUnixClient(socketPath, {
+    identity: { kind: "tui", version: "0.0.0", instanceId: randomUUID() },
+  });
+  const sdk = await connectUnixClient(socketPath, {
+    identity: { kind: "headless", version: "0.0.0", instanceId: randomUUID() },
+  });
+  context.after(() => {
+    tui.close();
+    sdk.close();
+  });
+  const created = await tui.request("session.create", { cwd });
+  const tuiSubscription = await subscribeSession(tui, created.sessionId);
+  const sdkSubscription = await subscribeSession(sdk, created.sessionId);
+  context.after(() => Promise.all([tuiSubscription.close(), sdkSubscription.close()]));
+
+  await tui.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "same canonical view" }],
+  });
+  await waitFor(
+    () =>
+      tuiSubscription.projector.state.records.length === 3 &&
+      sdkSubscription.projector.state.records.length === 3,
+    "both attachment projections",
+  );
+
+  assert.deepEqual(tuiSubscription.projector.state, sdkSubscription.projector.state);
 });
 
 test("dispose removes the session and errors surface typed codes", async (context) => {

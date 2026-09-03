@@ -124,7 +124,9 @@ class ResumableSessionSubscription implements SessionSubscription {
         return;
       }
       if (loading) pendingEvents.push(delivery);
-      else if (delivery.subscriptionId === this.currentSubscriptionId) this.enqueueEvent(delivery);
+      else if (delivery.subscriptionId === this.currentSubscriptionId) {
+        this.enqueueEvent(delivery, generation);
+      }
     });
     this.removeActivity = client.onActivity((delivery) => {
       if (delivery.sessionId !== this.sessionId || this.closed || generation !== this.generation) {
@@ -226,7 +228,12 @@ class ResumableSessionSubscription implements SessionSubscription {
             }
             page = result.page;
           }
-          await this.persist(descriptor.boundaryCursor);
+          await this.persist(
+            descriptor.boundaryCursor,
+            generation,
+            client,
+            subscription.subscriptionId,
+          );
         } else if (subscription.resumedFrom !== cursor || cursor === undefined) {
           throw new ProjectionError(
             "invalid_subscription",
@@ -238,7 +245,7 @@ class ResumableSessionSubscription implements SessionSubscription {
       loading = false;
       for (const delivery of pendingEvents) {
         if (delivery.subscriptionId === this.currentSubscriptionId) {
-          await this.applyEvent(delivery);
+          await this.applyEvent(delivery, generation);
         }
       }
       for (const delivery of pendingActivity) {
@@ -282,20 +289,28 @@ class ResumableSessionSubscription implements SessionSubscription {
     }
   }
 
-  private enqueueEvent(delivery: WireEvent): void {
+  private enqueueEvent(delivery: WireEvent, generation: number): void {
     this.delivery = this.delivery
-      .then(() => this.applyEvent(delivery))
-      .catch((error: unknown) => this.handleDeliveryFailure(error));
+      .then(() => this.applyEvent(delivery, generation))
+      .catch((error: unknown) => {
+        if (generation === this.generation) this.handleDeliveryFailure(error);
+      });
   }
 
-  private async applyEvent(delivery: WireEvent): Promise<void> {
-    if (this.closed || delivery.subscriptionId !== this.currentSubscriptionId) return;
+  private async applyEvent(delivery: WireEvent, generation: number): Promise<void> {
+    if (
+      this.closed ||
+      generation !== this.generation ||
+      delivery.subscriptionId !== this.currentSubscriptionId
+    ) {
+      return;
+    }
     if (delivery.sequence !== this.sequence + 1) {
       throw new ProjectionError("event_sequence_gap", "Canonical event delivery is out of order");
     }
     await this.reduceEvent(delivery.event);
     this.sequence = delivery.sequence;
-    await this.persist(delivery.cursor);
+    await this.persist(delivery.cursor, generation, this.client, delivery.subscriptionId);
   }
 
   private async reduceEvent(event: CanonicalEvent): Promise<void> {
@@ -314,11 +329,15 @@ class ResumableSessionSubscription implements SessionSubscription {
     }
   }
 
-  private async persist(cursor: string): Promise<void> {
-    await this.client.request("session.ack", {
-      subscriptionId: this.currentSubscriptionId,
-      cursor,
-    });
+  private async persist(
+    cursor: string,
+    generation: number,
+    client: AxlClient,
+    subscriptionId: string,
+  ): Promise<void> {
+    if (this.closed || generation !== this.generation) return;
+    await client.request("session.ack", { subscriptionId, cursor });
+    if (this.closed || generation !== this.generation) return;
     this.acknowledgedCursor = cursor;
     if (this.options.cursorStore !== undefined && this.resumableState && this.currentStoreKey) {
       try {
@@ -354,6 +373,7 @@ class ResumableSessionSubscription implements SessionSubscription {
     if (this.closed || this.recovery !== undefined) return;
     const client = this.client;
     const oldSubscriptionId = this.currentSubscriptionId;
+    this.generation += 1;
     this.unbind();
     this.recovery = (async () => {
       if (oldSubscriptionId !== "") {

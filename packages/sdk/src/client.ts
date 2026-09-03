@@ -150,11 +150,26 @@ export class AxlClient {
     }
     if (this.reconnectPromise !== undefined) return this.reconnectPromise;
     const reconnect = (async () => {
+      const previousCapabilities = this.initialized?.grantedCapabilities ?? [];
       this.detachTransport();
       this.initialized = undefined;
       this.helloReceived = false;
       this.latestPresence = undefined;
       await this.open("reconnecting");
+      const removedCapabilities = previousCapabilities.filter(
+        (capability) => !this.connection.grantedCapabilities.includes(capability),
+      );
+      if (removedCapabilities.length > 0) {
+        const error = new AxlClientError(
+          "capability_mismatch",
+          `Daemon removed required capabilities during reconnect: ${removedCapabilities.join(", ")}`,
+          { details: { removedCapabilities } },
+        );
+        this.initialized = undefined;
+        this.setState("incompatible");
+        this.fail(error, false);
+        throw error;
+      }
     })();
     this.reconnectPromise = reconnect;
     try {

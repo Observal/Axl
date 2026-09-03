@@ -11,6 +11,7 @@ import {
   type AxlTransportFactory,
 } from "../src/index.ts";
 import {
+  type CapabilityId,
   EVENT_FORMAT_VERSION,
   parseEvent,
   parseOperationId,
@@ -23,6 +24,11 @@ class FakeTransport implements AxlTransport {
   messages: unknown[] = [];
   messageListener: ((message: unknown) => void) | undefined;
   closeListener: ((cause?: Error) => void) | undefined;
+  private readonly capabilities: readonly CapabilityId[];
+
+  constructor(capabilities: readonly CapabilityId[] = WIRE_CAPABILITIES) {
+    this.capabilities = capabilities;
+  }
 
   send(message: string): void {
     const request = JSON.parse(message) as {
@@ -42,7 +48,9 @@ class FakeTransport implements AxlTransport {
             attachmentId: "attachment-1",
             daemonInstanceId: "daemon-1",
             wireVersion: WIRE_PROTOCOL_VERSION,
-            grantedCapabilities: request.params.requestedCapabilities,
+            grantedCapabilities: (
+              request.params.requestedCapabilities as readonly CapabilityId[]
+            ).filter((capability) => this.capabilities.includes(capability)),
             scope: "local_control",
             heartbeatIntervalMs: 60_000,
             presenceTimeoutMs: 120_000,
@@ -59,7 +67,7 @@ class FakeTransport implements AxlTransport {
         kind: "hello",
         wireVersion: WIRE_PROTOCOL_VERSION,
         daemonInstanceId: "daemon-1",
-        capabilities: WIRE_CAPABILITIES,
+        capabilities: this.capabilities,
         limits: { maxMessageBytes: 1_048_576, maxPendingRequests: 64 },
       }),
     );
@@ -84,8 +92,16 @@ class FakeTransport implements AxlTransport {
 
 class Factory implements AxlTransportFactory {
   readonly transports: FakeTransport[] = [];
+  private readonly capabilities: readonly (readonly CapabilityId[])[];
+
+  constructor(capabilities: readonly (readonly CapabilityId[])[] = [WIRE_CAPABILITIES]) {
+    this.capabilities = capabilities;
+  }
+
   async connect(): Promise<AxlTransport> {
-    const transport = new FakeTransport();
+    const transport = new FakeTransport(
+      this.capabilities[this.transports.length] ?? this.capabilities.at(-1),
+    );
     this.transports.push(transport);
     return transport;
   }
@@ -179,6 +195,33 @@ test("coalesces concurrent reconnect attempts onto one new transport", async () 
   const { client } = await connect(factory);
   await Promise.all([client.reconnect(), client.reconnect()]);
   assert.equal(factory.transports.length, 2);
+  client.close();
+});
+
+test("fails reconnect explicitly when a previously granted capability disappears", async () => {
+  const reducedCapabilities = WIRE_CAPABILITIES.filter(
+    (capability) => capability !== "session.subscribe",
+  );
+  const factory = new Factory([WIRE_CAPABILITIES, reducedCapabilities]);
+  const { client } = await connect(factory);
+
+  await assert.rejects(
+    client.reconnect(),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "capability_mismatch" &&
+      Array.isArray(error.details?.removedCapabilities) &&
+      error.details.removedCapabilities.includes("session.subscribe"),
+  );
+  assert.equal(client.state, "incompatible");
+  await assert.rejects(
+    client.request("session.list", {
+      scope: "all_local",
+      order: "recent",
+      pageSize: 10,
+    }),
+    (error) => error instanceof AxlClientError && error.code === "connection_not_initialized",
+  );
   client.close();
 });
 
