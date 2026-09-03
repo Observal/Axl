@@ -17,7 +17,10 @@ import {
   type EventId,
   encodeWireMessage,
   hashCanonicalRequest,
+  isKnownRpcErrorCode,
   isRetryableMutationMethod,
+  isRpcErrorAllowed,
+  isRpcErrorRetryable,
   MAX_CANONICAL_EVENT_BYTES,
   MAX_WIRE_MESSAGE_BYTES,
   ProtocolValidationError,
@@ -64,6 +67,10 @@ const MAX_SNAPSHOT_TAIL_EVENTS = 1_024;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PRESENCE_TIMEOUT_MS = 60_000;
 const SOCKET_PROBE_TIMEOUT_MS = 500;
+
+export function normalizeDaemonRpcErrorCode(method: WireRequest["method"], code: string): string {
+  return isKnownRpcErrorCode(code) && isRpcErrorAllowed(method, code) ? code : "internal_error";
+}
 
 interface CursorRecord {
   readonly subscriptionId: string;
@@ -469,7 +476,7 @@ export class AxlDaemon {
         request.method !== "connection.ping"
       ) {
         throw new DaemonError(
-          "connection_not_initialized",
+          "not_initialized",
           "Initialize the connection before accessing sessions",
         );
       }
@@ -540,19 +547,21 @@ export class AxlDaemon {
         this.publishPresence();
       }
     } catch (error) {
+      const reportedCode =
+        error instanceof DaemonError || error instanceof CommandJournalError
+          ? error.code
+          : error instanceof CanonicalEventSizeError
+            ? "content_too_large"
+            : "internal_error";
+      const code = normalizeDaemonRpcErrorCode(request.method, reportedCode);
       send({
         kind: "error",
         id: request.id,
         method: request.method,
         error: {
-          code:
-            error instanceof DaemonError || error instanceof CommandJournalError
-              ? error.code
-              : error instanceof CanonicalEventSizeError
-                ? "content_too_large"
-                : "internal_error",
+          code,
           message: error instanceof Error ? error.message : "Request failed",
-          retryable: error instanceof CommandJournalError ? error.retryable : false,
+          retryable: isRpcErrorRetryable(code),
           ...((error instanceof DaemonError || error instanceof CommandJournalError) &&
           error.details !== undefined
             ? { details: error.details }

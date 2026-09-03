@@ -9,10 +9,15 @@ import {
   encodeWireMessage,
   EVENT_TYPES,
   parseEvent,
+  isRpcErrorAllowed,
+  isRpcErrorRetryable,
   parseServerMessage,
   parseWireRequest,
+  PRE_RPC_ERROR_CODES,
   RPC_ERROR_CODES,
+  RPC_METHOD_ERROR_CODES,
   RPC_METHODS,
+  UNIVERSAL_RPC_ERROR_CODES,
   WIRE_PROTOCOL_VERSION,
 } from "../src/index.ts";
 
@@ -21,6 +26,7 @@ type ConformanceDocument = {
   readonly requests: readonly unknown[];
   readonly successes: readonly unknown[];
   readonly errors: readonly unknown[];
+  readonly allowedErrors: readonly unknown[];
   readonly serverMessages: readonly unknown[];
   readonly events: readonly unknown[];
 };
@@ -67,6 +73,39 @@ test("language-neutral fixtures cover every named structured error", () => {
     errors.map((message) => (message.kind === "error" ? message.error.code : "not-an-error")),
     RPC_ERROR_CODES,
   );
+  for (const message of errors) {
+    assert.equal(message.kind, "error");
+    assert.equal(message.error.retryable, isRpcErrorRetryable(message.error.code));
+  }
+});
+
+test("every named error is classified as pre-RPC, universal, or method-specific", () => {
+  const classified = new Set([
+    ...PRE_RPC_ERROR_CODES,
+    ...UNIVERSAL_RPC_ERROR_CODES,
+    ...Object.values(RPC_METHOD_ERROR_CODES).flat(),
+  ]);
+  assert.deepEqual([...classified].sort(), [...RPC_ERROR_CODES].sort());
+});
+
+test("language-neutral fixtures cover the complete allowed-error matrix", () => {
+  const errors = document.allowedErrors.map((value) => parseServerMessage(value));
+  const expected = RPC_METHODS.flatMap((method) =>
+    [...new Set([...UNIVERSAL_RPC_ERROR_CODES, ...RPC_METHOD_ERROR_CODES[method]])].map(
+      (code) => `${method}:${code}`,
+    ),
+  ).sort();
+  const actual = errors
+    .map((message) => {
+      if (message.kind !== "error" || message.method === undefined) {
+        assert.fail("Allowed-error fixture must identify its RPC method");
+      }
+      assert.equal(isRpcErrorAllowed(message.method, message.error.code), true);
+      assert.equal(message.error.retryable, isRpcErrorRetryable(message.error.code));
+      return `${message.method}:${message.error.code}`;
+    })
+    .sort();
+  assert.deepEqual(actual, expected);
 });
 
 test("language-neutral fixtures validate every non-success server message shape", () => {

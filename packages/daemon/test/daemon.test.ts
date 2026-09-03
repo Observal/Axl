@@ -37,16 +37,19 @@ import type {
 } from "@axl/protocol";
 import {
   encodeWireMessage,
+  isRpcErrorAllowed,
   MAX_CANONICAL_EVENT_BYTES,
   parseOperationId,
   parseServerMessage,
   parseSessionId,
+  RPC_ERROR_CODES,
+  RPC_METHODS,
   type ServerMessage,
   WIRE_PROTOCOL_VERSION,
   type WireRequest,
 } from "@axl/protocol";
 
-import { AxlDaemon, DaemonError } from "../src/index.ts";
+import { AxlDaemon, DaemonError, normalizeDaemonRpcErrorCode } from "../src/index.ts";
 import {
   AxlClient,
   AxlClientError,
@@ -279,6 +282,17 @@ function rawConnection(socketPath: string): {
   };
 }
 
+test("the daemon response boundary enforces every method's allowed-error matrix", () => {
+  for (const method of RPC_METHODS) {
+    for (const code of RPC_ERROR_CODES) {
+      const normalized = normalizeDaemonRpcErrorCode(method, code);
+      assert.equal(isRpcErrorAllowed(method, normalized), true, `${method}:${code}`);
+      assert.equal(normalized, isRpcErrorAllowed(method, code) ? code : "internal_error");
+    }
+    assert.equal(normalizeDaemonRpcErrorCode(method, "future_daemon_typo"), "internal_error");
+  }
+});
+
 test("requires version-4 initialization before session access", async (context) => {
   const fixture = await startDaemon(context);
   const raw = rawConnection(fixture.socketPath);
@@ -309,7 +323,7 @@ test("requires version-4 initialization before session access", async (context) 
   if (beforeInitialization.kind === "error") {
     assert.equal(beforeInitialization.method, "session.list");
     assert.deepEqual(beforeInitialization.error, {
-      code: "connection_not_initialized",
+      code: "not_initialized",
       message: "Initialize the connection before accessing sessions",
       retryable: false,
     });

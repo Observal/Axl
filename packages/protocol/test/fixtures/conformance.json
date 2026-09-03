@@ -781,8 +781,8 @@
       "kind": "error",
       "id": -1,
       "error": {
-        "code": "connection_not_initialized",
-        "message": "Fixture error: connection_not_initialized",
+        "code": "not_initialized",
+        "message": "Fixture error: not_initialized",
         "retryable": false
       }
     },
@@ -819,7 +819,7 @@
       "error": {
         "code": "rate_limited",
         "message": "Fixture error: rate_limited",
-        "retryable": false
+        "retryable": true
       }
     },
     {
@@ -828,15 +828,6 @@
       "error": {
         "code": "frame_too_large",
         "message": "Fixture error: frame_too_large",
-        "retryable": false
-      }
-    },
-    {
-      "kind": "error",
-      "id": -1,
-      "error": {
-        "code": "request_timeout",
-        "message": "Fixture error: request_timeout",
         "retryable": false
       }
     },
@@ -855,6 +846,15 @@
       "error": {
         "code": "internal_error",
         "message": "Fixture error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "invalid_cwd",
+        "message": "Fixture error: invalid_cwd",
         "retryable": false
       }
     },
@@ -943,6 +943,15 @@
       "kind": "error",
       "id": -1,
       "error": {
+        "code": "empty_session",
+        "message": "Fixture error: empty_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
         "code": "unknown_interaction",
         "message": "Fixture error: unknown_interaction",
         "retryable": false
@@ -972,15 +981,6 @@
       "error": {
         "code": "unknown_cursor",
         "message": "Fixture error: unknown_cursor",
-        "retryable": false
-      }
-    },
-    {
-      "kind": "error",
-      "id": -1,
-      "error": {
-        "code": "cursor_expired",
-        "message": "Fixture error: cursor_expired",
         "retryable": false
       }
     },
@@ -1125,7 +1125,7 @@
       "error": {
         "code": "git_timeout",
         "message": "Fixture error: git_timeout",
-        "retryable": false
+        "retryable": true
       }
     },
     {
@@ -1161,7 +1161,7 @@
       "error": {
         "code": "checkpoint_unavailable",
         "message": "Fixture error: checkpoint_unavailable",
-        "retryable": false
+        "retryable": true
       }
     },
     {
@@ -1179,6 +1179,3953 @@
       "error": {
         "code": "checkpoint_corrupt",
         "message": "Fixture error: checkpoint_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "invalid_media_type",
+        "message": "Fixture error: invalid_media_type",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "invalid_blob_name",
+        "message": "Fixture error: invalid_blob_name",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "invalid_blob_chunk",
+        "message": "Fixture error: invalid_blob_chunk",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_too_large",
+        "message": "Fixture error: blob_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "too_many_uploads",
+        "message": "Fixture error: too_many_uploads",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "unknown_blob_upload",
+        "message": "Fixture error: unknown_blob_upload",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_offset_mismatch",
+        "message": "Fixture error: blob_offset_mismatch",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_size_mismatch",
+        "message": "Fixture error: blob_size_mismatch",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_write_failed",
+        "message": "Fixture error: blob_write_failed",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "invalid_image",
+        "message": "Fixture error: invalid_image",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_not_owned",
+        "message": "Fixture error: blob_not_owned",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_missing",
+        "message": "Fixture error: blob_missing",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_corrupt",
+        "message": "Fixture error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "invalid_blob_range",
+        "message": "Fixture error: invalid_blob_range",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "blob_read_failed",
+        "message": "Fixture error: blob_read_failed",
+        "retryable": true
+      }
+    }
+  ],
+  "allowedErrors": [
+    {
+      "kind": "error",
+      "id": 1,
+      "method": "daemon.info",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture daemon.info error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2,
+      "method": "daemon.info",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture daemon.info error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3,
+      "method": "daemon.info",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture daemon.info error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 4,
+      "method": "daemon.info",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture daemon.info error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 5,
+      "method": "daemon.info",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture daemon.info error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 6,
+      "method": "daemon.info",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture daemon.info error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 101,
+      "method": "connection.initialize",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture connection.initialize error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 102,
+      "method": "connection.initialize",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture connection.initialize error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 103,
+      "method": "connection.initialize",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture connection.initialize error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 104,
+      "method": "connection.initialize",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture connection.initialize error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 105,
+      "method": "connection.initialize",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture connection.initialize error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 106,
+      "method": "connection.initialize",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture connection.initialize error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 107,
+      "method": "connection.initialize",
+      "error": {
+        "code": "unsupported_version",
+        "message": "Fixture connection.initialize error: unsupported_version",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 108,
+      "method": "connection.initialize",
+      "error": {
+        "code": "connection_already_initialized",
+        "message": "Fixture connection.initialize error: connection_already_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 109,
+      "method": "connection.initialize",
+      "error": {
+        "code": "unauthorized",
+        "message": "Fixture connection.initialize error: unauthorized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 110,
+      "method": "connection.initialize",
+      "error": {
+        "code": "forbidden",
+        "message": "Fixture connection.initialize error: forbidden",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 201,
+      "method": "connection.ping",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture connection.ping error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 202,
+      "method": "connection.ping",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture connection.ping error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 203,
+      "method": "connection.ping",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture connection.ping error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 204,
+      "method": "connection.ping",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture connection.ping error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 205,
+      "method": "connection.ping",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture connection.ping error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 206,
+      "method": "connection.ping",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture connection.ping error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 301,
+      "method": "request.cancel",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture request.cancel error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 302,
+      "method": "request.cancel",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture request.cancel error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 303,
+      "method": "request.cancel",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture request.cancel error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 304,
+      "method": "request.cancel",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture request.cancel error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 305,
+      "method": "request.cancel",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture request.cancel error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 306,
+      "method": "request.cancel",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture request.cancel error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 401,
+      "method": "session.create",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.create error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 402,
+      "method": "session.create",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.create error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 403,
+      "method": "session.create",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.create error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 404,
+      "method": "session.create",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.create error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 405,
+      "method": "session.create",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.create error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 406,
+      "method": "session.create",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.create error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 407,
+      "method": "session.create",
+      "error": {
+        "code": "invalid_cwd",
+        "message": "Fixture session.create error: invalid_cwd",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 408,
+      "method": "session.create",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.create error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 409,
+      "method": "session.create",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.create error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 410,
+      "method": "session.create",
+      "error": {
+        "code": "corrupt_session",
+        "message": "Fixture session.create error: corrupt_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 411,
+      "method": "session.create",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.create error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 501,
+      "method": "session.resume",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.resume error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 502,
+      "method": "session.resume",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.resume error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 503,
+      "method": "session.resume",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.resume error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 504,
+      "method": "session.resume",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.resume error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 505,
+      "method": "session.resume",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.resume error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 506,
+      "method": "session.resume",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.resume error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 507,
+      "method": "session.resume",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.resume error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 508,
+      "method": "session.resume",
+      "error": {
+        "code": "corrupt_session",
+        "message": "Fixture session.resume error: corrupt_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 509,
+      "method": "session.resume",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.resume error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 601,
+      "method": "session.list",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.list error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 602,
+      "method": "session.list",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.list error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 603,
+      "method": "session.list",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.list error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 604,
+      "method": "session.list",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.list error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 605,
+      "method": "session.list",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.list error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 606,
+      "method": "session.list",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.list error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 607,
+      "method": "session.list",
+      "error": {
+        "code": "invalid_cwd",
+        "message": "Fixture session.list error: invalid_cwd",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 608,
+      "method": "session.list",
+      "error": {
+        "code": "unknown_cursor",
+        "message": "Fixture session.list error: unknown_cursor",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 701,
+      "method": "session.history",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.history error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 702,
+      "method": "session.history",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.history error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 703,
+      "method": "session.history",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.history error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 704,
+      "method": "session.history",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.history error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 705,
+      "method": "session.history",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.history error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 706,
+      "method": "session.history",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.history error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 707,
+      "method": "session.history",
+      "error": {
+        "code": "unknown_cursor",
+        "message": "Fixture session.history error: unknown_cursor",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 708,
+      "method": "session.history",
+      "error": {
+        "code": "snapshot_required",
+        "message": "Fixture session.history error: snapshot_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 709,
+      "method": "session.history",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.history error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 801,
+      "method": "session.ack",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.ack error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 802,
+      "method": "session.ack",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.ack error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 803,
+      "method": "session.ack",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.ack error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 804,
+      "method": "session.ack",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.ack error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 805,
+      "method": "session.ack",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.ack error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 806,
+      "method": "session.ack",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.ack error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 807,
+      "method": "session.ack",
+      "error": {
+        "code": "unknown_subscription",
+        "message": "Fixture session.ack error: unknown_subscription",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 808,
+      "method": "session.ack",
+      "error": {
+        "code": "unknown_cursor",
+        "message": "Fixture session.ack error: unknown_cursor",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 809,
+      "method": "session.ack",
+      "error": {
+        "code": "snapshot_required",
+        "message": "Fixture session.ack error: snapshot_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 901,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.unsubscribe error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 902,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.unsubscribe error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 903,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.unsubscribe error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 904,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.unsubscribe error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 905,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.unsubscribe error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 906,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.unsubscribe error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 907,
+      "method": "session.unsubscribe",
+      "error": {
+        "code": "unknown_subscription",
+        "message": "Fixture session.unsubscribe error: unknown_subscription",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1001,
+      "method": "session.fork",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.fork error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1002,
+      "method": "session.fork",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.fork error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1003,
+      "method": "session.fork",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.fork error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1004,
+      "method": "session.fork",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.fork error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1005,
+      "method": "session.fork",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.fork error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1006,
+      "method": "session.fork",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.fork error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1007,
+      "method": "session.fork",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.fork error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1008,
+      "method": "session.fork",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.fork error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1009,
+      "method": "session.fork",
+      "error": {
+        "code": "corrupt_session",
+        "message": "Fixture session.fork error: corrupt_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1010,
+      "method": "session.fork",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.fork error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1011,
+      "method": "session.fork",
+      "error": {
+        "code": "invalid_fork_point",
+        "message": "Fixture session.fork error: invalid_fork_point",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1012,
+      "method": "session.fork",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.fork error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1013,
+      "method": "session.fork",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.fork error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1014,
+      "method": "session.fork",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.fork error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1101,
+      "method": "session.clone",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.clone error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1102,
+      "method": "session.clone",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.clone error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1103,
+      "method": "session.clone",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.clone error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1104,
+      "method": "session.clone",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.clone error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1105,
+      "method": "session.clone",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.clone error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1106,
+      "method": "session.clone",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.clone error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1107,
+      "method": "session.clone",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.clone error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1108,
+      "method": "session.clone",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.clone error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1109,
+      "method": "session.clone",
+      "error": {
+        "code": "corrupt_session",
+        "message": "Fixture session.clone error: corrupt_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1110,
+      "method": "session.clone",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.clone error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1111,
+      "method": "session.clone",
+      "error": {
+        "code": "empty_session",
+        "message": "Fixture session.clone error: empty_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1112,
+      "method": "session.clone",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.clone error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1113,
+      "method": "session.clone",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.clone error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1114,
+      "method": "session.clone",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.clone error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1201,
+      "method": "session.send",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.send error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1202,
+      "method": "session.send",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.send error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1203,
+      "method": "session.send",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.send error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1204,
+      "method": "session.send",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.send error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1205,
+      "method": "session.send",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.send error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1206,
+      "method": "session.send",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.send error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1207,
+      "method": "session.send",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.send error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1208,
+      "method": "session.send",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.send error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1209,
+      "method": "session.send",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.send error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1210,
+      "method": "session.send",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.send error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1211,
+      "method": "session.send",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.send error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1212,
+      "method": "session.send",
+      "error": {
+        "code": "blob_not_owned",
+        "message": "Fixture session.send error: blob_not_owned",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1213,
+      "method": "session.send",
+      "error": {
+        "code": "blob_missing",
+        "message": "Fixture session.send error: blob_missing",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1214,
+      "method": "session.send",
+      "error": {
+        "code": "blob_corrupt",
+        "message": "Fixture session.send error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1215,
+      "method": "session.send",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.send error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1301,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.queue.enqueue error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1302,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.queue.enqueue error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1303,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.queue.enqueue error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1304,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.queue.enqueue error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1305,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.queue.enqueue error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1306,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.queue.enqueue error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1307,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.queue.enqueue error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1308,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.queue.enqueue error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1309,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.queue.enqueue error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1310,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.queue.enqueue error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1311,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "blob_not_owned",
+        "message": "Fixture session.queue.enqueue error: blob_not_owned",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1312,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "blob_missing",
+        "message": "Fixture session.queue.enqueue error: blob_missing",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1313,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "blob_corrupt",
+        "message": "Fixture session.queue.enqueue error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1314,
+      "method": "session.queue.enqueue",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.queue.enqueue error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1401,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.queue.requeue error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1402,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.queue.requeue error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1403,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.queue.requeue error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1404,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.queue.requeue error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1405,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.queue.requeue error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1406,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.queue.requeue error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1407,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.queue.requeue error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1408,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.queue.requeue error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1409,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "unknown_queue_item",
+        "message": "Fixture session.queue.requeue error: unknown_queue_item",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1410,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "queue_not_paused",
+        "message": "Fixture session.queue.requeue error: queue_not_paused",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1411,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.queue.requeue error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1412,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.queue.requeue error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1413,
+      "method": "session.queue.requeue",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.queue.requeue error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1501,
+      "method": "session.shell",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.shell error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1502,
+      "method": "session.shell",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.shell error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1503,
+      "method": "session.shell",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.shell error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1504,
+      "method": "session.shell",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.shell error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1505,
+      "method": "session.shell",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.shell error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1506,
+      "method": "session.shell",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.shell error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1507,
+      "method": "session.shell",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.shell error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1508,
+      "method": "session.shell",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.shell error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1509,
+      "method": "session.shell",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.shell error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1510,
+      "method": "session.shell",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.shell error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1511,
+      "method": "session.shell",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.shell error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1601,
+      "method": "session.interrupt",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.interrupt error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1602,
+      "method": "session.interrupt",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.interrupt error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1603,
+      "method": "session.interrupt",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.interrupt error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1604,
+      "method": "session.interrupt",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.interrupt error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1605,
+      "method": "session.interrupt",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.interrupt error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1606,
+      "method": "session.interrupt",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.interrupt error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1607,
+      "method": "session.interrupt",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.interrupt error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1608,
+      "method": "session.interrupt",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.interrupt error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1609,
+      "method": "session.interrupt",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.interrupt error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1610,
+      "method": "session.interrupt",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.interrupt error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1701,
+      "method": "session.reload",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.reload error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1702,
+      "method": "session.reload",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.reload error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1703,
+      "method": "session.reload",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.reload error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1704,
+      "method": "session.reload",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.reload error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1705,
+      "method": "session.reload",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.reload error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1706,
+      "method": "session.reload",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.reload error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1707,
+      "method": "session.reload",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.reload error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1708,
+      "method": "session.reload",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.reload error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1709,
+      "method": "session.reload",
+      "error": {
+        "code": "corrupt_session",
+        "message": "Fixture session.reload error: corrupt_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1710,
+      "method": "session.reload",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.reload error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1711,
+      "method": "session.reload",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.reload error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1712,
+      "method": "session.reload",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.reload error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1713,
+      "method": "session.reload",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.reload error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1801,
+      "method": "session.configure",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.configure error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1802,
+      "method": "session.configure",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.configure error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1803,
+      "method": "session.configure",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.configure error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1804,
+      "method": "session.configure",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.configure error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1805,
+      "method": "session.configure",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.configure error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1806,
+      "method": "session.configure",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.configure error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1807,
+      "method": "session.configure",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.configure error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1808,
+      "method": "session.configure",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.configure error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1809,
+      "method": "session.configure",
+      "error": {
+        "code": "corrupt_session",
+        "message": "Fixture session.configure error: corrupt_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1810,
+      "method": "session.configure",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.configure error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1811,
+      "method": "session.configure",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.configure error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1812,
+      "method": "session.configure",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.configure error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1813,
+      "method": "session.configure",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.configure error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1901,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.interaction.respond error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1902,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.interaction.respond error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1903,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.interaction.respond error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1904,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.interaction.respond error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1905,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.interaction.respond error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1906,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.interaction.respond error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1907,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.interaction.respond error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1908,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.interaction.respond error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1909,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "unknown_interaction",
+        "message": "Fixture session.interaction.respond error: unknown_interaction",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1910,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "interaction_already_resolved",
+        "message": "Fixture session.interaction.respond error: interaction_already_resolved",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1911,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.interaction.respond error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1912,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.interaction.respond error: idempotency_conflict",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1913,
+      "method": "session.interaction.respond",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.interaction.respond error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2001,
+      "method": "session.subscribe",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.subscribe error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2002,
+      "method": "session.subscribe",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.subscribe error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2003,
+      "method": "session.subscribe",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.subscribe error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2004,
+      "method": "session.subscribe",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.subscribe error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2005,
+      "method": "session.subscribe",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.subscribe error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2006,
+      "method": "session.subscribe",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.subscribe error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2007,
+      "method": "session.subscribe",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.subscribe error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2008,
+      "method": "session.subscribe",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.subscribe error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2009,
+      "method": "session.subscribe",
+      "error": {
+        "code": "snapshot_required",
+        "message": "Fixture session.subscribe error: snapshot_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2101,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.workspace.list error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2102,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.workspace.list error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2103,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.workspace.list error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2104,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.workspace.list error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2105,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.workspace.list error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2106,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.workspace.list error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2107,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.workspace.list error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2108,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.workspace.list error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2109,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "workspace_unavailable",
+        "message": "Fixture session.workspace.list error: workspace_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2110,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "workspace_changed",
+        "message": "Fixture session.workspace.list error: workspace_changed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2111,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "invalid_path",
+        "message": "Fixture session.workspace.list error: invalid_path",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2112,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "path_denied",
+        "message": "Fixture session.workspace.list error: path_denied",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2113,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "symlink_escape",
+        "message": "Fixture session.workspace.list error: symlink_escape",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2114,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "not_found",
+        "message": "Fixture session.workspace.list error: not_found",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2115,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "unsupported_file_type",
+        "message": "Fixture session.workspace.list error: unsupported_file_type",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2116,
+      "method": "session.workspace.list",
+      "error": {
+        "code": "unsupported_filename_encoding",
+        "message": "Fixture session.workspace.list error: unsupported_filename_encoding",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2201,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.workspace.read error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2202,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.workspace.read error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2203,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.workspace.read error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2204,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.workspace.read error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2205,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.workspace.read error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2206,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.workspace.read error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2207,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.workspace.read error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2208,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.workspace.read error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2209,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "workspace_unavailable",
+        "message": "Fixture session.workspace.read error: workspace_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2210,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "workspace_changed",
+        "message": "Fixture session.workspace.read error: workspace_changed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2211,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "invalid_path",
+        "message": "Fixture session.workspace.read error: invalid_path",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2212,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "path_denied",
+        "message": "Fixture session.workspace.read error: path_denied",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2213,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "symlink_escape",
+        "message": "Fixture session.workspace.read error: symlink_escape",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2214,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "not_found",
+        "message": "Fixture session.workspace.read error: not_found",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2215,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "not_a_file",
+        "message": "Fixture session.workspace.read error: not_a_file",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2216,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "unsupported_file_type",
+        "message": "Fixture session.workspace.read error: unsupported_file_type",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2217,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "binary_file",
+        "message": "Fixture session.workspace.read error: binary_file",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2218,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "invalid_encoding",
+        "message": "Fixture session.workspace.read error: invalid_encoding",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2219,
+      "method": "session.workspace.read",
+      "error": {
+        "code": "content_too_large",
+        "message": "Fixture session.workspace.read error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2301,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.workspace.status error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2302,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.workspace.status error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2303,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.workspace.status error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2304,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.workspace.status error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2305,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.workspace.status error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2306,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.workspace.status error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2307,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.workspace.status error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2308,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.workspace.status error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2309,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "workspace_unavailable",
+        "message": "Fixture session.workspace.status error: workspace_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2310,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "workspace_changed",
+        "message": "Fixture session.workspace.status error: workspace_changed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2311,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "not_git_repository",
+        "message": "Fixture session.workspace.status error: not_git_repository",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2312,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "git_unavailable",
+        "message": "Fixture session.workspace.status error: git_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2313,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "git_timeout",
+        "message": "Fixture session.workspace.status error: git_timeout",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2314,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "git_output_too_large",
+        "message": "Fixture session.workspace.status error: git_output_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2315,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "unsupported_git_state",
+        "message": "Fixture session.workspace.status error: unsupported_git_state",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2316,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "unsupported_filename_encoding",
+        "message": "Fixture session.workspace.status error: unsupported_filename_encoding",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2317,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "checkpoint_unavailable",
+        "message": "Fixture session.workspace.status error: checkpoint_unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2318,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "checkpoint_too_large",
+        "message": "Fixture session.workspace.status error: checkpoint_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2319,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "checkpoint_corrupt",
+        "message": "Fixture session.workspace.status error: checkpoint_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2401,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.workspace.diff error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2402,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.workspace.diff error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2403,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.workspace.diff error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2404,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.workspace.diff error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2405,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.workspace.diff error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2406,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.workspace.diff error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2407,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.workspace.diff error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2408,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.workspace.diff error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2409,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "workspace_unavailable",
+        "message": "Fixture session.workspace.diff error: workspace_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2410,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "workspace_changed",
+        "message": "Fixture session.workspace.diff error: workspace_changed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2411,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "not_git_repository",
+        "message": "Fixture session.workspace.diff error: not_git_repository",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2412,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "git_unavailable",
+        "message": "Fixture session.workspace.diff error: git_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2413,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "git_timeout",
+        "message": "Fixture session.workspace.diff error: git_timeout",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2414,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "git_output_too_large",
+        "message": "Fixture session.workspace.diff error: git_output_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2415,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "unsupported_git_state",
+        "message": "Fixture session.workspace.diff error: unsupported_git_state",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2416,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "unsupported_filename_encoding",
+        "message": "Fixture session.workspace.diff error: unsupported_filename_encoding",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2417,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "checkpoint_unavailable",
+        "message": "Fixture session.workspace.diff error: checkpoint_unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2418,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "checkpoint_too_large",
+        "message": "Fixture session.workspace.diff error: checkpoint_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2419,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "checkpoint_corrupt",
+        "message": "Fixture session.workspace.diff error: checkpoint_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2420,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "repository_changed",
+        "message": "Fixture session.workspace.diff error: repository_changed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2501,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.workspace.checkpoint error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2502,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.workspace.checkpoint error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2503,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.workspace.checkpoint error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2504,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.workspace.checkpoint error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2505,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.workspace.checkpoint error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2506,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.workspace.checkpoint error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2507,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.workspace.checkpoint error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2508,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.workspace.checkpoint error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2509,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.workspace.checkpoint error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2510,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "not_git_repository",
+        "message": "Fixture session.workspace.checkpoint error: not_git_repository",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2511,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "git_unavailable",
+        "message": "Fixture session.workspace.checkpoint error: git_unavailable",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2512,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "git_timeout",
+        "message": "Fixture session.workspace.checkpoint error: git_timeout",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2513,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "git_output_too_large",
+        "message": "Fixture session.workspace.checkpoint error: git_output_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2514,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "unsupported_git_state",
+        "message": "Fixture session.workspace.checkpoint error: unsupported_git_state",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2515,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "unsupported_filename_encoding",
+        "message": "Fixture session.workspace.checkpoint error: unsupported_filename_encoding",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2516,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "checkpoint_unavailable",
+        "message": "Fixture session.workspace.checkpoint error: checkpoint_unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2517,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "checkpoint_too_large",
+        "message": "Fixture session.workspace.checkpoint error: checkpoint_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2518,
+      "method": "session.workspace.checkpoint",
+      "error": {
+        "code": "checkpoint_corrupt",
+        "message": "Fixture session.workspace.checkpoint error: checkpoint_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2601,
+      "method": "session.blob.start",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.blob.start error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2602,
+      "method": "session.blob.start",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.blob.start error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2603,
+      "method": "session.blob.start",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.blob.start error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2604,
+      "method": "session.blob.start",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.blob.start error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2605,
+      "method": "session.blob.start",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.blob.start error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2606,
+      "method": "session.blob.start",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.blob.start error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2607,
+      "method": "session.blob.start",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.blob.start error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2608,
+      "method": "session.blob.start",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.blob.start error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2609,
+      "method": "session.blob.start",
+      "error": {
+        "code": "invalid_media_type",
+        "message": "Fixture session.blob.start error: invalid_media_type",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2610,
+      "method": "session.blob.start",
+      "error": {
+        "code": "invalid_blob_name",
+        "message": "Fixture session.blob.start error: invalid_blob_name",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2611,
+      "method": "session.blob.start",
+      "error": {
+        "code": "blob_too_large",
+        "message": "Fixture session.blob.start error: blob_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2612,
+      "method": "session.blob.start",
+      "error": {
+        "code": "too_many_uploads",
+        "message": "Fixture session.blob.start error: too_many_uploads",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2701,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.blob.chunk error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2702,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.blob.chunk error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2703,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.blob.chunk error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2704,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.blob.chunk error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2705,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.blob.chunk error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2706,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.blob.chunk error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2707,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.blob.chunk error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2708,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.blob.chunk error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2709,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "unknown_blob_upload",
+        "message": "Fixture session.blob.chunk error: unknown_blob_upload",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2710,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "invalid_blob_chunk",
+        "message": "Fixture session.blob.chunk error: invalid_blob_chunk",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2711,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "blob_offset_mismatch",
+        "message": "Fixture session.blob.chunk error: blob_offset_mismatch",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2712,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "blob_size_mismatch",
+        "message": "Fixture session.blob.chunk error: blob_size_mismatch",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2713,
+      "method": "session.blob.chunk",
+      "error": {
+        "code": "blob_write_failed",
+        "message": "Fixture session.blob.chunk error: blob_write_failed",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2801,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.blob.commit error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2802,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.blob.commit error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2803,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.blob.commit error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2804,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.blob.commit error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2805,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.blob.commit error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2806,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.blob.commit error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2807,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.blob.commit error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2808,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.blob.commit error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2809,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "unknown_blob_upload",
+        "message": "Fixture session.blob.commit error: unknown_blob_upload",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2810,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "blob_size_mismatch",
+        "message": "Fixture session.blob.commit error: blob_size_mismatch",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2811,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "invalid_image",
+        "message": "Fixture session.blob.commit error: invalid_image",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2812,
+      "method": "session.blob.commit",
+      "error": {
+        "code": "blob_corrupt",
+        "message": "Fixture session.blob.commit error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2901,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.blob.abort error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2902,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.blob.abort error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2903,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.blob.abort error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2904,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.blob.abort error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2905,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.blob.abort error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2906,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.blob.abort error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2907,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.blob.abort error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2908,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.blob.abort error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2909,
+      "method": "session.blob.abort",
+      "error": {
+        "code": "unknown_blob_upload",
+        "message": "Fixture session.blob.abort error: unknown_blob_upload",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3001,
+      "method": "session.blob.read",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.blob.read error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3002,
+      "method": "session.blob.read",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.blob.read error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3003,
+      "method": "session.blob.read",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.blob.read error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3004,
+      "method": "session.blob.read",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.blob.read error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3005,
+      "method": "session.blob.read",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.blob.read error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3006,
+      "method": "session.blob.read",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.blob.read error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3007,
+      "method": "session.blob.read",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.blob.read error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3008,
+      "method": "session.blob.read",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.blob.read error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3009,
+      "method": "session.blob.read",
+      "error": {
+        "code": "blob_not_owned",
+        "message": "Fixture session.blob.read error: blob_not_owned",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3010,
+      "method": "session.blob.read",
+      "error": {
+        "code": "blob_missing",
+        "message": "Fixture session.blob.read error: blob_missing",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3011,
+      "method": "session.blob.read",
+      "error": {
+        "code": "blob_corrupt",
+        "message": "Fixture session.blob.read error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3012,
+      "method": "session.blob.read",
+      "error": {
+        "code": "invalid_blob_range",
+        "message": "Fixture session.blob.read error: invalid_blob_range",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3013,
+      "method": "session.blob.read",
+      "error": {
+        "code": "blob_read_failed",
+        "message": "Fixture session.blob.read error: blob_read_failed",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3101,
+      "method": "session.dispose",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.dispose error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3102,
+      "method": "session.dispose",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.dispose error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3103,
+      "method": "session.dispose",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.dispose error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3104,
+      "method": "session.dispose",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.dispose error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3105,
+      "method": "session.dispose",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.dispose error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3106,
+      "method": "session.dispose",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.dispose error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3107,
+      "method": "session.dispose",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.dispose error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3108,
+      "method": "session.dispose",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.dispose error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3109,
+      "method": "session.dispose",
+      "error": {
+        "code": "invalid_idempotency_key",
+        "message": "Fixture session.dispose error: invalid_idempotency_key",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3110,
+      "method": "session.dispose",
+      "error": {
+        "code": "idempotency_conflict",
+        "message": "Fixture session.dispose error: idempotency_conflict",
         "retryable": false
       }
     }

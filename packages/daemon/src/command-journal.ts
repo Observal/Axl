@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 
 import {
   isRetryableMutationMethod,
+  isRpcErrorRetryable,
   parseOperationId,
   parseRpcResult,
   parseSessionId,
@@ -340,29 +341,22 @@ export class CommandJournal {
           return validated;
         },
         async (cause: unknown) => {
-          const failure: CommandFailure =
-            cause instanceof CommandJournalError
-              ? {
-                  code: cause.code,
-                  message: cause.message,
-                  retryable: cause.retryable,
-                  ...(cause.details === undefined ? {} : { details: cause.details }),
-                }
-              : {
-                  code:
-                    cause instanceof Error && "code" in cause && typeof cause.code === "string"
-                      ? cause.code
-                      : "internal_error",
-                  message: cause instanceof Error ? cause.message : "Request failed",
-                  retryable: false,
-                  ...(cause instanceof Error &&
-                  "details" in cause &&
-                  typeof cause.details === "object" &&
-                  cause.details !== null &&
-                  !Array.isArray(cause.details)
-                    ? { details: cause.details as JsonObject }
-                    : {}),
-                };
+          const code =
+            cause instanceof Error && "code" in cause && typeof cause.code === "string"
+              ? cause.code
+              : "internal_error";
+          const failure: CommandFailure = {
+            code,
+            message: cause instanceof Error ? cause.message : "Request failed",
+            retryable: isRpcErrorRetryable(code),
+            ...(cause instanceof Error &&
+            "details" in cause &&
+            typeof cause.details === "object" &&
+            cause.details !== null &&
+            !Array.isArray(cause.details)
+              ? { details: cause.details as JsonObject }
+              : {}),
+          };
           const terminal: CommandCompletion = {
             version: 1,
             type: "failed",

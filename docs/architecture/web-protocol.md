@@ -119,7 +119,7 @@ interface ConnectionInitializeResult {
 
 `ClientKind` is a lowercase protocol identifier of at most 64 UTF-8 bytes, such as `tui`, `web`, `desktop`, `android`, `ios`, `headless`, or `ide`. Unknown valid kinds remain diagnostic and do not require a wire change. The client-generated instance ID is also diagnostic. Neither field grants authority. The daemon generates the attachment ID, and authenticated scope controls access. Remote scopes are deferred.
 
-Before initialization, only `daemon.info`, `connection.initialize`, and `connection.ping` are accepted. Any other method returns `connection_not_initialized`. A second initialization returns `connection_already_initialized`.
+Before initialization, only `daemon.info`, `connection.initialize`, and `connection.ping` are accepted. Any other method returns `not_initialized`. A second initialization returns `connection_already_initialized`.
 
 ## Method map
 
@@ -206,55 +206,49 @@ interface RpcError {
 
 `message` is safe user-facing text. `details` is validated and bounded per error code. It never includes stack traces, credentials, launch tokens, request headers, protected file contents, or raw provider errors.
 
-Common codes are:
+### Allowed-error matrix
 
-```text
-bad_request
-unsupported_version
-unsupported_capability
-connection_not_initialized
-connection_already_initialized
-unauthorized
-forbidden
-rate_limited
-frame_too_large
-request_timeout
-cancelled
-internal_error
-invalid_idempotency_key
-idempotency_conflict
-unknown_session
-corrupt_session
-event_migration_required
-operation_active
-invalid_fork_point
-unknown_interaction
-interaction_already_resolved
-unknown_subscription
-unknown_cursor
-cursor_expired
-snapshot_required
-workspace_unavailable
-workspace_changed
-invalid_path
-path_denied
-symlink_escape
-not_found
-not_a_file
-unsupported_file_type
-unsupported_filename_encoding
-binary_file
-invalid_encoding
-content_too_large
-not_git_repository
-git_unavailable
-git_timeout
-git_output_too_large
-unsupported_git_state
-repository_changed
-```
+The universal method errors are `bad_request`, `not_initialized`, `unsupported_capability`, `rate_limited`, `internal_error`, and `cancelled`. `frame_too_large` is the sole pre-RPC error and may omit `method` because no valid RPC was established.
 
-Each method documents its narrower set. Unknown codes remain displayable as generic failures, but never imply success.
+The following table lists the additional errors each method may return. The exported `UNIVERSAL_RPC_ERROR_CODES` and `RPC_METHOD_ERROR_CODES` values are the machine-readable authority.
+
+| Methods | Additional allowed errors |
+| --- | --- |
+| `daemon.info`, `connection.ping`, `request.cancel` | none |
+| `connection.initialize` | `unsupported_version`, `connection_already_initialized`, `unauthorized`, `forbidden` |
+| `session.create` | `invalid_cwd`, `invalid_idempotency_key`, `idempotency_conflict`, `corrupt_session`, `content_too_large` |
+| `session.resume` | `unknown_session`, `corrupt_session`, `event_migration_required` |
+| `session.list` | `invalid_cwd`, `unknown_cursor` |
+| `session.history` | `unknown_cursor`, `snapshot_required`, `event_migration_required` |
+| `session.ack` | `unknown_subscription`, `unknown_cursor`, `snapshot_required` |
+| `session.unsubscribe` | `unknown_subscription` |
+| `session.fork` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_fork_point`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.clone` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `empty_session`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.send` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
+| `session.queue.enqueue` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
+| `session.queue.requeue` | `unknown_session`, `event_migration_required`, `unknown_queue_item`, `queue_not_paused`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.shell` | `unknown_session`, `event_migration_required`, `operation_active`, `idempotency_conflict`, `content_too_large` |
+| `session.interrupt` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict` |
+| `session.reload`, `session.configure` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.interaction.respond` | `unknown_session`, `event_migration_required`, `unknown_interaction`, `interaction_already_resolved`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.subscribe` | `unknown_session`, `event_migration_required`, `snapshot_required` |
+| `session.workspace.list` | `unknown_session`, `event_migration_required`, `workspace_unavailable`, `workspace_changed`, `invalid_path`, `path_denied`, `symlink_escape`, `not_found`, `unsupported_file_type`, `unsupported_filename_encoding` |
+| `session.workspace.read` | all `session.workspace.list` errors plus `not_a_file`, `binary_file`, `invalid_encoding`, `content_too_large` |
+| `session.workspace.status` | `unknown_session`, `event_migration_required`, `workspace_unavailable`, `workspace_changed`, `not_git_repository`, `git_unavailable`, `git_timeout`, `git_output_too_large`, `unsupported_git_state`, `unsupported_filename_encoding`, `checkpoint_unavailable`, `checkpoint_too_large`, `checkpoint_corrupt` |
+| `session.workspace.diff` | all `session.workspace.status` errors plus `repository_changed` |
+| `session.workspace.checkpoint` | `unknown_session`, `event_migration_required`, `operation_active`, `not_git_repository`, `git_unavailable`, `git_timeout`, `git_output_too_large`, `unsupported_git_state`, `unsupported_filename_encoding`, `checkpoint_unavailable`, `checkpoint_too_large`, `checkpoint_corrupt` |
+| `session.blob.start` | `unknown_session`, `event_migration_required`, `invalid_media_type`, `invalid_blob_name`, `blob_too_large`, `too_many_uploads` |
+| `session.blob.chunk` | `unknown_session`, `event_migration_required`, `unknown_blob_upload`, `invalid_blob_chunk`, `blob_offset_mismatch`, `blob_size_mismatch`, `blob_write_failed` |
+| `session.blob.commit` | `unknown_session`, `event_migration_required`, `unknown_blob_upload`, `blob_size_mismatch`, `invalid_image`, `blob_corrupt` |
+| `session.blob.abort` | `unknown_session`, `event_migration_required`, `unknown_blob_upload` |
+| `session.blob.read` | `unknown_session`, `event_migration_required`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `invalid_blob_range`, `blob_read_failed` |
+| `session.dispose` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict` |
+
+The daemon converts an unrecognized or disallowed implementation error to `internal_error`; it does not leak arbitrary subsystem codes. Model and provider failures during a turn are canonical `session.error` events, not `session.send` RPC failures.
+
+`retryable` is code-defined, not call-site-defined. It is `true` only for `rate_limited`, `git_timeout`, `checkpoint_unavailable`, `too_many_uploads`, `blob_write_failed`, and `blob_read_failed`. It is `false` for every other named code. A retryable mutation still reuses its original idempotency key.
+
+Clients must accept unknown future string codes. They display the safe `message`, retain the unknown code and bounded details for diagnostics, obey the supplied `retryable` value, and never crash or infer success.
 
 `event_migration_required` details contain only `sessionId`, `eventId`, `eventType`, `encodedBytes`, `maximumBytes`, and a safe recovery command. They contain no payload excerpt or absolute path. `content_too_large` identifies the bounded field and limit without echoing rejected content.
 

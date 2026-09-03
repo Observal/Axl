@@ -140,7 +140,7 @@ export class AxlClient {
 
   get connection(): ConnectionInitializeResult {
     if (this.initialized === undefined) {
-      throw new AxlClientError("connection_not_initialized", "Connection is not initialized");
+      throw new AxlClientError("not_initialized", "Connection is not initialized");
     }
     return this.initialized;
   }
@@ -199,9 +199,7 @@ export class AxlClient {
     options: RequestOptions = {},
   ): Promise<RpcResult<Method>> {
     if (this.initialized === undefined && method !== "connection.initialize") {
-      return Promise.reject(
-        new AxlClientError("connection_not_initialized", "Connection is not initialized"),
-      );
+      return Promise.reject(new AxlClientError("not_initialized", "Connection is not initialized"));
     }
     const idempotencyKey = isRetryableMutationMethod(method)
       ? (options.idempotencyKey ?? this.options.idempotencyKeys.create())

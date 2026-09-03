@@ -145,6 +145,33 @@ test("initializes exactly once and creates keys only for retryable mutations", a
   client.close();
 });
 
+test("preserves unknown future structured errors without crashing", async () => {
+  const { client, transport } = await connect();
+  const pending = client.request("daemon.info", {});
+  const request = transport.messages.at(-1) as { id: number; method: "daemon.info" };
+  transport.emit({
+    kind: "error",
+    id: request.id,
+    method: request.method,
+    error: {
+      code: "future_policy_failure",
+      message: "A future daemon rejected the request",
+      retryable: true,
+      details: { safe: true },
+    },
+  });
+  await assert.rejects(
+    pending,
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "future_policy_failure" &&
+      error.message === "A future daemon rejected the request" &&
+      error.retryable === true &&
+      error.details?.safe === true,
+  );
+  client.close();
+});
+
 test("fails capability checks before writing a request", async () => {
   const factory = new Factory();
   const client = await AxlClient.connect({
@@ -226,7 +253,7 @@ test("fails reconnect explicitly when a previously granted capability disappears
       order: "recent",
       pageSize: 10,
     }),
-    (error) => error instanceof AxlClientError && error.code === "connection_not_initialized",
+    (error) => error instanceof AxlClientError && error.code === "not_initialized",
   );
   client.close();
 });

@@ -900,15 +900,15 @@ export const RPC_ERROR_CODES = [
   "bad_request",
   "unsupported_version",
   "unsupported_capability",
-  "connection_not_initialized",
+  "not_initialized",
   "connection_already_initialized",
   "unauthorized",
   "forbidden",
   "rate_limited",
   "frame_too_large",
-  "request_timeout",
   "cancelled",
   "internal_error",
+  "invalid_cwd",
   "invalid_idempotency_key",
   "idempotency_conflict",
   "unknown_session",
@@ -918,11 +918,11 @@ export const RPC_ERROR_CODES = [
   "unknown_queue_item",
   "queue_not_paused",
   "invalid_fork_point",
+  "empty_session",
   "unknown_interaction",
   "interaction_already_resolved",
   "unknown_subscription",
   "unknown_cursor",
-  "cursor_expired",
   "snapshot_required",
   "workspace_unavailable",
   "workspace_changed",
@@ -945,6 +945,21 @@ export const RPC_ERROR_CODES = [
   "checkpoint_unavailable",
   "checkpoint_too_large",
   "checkpoint_corrupt",
+  "invalid_media_type",
+  "invalid_blob_name",
+  "invalid_blob_chunk",
+  "blob_too_large",
+  "too_many_uploads",
+  "unknown_blob_upload",
+  "blob_offset_mismatch",
+  "blob_size_mismatch",
+  "blob_write_failed",
+  "invalid_image",
+  "blob_not_owned",
+  "blob_missing",
+  "blob_corrupt",
+  "invalid_blob_range",
+  "blob_read_failed",
 ] as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number] | (string & {});
@@ -2316,6 +2331,229 @@ export const RPC_METHODS = [
   "session.blob.read",
   "session.dispose",
 ] as const satisfies readonly RpcMethod[];
+
+export type KnownRpcErrorCode = (typeof RPC_ERROR_CODES)[number];
+
+export const PRE_RPC_ERROR_CODES = [
+  "frame_too_large",
+] as const satisfies readonly KnownRpcErrorCode[];
+
+export const UNIVERSAL_RPC_ERROR_CODES = [
+  "bad_request",
+  "not_initialized",
+  "unsupported_capability",
+  "rate_limited",
+  "internal_error",
+  "cancelled",
+] as const satisfies readonly KnownRpcErrorCode[];
+
+const SESSION_BASE_ERRORS = ["unknown_session", "event_migration_required"] as const;
+const MUTATION_ERRORS = ["invalid_idempotency_key", "idempotency_conflict"] as const;
+const WORKSPACE_BASE_ERRORS = [
+  ...SESSION_BASE_ERRORS,
+  "workspace_unavailable",
+  "workspace_changed",
+] as const;
+const GIT_ERRORS = [
+  "not_git_repository",
+  "git_unavailable",
+  "git_timeout",
+  "git_output_too_large",
+  "unsupported_git_state",
+  "unsupported_filename_encoding",
+] as const;
+const CHECKPOINT_ERRORS = [
+  "checkpoint_unavailable",
+  "checkpoint_too_large",
+  "checkpoint_corrupt",
+] as const;
+
+export const RPC_METHOD_ERROR_CODES = {
+  "daemon.info": [],
+  "connection.initialize": [
+    "unsupported_version",
+    "connection_already_initialized",
+    "unauthorized",
+    "forbidden",
+  ],
+  "connection.ping": [],
+  "request.cancel": [],
+  "session.create": ["invalid_cwd", ...MUTATION_ERRORS, "corrupt_session", "content_too_large"],
+  "session.resume": ["unknown_session", "corrupt_session", "event_migration_required"],
+  "session.list": ["invalid_cwd", "unknown_cursor"],
+  "session.history": ["unknown_cursor", "snapshot_required", "event_migration_required"],
+  "session.ack": ["unknown_subscription", "unknown_cursor", "snapshot_required"],
+  "session.unsubscribe": ["unknown_subscription"],
+  "session.fork": [
+    ...SESSION_BASE_ERRORS,
+    "corrupt_session",
+    "operation_active",
+    "invalid_fork_point",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
+  "session.clone": [
+    ...SESSION_BASE_ERRORS,
+    "corrupt_session",
+    "operation_active",
+    "empty_session",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
+  "session.send": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    ...MUTATION_ERRORS,
+    "blob_not_owned",
+    "blob_missing",
+    "blob_corrupt",
+    "content_too_large",
+  ],
+  "session.queue.enqueue": [
+    ...SESSION_BASE_ERRORS,
+    ...MUTATION_ERRORS,
+    "blob_not_owned",
+    "blob_missing",
+    "blob_corrupt",
+    "content_too_large",
+  ],
+  "session.queue.requeue": [
+    ...SESSION_BASE_ERRORS,
+    "unknown_queue_item",
+    "queue_not_paused",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
+  "session.shell": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    "idempotency_conflict",
+    "content_too_large",
+  ],
+  "session.interrupt": [...SESSION_BASE_ERRORS, ...MUTATION_ERRORS],
+  "session.reload": [
+    ...SESSION_BASE_ERRORS,
+    "corrupt_session",
+    "operation_active",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
+  "session.configure": [
+    ...SESSION_BASE_ERRORS,
+    "corrupt_session",
+    "operation_active",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
+  "session.interaction.respond": [
+    ...SESSION_BASE_ERRORS,
+    "unknown_interaction",
+    "interaction_already_resolved",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
+  "session.subscribe": [...SESSION_BASE_ERRORS, "snapshot_required"],
+  "session.workspace.list": [
+    ...WORKSPACE_BASE_ERRORS,
+    "invalid_path",
+    "path_denied",
+    "symlink_escape",
+    "not_found",
+    "unsupported_file_type",
+    "unsupported_filename_encoding",
+  ],
+  "session.workspace.read": [
+    ...WORKSPACE_BASE_ERRORS,
+    "invalid_path",
+    "path_denied",
+    "symlink_escape",
+    "not_found",
+    "not_a_file",
+    "unsupported_file_type",
+    "binary_file",
+    "invalid_encoding",
+    "content_too_large",
+  ],
+  "session.workspace.status": [...WORKSPACE_BASE_ERRORS, ...GIT_ERRORS, ...CHECKPOINT_ERRORS],
+  "session.workspace.diff": [
+    ...WORKSPACE_BASE_ERRORS,
+    ...GIT_ERRORS,
+    ...CHECKPOINT_ERRORS,
+    "repository_changed",
+  ],
+  "session.workspace.checkpoint": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    ...GIT_ERRORS,
+    ...CHECKPOINT_ERRORS,
+  ],
+  "session.blob.start": [
+    ...SESSION_BASE_ERRORS,
+    "invalid_media_type",
+    "invalid_blob_name",
+    "blob_too_large",
+    "too_many_uploads",
+  ],
+  "session.blob.chunk": [
+    ...SESSION_BASE_ERRORS,
+    "unknown_blob_upload",
+    "invalid_blob_chunk",
+    "blob_offset_mismatch",
+    "blob_size_mismatch",
+    "blob_write_failed",
+  ],
+  "session.blob.commit": [
+    ...SESSION_BASE_ERRORS,
+    "unknown_blob_upload",
+    "blob_size_mismatch",
+    "invalid_image",
+    "blob_corrupt",
+  ],
+  "session.blob.abort": [...SESSION_BASE_ERRORS, "unknown_blob_upload"],
+  "session.blob.read": [
+    ...SESSION_BASE_ERRORS,
+    "blob_not_owned",
+    "blob_missing",
+    "blob_corrupt",
+    "invalid_blob_range",
+    "blob_read_failed",
+  ],
+  "session.dispose": [...SESSION_BASE_ERRORS, ...MUTATION_ERRORS],
+} as const satisfies Readonly<Record<RpcMethod, readonly KnownRpcErrorCode[]>>;
+
+export type UniversalRpcErrorCode = (typeof UNIVERSAL_RPC_ERROR_CODES)[number];
+export type RpcMethodErrorCode<Method extends RpcMethod> =
+  | UniversalRpcErrorCode
+  | (typeof RPC_METHOD_ERROR_CODES)[Method][number];
+
+export const RETRYABLE_RPC_ERROR_CODES = [
+  "rate_limited",
+  "git_timeout",
+  "checkpoint_unavailable",
+  "too_many_uploads",
+  "blob_write_failed",
+  "blob_read_failed",
+] as const satisfies readonly KnownRpcErrorCode[];
+
+const KNOWN_RPC_ERROR_CODE_SET = new Set<string>(RPC_ERROR_CODES);
+const UNIVERSAL_RPC_ERROR_CODE_SET = new Set<string>(UNIVERSAL_RPC_ERROR_CODES);
+const RETRYABLE_RPC_ERROR_CODE_SET = new Set<string>(RETRYABLE_RPC_ERROR_CODES);
+
+export function isKnownRpcErrorCode(code: string): code is KnownRpcErrorCode {
+  return KNOWN_RPC_ERROR_CODE_SET.has(code);
+}
+
+export function isRpcErrorAllowed(method: RpcMethod, code: string): boolean {
+  return (
+    UNIVERSAL_RPC_ERROR_CODE_SET.has(code) ||
+    (RPC_METHOD_ERROR_CODES[method] as readonly string[]).includes(code)
+  );
+}
+
+export function isRpcErrorRetryable(code: string): boolean {
+  return RETRYABLE_RPC_ERROR_CODE_SET.has(code);
+}
+
 const RPC_METHOD_SET = new Set<RpcMethod>(RPC_METHODS);
 
 function parseRpcMethod(value: unknown, path: string): RpcMethod {

@@ -12,14 +12,17 @@ import {
   parseEvent,
   type EventType,
   isRetryableMutationMethod,
+  isRpcErrorRetryable,
   parseEventId,
   parseOperationId,
   parseServerMessage,
   parseSessionId,
   parseWireRequest,
   RPC_ERROR_CODES,
+  RPC_METHOD_ERROR_CODES,
   type RpcMethod,
   RPC_METHODS,
+  UNIVERSAL_RPC_ERROR_CODES,
   type RpcParams,
   type RpcResult,
   WIRE_PROTOCOL_VERSION,
@@ -336,8 +339,22 @@ const successes = Object.entries(results).map(([method, result], index) => ({
 const errors = RPC_ERROR_CODES.map((code) => ({
   kind: "error",
   id: -1,
-  error: { code, message: `Fixture error: ${code}`, retryable: false },
+  error: { code, message: `Fixture error: ${code}`, retryable: isRpcErrorRetryable(code) },
 }));
+const allowedErrors = RPC_METHODS.flatMap((method, methodIndex) =>
+  [...new Set([...UNIVERSAL_RPC_ERROR_CODES, ...RPC_METHOD_ERROR_CODES[method]])].map(
+    (code, codeIndex) => ({
+      kind: "error" as const,
+      id: methodIndex * 100 + codeIndex + 1,
+      method,
+      error: {
+        code,
+        message: `Fixture ${method} error: ${code}`,
+        retryable: isRpcErrorRetryable(code),
+      },
+    }),
+  ),
+);
 const serverMessages = [
   {
     kind: "hello",
@@ -395,6 +412,7 @@ for (const request of requests) parseWireRequest(request);
 for (const success of successes) parseServerMessage(success);
 for (const message of serverMessages) parseServerMessage(message);
 for (const error of errors) parseServerMessage(error);
+for (const error of allowedErrors) parseServerMessage(error);
 for (const event of events) parseEvent(event);
 
 const document = {
@@ -405,6 +423,7 @@ const document = {
   requests,
   successes,
   errors,
+  allowedErrors,
   serverMessages,
   events,
 };

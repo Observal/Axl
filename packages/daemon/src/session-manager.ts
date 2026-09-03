@@ -984,9 +984,16 @@ export class SessionManager {
       (event) => event.type === "queue.enqueued" && event.operationId === operationId,
     );
     if (prior?.type === "queue.enqueued") return { queueItemId: prior.id, state: "queued" };
-    for (const item of content) {
-      if (item.type === "blob")
-        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+    try {
+      for (const item of content) {
+        if (item.type === "blob")
+          await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+      }
+    } catch (error) {
+      if (error instanceof BlobStoreError) {
+        throw new DaemonError(error.code, error.message, { cause: error });
+      }
+      throw error;
     }
     const queued = await managed.session.recordQueueEvent(operationId, "queue.enqueued", {
       content,
@@ -1066,9 +1073,16 @@ export class SessionManager {
         return { operationId, stopReason: aborted.payload.stopReason };
       }
     }
-    for (const item of content) {
-      if (item.type === "blob")
-        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+    try {
+      for (const item of content) {
+        if (item.type === "blob")
+          await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+      }
+    } catch (error) {
+      if (error instanceof BlobStoreError) {
+        throw new DaemonError(error.code, error.message, { cause: error });
+      }
+      throw error;
     }
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
