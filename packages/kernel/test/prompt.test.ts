@@ -208,19 +208,19 @@ test("context injection is refused while an operation owns the branch", async (c
   await session.dispose();
 });
 
-test("the minimal profile is exactly shell and edit", async (context) => {
+test("the minimal profile is exactly bash and edit", async (context) => {
   const cwd = await workspace(context);
   const tools = makeMinimalProfileTools({ cwd, overflowDirectory: join(cwd, ".overflow") });
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ["shell", "edit"],
+    ["bash", "edit"],
   );
 
   const registry = new ToolRegistry();
   for (const tool of tools) registry.register(tool);
   assert.deepEqual(
     registry.declarations().map((declaration) => declaration.name),
-    ["shell", "edit"],
+    ["bash", "edit"],
   );
   assert.equal(registry.get("read"), undefined);
 });

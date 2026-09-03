@@ -70,7 +70,13 @@ test("validates every request shape", () => {
       kind: "request",
       id: 9,
       method: "session.create",
-      params: { cwd: "/repo", modelId: "gpt-5", thinkingLevel: "medium" },
+      params: {
+        cwd: "/repo",
+        modelId: "gpt-5",
+        thinkingLevel: "medium",
+        webFetch: true,
+        webSearch: false,
+      },
     },
     {
       kind: "request",
@@ -175,6 +181,12 @@ test("rejects malformed requests at the wire boundary", () => {
       id: 1,
       method: "session.configure",
       params: { sessionId, thinkingLevel: "extreme" },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.configure",
+      params: { sessionId, webFetch: "yes" },
     },
     {
       kind: "request",

@@ -68,7 +68,7 @@ test("phase 3 exit gate: inspect, edit, run, and stop over a fixture repository"
       oldText: '"hello"',
       newText: '"hi"',
     }),
-    toolTurn("call-shell", "shell", { command: "bash check.sh" }),
+    toolTurn("call-shell", "bash", { command: "bash check.sh" }),
     [
       { type: "text_delta", text: "Edited and verified." },
       { type: "completed", stopReason: "stop", usage },

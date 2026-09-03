@@ -12,7 +12,7 @@ export interface MinimalProfileOptions {
 }
 
 /**
- * The minimal profile: shell and file editing, the base prompt, nothing else.
+ * The minimal profile: Bash and file editing, the base prompt, nothing else.
  * The smallest thing that is still Axl. No subagent, planning, or task tools
  * exist here — or anywhere — by default.
  */

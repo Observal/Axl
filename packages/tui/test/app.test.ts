@@ -11,7 +11,13 @@ import test, { type TestContext } from "node:test";
 import { AxlDaemon, DaemonClient, type SessionInteractionRequest } from "@axl/daemon";
 import type { TerminalExtension } from "@axl/extension-api";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
-import type { EventPayloadMap, JsonObject, ModelStreamEvent, Usage } from "@axl/protocol";
+import type {
+  EventPayloadMap,
+  JsonObject,
+  ModelStreamEvent,
+  SessionSnapshot,
+  Usage,
+} from "@axl/protocol";
 
 import { AxlApp, stripAnsi } from "../src/index.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -218,7 +224,7 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
   assert.match(text(), /second prompt/);
 
   input.write("\x15/resume\r");
-  await until(() => text().includes("Resume Session (Current Folder)"), "resume selector");
+  await until(() => text().includes("Resume Session (All)"), "resume selector");
   input.write("\r");
   await until(() => app.sessionId === sourceSessionId, "source session resume");
 
@@ -228,6 +234,92 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
     "clone switch",
   );
   assert.match(text(), /cloned to new session/);
+  app.stop();
+});
+
+test("initial resume opens the all-session picker without creating a throwaway session", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const seed = await DaemonClient.connect(socketPath);
+  const saved = (await seed.request("session.create", { cwd: directory })) as SessionSnapshot;
+  seed.close();
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await DaemonClient.connect(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    initialResume: true,
+    listResumeSessions: async () => [
+      {
+        sessionId: saved.sessionId,
+        resumeKey: `native:${saved.sessionId}`,
+        cwd: directory,
+        createdAt: 1,
+        updatedAt: 1,
+        userMessageCount: 0,
+        placementLabel: "SANDBOXED · native",
+        unsafe: false,
+      },
+    ],
+  });
+  await until(() => text().includes("Resume Session (All)"), "initial resume selector");
+  const listingClient = await DaemonClient.connect(socketPath);
+  const before = (await listingClient.request("session.list", {})) as unknown[];
+  assert.equal(before.length, 1);
+  input.write("\r");
+  await until(() => app.sessionId === saved.sessionId, "initial resumed session");
+  const after = (await listingClient.request("session.list", {})) as unknown[];
+  assert.equal(after.length, 1);
+  listingClient.close();
+  app.stop();
+});
+
+test("resume can switch to a visibly labeled unsafe daemon", async (context) => {
+  const safe = await startStack(context);
+  const unsafe = await startStack(context, port, undefined, {
+    provider: "none",
+    enforced: false,
+    controls: [],
+  });
+  const unsafeSeed = await DaemonClient.connect(unsafe.socketPath);
+  const unsafeSession = (await unsafeSeed.request("session.create", {
+    cwd: unsafe.directory,
+  })) as SessionSnapshot;
+  unsafeSeed.close();
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await DaemonClient.connect(safe.socketPath),
+    input,
+    output,
+    cwd: safe.directory,
+    color: false,
+    listResumeSessions: async () => [
+      {
+        sessionId: unsafeSession.sessionId,
+        resumeKey: `unsafe:${unsafeSession.sessionId}`,
+        cwd: unsafe.directory,
+        createdAt: 1,
+        updatedAt: 2,
+        userMessageCount: 0,
+        securityMode: "unsafe",
+        sandboxProvider: "none",
+        placementLabel: "UNSAFE",
+        unsafe: true,
+      },
+    ],
+    openResumeSession: async () => ({
+      client: await DaemonClient.connect(unsafe.socketPath),
+      reconnectClient: () => DaemonClient.connect(unsafe.socketPath),
+    }),
+  });
+  input.write("/resume\r");
+  await until(() => text().includes("UNSAFE"), "unsafe resume label");
+  input.write("\r");
+  await until(() => app.sessionId === unsafeSession.sessionId, "unsafe session switch");
+  assert.match(text(), /UNSAFE: no sandbox/);
   app.stop();
 });
 
@@ -798,8 +890,8 @@ test("bang commands run through daemon shell authority", async (context) => {
   const { socketPath, directory } = await startStack(context, recordingPort, () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "shell",
-      description: "Run shell",
+      name: "bash",
+      description: "Run Bash",
       inputSchema: { type: "object" },
       async execute(input) {
         commands.push(String(input.command));
@@ -851,8 +943,8 @@ test("Escape interrupts shell passthrough and preserves queued prompts", async (
   const { socketPath, directory } = await startStack(context, recordingPort, () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "shell",
-      description: "Blocking shell",
+      name: "bash",
+      description: "Blocking Bash",
       inputSchema: { type: "object" },
       async execute(_input, signal) {
         await new Promise<void>((resolve) => {
@@ -1075,6 +1167,28 @@ test("MCP interactions block the operation until the user responds", async (cont
   resumedInput.write("yes\r\r");
   await until(() => resumed.text().includes("continued after approval"), "approved continuation");
   resumedApp.stop();
+});
+
+test("web tools can be toggled per session and persisted", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const updates: Array<Record<string, unknown>> = [];
+  const app = await AxlApp.start({
+    client: await DaemonClient.connect(socketPath),
+    input: new PassThrough(),
+    output: captureOutput().output,
+    cwd: directory,
+    color: false,
+    onPreferenceChange: (update) => {
+      updates.push(update);
+    },
+  });
+  await (
+    app as unknown as {
+      configure(update: { webFetch?: boolean; webSearch?: boolean }): Promise<void>;
+    }
+  ).configure({ webFetch: false, webSearch: false });
+  assert.deepEqual(updates.at(-1), { webFetch: false, webSearch: false });
+  app.stop();
 });
 
 test("/model opens a selector and switches the model live", async (context) => {

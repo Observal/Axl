@@ -13,6 +13,10 @@ import {
   makeEditTool,
   makeReadTool,
   makeShellTool,
+  makeWebFetchTool,
+  makeWebSearchTool,
+  makeWriteTool,
+  requestPublicUrl,
   SandboxViolationError,
   ToolInputError,
 } from "../src/index.ts";
@@ -262,6 +266,96 @@ test("edit rejects misses, ambiguity, and missing files before writing", async (
     /identical/,
   );
   assert.equal(await readFile(path, "utf8"), original); // nothing was written
+});
+
+test("write creates directories, overwrites atomically, and enforces bounds", async (context) => {
+  const cwd = await workspace(context);
+  const write = makeWriteTool({
+    cwd,
+    maxBytes: 20,
+    policy: { workspace: cwd, readableRoots: [cwd], protectedPaths: [] },
+  });
+  const created = await write.execute({ path: "nested/file.txt", content: "hello\n" }, noSignal);
+  assert.equal(created.isError, false);
+  assert.equal(await readFile(join(cwd, "nested", "file.txt"), "utf8"), "hello\n");
+  await write.execute({ path: "nested/file.txt", content: "replacement\n" }, noSignal);
+  assert.equal(await readFile(join(cwd, "nested", "file.txt"), "utf8"), "replacement\n");
+  await assert.rejects(
+    write.execute({ path: "too-large.txt", content: "x".repeat(21) }, noSignal),
+    /maximum is 20/,
+  );
+  await assert.rejects(
+    write.execute({ path: "../escape.txt", content: "no" }, noSignal),
+    SandboxViolationError,
+  );
+});
+
+test("web_fetch returns bounded readable content", async () => {
+  const tool = makeWebFetchTool({
+    request: async (url) => ({
+      url,
+      status: 200,
+      contentType: "text/html",
+      body: Buffer.from(
+        "<html><style>hidden</style><h1>Hello</h1><p>world &amp; friends &amp;lt;</p></html>",
+      ),
+    }),
+  });
+  const result = await tool.execute({ url: "https://example.com/page" }, noSignal);
+  assert.equal(result.isError, false);
+  assert.match(text(result), /Hello\s+world & friends &lt;/);
+  assert.equal(text(result).includes("hidden"), false);
+  assert.equal(text(result).includes("world & friends <"), false);
+  const truncated = await tool.execute(
+    { url: "https://example.com/page", maxCharacters: 10 },
+    noSignal,
+  );
+  assert.match(text(truncated), /truncated at 10 characters/);
+});
+
+test("web access blocks private destinations and search uses configured credentials", async () => {
+  await assert.rejects(requestPublicUrl("http://127.0.0.1/private"), /private or reserved/);
+  const keyless = makeWebSearchTool({
+    request: async (url) => ({
+      url,
+      status: 200,
+      contentType: "application/json",
+      body: Buffer.from(
+        JSON.stringify({
+          Heading: "Axl",
+          AbstractURL: "https://example.com/axl",
+          AbstractText: "Agent harness",
+        }),
+      ),
+    }),
+  });
+  assert.match(text(await keyless.execute({ query: "Axl" }, noSignal)), /Agent harness/);
+
+  let receivedToken: string | undefined;
+  const search = makeWebSearchTool({
+    apiKey: "obviously-fake-search-key",
+    request: async (url, options) => {
+      receivedToken = options?.headers?.["x-subscription-token"];
+      return {
+        url,
+        status: 200,
+        contentType: "application/json",
+        body: Buffer.from(
+          JSON.stringify({
+            web: {
+              results: [
+                { title: "Axl", url: "https://example.com/axl", description: "Agent harness" },
+              ],
+            },
+          }),
+        ),
+      };
+    },
+  });
+  const result = await search.execute({ query: "Axl agent", count: 1 }, noSignal);
+  assert.equal(receivedToken, "obviously-fake-search-key");
+  assert.match(text(result), /Axl/);
+  assert.match(text(result), /https:\/\/example.com\/axl/);
 });
 
 test("tool input objects with unknown fields are rejected across tools", async (context) => {

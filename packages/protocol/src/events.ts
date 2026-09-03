@@ -26,7 +26,7 @@ export type SessionCloseReason = "completed" | "disposed" | "failed";
 export type AssistantStopReason = "stop" | "length" | "tool_use" | "error" | "aborted";
 export type ChildStatus = "completed" | "failed" | "aborted";
 /** Why the provider-visible tool roster was (re)rendered — each is a deliberate prompt-cache break. */
-export type DialectBoundaryReason = "session_start" | "model_switch" | "reload";
+export type DialectBoundaryReason = "session_start" | "model_switch" | "tool_change" | "reload";
 
 export type BlobReference = {
   readonly sha256: string;
@@ -82,6 +82,10 @@ export type EventPayloadMap = {
     readonly requested: ThinkingLevel;
     readonly effective: ThinkingLevel;
     readonly clamped: boolean;
+  };
+  "config.tools": {
+    readonly webFetch: boolean;
+    readonly webSearch: boolean;
   };
   "config.dialect": {
     readonly dialectId: string;
@@ -374,11 +378,22 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     boolean(payload.clamped, `${path}.clamped`);
     return payload;
   },
+  "config.tools": (payload, path) => {
+    exact(payload, path, ["webFetch", "webSearch"]);
+    boolean(payload.webFetch, `${path}.webFetch`);
+    boolean(payload.webSearch, `${path}.webSearch`);
+    return payload;
+  },
   "config.dialect": (payload, path) => {
     exact(payload, path, ["dialectId", "rosterFingerprint", "reason"]);
     string(payload.dialectId, `${path}.dialectId`);
     string(payload.rosterFingerprint, `${path}.rosterFingerprint`);
-    choice(payload.reason, `${path}.reason`, ["session_start", "model_switch", "reload"]);
+    choice(payload.reason, `${path}.reason`, [
+      "session_start",
+      "model_switch",
+      "tool_change",
+      "reload",
+    ]);
     return payload;
   },
   "prompt.section": (payload, path) => {

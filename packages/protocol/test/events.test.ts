@@ -55,6 +55,7 @@ const validPayloads = {
   "config.provider": { providerId: "provider-1" },
   "config.entitlement": { entitlementId: "credential-reference" },
   "config.thinking": { requested: "high", effective: "medium", clamped: true },
+  "config.tools": { webFetch: true, webSearch: false },
   "config.dialect": {
     dialectId: "openai-chat",
     rosterFingerprint: "f".repeat(64),

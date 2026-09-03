@@ -35,6 +35,8 @@ export interface TuiSettings {
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
   readonly theme?: string;
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
   readonly toolOutputDisplay?: ToolOutputDisplay;
   readonly thinkingDisplay?: ThinkingDisplay;
   readonly tuiMode?: "regular" | "fullscreen";
@@ -95,6 +97,8 @@ function parseSettings(value: unknown, path: string): TuiSettings {
     "modelId",
     "thinkingLevel",
     "theme",
+    "webFetch",
+    "webSearch",
     "toolOutputDisplay",
     "thinkingDisplay",
     "tuiMode",
@@ -128,6 +132,11 @@ function parseSettings(value: unknown, path: string): TuiSettings {
     !TUI_THEME_NAMES.includes(input.theme as (typeof TUI_THEME_NAMES)[number])
   ) {
     throw new Error(`${path}: invalid theme`);
+  }
+  for (const field of ["webFetch", "webSearch"] as const) {
+    if (input[field] !== undefined && typeof input[field] !== "boolean") {
+      throw new Error(`${path}: ${field} must be a boolean`);
+    }
   }
   if (
     input.toolOutputDisplay !== undefined &&

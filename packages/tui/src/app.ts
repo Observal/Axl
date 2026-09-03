@@ -155,14 +155,14 @@ function messageText(event: CanonicalEvent): string | undefined {
   return text || undefined;
 }
 
-function orderSessions(
-  sessions: readonly SessionSummary[],
+function orderSessions<T extends SessionSummary>(
+  sessions: readonly T[],
   mode: "threaded" | "recent",
-): SessionSummary[] {
+): T[] {
   const recent = [...sessions].sort((left, right) => right.updatedAt - left.updatedAt);
   if (mode === "recent") return recent;
   const ids = new Set(recent.map((session) => session.sessionId));
-  const children = new Map<string, SessionSummary[]>();
+  const children = new Map<string, T[]>();
   for (const session of recent) {
     const parent = session.parentSessionId;
     if (parent === undefined || !ids.has(parent)) continue;
@@ -170,9 +170,9 @@ function orderSessions(
     siblings.push(session);
     children.set(parent, siblings);
   }
-  const ordered: SessionSummary[] = [];
+  const ordered: T[] = [];
   const visited = new Set<string>();
-  const visit = (session: SessionSummary): void => {
+  const visit = (session: T): void => {
     if (visited.has(session.sessionId)) return;
     visited.add(session.sessionId);
     ordered.push(session);
@@ -443,9 +443,23 @@ function themePreview(width: number, palette: Palette): readonly string[] {
   ];
 }
 
+export interface ResumeSessionEntry extends SessionSummary {
+  readonly resumeKey: string;
+  readonly placementLabel: string;
+  readonly unsafe: boolean;
+}
+
+export interface ResumeSessionConnection {
+  readonly client: DaemonClient;
+  readonly reconnectClient: () => Promise<DaemonClient>;
+}
+
 export interface AxlAppOptions {
   readonly client: DaemonClient;
   readonly reconnectClient?: () => Promise<DaemonClient>;
+  readonly listResumeSessions?: () => Promise<readonly ResumeSessionEntry[]>;
+  readonly openResumeSession?: (session: ResumeSessionEntry) => Promise<ResumeSessionConnection>;
+  readonly initialResume?: boolean;
   readonly input: TerminalInput;
   readonly output: TerminalOutput;
   readonly cwd: string;
@@ -456,6 +470,8 @@ export interface AxlAppOptions {
   readonly modelCatalog?: readonly ModelInfo[];
   readonly currentModel?: string;
   readonly currentThinking?: ThinkingLevel;
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
   readonly toolOutputDisplay?: ToolOutputDisplay;
   readonly thinkingDisplay?: "show" | "compact" | "hide";
   readonly tuiMode?: "regular" | "fullscreen";
@@ -475,6 +491,8 @@ export interface AxlAppOptions {
   readonly onPreferenceChange?: (update: {
     modelId?: string;
     thinkingLevel?: ThinkingLevel;
+    webFetch?: boolean;
+    webSearch?: boolean;
     theme?: string;
     toolOutputDisplay?: ToolOutputDisplay;
     thinkingDisplay?: "show" | "compact" | "hide";
@@ -521,6 +539,7 @@ export class AxlApp {
   private cwd: string;
   private readonly options: AxlAppOptions;
   private client: DaemonClient;
+  private reconnectClient: (() => Promise<DaemonClient>) | undefined;
   private readonly screen: DifferentialScreen;
   private view: SessionView;
   private readonly editor = new LineEditor();
@@ -578,6 +597,9 @@ export class AxlApp {
   }> = [];
   private sending = false;
   private configuring = false;
+  private webFetchEnabled: boolean;
+  private webSearchEnabled: boolean;
+  private initialResumePending: boolean;
   private lastInterrupt = 0;
   private branch: string | undefined;
   private currentTheme: string;
@@ -624,6 +646,7 @@ export class AxlApp {
   ) {
     this.options = options;
     this.client = options.client;
+    this.reconnectClient = options.reconnectClient;
     this.sessionId = sessionId;
     this.cwd = cwd;
     this.width = width;
@@ -641,6 +664,9 @@ export class AxlApp {
     this.diffLayout = options.diffLayout ?? "unified";
     this.workspaceReviewEnabled = options.workspaceReview ?? false;
     this.imageDisplay = options.imageDisplay ?? "auto";
+    this.webFetchEnabled = options.webFetch ?? true;
+    this.webSearchEnabled = options.webSearch ?? true;
+    this.initialResumePending = options.initialResume ?? false;
     this.mediaCache = new MediaCache(
       () => this.client,
       sessionId,
@@ -759,7 +785,7 @@ export class AxlApp {
 
   private async reconnect(error: Error): Promise<void> {
     if (this.connectionState === "reconnecting" || this.stopped) return;
-    const reconnectClient = this.options.reconnectClient;
+    const reconnectClient = this.reconnectClient;
     if (reconnectClient === undefined) {
       this.connectionState = "detached";
       this.notice = this.view.palette.error(`✖ disconnected: ${error.message}`);
@@ -856,25 +882,32 @@ export class AxlApp {
 
   static async start(options: AxlAppOptions): Promise<AxlApp> {
     assertInteractiveTerminal(options.input, options.output);
-    const snapshot = (await (options.sessionId === undefined
-      ? options.client.request("session.create", {
-          cwd: options.cwd,
-          ...(options.currentModel === undefined ? {} : { modelId: options.currentModel }),
-          ...(options.currentThinking === undefined
-            ? {}
-            : { thinkingLevel: options.currentThinking }),
-        })
-      : resumeSnapshot(options.client, options.sessionId))) as SessionSnapshot;
-    const created = snapshot.events[0];
-    if (created?.type !== "session.created") throw new Error("Session has no creation event");
-    const cwd = created.payload.cwd;
+    const initialResume = options.initialResume === true && options.sessionId === undefined;
+    const snapshot = initialResume
+      ? undefined
+      : ((await (options.sessionId === undefined
+          ? options.client.request("session.create", {
+              cwd: options.cwd,
+              ...(options.currentModel === undefined ? {} : { modelId: options.currentModel }),
+              ...(options.currentThinking === undefined
+                ? {}
+                : { thinkingLevel: options.currentThinking }),
+              ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
+              ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+            })
+          : resumeSnapshot(options.client, options.sessionId))) as SessionSnapshot);
+    const created = snapshot?.events[0];
+    if (snapshot !== undefined && created?.type !== "session.created") {
+      throw new Error("Session has no creation event");
+    }
+    const cwd = created?.type === "session.created" ? created.payload.cwd : options.cwd;
 
     const width =
       options.output.columns && options.output.columns > 0 ? options.output.columns : 80;
     const height = options.output.rows && options.output.rows > 0 ? options.output.rows : 24;
     const app = new AxlApp(
       options,
-      snapshot.sessionId,
+      snapshot?.sessionId ?? "00000000-0000-4000-8000-000000000000",
       cwd,
       width,
       height,
@@ -910,40 +943,43 @@ export class AxlApp {
       throw error;
     }
     if (options.clearStartupLine) options.output.write("\r\x1b[2K");
-    app.commitLines(app.welcomeLines(cwd, options.sessionId !== undefined), false);
-    for (const event of snapshot.events) {
-      await app.prepareEventMedia(event);
-      app.commitEvent(event, false);
-    }
-    const lastEventId = snapshot.events.at(-1)?.id;
-    const subscription = (await options.client.request("session.subscribe", {
-      sessionId: snapshot.sessionId,
-      ...(lastEventId === undefined ? {} : { afterEventId: lastEventId }),
-    })) as {
-      snapshot: readonly CanonicalEvent[];
-      activity?: SessionActivityFrame;
-    };
-    for (const event of subscription.snapshot) {
-      await app.prepareEventMedia(event);
-      app.commitEvent(event, false);
-    }
-    if (subscription.activity !== undefined) app.liveAssistant.apply(subscription.activity);
-    for (const event of app.bufferedEvents ?? []) {
-      await app.prepareEventMedia(event);
-      app.commitEvent(event, false);
+    if (snapshot !== undefined) {
+      app.commitLines(app.welcomeLines(cwd, options.sessionId !== undefined), false);
+      for (const event of snapshot.events) {
+        await app.prepareEventMedia(event);
+        app.commitEvent(event, false);
+      }
+      const lastEventId = snapshot.events.at(-1)?.id;
+      const subscription = (await options.client.request("session.subscribe", {
+        sessionId: snapshot.sessionId,
+        ...(lastEventId === undefined ? {} : { afterEventId: lastEventId }),
+      })) as {
+        snapshot: readonly CanonicalEvent[];
+        activity?: SessionActivityFrame;
+      };
+      for (const event of subscription.snapshot) {
+        await app.prepareEventMedia(event);
+        app.commitEvent(event, false);
+      }
+      if (subscription.activity !== undefined) app.liveAssistant.apply(subscription.activity);
+      for (const event of app.bufferedEvents ?? []) {
+        await app.prepareEventMedia(event);
+        app.commitEvent(event, false);
+      }
+      if (options.workspaceReview !== undefined) {
+        await app.configureWorkspaceReview(options.workspaceReview, false);
+      }
+      if (app.developerPanelEnabled) void app.refreshWorkspaceDiff();
     }
     app.bufferedEvents = undefined;
     app.hydrating = false;
     app.openNextInteraction();
-    if (options.workspaceReview !== undefined) {
-      await app.configureWorkspaceReview(options.workspaceReview, false);
-    }
-    if (app.developerPanelEnabled) void app.refreshWorkspaceDiff();
 
     try {
       app.terminal.start();
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
       app.redraw();
+      if (initialResume) void app.openResume();
       return app;
     } catch (error) {
       try {
@@ -991,7 +1027,7 @@ export class AxlApp {
       if (this.tuiMode === "fullscreen") {
         this.fullscreen.exit(
           this.fullscreenDocumentRows(),
-          this.fullscreenExitOutput,
+          this.initialResumePending ? "transcript" : this.fullscreenExitOutput,
           this.sessionId,
         );
       } else this.options.output.write(this.screen.clear());
@@ -1489,6 +1525,11 @@ export class AxlApp {
         const path = input?.path ?? input?.filePath ?? input?.file_path;
         if (typeof path === "string") this.awayChangedFiles.add(path);
       }
+    }
+
+    if (event.type === "config.tools") {
+      this.webFetchEnabled = event.payload.webFetch;
+      this.webSearchEnabled = event.payload.webSearch;
     }
 
     if (event.type === "tool.call") {
@@ -2522,6 +2563,16 @@ export class AxlApp {
           label: "Workspace review",
           description: this.workspaceReviewEnabled ? "on" : "off",
         },
+        {
+          value: "web-fetch",
+          label: "Web fetch tool",
+          description: this.webFetchEnabled ? "on" : "off",
+        },
+        {
+          value: "web-search",
+          label: "Web search tool",
+          description: this.webSearchEnabled ? "on" : "off",
+        },
         { value: "images", label: "Image display", description: this.imageDisplay },
         { value: "diff", label: "Diff layout", description: this.diffLayout },
       ],
@@ -2539,8 +2590,26 @@ export class AxlApp {
         else if (value === "recap") this.selectRefocusRecap();
         else if (value === "developer") this.selectDeveloperPanel();
         else if (value === "review") this.selectWorkspaceReview();
+        else if (value === "web-fetch") this.selectWebTool("webFetch");
+        else if (value === "web-search") this.selectWebTool("webSearch");
         else if (value === "images") this.selectImageDisplay();
         else this.selectDiffLayout();
+      },
+    });
+  }
+
+  private selectWebTool(tool: "webFetch" | "webSearch"): void {
+    const current = tool === "webFetch" ? this.webFetchEnabled : this.webSearchEnabled;
+    this.openPicker({
+      title: tool === "webFetch" ? "Web fetch tool" : "Web search tool",
+      items: [
+        { value: "on", label: "On", description: "include the tool in model requests" },
+        { value: "off", label: "Off", description: "remove all schema and prompt contribution" },
+      ],
+      current: current ? "on" : "off",
+      onPick: (value) => {
+        const enabled = value === "on";
+        void this.configure({ [tool]: enabled });
       },
     });
   }
@@ -2888,17 +2957,31 @@ export class AxlApp {
 
   private async openResume(): Promise<void> {
     try {
-      const sessions = (await this.client.request("session.list", {})) as SessionSummary[];
+      const sessions: readonly ResumeSessionEntry[] =
+        this.options.listResumeSessions === undefined
+          ? ((await this.client.request("session.list", {})) as SessionSummary[]).map(
+              (session) => ({
+                ...session,
+                resumeKey: session.sessionId,
+                placementLabel:
+                  session.securityMode === "unsafe"
+                    ? "UNSAFE"
+                    : `SANDBOXED · ${session.sandboxProvider ?? "current"}`,
+                unsafe: session.securityMode === "unsafe",
+              }),
+            )
+          : await this.options.listResumeSessions();
       if (sessions.length === 0) {
         this.notice = this.view.palette.dim("· no saved sessions");
-        this.redraw();
+        if (this.initialResumePending) this.stop();
+        else this.redraw();
         return;
       }
-      let scope: "current" | "all" = "current";
+      let scope: "current" | "all" = "all";
       let sort: "threaded" | "recent" = "threaded";
       let filter = "";
       let index = 0;
-      const visibleSessions = (): SessionSummary[] => {
+      const visibleSessions = (): ResumeSessionEntry[] => {
         const query = filter.toLowerCase();
         return orderSessions(
           sessions.filter(
@@ -2950,7 +3033,13 @@ export class AxlApp {
                     "…",
                   ),
                   this.view.palette.dim(
-                    `  ${plural(session.userMessageCount, "message")} · ${relativeAge(session.updatedAt)}${current}${location}`,
+                    `  ${plural(session.userMessageCount, "message")} · ${relativeAge(session.updatedAt)} · ${
+                      session.unsafe
+                        ? (this.view.palette.warning ?? this.view.palette.error)(
+                            session.placementLabel,
+                          )
+                        : session.placementLabel
+                    }${current}${location}`,
                   ),
                   "",
                 ];
@@ -2985,11 +3074,12 @@ export class AxlApp {
               const selected = filtered[index];
               if (selected !== undefined) {
                 this.overlays.close();
-                void this.resumeSession(selected.sessionId);
+                void this.resumeSession(selected);
                 return;
               }
             } else if (key.kind === "escape" || (key.kind === "ctrl" && key.char === "c")) {
               this.overlays.close();
+              if (this.initialResumePending) this.stop();
               return;
             } else if (key.kind === "backspace") {
               filter = filter.slice(0, -1);
@@ -3079,18 +3169,40 @@ export class AxlApp {
     this.overlays.replace(overlay);
   }
 
-  private async resumeSession(sessionId: string): Promise<void> {
+  private async resumeSession(session: ResumeSessionEntry | string): Promise<void> {
+    const entry =
+      typeof session === "string"
+        ? {
+            sessionId: session,
+            resumeKey: session,
+            placementLabel: "current",
+            unsafe: false,
+          }
+        : session;
+    const previousClient = this.client;
+    const previousReconnect = this.reconnectClient;
+    let candidate: ResumeSessionConnection | undefined;
     try {
-      await this.switchSession(
-        await resumeSnapshot(this.client, sessionId),
-        "",
-        "· resumed session",
-      );
+      candidate =
+        typeof session === "string" ? undefined : await this.options.openResumeSession?.(session);
+      const client = candidate?.client ?? this.client;
+      const snapshot = await resumeSnapshot(client, entry.sessionId);
+      if (client !== this.client) this.bindClient(client);
+      await this.switchSession(snapshot, "", `· resumed session · ${entry.placementLabel}`);
+      if (candidate !== undefined) this.reconnectClient = candidate.reconnectClient;
+      if (previousClient !== client) previousClient.close();
+      this.initialResumePending = false;
     } catch (error) {
+      if (candidate !== undefined && candidate.client !== previousClient) {
+        candidate.client.close();
+        this.bindClient(previousClient);
+        this.reconnectClient = previousReconnect;
+      }
       this.notice = this.view.palette.error(
         `✖ ${error instanceof Error ? error.message : "could not resume session"}`,
       );
       this.redraw();
+      if (this.initialResumePending) void this.openResume();
     }
   }
 
@@ -3131,10 +3243,10 @@ export class AxlApp {
   ): Promise<void> {
     const created = snapshot.events[0];
     if (created?.type !== "session.created") throw new Error("Session has no creation event");
-    const branch = await readGitBranch(created.payload.cwd);
     this.switchingSessionId = snapshot.sessionId;
     this.switchingEvents = [];
     this.switchingActivityFrames = [];
+    const branch = await readGitBranch(created.payload.cwd);
     const lastEventId = snapshot.events.at(-1)?.id;
     let subscription: { snapshot: readonly CanonicalEvent[]; activity?: SessionActivityFrame };
     try {
@@ -3542,6 +3654,8 @@ export class AxlApp {
   private async persistPreferences(update: {
     modelId?: string;
     thinkingLevel?: ThinkingLevel;
+    webFetch?: boolean;
+    webSearch?: boolean;
     theme?: string;
     toolOutputDisplay?: ToolOutputDisplay;
     thinkingDisplay?: "show" | "compact" | "hide";
@@ -3571,6 +3685,8 @@ export class AxlApp {
   private async configure(update: {
     modelId?: string;
     thinkingLevel?: ThinkingLevel;
+    webFetch?: boolean;
+    webSearch?: boolean;
   }): Promise<void> {
     if (this.configuring) {
       this.notice = this.view.palette.dim("· configuration change already in progress");

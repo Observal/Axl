@@ -141,13 +141,13 @@ async function preserveOverflow(directory: string, output: Buffer): Promise<stri
   return path;
 }
 
-/** Canonical `shell` tool: run one command, bounded output, prompt cancellation. */
+/** Canonical `bash` tool: run one command, bounded output, prompt cancellation. */
 export function makeShellTool(options: ShellToolOptions): KernelTool {
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   return {
-    name: "shell",
+    name: "bash",
     description:
-      "Run a shell command in the workspace and return its combined output and exit status.",
+      "Run a Bash command in the workspace and return its combined output and exit status.",
     inputSchema: {
       type: "object",
       properties: {
@@ -159,13 +159,13 @@ export function makeShellTool(options: ShellToolOptions): KernelTool {
       additionalProperties: false,
     },
     async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
-      rejectUnknownFields(input, "shell", ["command", "cwd", "timeoutMs"]);
-      const command = requiredString(input, "shell", "command");
+      rejectUnknownFields(input, "bash", ["command", "cwd", "timeoutMs"]);
+      const command = requiredString(input, "bash", "command");
       signal.throwIfAborted();
-      let cwd = resolve(options.cwd, optionalString(input, "shell", "cwd") ?? ".");
+      let cwd = resolve(options.cwd, optionalString(input, "bash", "cwd") ?? ".");
       if (options.policy !== undefined) cwd = await assertReadAllowed(options.policy, cwd);
       const timeoutMs =
-        optionalPositiveInteger(input, "shell", "timeoutMs") ??
+        optionalPositiveInteger(input, "bash", "timeoutMs") ??
         options.defaultTimeoutMs ??
         DEFAULT_TIMEOUT_MS;
 

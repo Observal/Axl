@@ -317,8 +317,10 @@ export class SessionView {
           ? []
           : this.wrap(dim(`· thinking ${previous} → ${effective}`));
       }
+      case "config.tools":
+        return EMPTY_ROWS;
       case "config.dialect":
-        return event.payload.reason === "reload"
+        return event.payload.reason === "reload" || event.payload.reason === "tool_change"
           ? this.wrap(dim(`· tools reloaded · ${event.payload.dialectId}`))
           : [];
       case "permission.requested":

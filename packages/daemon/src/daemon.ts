@@ -238,10 +238,12 @@ export class AxlDaemon {
           ...(this.sandboxImage === undefined ? {} : { sandboxImage: this.sandboxImage }),
         };
       case "session.create": {
-        const { cwd, modelId, thinkingLevel } = request.params;
+        const { cwd, modelId, thinkingLevel, webFetch, webSearch } = request.params;
         return this.sessions.create(cwd, {
           ...(modelId === undefined ? {} : { modelId }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+          ...(webFetch === undefined ? {} : { webFetch }),
+          ...(webSearch === undefined ? {} : { webSearch }),
         });
       }
       case "session.resume": {
@@ -275,10 +277,12 @@ export class AxlDaemon {
       case "session.reload":
         return this.sessions.reload(request.params.sessionId);
       case "session.configure": {
-        const { sessionId, modelId, thinkingLevel } = request.params;
+        const { sessionId, modelId, thinkingLevel, webFetch, webSearch } = request.params;
         return this.sessions.configure(sessionId, {
           ...(modelId === undefined ? {} : { modelId }),
           ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+          ...(webFetch === undefined ? {} : { webFetch }),
+          ...(webSearch === undefined ? {} : { webSearch }),
         });
       }
       case "session.interaction.respond": {

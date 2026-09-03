@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 import {
@@ -33,7 +33,7 @@ import {
   type SessionForkResult,
   type SessionHistoryPage,
   type SessionId,
-  type SessionModelSelection,
+  type SessionSelection,
   type SessionSummary,
   type UserContent,
   type WorkspaceDiff,
@@ -65,10 +65,16 @@ export interface SessionRuntime {
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
+  readonly configTools?: EventPayloadMap["config.tools"];
   readonly configDialect?: EventPayloadMap["config.dialect"];
 }
 
-export type SessionRuntimeBoundary = "session_start" | "reload" | "model_switch" | "config_change";
+export type SessionRuntimeBoundary =
+  | "session_start"
+  | "reload"
+  | "model_switch"
+  | "tool_change"
+  | "config_change";
 
 export interface SessionInteractionRequest {
   readonly kind: EventPayloadMap["interaction.requested"]["kind"];
@@ -86,7 +92,7 @@ export type SessionRuntimeFactory = (input: {
   readonly sessionId: SessionId;
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
-  readonly selection: SessionModelSelection;
+  readonly selection: SessionSelection;
   readonly interact: (
     request: SessionInteractionRequest,
     signal?: AbortSignal,
@@ -122,7 +128,7 @@ interface ManagedSession {
     thinking: string;
     tools: Array<{ callId: string; name: string }>;
   };
-  selection: SessionModelSelection;
+  selection: SessionSelection;
   activeTurn?: ActiveTurn;
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
@@ -159,6 +165,11 @@ function summarizeSession(events: readonly CanonicalEvent[]): SessionSummary {
   });
   const firstUserMessage = messages[0];
   const lastUserMessage = messages.at(-1);
+  const sandbox = events.findLast((event) => event.type === "sandbox.configured");
+  const image =
+    sandbox?.type === "sandbox.configured" && typeof sandbox.payload.details?.image === "string"
+      ? sandbox.payload.details.image
+      : undefined;
   return {
     sessionId: created.sessionId,
     cwd: created.payload.cwd,
@@ -170,7 +181,43 @@ function summarizeSession(events: readonly CanonicalEvent[]): SessionSummary {
     ...(created.payload.parentSessionId === undefined
       ? {}
       : { parentSessionId: created.payload.parentSessionId }),
+    ...(sandbox?.type !== "sandbox.configured"
+      ? {}
+      : {
+          securityMode: sandbox.payload.enforced ? ("sandboxed" as const) : ("unsafe" as const),
+          sandboxProvider: sandbox.payload.provider,
+        }),
+    ...(image === undefined ? {} : { sandboxImage: image }),
   };
+}
+
+export async function listStoredSessions(
+  dataDirectory: string,
+): Promise<readonly SessionSummary[]> {
+  const directory = join(resolve(dataDirectory), "sessions");
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const summaries: SessionSummary[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const sessionId = parseSessionId(basename(entry.name, ".jsonl"), "session file name");
+    const raw = await readFile(join(directory, entry.name), "utf8");
+    const lines = raw.split("\n");
+    lines.pop(); // Ignore an absent or incomplete final newline without modifying the live log.
+    const events = lines
+      .filter((line) => line.length > 0)
+      .map((line) => parseEvent(JSON.parse(line) as unknown));
+    if (events.some((event) => event.sessionId !== sessionId)) {
+      throw new DaemonError("corrupt_session", `Session file ${entry.name} contains another ID`);
+    }
+    summaries.push(summarizeSession(events));
+  }
+  return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 /** Owns every live session. Clients never receive a mutable kernel object. */
@@ -204,7 +251,7 @@ export class SessionManager {
       tools: Array<{ callId: string; name: string }>;
     },
     boundary: SessionRuntimeBoundary,
-    selection: SessionModelSelection,
+    selection: SessionSelection,
   ): Promise<AgentSession> {
     const runtime = await this.options.runtime({
       sessionId,
@@ -225,6 +272,7 @@ export class SessionManager {
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
+      ...(runtime.configTools === undefined ? {} : { configTools: runtime.configTools }),
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
       onEvent: (event) => {
         events.push(event);
@@ -241,7 +289,7 @@ export class SessionManager {
   private async open(
     sessionId: SessionId,
     cwd: string,
-    selection: SessionModelSelection,
+    selection: SessionSelection,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [];
     const listeners = new Set<(event: CanonicalEvent) => void>();
@@ -282,7 +330,7 @@ export class SessionManager {
 
   async create(
     cwd: string,
-    selection: SessionModelSelection = {},
+    selection: SessionSelection = {},
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
       throw new DaemonError("invalid_cwd", `Cannot open working directory ${cwd}`, { cause });
@@ -501,14 +549,22 @@ export class SessionManager {
       throw new DaemonError("corrupt_session", `Session ${sessionId} has no creation event`);
     }
     let modelId: string | undefined;
-    let thinkingLevel: SessionModelSelection["thinkingLevel"];
+    let thinkingLevel: SessionSelection["thinkingLevel"];
+    let webFetch: boolean | undefined;
+    let webSearch: boolean | undefined;
     for (const event of events) {
       if (event.type === "config.model") modelId = event.payload.modelId;
       else if (event.type === "config.thinking") thinkingLevel = event.payload.requested;
+      else if (event.type === "config.tools") {
+        webFetch = event.payload.webFetch;
+        webSearch = event.payload.webSearch;
+      }
     }
     return this.open(sessionId, created.payload.cwd, {
       ...(modelId === undefined ? {} : { modelId }),
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+      ...(webFetch === undefined ? {} : { webFetch }),
+      ...(webSearch === undefined ? {} : { webSearch }),
     });
   }
 
@@ -524,7 +580,7 @@ export class SessionManager {
 
   async configure(
     sessionId: unknown,
-    update: SessionModelSelection,
+    update: SessionSelection,
   ): Promise<{ events: readonly CanonicalEvent[] }> {
     const managed = this.managed(sessionId);
     if (managed.activeTurn || managed.rebuilding) {
@@ -537,7 +593,10 @@ export class SessionManager {
     const boundary: SessionRuntimeBoundary =
       update.modelId !== undefined && update.modelId !== managed.selection.modelId
         ? "model_switch"
-        : "config_change";
+        : (update.webFetch !== undefined && update.webFetch !== managed.selection.webFetch) ||
+            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch)
+          ? "tool_change"
+          : "config_change";
     const before = managed.events.length;
     await this.rebuild(managed, boundary, selection);
     managed.selection = selection;
@@ -798,7 +857,7 @@ export class SessionManager {
   private async rebuild(
     managed: ManagedSession,
     boundary: SessionRuntimeBoundary,
-    selection: SessionModelSelection,
+    selection: SessionSelection,
   ): Promise<void> {
     const previous = managed.session;
     const rebuilding = (async () => {

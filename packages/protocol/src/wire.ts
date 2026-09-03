@@ -18,6 +18,13 @@ export interface SessionModelSelection {
   readonly thinkingLevel?: ThinkingLevel;
 }
 
+export interface SessionToolSelection {
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
+}
+
+export type SessionSelection = SessionModelSelection & SessionToolSelection;
+
 export interface SessionSummary {
   readonly sessionId: SessionId;
   readonly cwd: string;
@@ -27,6 +34,9 @@ export interface SessionSummary {
   readonly firstUserMessage?: string;
   readonly lastUserMessage?: string;
   readonly parentSessionId?: SessionId;
+  readonly securityMode?: "sandboxed" | "unsafe";
+  readonly sandboxProvider?: string;
+  readonly sandboxImage?: string;
 }
 
 export interface TransientToolCall {
@@ -155,7 +165,7 @@ export type WireRequest =
       readonly kind: "request";
       readonly id: number;
       readonly method: "session.create";
-      readonly params: { readonly cwd: string } & SessionModelSelection;
+      readonly params: { readonly cwd: string } & SessionSelection;
     }
   | {
       readonly kind: "request";
@@ -217,7 +227,7 @@ export type WireRequest =
       readonly kind: "request";
       readonly id: number;
       readonly method: "session.configure";
-      readonly params: { readonly sessionId: SessionId } & SessionModelSelection;
+      readonly params: { readonly sessionId: SessionId } & SessionSelection;
     }
   | {
       readonly kind: "request";
@@ -502,7 +512,7 @@ const thinkingLevels: readonly ThinkingLevel[] = [
   "max",
 ];
 
-function selection(params: Record<string, unknown>, path: string): SessionModelSelection {
+function selection(params: Record<string, unknown>, path: string): SessionSelection {
   const modelId =
     params.modelId === undefined ? undefined : string(params.modelId, `${path}.modelId`);
   const thinkingLevel = params.thinkingLevel;
@@ -512,9 +522,16 @@ function selection(params: Record<string, unknown>, path: string): SessionModelS
       `must be one of: ${thinkingLevels.join(", ")}`,
     );
   }
+  for (const field of ["webFetch", "webSearch"] as const) {
+    if (params[field] !== undefined && typeof params[field] !== "boolean") {
+      throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
+    }
+  }
   return {
     ...(modelId === undefined ? {} : { modelId }),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel: thinkingLevel as ThinkingLevel }),
+    ...(params.webFetch === undefined ? {} : { webFetch: params.webFetch as boolean }),
+    ...(params.webSearch === undefined ? {} : { webSearch: params.webSearch as boolean }),
   };
 }
 
@@ -535,7 +552,7 @@ export function parseWireRequest(value: unknown): WireRequest {
     return { ...base, method, params: {} };
   }
   if (method === "session.create") {
-    exact(params, "request.params", ["cwd", "modelId", "thinkingLevel"]);
+    exact(params, "request.params", ["cwd", "modelId", "thinkingLevel", "webFetch", "webSearch"]);
     return {
       ...base,
       method,
@@ -633,10 +650,24 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.configure") {
-    exact(params, "request.params", ["sessionId", "modelId", "thinkingLevel"]);
+    exact(params, "request.params", [
+      "sessionId",
+      "modelId",
+      "thinkingLevel",
+      "webFetch",
+      "webSearch",
+    ]);
     const configured = selection(params, "request.params");
-    if (configured.modelId === undefined && configured.thinkingLevel === undefined) {
-      throw new ProtocolValidationError("request.params", "must include modelId or thinkingLevel");
+    if (
+      configured.modelId === undefined &&
+      configured.thinkingLevel === undefined &&
+      configured.webFetch === undefined &&
+      configured.webSearch === undefined
+    ) {
+      throw new ProtocolValidationError(
+        "request.params",
+        "must include modelId, thinkingLevel, webFetch, or webSearch",
+      );
     }
     return {
       ...base,

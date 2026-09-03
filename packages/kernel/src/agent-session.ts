@@ -81,6 +81,8 @@ export interface AgentSessionOptions {
   readonly configModel?: EventPayloadMap["config.model"];
   /** Thinking configuration announced at every open as a `config.thinking` event. */
   readonly configThinking?: EventPayloadMap["config.thinking"];
+  /** Optional web-tool configuration announced at every open. */
+  readonly configTools?: EventPayloadMap["config.tools"];
   /** Dialect boundary announced at open; the payload carries its own reason. */
   readonly configDialect?: EventPayloadMap["config.dialect"];
   /** Live tail: invoked after each event is durably appended, in append order. */
@@ -128,14 +130,14 @@ export function messagesFromLineage(events: readonly CanonicalEvent[]): readonly
       }
       (toolCallingAssistant.toolCalls as ToolCallRequest[]).push({
         callId: event.payload.callId,
-        name: event.payload.name,
+        name: event.payload.name === "shell" ? "bash" : event.payload.name,
         input: event.payload.input,
       });
     } else if (event.type === "tool.result") {
       messages.push({
         role: "tool",
         callId: event.payload.callId,
-        name: event.payload.name,
+        name: event.payload.name === "shell" ? "bash" : event.payload.name,
         content: event.payload.content,
         isError: event.payload.isError,
       });
@@ -235,7 +237,7 @@ export class AgentSession {
       session.messages.push({
         role: "tool",
         callId: call.payload.callId,
-        name: call.payload.name,
+        name: call.payload.name === "shell" ? "bash" : call.payload.name,
         content: result.payload.content,
         isError: true,
       });
@@ -262,6 +264,9 @@ export class AgentSession {
     }
     if (options.configThinking !== undefined) {
       await session.append(undefined, "config.thinking", options.configThinking);
+    }
+    if (options.configTools !== undefined) {
+      await session.append(undefined, "config.tools", options.configTools);
     }
     if (options.configDialect !== undefined) {
       await session.append(undefined, "config.dialect", options.configDialect);
@@ -323,8 +328,8 @@ export class AgentSession {
         `Operation ${this.activeOperation} already owns this branch`,
       );
     }
-    const shell = this.tools.get("shell");
-    if (!shell) throw new Error("The shell tool is unavailable in this session");
+    const shell = this.tools.get("bash");
+    if (!shell) throw new Error("The bash tool is unavailable in this session");
     const operationId = parseOperationId(randomUUID(), "operationId");
     this.activeOperation = operationId;
     try {

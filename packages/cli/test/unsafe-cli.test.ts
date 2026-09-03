@@ -19,6 +19,8 @@ test("--help and --version do not require credentials", () => {
   const help = spawnSync(process.execPath, [entry, "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.match(help.stdout, /^Usage: axl/);
+  assert.match(help.stdout, /-r, --resume/);
+  assert.match(help.stdout, /--no-web-search/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
@@ -65,6 +67,12 @@ async function runCli(args: readonly string[]): Promise<{ code: number | null; s
   );
   return { code, stderr };
 }
+
+test("resume mode rejects an explicit session ID", async () => {
+  const result = await runCli(["-r", "123e4567-e89b-42d3-a456-426614174000"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /--resume cannot be combined with a session ID/);
+});
 
 test("OCI CLI arguments fail closed", async () => {
   const missingImage = await runCli(["--sandbox", "podman"]);

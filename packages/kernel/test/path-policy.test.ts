@@ -13,6 +13,7 @@ import {
   canonicalizeForPolicy,
   makeEditTool,
   makeReadTool,
+  makeWriteTool,
   SandboxViolationError,
   type WorkspacePolicy,
 } from "../src/index.ts";
@@ -107,9 +108,10 @@ test("an explicitly readable root remains read-only", async (context) => {
   );
 });
 
-test("read and edit tools enforce the policy before touching the filesystem", async (context) => {
+test("read, write, and edit tools enforce policy before touching the filesystem", async (context) => {
   const { workspace, outside, axlHome, policy } = await makeLayout(context);
   const read = makeReadTool({ cwd: workspace, policy });
+  const write = makeWriteTool({ cwd: workspace, policy });
   const edit = makeEditTool({ cwd: workspace, policy });
   const signal = new AbortController().signal;
 
@@ -126,6 +128,10 @@ test("read and edit tools enforce the policy before touching the filesystem", as
       { path: join(outside, "victim.txt"), oldText: "outside", newText: "changed" },
       signal,
     ),
+    SandboxViolationError,
+  );
+  await assert.rejects(
+    write.execute({ path: join(outside, "new.txt"), content: "changed" }, signal),
     SandboxViolationError,
   );
   // The victim file is untouched and in-workspace work still flows.

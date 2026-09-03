@@ -10,13 +10,13 @@ The TUI includes:
 - Unicode-aware multiline editing, selection, clipboard paste, searchable history, word movement, undo, a kill ring, and external-editor handoff
 - Kitty keyboard support with fallbacks for older terminals
 - Searchable command, model, thinking-level, theme, hotkey, and history selectors
-- Atomic global preferences in `~/.axl/settings.json` for model, thinking, theme, and terminal presentation
+- Atomic global preferences in `~/.axl/settings.json` for model, thinking, web-tool availability, theme, and terminal presentation
 - Sandboxed `!command` passthrough, plus context-excluded `!!command` passthrough
 - Model and thinking changes recorded by the daemon
 - Queued follow-up prompts while a turn is running
 - GFM Markdown, syntax highlighting, Unicode Mermaid diagrams, safe visible links, bordered prompts, retained tool transactions, bounded shell output, and line-numbered diffs that switch between unified and split views
 - A framed editor showing token use, cache rate, cost, context, model, effort, path, Git branch, and local throughput
-- Clean resize reconstruction, interruption, detach, daemon restart reconnect, searchable session resume, fork, clone, and visible connection state
+- Clean resize reconstruction, interruption, detach, daemon restart reconnect, searchable all-placement session resume with visible unsafe labels, fork, clone, and visible connection state
 - Optional persistent fullscreen mode with a separated fixed dock, highlighted transcript search, prompt jumps, line, half-page, and page navigation, draggable scrollbars, mouse selection with verified copy, native mouse mode, and transcript or resume-hint exit output
 - Opt-in focus-aware terminal bell and deterministic refocus recaps for questions, failures, changes, and completed turns
 - Prompt stash and optional Vim insert or normal editing

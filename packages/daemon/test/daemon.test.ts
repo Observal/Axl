@@ -813,11 +813,17 @@ test("routes runtime interaction requests to an attached client", async (context
   );
 });
 
-test("configuration changes rebuild and log the selected model and thinking", async (context) => {
+test("configuration changes rebuild and log the selected model, thinking, and tools", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "axl.sock");
-  const configured: Array<{ boundary: string; model?: string; thinking?: string }> = [];
+  const configured: Array<{
+    boundary: string;
+    model?: string;
+    thinking?: string;
+    webFetch?: boolean;
+    webSearch?: boolean;
+  }> = [];
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
@@ -826,6 +832,8 @@ test("configuration changes rebuild and log the selected model and thinking", as
         boundary,
         ...(selection.modelId === undefined ? {} : { model: selection.modelId }),
         ...(selection.thinkingLevel === undefined ? {} : { thinking: selection.thinkingLevel }),
+        ...(selection.webFetch === undefined ? {} : { webFetch: selection.webFetch }),
+        ...(selection.webSearch === undefined ? {} : { webSearch: selection.webSearch }),
       });
       return {
         model: replyPort(),
@@ -840,6 +848,14 @@ test("configuration changes rebuild and log the selected model and thinking", as
                 clamped: false,
               },
             }),
+        ...(selection.webFetch === undefined || selection.webSearch === undefined
+          ? {}
+          : {
+              configTools: {
+                webFetch: selection.webFetch,
+                webSearch: selection.webSearch,
+              },
+            }),
       };
     },
   });
@@ -852,6 +868,8 @@ test("configuration changes rebuild and log the selected model and thinking", as
     cwd: directory,
     modelId: "gpt-5",
     thinkingLevel: "medium",
+    webFetch: true,
+    webSearch: true,
   })) as SessionSnapshot;
   const changed = (await client.request("session.configure", {
     sessionId: created.sessionId,
@@ -859,11 +877,36 @@ test("configuration changes rebuild and log the selected model and thinking", as
     thinkingLevel: "high",
   })) as { events: CanonicalEvent[] };
 
+  const toolsChanged = (await client.request("session.configure", {
+    sessionId: created.sessionId,
+    webSearch: false,
+  })) as { events: CanonicalEvent[] };
+
   assert.deepEqual(configured, [
-    { boundary: "session_start", model: "gpt-5", thinking: "medium" },
-    { boundary: "model_switch", model: "gpt-4.1", thinking: "high" },
+    {
+      boundary: "session_start",
+      model: "gpt-5",
+      thinking: "medium",
+      webFetch: true,
+      webSearch: true,
+    },
+    {
+      boundary: "model_switch",
+      model: "gpt-4.1",
+      thinking: "high",
+      webFetch: true,
+      webSearch: true,
+    },
+    {
+      boundary: "tool_change",
+      model: "gpt-4.1",
+      thinking: "high",
+      webFetch: true,
+      webSearch: false,
+    },
   ]);
-  assert.deepEqual(types(changed.events), ["config.model", "config.thinking"]);
+  assert.deepEqual(types(changed.events), ["config.model", "config.thinking", "config.tools"]);
+  assert.deepEqual(types(toolsChanged.events), ["config.model", "config.thinking", "config.tools"]);
 });
 
 test("reload rebuilds the runtime as a logged boundary with live subscriptions", async (context) => {

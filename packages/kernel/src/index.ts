@@ -17,3 +17,5 @@ export * from "./tools/edit.ts";
 export * from "./tools/read.ts";
 export * from "./tools/shell.ts";
 export * from "./tools/validate.ts";
+export * from "./tools/web.ts";
+export * from "./tools/write.ts";

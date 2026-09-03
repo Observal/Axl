@@ -1,16 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import { access } from "node:fs/promises";
+import { access, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { CredentialStore } from "@axl/ai";
-import type { AxlDaemon } from "@axl/daemon";
-import type { ThinkingLevel } from "@axl/protocol";
+import { type AxlDaemon, listStoredSessions } from "@axl/daemon";
+import type { SessionSummary, ThinkingLevel } from "@axl/protocol";
 
 export interface LocalRuntimeDefaults {
   readonly modelId: string;
   readonly thinkingLevel: ThinkingLevel;
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
 }
 
 export type LocalSandboxSelection =
@@ -38,6 +40,67 @@ export function localSandboxStateKey(selection: LocalSandboxSelection): string |
     );
   }
   return join("oci", selection.engine, digest);
+}
+
+export type LocalSessionPlacement =
+  | { readonly type: "native" }
+  | { readonly type: "unsafe" }
+  | { readonly type: "oci"; readonly engine: "podman" | "docker"; readonly image: string };
+
+export interface LocalSessionDescriptor extends SessionSummary {
+  readonly placement: LocalSessionPlacement;
+  readonly placementLabel: string;
+}
+
+async function directories(path: string): Promise<readonly string[]> {
+  try {
+    return (await readdir(path, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+/** Reads the authoritative local logs without starting or weakening any sandbox daemon. */
+export async function listLocalSessions(
+  axlHome: string,
+): Promise<readonly LocalSessionDescriptor[]> {
+  const sources: Array<{
+    directory: string;
+    placement: LocalSessionPlacement;
+    label: string;
+  }> = [
+    { directory: axlHome, placement: { type: "native" }, label: "SANDBOXED · native" },
+    { directory: join(axlHome, "unsafe"), placement: { type: "unsafe" }, label: "UNSAFE" },
+  ];
+  for (const engine of ["podman", "docker"] as const) {
+    const engineDirectory = join(axlHome, "oci", engine);
+    for (const digest of await directories(engineDirectory)) {
+      if (digest.length !== 64) continue;
+      const directory = join(engineDirectory, digest);
+      const summaries = await listStoredSessions(directory);
+      const image = summaries.find((summary) => summary.sandboxImage !== undefined)?.sandboxImage;
+      if (image === undefined) continue;
+      const selection = { type: "oci" as const, engine, image };
+      if (localSandboxStateKey(selection) !== join("oci", engine, digest)) {
+        throw new Error(`OCI session image does not match state directory ${directory}`);
+      }
+      sources.push({ directory, placement: selection, label: `SANDBOXED · ${engine}` });
+    }
+  }
+
+  const listed = await Promise.all(
+    sources.map(async (source) =>
+      (await listStoredSessions(source.directory)).map((summary) => ({
+        ...summary,
+        placement: source.placement,
+        placementLabel: source.label,
+      })),
+    ),
+  );
+  return listed.flat().sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 export async function diagnoseLocalSandboxes(): Promise<{
@@ -173,9 +236,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           ? Promise.resolve([])
           : mcpPackage.loadMcpConfig({ cwd, globalDirectory: axlHome }),
       ]);
-      const active: LocalRuntimeDefaults = {
+      const active = {
         modelId: selection.modelId ?? defaults.modelId,
         thinkingLevel: selection.thinkingLevel ?? defaults.thinkingLevel,
+        webFetch: selection.webFetch ?? defaults.webFetch ?? true,
+        webSearch: selection.webSearch ?? defaults.webSearch ?? true,
       };
       const modelInfo = ai.AZURE_OPENAI_MODELS.find(
         (candidate) => candidate.modelId === active.modelId,
@@ -196,7 +261,17 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       const overflowDirectory = join(stateDirectory, "tool-output");
       tools.register(sandbox.makeShellTool({ cwd, overflowDirectory, policy }));
       tools.register(kernel.makeReadTool({ cwd, ...(unsafe ? {} : { policy }) }));
+      tools.register(kernel.makeWriteTool({ cwd, ...(unsafe ? {} : { policy }) }));
       tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
+      if (active.webFetch) tools.register(kernel.makeWebFetchTool());
+      const braveSearchKey = ai.nodeAuthContext.env("BRAVE_SEARCH_API_KEY");
+      if (active.webSearch) {
+        tools.register(
+          kernel.makeWebSearchTool({
+            ...(braveSearchKey === undefined ? {} : { apiKey: braveSearchKey }),
+          }),
+        );
+      }
 
       if (skillsPackage !== undefined && skills.length > 0) {
         tools.register(skillsPackage.makeSkillTool(skills));
@@ -238,10 +313,17 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         tools,
         ...(mcp === undefined ? {} : { extensionHost: mcp }),
         prompt,
-        log: { secretValues: [...resolved.secretValues, ...mcpSecrets] },
+        log: {
+          secretValues: [
+            ...resolved.secretValues,
+            ...mcpSecrets,
+            ...(braveSearchKey === undefined ? [] : [braveSearchKey]),
+          ],
+        },
         sandbox: sandbox.configuredPayload(),
         configModel: { modelId: active.modelId },
         configThinking: thinking,
+        configTools: { webFetch: active.webFetch, webSearch: active.webSearch },
         ...(boundary === "config_change"
           ? {}
           : {
