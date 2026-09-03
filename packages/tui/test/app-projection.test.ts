@@ -100,6 +100,18 @@ function client(
       if (method === "session.ack") {
         return { cursor: "00000000-0000-4000-8000-000000000102" };
       }
+      if (method === "session.queue.enqueue") {
+        return {
+          queueItemId: "00000000-0000-4000-8000-000000000105",
+          state: "queued",
+        };
+      }
+      if (method === "session.queue.requeue") {
+        return {
+          queueItemId: (params as { queueItemId: string }).queueItemId,
+          state: "queued",
+        };
+      }
       if (method === "session.send" || method === "session.shell") {
         if (sendError !== undefined) throw sendError;
         return method === "session.send"

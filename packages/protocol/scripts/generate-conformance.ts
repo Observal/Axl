@@ -28,6 +28,7 @@ import {
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
 const otherSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174001");
 const eventId = parseEventId("00000000-0000-4000-8000-000000000001");
+const queueItemId = parseEventId("00000000-0000-4000-8000-000000000005");
 const otherEventId = parseEventId("00000000-0000-4000-8000-000000000002");
 const operationId = parseOperationId("00000000-0000-4000-8000-000000000010");
 const idempotencyKey = "00000000-0000-4000-8000-000000000020";
@@ -38,6 +39,10 @@ const eventPayloads = {
   "session.resumed": {},
   "session.closed": { reason: "completed" },
   "user.message": { content: [{ type: "text", text: "hello" }] },
+  "queue.enqueued": { content: [{ type: "text", text: "later" }], priority: "back" },
+  "queue.requeued": { queueItemId, priority: "front" },
+  "queue.started": { queueItemId },
+  "queue.paused": { queueItemId, reason: "daemon_restart" },
   "user.shell": {
     command: "pwd",
     content: [{ type: "text", text: "/workspace" }],
@@ -150,6 +155,12 @@ const params = {
   "session.fork": { sessionId, fromEventId: eventId },
   "session.clone": { sessionId },
   "session.send": { sessionId, content: [{ type: "text", text: "hello" }], delivery: "prompt" },
+  "session.queue.enqueue": {
+    sessionId,
+    content: [{ type: "text", text: "later" }],
+    priority: "back",
+  },
+  "session.queue.requeue": { sessionId, queueItemId: eventId, priority: "front" },
   "session.shell": { sessionId, operationId, command: "pwd", excluded: false },
   "session.interrupt": { sessionId },
   "session.reload": { sessionId },
@@ -233,6 +244,8 @@ const results = {
   "session.fork": { ...opened, selectedText: "hello" },
   "session.clone": opened,
   "session.send": { operationId, stopReason: "stop" },
+  "session.queue.enqueue": { queueItemId: eventId, state: "queued" },
+  "session.queue.requeue": { queueItemId: eventId, state: "queued" },
   "session.shell": { operationId, isError: false, resultEventId: eventId },
   "session.interrupt": { interrupted: true, operationId },
   "session.reload": { boundaryEventIds: [eventId] },

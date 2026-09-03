@@ -4,6 +4,7 @@
 import type {
   CanonicalEvent,
   EventId,
+  EventPayloadMap,
   JsonObject,
   JsonValue,
   OperationId,
@@ -79,6 +80,14 @@ export interface UncertainShellOperation {
   readonly command: string;
 }
 
+export interface ProjectedQueueItem {
+  readonly queueItemId: EventId;
+  readonly operationId?: OperationId;
+  readonly content: EventPayloadMap["queue.enqueued"]["content"];
+  readonly priority: "front" | "back";
+  readonly status: "queued" | "running" | "paused" | "completed" | "failed" | "aborted";
+}
+
 export interface ConversationState {
   readonly sessionId?: SessionId;
   readonly selectedNodeId?: EventId;
@@ -88,6 +97,7 @@ export interface ConversationState {
   readonly operations: readonly ProjectedOperation[];
   readonly activeOperationId?: OperationId;
   readonly uncertainShellOperations: readonly UncertainShellOperation[];
+  readonly queue: readonly ProjectedQueueItem[];
   readonly model?: string;
   readonly provider?: string;
   readonly entitlement?: string;
@@ -165,6 +175,7 @@ export class ConversationProjector {
   private readonly interactions = new Map<string, ProjectedInteraction>();
   private readonly operations = new Map<OperationId, ProjectedOperation>();
   private readonly uncertainShellOperations = new Map<OperationId, UncertainShellOperation>();
+  private readonly queue = new Map<EventId, ProjectedQueueItem>();
   private activeOperationId: OperationId | undefined;
   private model: string | undefined;
   private provider: string | undefined;
@@ -197,6 +208,7 @@ export class ConversationProjector {
         ? {}
         : { activeOperationId: this.activeOperationId }),
       uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
+      queue: Object.freeze([...this.queue.values()]),
       ...(this.model === undefined ? {} : { model: this.model }),
       ...(this.provider === undefined ? {} : { provider: this.provider }),
       ...(this.entitlement === undefined ? {} : { entitlement: this.entitlement }),
@@ -231,6 +243,7 @@ export class ConversationProjector {
     this.operations.clear();
     this.activeOperationId = undefined;
     if (!keepUncertainShells) this.uncertainShellOperations.clear();
+    this.queue.clear();
     this.model = undefined;
     this.provider = undefined;
     this.entitlement = undefined;
@@ -268,6 +281,28 @@ export class ConversationProjector {
     switch (event.type) {
       case "user.message":
         this.updateOperation(event.operationId, "running");
+        break;
+      case "queue.enqueued":
+        this.queue.set(event.id, {
+          queueItemId: event.id,
+          ...(event.operationId === undefined ? {} : { operationId: event.operationId }),
+          content: event.payload.content,
+          priority: event.payload.priority,
+          status: "queued",
+        });
+        break;
+      case "queue.requeued":
+        this.updateQueueItem(event.payload.queueItemId, {
+          status: "queued",
+          priority: event.payload.priority,
+        });
+        break;
+      case "queue.started":
+        this.updateQueueItem(event.payload.queueItemId, { status: "running" });
+        this.updateOperation(event.operationId, "running");
+        break;
+      case "queue.paused":
+        this.updateQueueItem(event.payload.queueItemId, { status: "paused" });
         break;
       case "user.shell":
         this.updateOperation(event.operationId, event.payload.isError ? "failed" : "succeeded");
@@ -363,14 +398,14 @@ export class ConversationProjector {
         if (event.payload.stopReason === "tool_use") {
           this.updateOperation(event.operationId, "running");
         } else {
-          this.updateOperation(
-            event.operationId,
+          const status =
             event.payload.stopReason === "aborted"
               ? "aborted"
               : event.payload.stopReason === "error"
                 ? "failed"
-                : "succeeded",
-          );
+                : "succeeded";
+          this.updateOperation(event.operationId, status);
+          this.completeQueuedOperation(event.operationId, status);
           this.clearActivity(event.operationId);
         }
         break;
@@ -381,6 +416,7 @@ export class ConversationProjector {
       case "session.error":
         this.lastError = event;
         this.updateOperation(event.operationId, "failed");
+        this.completeQueuedOperation(event.operationId, "failed");
         this.clearActivity(event.operationId);
         break;
       case "session.closed":
@@ -488,6 +524,32 @@ export class ConversationProjector {
 
   markShellUncertain(operationId: OperationId, command: string): void {
     this.uncertainShellOperations.set(operationId, { operationId, command });
+  }
+
+  private updateQueueItem(
+    queueItemId: EventId,
+    update: Pick<ProjectedQueueItem, "status"> & Partial<Pick<ProjectedQueueItem, "priority">>,
+  ): void {
+    const current = this.queue.get(queueItemId);
+    if (current === undefined) {
+      throw new ProjectionError("queue_identity_conflict", `Unknown queue item ${queueItemId}`);
+    }
+    this.queue.set(queueItemId, { ...current, ...update });
+  }
+
+  private completeQueuedOperation(
+    operationId: OperationId | undefined,
+    status: "succeeded" | "failed" | "aborted",
+  ): void {
+    if (operationId === undefined) return;
+    for (const [queueItemId, item] of this.queue) {
+      if (item.operationId === operationId && item.status === "running") {
+        this.queue.set(queueItemId, {
+          ...item,
+          status: status === "succeeded" ? "completed" : status,
+        });
+      }
+    }
   }
 
   private updateOperation(

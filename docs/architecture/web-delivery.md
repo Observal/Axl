@@ -19,6 +19,8 @@ Every mutation that may be retried requires a lowercase UUID idempotency key:
 - `session.fork`
 - `session.clone`
 - `session.send`
+- `session.queue.enqueue`
+- `session.queue.requeue`
 - `session.interrupt`
 - `session.reload`
 - `session.configure`
@@ -68,6 +70,8 @@ The idempotency key becomes, or is durably mapped to, the canonical operation ID
 | create | created session root carrying the operation ID |
 | fork or clone | target session root carrying the operation ID and source identity |
 | send | user message and terminal assistant or error events carrying the operation ID |
+| queue enqueue | `queue.enqueued` carrying the operation ID |
+| queue re-queue | one `queue.requeued` carrying the operation ID |
 | interrupt | terminal aborted event for the target operation, or a durable false result when no operation existed |
 | reload | configuration boundary events carrying the operation ID |
 | configure | configuration events carrying the operation ID |
@@ -96,6 +100,14 @@ The first accepted interaction response wins. A retry with the same key returns 
 ### Direct shell operations
 
 `session.shell` is not part of the automatically retryable mutation set. The caller supplies a UUID operation ID, and a completed canonical `user.shell` event carries that ID. After transport loss, the SDK returns the recorded result when present; otherwise it reports an uncertain outcome and never resends the command. `session.interrupt` may request cancellation, but it cannot roll back shell side effects that already occurred.
+
+### Canonical prompt queue
+
+Queued prompts are daemon-owned canonical state shared by every attachment. `session.queue.enqueue` durably appends `queue.enqueued` with the prompt content and its front-or-back priority before acknowledging the request. The event ID is the stable queue item ID. The daemon executes queued items in priority order after the active operation finishes and appends `queue.started` before the corresponding `user.message`.
+
+A queued item is reduced from lifecycle events rather than mutable flags. A terminal `assistant.message` or `session.error` carrying the queue operation ID completes or fails the item. Queue lifecycle consists of `queue.enqueued`, `queue.requeued`, `queue.started`, and `queue.paused`.
+
+A daemon restart never executes a previously pending item implicitly. During session recovery each item whose latest lifecycle is queued becomes `queue.paused` with reason `daemon_restart`. Its content remains visible in canonical history. A user must invoke `session.queue.requeue` to make that item eligible to run again. Re-queueing is itself an idempotent mutation and appends `queue.requeued`. Clients do not maintain private authoritative prompt queues.
 
 ## Canonical event size
 

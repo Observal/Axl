@@ -741,6 +741,20 @@ export class AxlDaemon {
           request.params.content,
           this.mutationOperationId(acceptance),
         );
+      case "session.queue.enqueue":
+        return this.sessions.enqueue(
+          request.params.sessionId,
+          request.params.content,
+          request.params.priority,
+          this.mutationOperationId(acceptance),
+        );
+      case "session.queue.requeue":
+        return this.sessions.requeue(
+          request.params.sessionId,
+          request.params.queueItemId,
+          request.params.priority,
+          this.mutationOperationId(acceptance),
+        );
       case "session.shell":
         return this.sessions.shell(
           request.params.sessionId,

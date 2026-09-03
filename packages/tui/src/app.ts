@@ -324,6 +324,7 @@ const COMMANDS: readonly { readonly name: string; readonly summary: string }[] =
   { name: "/login", summary: "configure Azure OpenAI credentials" },
   { name: "/reload", summary: "reload AGENTS.md, prompt, and tools" },
   { name: "/status", summary: "show session, display, and queue state" },
+  { name: "/requeue", summary: "re-queue a paused prompt by queue item ID" },
   { name: "/resume", summary: "open another saved session" },
   { name: "/fork", summary: "fork from an earlier user message" },
   { name: "/clone", summary: "clone the complete current session" },
@@ -1419,6 +1420,8 @@ export class AxlApp {
       return;
     }
 
+    if (event.type === "queue.started" && !this.hydrating) this.setWorking(true);
+
     if (event.type === "assistant.message") {
       this.liveAssistant.clear();
       this.cancelActivityRender();
@@ -2069,11 +2072,38 @@ export class AxlApp {
           : [`  last error ${this.lastReconnectError}`]),
         `  usage     ${this.view.usageLabel()}`,
         `  speed     ${this.view.tpsLabel() || "?"}`,
-        `  queued    ${this.queued.length}`,
+        `  queued    ${
+          this.queued.length +
+          (this.sessionSubscription?.projector.state.queue.filter(
+            (item) => item.status === "queued" || item.status === "paused",
+          ).length ?? 0)
+        }`,
         `  editor    ${this.editorMode}`,
         `  favorites ${this.modelFavorites.length}`,
         `  developer ${this.developerPanelEnabled ? "on" : "off"}`,
       ]);
+      return;
+    }
+    if (command === "/requeue") {
+      const queueItem = this.sessionSubscription?.projector.state.queue.find(
+        (item) => item.queueItemId === argument && item.status === "paused",
+      );
+      if (queueItem === undefined) {
+        this.notice = this.view.palette.error("✖ provide the ID of a paused queued prompt");
+      } else {
+        void this.client
+          .request("session.queue.requeue", {
+            sessionId: this.sessionId,
+            queueItemId: queueItem.queueItemId,
+            priority: "back",
+          })
+          .catch((error: unknown) => {
+            this.notice = this.view.palette.error(
+              `✖ ${error instanceof Error ? error.message : "re-queue failed"}`,
+            );
+            this.redraw();
+          });
+      }
       return;
     }
     if (command === "/fullscreen") {
@@ -2127,12 +2157,15 @@ export class AxlApp {
 
     const queued = { text: line, attachments: [...this.pendingAttachments] };
     this.pendingAttachments.length = 0;
-    if (prioritize) this.queued.unshift(queued);
-    else this.queued.push(queued);
+    if (this.sending || this.view.working) {
+      this.notice = this.view.palette.dim("· queueing follow-up");
+      this.invalidateFullscreenRows();
+      this.redraw();
+      void this.enqueuePrompt(queued, prioritize ? "front" : "back");
+      return;
+    }
+    this.queued.push(queued);
     this.invalidateFullscreenRows();
-    this.notice = this.view.working
-      ? this.view.palette.dim(`· queued follow-up (${this.queued.length})`)
-      : undefined;
     void this.drainQueue();
   }
 
@@ -3595,6 +3628,33 @@ export class AxlApp {
       this.redraw();
       void this.drainQueue();
     }
+  }
+
+  private async enqueuePrompt(
+    queued: { readonly text: string; readonly attachments: readonly BlobReference[] },
+    priority: "front" | "back",
+  ): Promise<void> {
+    try {
+      await this.client.request("session.queue.enqueue", {
+        sessionId: this.sessionId,
+        content: [
+          ...(queued.text ? [{ type: "text" as const, text: queued.text }] : []),
+          ...queued.attachments.map((blob) => ({ type: "blob" as const, blob })),
+        ],
+        priority,
+      });
+      const count =
+        this.sessionSubscription?.projector.state.queue.filter((item) => item.status === "queued")
+          .length ?? 0;
+      this.notice = this.view.palette.dim(`· queued follow-up (${count})`);
+    } catch (error) {
+      this.editor.setText([queued.text, this.editor.text].filter(Boolean).join("\n\n"));
+      this.pendingAttachments.unshift(...queued.attachments);
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "queue failed"}`,
+      );
+    }
+    this.redraw();
   }
 
   private async drainQueue(): Promise<void> {

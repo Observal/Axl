@@ -243,6 +243,14 @@ export class SessionView {
             item.type === "blob" ? this.blobRows(item.blob) : [],
           ),
         ];
+      case "queue.enqueued":
+        return [dim(`· queued · ${sanitizeTerminalText(textOf(event.payload.content))}`)];
+      case "queue.requeued":
+        return [dim(`· re-queued ${event.payload.queueItemId}`)];
+      case "queue.started":
+        return [dim(`· running queued prompt ${event.payload.queueItemId}`)];
+      case "queue.paused":
+        return [dim(`· queued prompt paused · use re-queue to run ${event.payload.queueItemId}`)];
       case "user.shell":
         return renderShellPassthrough({
           command: event.payload.command,

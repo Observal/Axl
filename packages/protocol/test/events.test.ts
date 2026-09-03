@@ -22,6 +22,10 @@ const validPayloads = {
   "session.resumed": {},
   "session.closed": { reason: "completed" },
   "user.message": { content: [{ type: "text", text: "hello" }] },
+  "queue.enqueued": { content: [{ type: "text", text: "later" }], priority: "back" },
+  "queue.requeued": { queueItemId: eventId, priority: "front" },
+  "queue.started": { queueItemId: eventId },
+  "queue.paused": { queueItemId: eventId, reason: "daemon_restart" },
   "user.shell": {
     command: "pwd",
     content: [{ type: "text", text: "/workspace" }],

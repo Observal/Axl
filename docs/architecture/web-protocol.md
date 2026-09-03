@@ -61,6 +61,8 @@ session.clone
 session.send.prompt
 session.send.steer
 session.send.follow_up
+session.queue.enqueue
+session.queue.requeue
 session.shell
 session.interrupt
 session.reload
@@ -303,6 +305,25 @@ interface SessionSendResult {
   readonly stopReason: AssistantStopReason;
 }
 
+interface SessionQueueEnqueueParams {
+  readonly sessionId: SessionId;
+  readonly content: readonly UserContent[];
+  readonly priority: "front" | "back";
+}
+interface SessionQueueEnqueueResult {
+  readonly queueItemId: EventId;
+  readonly state: "queued" | "paused";
+}
+interface SessionQueueRequeueParams {
+  readonly sessionId: SessionId;
+  readonly queueItemId: EventId;
+  readonly priority: "front" | "back";
+}
+interface SessionQueueRequeueResult {
+  readonly queueItemId: EventId;
+  readonly state: "queued";
+}
+
 interface SessionShellParams {
   readonly sessionId: SessionId;
   readonly operationId: OperationId;
@@ -367,6 +388,8 @@ interface SessionDisposeResult {
 `delivery: "prompt"` is the existing ordinary prompt behavior. `steer` and `follow_up` are accepted only when their capabilities are granted. Before those semantics land, clients send only `prompt` and do not present ordinary queuing as steering.
 
 `session.send` completes when the turn reaches a canonical terminal assistant event or error. Detaching does not cancel it. `session.interrupt` is the session-operation cancellation path.
+
+Queued prompts use `session.queue.enqueue` and `session.queue.requeue`. Enqueue records prompt content and priority in canonical history before returning. The daemon appends lifecycle events as an item is queued, started, paused after restart, and explicitly re-queued. Pending items are never executed automatically after restart. Every attachment derives the same queue from those events.
 
 `session.shell` is correlated by its caller-supplied operation ID but is never retried automatically. Its SDK wrapper returns either `{ state: "completed", result }` or `{ state: "uncertain", operationId }`. If transport loss prevents the SDK from proving a canonical `user.shell` result, it preserves the command for explicit user review. `session.interrupt` may cancel the active shell operation, but cancellation does not imply that prior shell side effects were rolled back.
 
@@ -485,7 +508,7 @@ It consumes validated snapshot pages, ordered canonical deliveries, and transien
 - unresolved and resolved interactions
 - errors, interruptions, and compaction
 - model, provider, thinking, sandbox, usage, and cost supplied by events
-- operation and queue state supplied by protocol
+- operation and daemon-owned queue state supplied by canonical lifecycle events
 - transient activity reconciled by operation ID and replaced by canonical terminal events
 - canonical `user.shell` records and uncertain local shell outcomes
 - unknown events and tools through safe generic records

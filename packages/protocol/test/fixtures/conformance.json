@@ -129,6 +129,33 @@
     {
       "kind": "request",
       "id": 14,
+      "method": "session.queue.enqueue",
+      "params": {
+        "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+        "content": [
+          {
+            "type": "text",
+            "text": "later"
+          }
+        ],
+        "priority": "back"
+      },
+      "idempotencyKey": "00000000-0000-4000-8000-000000000020"
+    },
+    {
+      "kind": "request",
+      "id": 15,
+      "method": "session.queue.requeue",
+      "params": {
+        "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+        "queueItemId": "00000000-0000-4000-8000-000000000001",
+        "priority": "front"
+      },
+      "idempotencyKey": "00000000-0000-4000-8000-000000000020"
+    },
+    {
+      "kind": "request",
+      "id": 16,
       "method": "session.shell",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -139,7 +166,7 @@
     },
     {
       "kind": "request",
-      "id": 15,
+      "id": 17,
       "method": "session.interrupt",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -148,7 +175,7 @@
     },
     {
       "kind": "request",
-      "id": 16,
+      "id": 18,
       "method": "session.reload",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -157,7 +184,7 @@
     },
     {
       "kind": "request",
-      "id": 17,
+      "id": 19,
       "method": "session.configure",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -168,7 +195,7 @@
     },
     {
       "kind": "request",
-      "id": 18,
+      "id": 20,
       "method": "session.interaction.respond",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -182,7 +209,7 @@
     },
     {
       "kind": "request",
-      "id": 19,
+      "id": 21,
       "method": "session.subscribe",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -190,7 +217,7 @@
     },
     {
       "kind": "request",
-      "id": 20,
+      "id": 22,
       "method": "session.workspace.list",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -200,7 +227,7 @@
     },
     {
       "kind": "request",
-      "id": 21,
+      "id": 23,
       "method": "session.workspace.read",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -211,7 +238,7 @@
     },
     {
       "kind": "request",
-      "id": 22,
+      "id": 24,
       "method": "session.workspace.status",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -220,7 +247,7 @@
     },
     {
       "kind": "request",
-      "id": 23,
+      "id": 25,
       "method": "session.workspace.diff",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -232,7 +259,7 @@
     },
     {
       "kind": "request",
-      "id": 24,
+      "id": 26,
       "method": "session.workspace.checkpoint",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -241,7 +268,7 @@
     },
     {
       "kind": "request",
-      "id": 25,
+      "id": 27,
       "method": "session.blob.start",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -252,7 +279,7 @@
     },
     {
       "kind": "request",
-      "id": 26,
+      "id": 28,
       "method": "session.blob.chunk",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -263,7 +290,7 @@
     },
     {
       "kind": "request",
-      "id": 27,
+      "id": 29,
       "method": "session.blob.commit",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -272,7 +299,7 @@
     },
     {
       "kind": "request",
-      "id": 28,
+      "id": 30,
       "method": "session.blob.abort",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -281,7 +308,7 @@
     },
     {
       "kind": "request",
-      "id": 29,
+      "id": 31,
       "method": "session.blob.read",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -292,7 +319,7 @@
     },
     {
       "kind": "request",
-      "id": 30,
+      "id": 32,
       "method": "session.dispose",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -466,6 +493,24 @@
     {
       "kind": "success",
       "id": 14,
+      "method": "session.queue.enqueue",
+      "result": {
+        "queueItemId": "00000000-0000-4000-8000-000000000001",
+        "state": "queued"
+      }
+    },
+    {
+      "kind": "success",
+      "id": 15,
+      "method": "session.queue.requeue",
+      "result": {
+        "queueItemId": "00000000-0000-4000-8000-000000000001",
+        "state": "queued"
+      }
+    },
+    {
+      "kind": "success",
+      "id": 16,
       "method": "session.shell",
       "result": {
         "operationId": "00000000-0000-4000-8000-000000000010",
@@ -475,7 +520,7 @@
     },
     {
       "kind": "success",
-      "id": 15,
+      "id": 17,
       "method": "session.interrupt",
       "result": {
         "interrupted": true,
@@ -484,7 +529,7 @@
     },
     {
       "kind": "success",
-      "id": 16,
+      "id": 18,
       "method": "session.reload",
       "result": {
         "boundaryEventIds": ["00000000-0000-4000-8000-000000000001"]
@@ -492,7 +537,7 @@
     },
     {
       "kind": "success",
-      "id": 17,
+      "id": 19,
       "method": "session.configure",
       "result": {
         "modelId": "model-1",
@@ -504,7 +549,7 @@
     },
     {
       "kind": "success",
-      "id": 18,
+      "id": 20,
       "method": "session.interaction.respond",
       "result": {
         "interactionId": "interaction-1",
@@ -513,7 +558,7 @@
     },
     {
       "kind": "success",
-      "id": 19,
+      "id": 21,
       "method": "session.subscribe",
       "result": {
         "subscriptionId": "subscription-1",
@@ -545,7 +590,7 @@
     },
     {
       "kind": "success",
-      "id": 20,
+      "id": 22,
       "method": "session.workspace.list",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -561,7 +606,7 @@
     },
     {
       "kind": "success",
-      "id": 21,
+      "id": 23,
       "method": "session.workspace.read",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -577,7 +622,7 @@
     },
     {
       "kind": "success",
-      "id": 22,
+      "id": 24,
       "method": "session.workspace.status",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -603,7 +648,7 @@
     },
     {
       "kind": "success",
-      "id": 23,
+      "id": 25,
       "method": "session.workspace.diff",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -640,7 +685,7 @@
     },
     {
       "kind": "success",
-      "id": 24,
+      "id": 26,
       "method": "session.workspace.checkpoint",
       "result": {
         "enabled": true,
@@ -649,7 +694,7 @@
     },
     {
       "kind": "success",
-      "id": 25,
+      "id": 27,
       "method": "session.blob.start",
       "result": {
         "uploadId": "upload-1",
@@ -658,7 +703,7 @@
     },
     {
       "kind": "success",
-      "id": 26,
+      "id": 28,
       "method": "session.blob.chunk",
       "result": {
         "nextOffset": 4
@@ -666,7 +711,7 @@
     },
     {
       "kind": "success",
-      "id": 27,
+      "id": 29,
       "method": "session.blob.commit",
       "result": {
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -677,7 +722,7 @@
     },
     {
       "kind": "success",
-      "id": 28,
+      "id": 30,
       "method": "session.blob.abort",
       "result": {
         "aborted": true
@@ -685,7 +730,7 @@
     },
     {
       "kind": "success",
-      "id": 29,
+      "id": 31,
       "method": "session.blob.read",
       "result": {
         "data": "YWJjZA==",
@@ -696,7 +741,7 @@
     },
     {
       "kind": "success",
-      "id": 30,
+      "id": 32,
       "method": "session.dispose",
       "result": {
         "disposed": true,
@@ -864,6 +909,24 @@
       "error": {
         "code": "operation_active",
         "message": "Fixture error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "unknown_queue_item",
+        "message": "Fixture error: unknown_queue_item",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": -1,
+      "error": {
+        "code": "queue_not_paused",
+        "message": "Fixture error: queue_not_paused",
         "retryable": false
       }
     },
@@ -1249,6 +1312,62 @@
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
       "timestamp": 1725000000004,
+      "type": "queue.enqueued",
+      "payload": {
+        "content": [
+          {
+            "type": "text",
+            "text": "later"
+          }
+        ],
+        "priority": "back"
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000006",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000005,
+      "type": "queue.requeued",
+      "payload": {
+        "queueItemId": "00000000-0000-4000-8000-000000000005",
+        "priority": "front"
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000007",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000006,
+      "type": "queue.started",
+      "payload": {
+        "queueItemId": "00000000-0000-4000-8000-000000000005"
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000008",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000007,
+      "type": "queue.paused",
+      "payload": {
+        "queueItemId": "00000000-0000-4000-8000-000000000005",
+        "reason": "daemon_restart"
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000009",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000008,
       "type": "user.shell",
       "payload": {
         "command": "pwd",
@@ -1264,11 +1383,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000006",
+      "id": "00000000-0000-4000-8000-00000000000a",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000005,
+      "timestamp": 1725000000009,
       "type": "assistant.message",
       "payload": {
         "content": [
@@ -1294,11 +1413,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000007",
+      "id": "00000000-0000-4000-8000-00000000000b",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000006,
+      "timestamp": 1725000000010,
       "type": "tool.call",
       "payload": {
         "callId": "call-1",
@@ -1310,11 +1429,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000008",
+      "id": "00000000-0000-4000-8000-00000000000c",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000007,
+      "timestamp": 1725000000011,
       "type": "tool.result",
       "payload": {
         "callId": "call-1",
@@ -1333,66 +1452,14 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000009",
-      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
-      "operationId": "00000000-0000-4000-8000-000000000010",
-      "parentId": null,
-      "timestamp": 1725000000008,
-      "type": "config.model",
-      "payload": {
-        "modelId": "model-1"
-      }
-    },
-    {
-      "version": 1,
-      "id": "00000000-0000-4000-8000-00000000000a",
-      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
-      "operationId": "00000000-0000-4000-8000-000000000010",
-      "parentId": null,
-      "timestamp": 1725000000009,
-      "type": "config.provider",
-      "payload": {
-        "providerId": "provider-1"
-      }
-    },
-    {
-      "version": 1,
-      "id": "00000000-0000-4000-8000-00000000000b",
-      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
-      "operationId": "00000000-0000-4000-8000-000000000010",
-      "parentId": null,
-      "timestamp": 1725000000010,
-      "type": "config.entitlement",
-      "payload": {
-        "entitlementId": "credential-reference"
-      }
-    },
-    {
-      "version": 1,
-      "id": "00000000-0000-4000-8000-00000000000c",
-      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
-      "operationId": "00000000-0000-4000-8000-000000000010",
-      "parentId": null,
-      "timestamp": 1725000000011,
-      "type": "config.thinking",
-      "payload": {
-        "requested": "high",
-        "effective": "medium",
-        "clamped": true
-      }
-    },
-    {
-      "version": 1,
       "id": "00000000-0000-4000-8000-00000000000d",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
       "timestamp": 1725000000012,
-      "type": "config.dialect",
+      "type": "config.model",
       "payload": {
-        "dialectId": "openai-chat",
-        "rosterFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "reason": "model_switch"
+        "modelId": "model-1"
       }
     },
     {
@@ -1402,11 +1469,9 @@
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
       "timestamp": 1725000000013,
-      "type": "prompt.section",
+      "type": "config.provider",
       "payload": {
-        "name": "identity",
-        "source": "core",
-        "content": "You are Axl."
+        "providerId": "provider-1"
       }
     },
     {
@@ -1416,6 +1481,60 @@
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
       "timestamp": 1725000000014,
+      "type": "config.entitlement",
+      "payload": {
+        "entitlementId": "credential-reference"
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000010",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000015,
+      "type": "config.thinking",
+      "payload": {
+        "requested": "high",
+        "effective": "medium",
+        "clamped": true
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000011",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000016,
+      "type": "config.dialect",
+      "payload": {
+        "dialectId": "openai-chat",
+        "rosterFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reason": "model_switch"
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000012",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000017,
+      "type": "prompt.section",
+      "payload": {
+        "name": "identity",
+        "source": "core",
+        "content": "You are Axl."
+      }
+    },
+    {
+      "version": 1,
+      "id": "00000000-0000-4000-8000-000000000013",
+      "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+      "operationId": "00000000-0000-4000-8000-000000000010",
+      "parentId": null,
+      "timestamp": 1725000000018,
       "type": "tool.schema",
       "payload": {
         "name": "read",
@@ -1428,11 +1547,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000010",
+      "id": "00000000-0000-4000-8000-000000000014",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000015,
+      "timestamp": 1725000000019,
       "type": "context.injected",
       "payload": {
         "source": "skill",
@@ -1441,11 +1560,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000011",
+      "id": "00000000-0000-4000-8000-000000000015",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000016,
+      "timestamp": 1725000000020,
       "type": "context.extension",
       "payload": {
         "extensionId": "example",
@@ -1455,11 +1574,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000012",
+      "id": "00000000-0000-4000-8000-000000000016",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000017,
+      "timestamp": 1725000000021,
       "type": "permission.requested",
       "payload": {
         "capability": "filesystem.write",
@@ -1468,11 +1587,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000013",
+      "id": "00000000-0000-4000-8000-000000000017",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000018,
+      "timestamp": 1725000000022,
       "type": "permission.resolved",
       "payload": {
         "requestId": "00000000-0000-4000-8000-000000000001",
@@ -1481,11 +1600,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000014",
+      "id": "00000000-0000-4000-8000-000000000018",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000019,
+      "timestamp": 1725000000023,
       "type": "interaction.requested",
       "payload": {
         "interactionId": "interaction-1",
@@ -1501,11 +1620,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000015",
+      "id": "00000000-0000-4000-8000-000000000019",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000020,
+      "timestamp": 1725000000024,
       "type": "interaction.resolved",
       "payload": {
         "interactionId": "interaction-1",
@@ -1517,11 +1636,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000016",
+      "id": "00000000-0000-4000-8000-00000000001a",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000021,
+      "timestamp": 1725000000025,
       "type": "sandbox.configured",
       "payload": {
         "provider": "bubblewrap",
@@ -1534,11 +1653,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000017",
+      "id": "00000000-0000-4000-8000-00000000001b",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000022,
+      "timestamp": 1725000000026,
       "type": "sandbox.violation",
       "payload": {
         "capability": "filesystem.write",
@@ -1547,11 +1666,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000018",
+      "id": "00000000-0000-4000-8000-00000000001c",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000023,
+      "timestamp": 1725000000027,
       "type": "context.compacted",
       "payload": {
         "summary": "Earlier work",
@@ -1560,11 +1679,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-000000000019",
+      "id": "00000000-0000-4000-8000-00000000001d",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000024,
+      "timestamp": 1725000000028,
       "type": "session.error",
       "payload": {
         "code": "provider_failed",
@@ -1574,11 +1693,11 @@
     },
     {
       "version": 1,
-      "id": "00000000-0000-4000-8000-00000000001a",
+      "id": "00000000-0000-4000-8000-00000000001e",
       "sessionId": "123e4567-e89b-42d3-a456-426614174000",
       "operationId": "00000000-0000-4000-8000-000000000010",
       "parentId": null,
-      "timestamp": 1725000000025,
+      "timestamp": 1725000000029,
       "type": "child.result",
       "payload": {
         "childSessionId": "123e4567-e89b-42d3-a456-426614174001",

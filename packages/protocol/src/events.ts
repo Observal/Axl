@@ -60,6 +60,13 @@ export type EventPayloadMap = {
   "session.resumed": Record<string, never>;
   "session.closed": { readonly reason: SessionCloseReason };
   "user.message": { readonly content: readonly UserContent[] };
+  "queue.enqueued": {
+    readonly content: readonly UserContent[];
+    readonly priority: "front" | "back";
+  };
+  "queue.requeued": { readonly queueItemId: EventId; readonly priority: "front" | "back" };
+  "queue.started": { readonly queueItemId: EventId };
+  "queue.paused": { readonly queueItemId: EventId; readonly reason: "daemon_restart" };
   "user.shell": {
     readonly command: string;
     readonly content: readonly UserContent[];
@@ -321,6 +328,29 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
   "user.message": (payload, path) => {
     exact(payload, path, ["content"]);
     validateContent(payload.content, `${path}.content`, false);
+    return payload;
+  },
+  "queue.enqueued": (payload, path) => {
+    exact(payload, path, ["content", "priority"]);
+    validateContent(payload.content, `${path}.content`, false);
+    choice(payload.priority, `${path}.priority`, ["front", "back"]);
+    return payload;
+  },
+  "queue.requeued": (payload, path) => {
+    exact(payload, path, ["queueItemId", "priority"]);
+    parseEventId(payload.queueItemId, `${path}.queueItemId`);
+    choice(payload.priority, `${path}.priority`, ["front", "back"]);
+    return payload;
+  },
+  "queue.started": (payload, path) => {
+    exact(payload, path, ["queueItemId"]);
+    parseEventId(payload.queueItemId, `${path}.queueItemId`);
+    return payload;
+  },
+  "queue.paused": (payload, path) => {
+    exact(payload, path, ["queueItemId", "reason"]);
+    parseEventId(payload.queueItemId, `${path}.queueItemId`);
+    choice(payload.reason, `${path}.reason`, ["daemon_restart"]);
     return payload;
   },
   "user.shell": (payload, path) => {

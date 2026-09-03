@@ -2159,6 +2159,130 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
   assert.equal(snapshot.events.filter((event) => event.type === "user.message").length, 1);
 });
 
+test("daemon-owned queued prompts are canonical and execute in priority order", async (context) => {
+  const paused = pausedActivityPort();
+  const { socketPath, cwd } = await startDaemon(context, paused.port);
+  const client = await connectUnixClient(socketPath);
+  const observer = await connectUnixClient(socketPath, {
+    identity: { kind: "headless", version: "0.0.0", instanceId: randomUUID() },
+  });
+  context.after(() => {
+    client.close();
+    observer.close();
+  });
+  const created = await client.request("session.create", { cwd });
+  const subscription = await subscribeSession(client, created.sessionId);
+  const observedSubscription = await subscribeSession(observer, created.sessionId);
+  context.after(() => Promise.all([subscription.close(), observedSubscription.close()]));
+
+  const active = client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "first" }],
+  });
+  await waitFor(() => subscription.projector.state.activeOperationId !== undefined, "active turn");
+  const queueKey = "00000000-0000-4000-8000-000000000130";
+  const queueRequest = {
+    sessionId: created.sessionId,
+    content: [{ type: "text" as const, text: "second" }],
+    priority: "back" as const,
+  };
+  const queued = await client.request("session.queue.enqueue", queueRequest, {
+    idempotencyKey: queueKey,
+  });
+  assert.deepEqual(
+    await client.request("session.queue.enqueue", queueRequest, { idempotencyKey: queueKey }),
+    queued,
+  );
+  await waitFor(
+    () =>
+      subscription.projector.state.queue.some((item) => item.queueItemId === queued.queueItemId),
+    "canonical queued prompt",
+  );
+  await waitFor(
+    () =>
+      observedSubscription.projector.state.queue.some(
+        (item) => item.queueItemId === queued.queueItemId,
+      ),
+    "shared canonical queue",
+  );
+  assert.deepEqual(subscription.projector.state.queue, observedSubscription.projector.state.queue);
+  assert.equal(
+    subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+      ?.status,
+    "queued",
+  );
+
+  paused.finish();
+  await active;
+  await waitFor(
+    () =>
+      subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status === "completed",
+    "queued prompt completion",
+  );
+  assert.equal(
+    subscription.projector.state.records.filter((record) => record.event.type === "user.message")
+      .length,
+    2,
+  );
+});
+
+test("queued prompts become paused after restart and require explicit re-queueing", async (context) => {
+  const paused = pausedActivityPort();
+  const fixture = await startDaemon(context, paused.port);
+  const client = await connectUnixClient(fixture.socketPath);
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const active = client
+    .request("session.send", {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "active" }],
+    })
+    .catch(() => undefined);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  const queued = await client.request("session.queue.enqueue", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "survive restart" }],
+    priority: "back",
+  });
+
+  const stopping = fixture.daemon.stop();
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  paused.finish();
+  await Promise.allSettled([active, stopping]);
+  client.close();
+
+  const restarted = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry(), system: "You are Axl." }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recovered = await connectUnixClient(fixture.socketPath);
+  context.after(() => recovered.close());
+  await recovered.request("session.resume", { sessionId: created.sessionId });
+  const subscription = await subscribeSession(recovered, created.sessionId);
+  context.after(() => subscription.close());
+  const pausedItem = subscription.projector.state.queue.find(
+    (item) => item.queueItemId === queued.queueItemId,
+  );
+  assert.equal(pausedItem?.status, "paused");
+
+  await recovered.request("session.queue.requeue", {
+    sessionId: created.sessionId,
+    queueItemId: queued.queueItemId,
+    priority: "back",
+  });
+  await waitFor(
+    () =>
+      subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status === "completed",
+    "re-queued prompt completion",
+  );
+});
+
 test("subscribe supports opaque acknowledged cursors and multiple attachments", async (context) => {
   const { socketPath, cwd } = await startDaemon(context);
   const one = await connectUnixClient(socketPath);

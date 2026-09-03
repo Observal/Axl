@@ -218,6 +218,32 @@ test("replaces activity by operation and clears it on canonical completion", () 
   assert.equal(projector.state.activity, undefined);
 });
 
+test("derives canonical queue lifecycle state", () => {
+  const projector = new ConversationProjector(sessionId);
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000077");
+  const enqueued = {
+    ...event("queue.enqueued", {
+      content: [{ type: "text", text: "later" }],
+      priority: "back",
+    }),
+    operationId,
+  };
+  projector.applyEvent(enqueued);
+  assert.equal(projector.state.queue[0]?.status, "queued");
+  projector.applyEvent(
+    event("queue.paused", { queueItemId: enqueued.id, reason: "daemon_restart" }),
+  );
+  assert.equal(projector.state.queue[0]?.status, "paused");
+  projector.applyEvent(event("queue.requeued", { queueItemId: enqueued.id, priority: "front" }));
+  projector.applyEvent(event("queue.started", { queueItemId: enqueued.id }));
+  assert.equal(projector.state.queue[0]?.status, "running");
+  projector.applyEvent({
+    ...event("assistant.message", { content: [], stopReason: "stop" }),
+    operationId,
+  });
+  assert.equal(projector.state.queue[0]?.status, "completed");
+});
+
 test("projects the language-neutral canonical event corpus deterministically", () => {
   const first = new ConversationProjector(sessionId);
   const second = new ConversationProjector(sessionId);

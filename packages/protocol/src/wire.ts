@@ -592,6 +592,8 @@ export const WIRE_CAPABILITIES = [
   "session.fork",
   "session.clone",
   "session.send.prompt",
+  "session.queue.enqueue",
+  "session.queue.requeue",
   "session.shell",
   "session.interrupt",
   "session.reload",
@@ -711,6 +713,22 @@ export interface RpcMethodMap {
       readonly stopReason: AssistantStopReason;
     };
   };
+  readonly "session.queue.enqueue": {
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly content: readonly UserContent[];
+      readonly priority: "front" | "back";
+    };
+    readonly result: { readonly queueItemId: EventId; readonly state: "queued" | "paused" };
+  };
+  readonly "session.queue.requeue": {
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly queueItemId: EventId;
+      readonly priority: "front" | "back";
+    };
+    readonly result: { readonly queueItemId: EventId; readonly state: "queued" };
+  };
   readonly "session.shell": {
     readonly params: {
       readonly sessionId: SessionId;
@@ -827,6 +845,8 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.fork",
   "session.clone",
   "session.send",
+  "session.queue.enqueue",
+  "session.queue.requeue",
   "session.interrupt",
   "session.reload",
   "session.configure",
@@ -895,6 +915,8 @@ export const RPC_ERROR_CODES = [
   "corrupt_session",
   "event_migration_required",
   "operation_active",
+  "unknown_queue_item",
+  "queue_not_paused",
   "invalid_fork_point",
   "unknown_interaction",
   "interaction_already_resolved",
@@ -1478,6 +1500,36 @@ export function parseWireRequest(value: unknown): WireRequest {
       },
     };
   }
+  if (method === "session.queue.enqueue") {
+    exact(params, "request.params", ["sessionId", "content", "priority"]);
+    if (params.priority !== "front" && params.priority !== "back") {
+      throw new ProtocolValidationError("request.params.priority", "must be front or back");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        content: parseUserContent(params.content, "request.params.content"),
+        priority: params.priority,
+      },
+    };
+  }
+  if (method === "session.queue.requeue") {
+    exact(params, "request.params", ["sessionId", "queueItemId", "priority"]);
+    if (params.priority !== "front" && params.priority !== "back") {
+      throw new ProtocolValidationError("request.params.priority", "must be front or back");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        queueItemId: parseEventId(params.queueItemId, "request.params.queueItemId"),
+        priority: params.priority,
+      },
+    };
+  }
   if (method === "session.shell") {
     exact(params, "request.params", ["sessionId", "operationId", "command", "excluded"]);
     if (typeof params.excluded !== "boolean") {
@@ -2017,6 +2069,19 @@ export function parseRpcResult<Method extends RpcMethod>(
       operationId: parseOperationId(result.operationId, `${path}.operationId`),
       stopReason: result.stopReason,
     };
+  } else if (method === "session.queue.enqueue" || method === "session.queue.requeue") {
+    const result = object(value, path);
+    exact(result, path, ["queueItemId", "state"]);
+    if (
+      result.state !== "queued" &&
+      !(method === "session.queue.enqueue" && result.state === "paused")
+    ) {
+      throw new ProtocolValidationError(`${path}.state`, "is not valid for this queue method");
+    }
+    parsed = {
+      queueItemId: parseEventId(result.queueItemId, `${path}.queueItemId`),
+      state: result.state,
+    };
   } else if (method === "session.shell") {
     const result = object(value, path);
     exact(result, path, ["operationId", "isError", "resultEventId"]);
@@ -2231,6 +2296,8 @@ export const RPC_METHODS = [
   "session.fork",
   "session.clone",
   "session.send",
+  "session.queue.enqueue",
+  "session.queue.requeue",
   "session.shell",
   "session.interrupt",
   "session.reload",

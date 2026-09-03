@@ -125,6 +125,13 @@ interface ActiveTurn {
   finish(): void;
 }
 
+interface QueuedTurn {
+  readonly queueItemId: EventId;
+  readonly operationId: OperationId;
+  readonly content: readonly UserContent[];
+  readonly priority: "front" | "back";
+}
+
 interface PendingInteraction {
   readonly resolve: (response: SessionInteractionResponse) => void;
   readonly reject: (error: Error) => void;
@@ -147,6 +154,9 @@ interface ManagedSession {
   activeTurn?: ActiveTurn;
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
+  readonly queue: QueuedTurn[];
+  queueDraining: boolean;
+  disposing: boolean;
   checkpointError?: WorkspaceCheckpointError;
   workspaceCheckpointsEnabled: boolean;
 }
@@ -404,9 +414,13 @@ export class SessionManager {
       activityState,
       selection,
       interactions: new Map(),
+      queue: [],
+      queueDraining: false,
+      disposing: false,
       workspaceCheckpointsEnabled: false,
     };
     this.sessions.set(sessionId, managed);
+    await this.pauseRecoveredQueue(managed);
     return managed;
   }
 
@@ -557,6 +571,20 @@ export class SessionManager {
     }
     if (evidence.length === 0) return undefined;
     await this.resume(target);
+    if (acceptance.method === "session.queue.enqueue") {
+      const queued = evidence.find((event) => event.type === "queue.enqueued");
+      if (queued?.type !== "queue.enqueued") return undefined;
+      const paused = this.managed(target).events.some(
+        (event) => event.type === "queue.paused" && event.payload.queueItemId === queued.id,
+      );
+      return { queueItemId: queued.id, state: paused ? "paused" : "queued" };
+    }
+    if (acceptance.method === "session.queue.requeue") {
+      const requeued = evidence.find((event) => event.type === "queue.requeued");
+      return requeued?.type === "queue.requeued"
+        ? { queueItemId: requeued.payload.queueItemId, state: "queued" }
+        : undefined;
+    }
     if (acceptance.method === "session.send") {
       const terminal = evidence.findLast(
         (event) =>
@@ -594,8 +622,9 @@ export class SessionManager {
       sessionId: managed.session.log.sessionId,
       cwd: managed.cwd,
       runtime: {
-        state:
-          managed.interactions.size > 0
+        state: managed.disposing
+          ? "disposing"
+          : managed.interactions.size > 0
             ? "waiting_interaction"
             : managed.activeTurn !== undefined || managed.rebuilding !== undefined
               ? "running"
@@ -942,6 +971,79 @@ export class SessionManager {
     };
   }
 
+  async enqueue(
+    sessionId: unknown,
+    content: readonly UserContent[],
+    priority: "front" | "back",
+    operationId: OperationId | undefined,
+  ): Promise<{ queueItemId: EventId; state: "queued" }> {
+    if (operationId === undefined)
+      throw new DaemonError("internal_error", "Queue operation ID is missing");
+    const managed = this.managed(sessionId);
+    const prior = managed.events.find(
+      (event) => event.type === "queue.enqueued" && event.operationId === operationId,
+    );
+    if (prior?.type === "queue.enqueued") return { queueItemId: prior.id, state: "queued" };
+    for (const item of content) {
+      if (item.type === "blob")
+        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+    }
+    const queued = await managed.session.recordQueueEvent(operationId, "queue.enqueued", {
+      content,
+      priority,
+    });
+    const entry = { queueItemId: queued.id, operationId, content, priority };
+    if (priority === "front") managed.queue.unshift(entry);
+    else managed.queue.push(entry);
+    void this.drainQueue(managed);
+    return { queueItemId: queued.id, state: "queued" };
+  }
+
+  async requeue(
+    sessionId: unknown,
+    queueItemId: EventId,
+    priority: "front" | "back",
+    operationId: OperationId | undefined,
+  ): Promise<{ queueItemId: EventId; state: "queued" }> {
+    if (operationId === undefined)
+      throw new DaemonError("internal_error", "Queue operation ID is missing");
+    const managed = this.managed(sessionId);
+    const prior = managed.events.find(
+      (event) => event.type === "queue.requeued" && event.operationId === operationId,
+    );
+    if (prior?.type === "queue.requeued") return { queueItemId, state: "queued" };
+    const queued = managed.events.find(
+      (event) => event.type === "queue.enqueued" && event.id === queueItemId,
+    );
+    if (queued?.type !== "queue.enqueued" || queued.operationId === undefined) {
+      throw new DaemonError("unknown_queue_item", "The queued prompt does not exist");
+    }
+    const latest = managed.events.findLast(
+      (event) =>
+        (event.type === "queue.requeued" ||
+          event.type === "queue.started" ||
+          event.type === "queue.paused") &&
+        event.payload.queueItemId === queueItemId,
+    );
+    if (latest?.type !== "queue.paused") {
+      throw new DaemonError("queue_not_paused", "Only a paused queued prompt can be re-queued");
+    }
+    await managed.session.recordQueueEvent(operationId, "queue.requeued", {
+      queueItemId,
+      priority,
+    });
+    const entry = {
+      queueItemId,
+      operationId: queued.operationId,
+      content: queued.payload.content,
+      priority,
+    };
+    if (priority === "front") managed.queue.unshift(entry);
+    else managed.queue.push(entry);
+    void this.drainQueue(managed);
+    return { queueItemId, state: "queued" };
+  }
+
   async send(
     sessionId: unknown,
     content: readonly UserContent[],
@@ -984,6 +1086,56 @@ export class SessionManager {
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
+      void this.drainQueue(managed);
+    }
+  }
+
+  private async drainQueue(managed: ManagedSession): Promise<void> {
+    if (managed.queueDraining || managed.activeTurn || managed.rebuilding || managed.disposing)
+      return;
+    managed.queueDraining = true;
+    try {
+      while (!managed.activeTurn && !managed.rebuilding) {
+        const queued = managed.queue.shift();
+        if (queued === undefined) break;
+        await managed.session.recordQueueEvent(queued.operationId, "queue.started", {
+          queueItemId: queued.queueItemId,
+        });
+        try {
+          await this.send(managed.session.log.sessionId, queued.content, queued.operationId);
+        } catch {
+          await managed.session.recordSessionError(queued.operationId, {
+            code: "queued_prompt_failed",
+            message: "Queued prompt execution failed",
+            retryable: false,
+          });
+        }
+      }
+    } finally {
+      managed.queueDraining = false;
+    }
+  }
+
+  private async pauseRecoveredQueue(managed: ManagedSession): Promise<void> {
+    const pending = new Map<EventId, OperationId>();
+    for (const event of managed.events) {
+      if (event.type === "queue.enqueued" && event.operationId !== undefined) {
+        pending.set(event.id, event.operationId);
+      } else if (event.type === "queue.started" || event.type === "queue.paused") {
+        pending.delete(event.payload.queueItemId);
+      } else if (event.type === "queue.requeued") {
+        const queued = managed.events.find(
+          (candidate) =>
+            candidate.type === "queue.enqueued" && candidate.id === event.payload.queueItemId,
+        );
+        if (queued?.operationId !== undefined) pending.set(queued.id, queued.operationId);
+      }
+    }
+    for (const [queueItemId, operationId] of pending) {
+      await managed.session.recordQueueEvent(operationId, "queue.paused", {
+        queueItemId,
+        reason: "daemon_restart",
+      });
     }
   }
 
@@ -1047,6 +1199,7 @@ export class SessionManager {
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
+      void this.drainQueue(managed);
     }
   }
 
@@ -1392,6 +1545,7 @@ export class SessionManager {
       managed = this.sessions.get(parsed);
     }
     if (!managed) return;
+    managed.disposing = true;
     await managed.rebuilding;
     managed.activeTurn?.controller.abort();
     for (const [interactionId, interaction] of managed.interactions) {

@@ -535,6 +535,24 @@ export class AgentSession {
     };
   }
 
+  /** Appends daemon-owned queue lifecycle state to the canonical session log. */
+  recordQueueEvent<
+    Type extends "queue.enqueued" | "queue.requeued" | "queue.started" | "queue.paused",
+  >(
+    operationId: OperationId,
+    type: Type,
+    payload: EventPayloadMap[Type],
+  ): Promise<CanonicalEvent<Type>> {
+    return this.append(operationId, type, payload);
+  }
+
+  recordSessionError(
+    operationId: OperationId,
+    payload: EventPayloadMap["session.error"],
+  ): Promise<CanonicalEvent<"session.error">> {
+    return this.append(operationId, "session.error", payload);
+  }
+
   /** Executes each call, appending paired call/result events. Returns true when aborted. */
   private async executeToolCalls(
     operationId: OperationId,
