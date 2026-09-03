@@ -161,7 +161,9 @@ function userMessageText(event: CanonicalEvent): string | undefined {
   return text || undefined;
 }
 
-function summarizeSession(events: readonly CanonicalEvent[]): SessionSummary {
+type StoredSessionSummary = Omit<SessionSummary, "runtime" | "attachmentCount">;
+
+function summarizeSession(events: readonly CanonicalEvent[]): StoredSessionSummary {
   const created = events[0];
   if (created?.type !== "session.created") {
     throw new DaemonError("corrupt_session", "Session has no creation event");
@@ -573,7 +575,7 @@ export class SessionManager {
 
   describe(sessionId: unknown): SessionOpenResult {
     const managed = this.managed(sessionId);
-    const activeOperationId = managed.activityState.current?.operationId;
+    const activeOperationId = managed.activeTurn?.operationId;
     return {
       sessionId: managed.session.log.sessionId,
       cwd: managed.cwd,
@@ -590,7 +592,7 @@ export class SessionManager {
     };
   }
 
-  async list(): Promise<readonly SessionSummary[]> {
+  async list(): Promise<readonly StoredSessionSummary[]> {
     const directory = join(this.options.dataDirectory, "sessions");
     let entries: Dirent[];
     try {
@@ -600,7 +602,7 @@ export class SessionManager {
       throw error;
     }
 
-    const summaries: SessionSummary[] = [];
+    const summaries: StoredSessionSummary[] = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
       const sessionId = parseSessionId(basename(entry.name, ".jsonl"), "session file name");
@@ -612,6 +614,12 @@ export class SessionManager {
       summaries.push(summarizeSession(events));
     }
     return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
+  }
+
+  runtimeState(sessionId: SessionId): SessionOpenResult["runtime"] {
+    const managed = this.sessions.get(sessionId);
+    if (managed === undefined) return { state: "inactive" };
+    return this.describe(sessionId).runtime;
   }
 
   async fork(
@@ -1094,7 +1102,12 @@ export class SessionManager {
     }
   }
 
-  async workspaceDiff(sessionId: unknown, scope: WorkspaceDiffScope): Promise<WorkspaceDiff> {
+  async workspaceDiff(
+    sessionId: unknown,
+    scope: WorkspaceDiffScope,
+    signal?: AbortSignal,
+  ): Promise<WorkspaceDiff> {
+    if (signal?.aborted) throw new DaemonError("cancelled", "Workspace request was cancelled");
     const managed = this.managed(sessionId);
     if (scope === "last-turn" && managed.checkpointError !== undefined) {
       throw new DaemonError(managed.checkpointError.code, managed.checkpointError.message, {
@@ -1102,11 +1115,13 @@ export class SessionManager {
       });
     }
     try {
-      return await this.workspaceCheckpoints.diff(
+      const result = await this.workspaceCheckpoints.diff(
         managed.session.log.sessionId,
         managed.cwd,
         scope,
       );
+      if (signal?.aborted) throw new DaemonError("cancelled", "Workspace request was cancelled");
+      return result;
     } catch (error) {
       if (error instanceof WorkspaceCheckpointError) {
         throw new DaemonError(error.code, error.message, { cause: error });

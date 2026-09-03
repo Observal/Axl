@@ -20,7 +20,6 @@ import type {
   SessionHistoryResult,
   SessionId,
   SessionSubscribeResult,
-  SessionSummary,
   Usage,
 } from "@axl/protocol";
 import {
@@ -33,7 +32,13 @@ import {
   type WireRequest,
 } from "@axl/protocol";
 
-import { AxlDaemon, DaemonClient, WireClientError, type WireEvent } from "../src/index.ts";
+import {
+  AxlDaemon,
+  DaemonClient,
+  DaemonError,
+  WireClientError,
+  type WireEvent,
+} from "../src/index.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
 const execute = promisify(execFile);
@@ -205,7 +210,12 @@ test("requires version-4 initialization before session access", async (context) 
     assert.equal(info.result.securityMode, "sandboxed");
   }
 
-  raw.send({ kind: "request", id: 1, method: "session.list", params: {} });
+  raw.send({
+    kind: "request",
+    id: 1,
+    method: "session.list",
+    params: { scope: "all_local", order: "recent", pageSize: 50 },
+  });
   const beforeInitialization = await raw.next();
   assert.equal(beforeInitialization.kind, "error");
   if (beforeInitialization.kind === "error") {
@@ -234,7 +244,12 @@ test("requires version-4 initialization before session access", async (context) 
     assert.deepEqual(initialized.result.grantedCapabilities, ["session.create"]);
   }
 
-  raw.send({ kind: "request", id: 4, method: "session.list", params: {} });
+  raw.send({
+    kind: "request",
+    id: 4,
+    method: "session.list",
+    params: { scope: "all_local", order: "recent", pageSize: 50 },
+  });
   const unsupported = await raw.next();
   assert.equal(unsupported.kind, "error");
   if (unsupported.kind === "error") {
@@ -276,6 +291,69 @@ test("requires version-4 initialization before session access", async (context) 
     assert.equal(keyOnRead.id, 6);
     assert.equal(keyOnRead.error.code, "invalid_idempotency_key");
   }
+});
+
+test("cancels attachment-owned read requests without cancelling session operations", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+
+  fixture.daemon.sessions.workspaceDiff = async (_sessionId, _scope, signal) =>
+    new Promise((_, reject) => {
+      signal?.addEventListener(
+        "abort",
+        () => reject(new DaemonError("cancelled", "Workspace request was cancelled")),
+        { once: true },
+      );
+    });
+  const pending = client.request("session.workspace.diff", {
+    sessionId: created.sessionId,
+    scope: "working",
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  assert.deepEqual(await client.request("request.cancel", { requestId: 3 }), {
+    cancellationRequested: true,
+  });
+  await assert.rejects(
+    pending,
+    (error) => error instanceof WireClientError && error.code === "cancelled",
+  );
+  assert.deepEqual(await client.request("request.cancel", { requestId: 999 }), {
+    cancellationRequested: false,
+  });
+  assert.equal(
+    (await client.request("session.interrupt", { sessionId: created.sessionId })).interrupted,
+    false,
+  );
+});
+
+test("expires incomplete snapshots and requires a replacement boundary", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    snapshotIdleLifetimeMs: 10,
+    snapshotAbsoluteLifetimeMs: 50,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await DaemonClient.connect(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: directory });
+  const subscription = await client.request("session.subscribe", { sessionId: created.sessionId });
+  assert.ok(subscription.snapshot);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  await assert.rejects(
+    client.request("session.ack", {
+      subscriptionId: subscription.subscriptionId,
+      cursor: subscription.snapshot.boundaryCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+  );
 });
 
 test("publishes bounded attachment presence and subscription membership", async (context) => {
@@ -382,7 +460,11 @@ test("reports the daemon security mode", async (context) => {
   assert.deepEqual(sandboxedClient.connection.grantedCapabilities, ["session.create"]);
   assert.deepEqual(await sandboxedClient.request("connection.ping", {}), {});
   await assert.rejects(
-    sandboxedClient.request("session.list", {}),
+    sandboxedClient.request("session.list", {
+      scope: "all_local",
+      order: "recent",
+      pageSize: 50,
+    }),
     (error) => error instanceof WireClientError && error.code === "unsupported_capability",
   );
   assert.deepEqual(await sandboxedClient.request("daemon.info", {}), {
@@ -1169,12 +1251,18 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
     content: [{ type: "text", text: "second prompt" }],
   });
 
-  const listed = (await client.request("session.list", {})) as SessionSummary[];
-  assert.equal(listed.length, 1);
-  assert.equal(listed[0]?.cwd, first.cwd);
-  assert.equal(listed[0]?.userMessageCount, 2);
-  assert.equal(listed[0]?.firstUserMessage, "first prompt");
-  assert.equal(listed[0]?.lastUserMessage, "second prompt");
+  const listed = await client.request("session.list", {
+    scope: "all_local",
+    order: "recent",
+    pageSize: 50,
+  });
+  assert.equal(listed.sessions.length, 1);
+  assert.equal(listed.sessions[0]?.cwd, first.cwd);
+  assert.equal(listed.sessions[0]?.userMessageCount, 2);
+  assert.equal(listed.sessions[0]?.firstUserMessage, "first prompt");
+  assert.equal(listed.sessions[0]?.lastUserMessage, "second prompt");
+  assert.deepEqual(listed.sessions[0]?.runtime, { state: "idle" });
+  assert.equal(listed.sessions[0]?.attachmentCount, 0);
 
   await client.request("session.resume", {
     sessionId: created.sessionId,
@@ -1217,6 +1305,35 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
     ["first prompt", "second prompt"],
   );
 
+  const firstPage = await client.request("session.list", {
+    scope: "current_workspace",
+    cwd: first.cwd,
+    query: "first prompt",
+    order: "threaded",
+    pageSize: 1,
+  });
+  assert.equal(firstPage.sessions.length, 1);
+  assert.ok(firstPage.nextPageCursor);
+  const secondPage = await client.request("session.list", {
+    scope: "current_workspace",
+    cwd: first.cwd,
+    query: "first prompt",
+    order: "threaded",
+    pageSize: 1,
+    pageCursor: firstPage.nextPageCursor,
+  });
+  assert.equal(secondPage.sessions.length, 1);
+  assert.notEqual(secondPage.sessions[0]?.sessionId, firstPage.sessions[0]?.sessionId);
+  await assert.rejects(
+    client.request("session.list", {
+      scope: "all_local",
+      order: "recent",
+      pageSize: 1,
+      pageCursor: firstPage.nextPageCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "unknown_cursor",
+  );
+
   client.close();
   await first.daemon.stop();
   const daemon = new AxlDaemon({
@@ -1238,6 +1355,53 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
   const resumedClone = await subscribeAll(resumedClient, cloned.sessionId);
   assert.equal(resumedFork.events[0]?.type, "session.created");
   assert.equal(resumedClone.events[0]?.type, "session.created");
+});
+
+test("pages and filters daemon-owned session summaries", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => client.close());
+  const canonicalCwd = await realpath(fixture.cwd);
+  const first = await client.request("session.create", { cwd: fixture.cwd });
+  await client.request("session.send", {
+    sessionId: first.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "searchable root" }],
+  });
+  const second = await client.request("session.clone", { sessionId: first.sessionId });
+  const firstPage = await client.request("session.list", {
+    scope: "current_workspace",
+    cwd: fixture.cwd,
+    query: "searchable root",
+    order: "threaded",
+    pageSize: 1,
+  });
+  assert.equal(firstPage.sessions.length, 1);
+  assert.equal(firstPage.sessions[0]?.cwd, canonicalCwd);
+  assert.deepEqual(firstPage.sessions[0]?.runtime, { state: "idle" });
+  assert.ok(firstPage.nextPageCursor);
+  const secondPage = await client.request("session.list", {
+    scope: "current_workspace",
+    cwd: fixture.cwd,
+    query: "searchable root",
+    order: "threaded",
+    pageSize: 1,
+    pageCursor: firstPage.nextPageCursor,
+  });
+  assert.equal(secondPage.sessions.length, 1);
+  assert.deepEqual(
+    new Set([firstPage.sessions[0]?.sessionId, secondPage.sessions[0]?.sessionId]),
+    new Set([first.sessionId, second.sessionId]),
+  );
+  await assert.rejects(
+    client.request("session.list", {
+      scope: "all_local",
+      order: "recent",
+      pageSize: 1,
+      pageCursor: firstPage.nextPageCursor,
+    }),
+    (error) => error instanceof WireClientError && error.code === "unknown_cursor",
+  );
 });
 
 test("interrupt aborts the active operation from another connection", async (context) => {
@@ -1978,7 +2142,14 @@ test("ignores incomplete migration targets until their manifest is published", a
   context.after(() => daemon.stop());
   const client = await DaemonClient.connect(join(directory, "axl.sock"));
   context.after(() => client.close());
-  assert.deepEqual(await client.request("session.list", {}), []);
+  assert.deepEqual(
+    await client.request("session.list", {
+      scope: "all_local",
+      order: "recent",
+      pageSize: 50,
+    }),
+    { sessions: [] },
+  );
   await assert.rejects(client.request("session.resume", { sessionId }), (error: unknown) => {
     assert.ok(error instanceof WireClientError);
     assert.equal(error.code, "unknown_session");

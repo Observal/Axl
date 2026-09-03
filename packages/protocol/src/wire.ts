@@ -49,6 +49,22 @@ export interface SessionSummary {
   readonly firstUserMessage?: string;
   readonly lastUserMessage?: string;
   readonly parentSessionId?: SessionId;
+  readonly runtime: SessionOpenResult["runtime"];
+  readonly attachmentCount: number;
+}
+
+export interface SessionListParams {
+  readonly scope: "current_workspace" | "all_local";
+  readonly cwd?: string;
+  readonly query?: string;
+  readonly order: "recent" | "threaded";
+  readonly pageSize: number;
+  readonly pageCursor?: string;
+}
+
+export interface SessionListResult {
+  readonly sessions: readonly SessionSummary[];
+  readonly nextPageCursor?: string;
 }
 
 export interface TransientToolCall {
@@ -221,6 +237,14 @@ export interface DaemonInfoResult {
   readonly sandboxImage?: string;
 }
 
+export interface RequestCancelParams {
+  readonly requestId: number;
+}
+
+export interface RequestCancelResult {
+  readonly cancellationRequested: boolean;
+}
+
 export interface RpcMethodMap {
   readonly "daemon.info": {
     readonly params: Record<string, never>;
@@ -234,6 +258,10 @@ export interface RpcMethodMap {
     readonly params: Record<string, never>;
     readonly result: Record<string, never>;
   };
+  readonly "request.cancel": {
+    readonly params: RequestCancelParams;
+    readonly result: RequestCancelResult;
+  };
   readonly "session.create": {
     readonly params: {
       readonly cwd: string;
@@ -246,8 +274,8 @@ export interface RpcMethodMap {
     readonly result: SessionOpenResult;
   };
   readonly "session.list": {
-    readonly params: Record<string, never>;
-    readonly result: readonly SessionSummary[];
+    readonly params: SessionListParams;
+    readonly result: SessionListResult;
   };
   readonly "session.history": {
     readonly params: SessionHistoryParams;
@@ -402,6 +430,7 @@ export function requiredCapability(method: RpcMethod): CapabilityId | undefined 
     method === "daemon.info" ||
     method === "connection.initialize" ||
     method === "connection.ping" ||
+    method === "request.cancel" ||
     method === "session.history" ||
     method === "session.ack" ||
     method === "session.unsubscribe"
@@ -887,6 +916,14 @@ export function parseWireRequest(value: unknown): WireRequest {
     exact(params, "request.params", []);
     return { ...base, method, params: {} };
   }
+  if (method === "request.cancel") {
+    exact(params, "request.params", ["requestId"]);
+    return {
+      ...base,
+      method,
+      params: { requestId: nonNegativeInteger(params.requestId, "request.params.requestId") },
+    };
+  }
   if (method === "session.create") {
     exact(params, "request.params", ["cwd", "modelId", "thinkingLevel", "profile"]);
     const profile = sessionProfile(params.profile, "request.params.profile");
@@ -909,8 +946,46 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.list") {
-    exact(params, "request.params", []);
-    return { ...base, method, params: {} };
+    exact(params, "request.params", ["scope", "cwd", "query", "order", "pageSize", "pageCursor"]);
+    if (params.scope !== "current_workspace" && params.scope !== "all_local") {
+      throw new ProtocolValidationError(
+        "request.params.scope",
+        "must be current_workspace or all_local",
+      );
+    }
+    if (params.order !== "recent" && params.order !== "threaded") {
+      throw new ProtocolValidationError("request.params.order", "must be recent or threaded");
+    }
+    const cwd =
+      params.cwd === undefined ? undefined : boundedString(params.cwd, "request.params.cwd", 4096);
+    if (params.scope === "current_workspace" && cwd === undefined) {
+      throw new ProtocolValidationError(
+        "request.params.cwd",
+        "is required for current_workspace scope",
+      );
+    }
+    const query =
+      params.query === undefined
+        ? undefined
+        : boundedText(params.query, "request.params.query", 1024);
+    const pageSize = positiveInteger(params.pageSize, "request.params.pageSize");
+    if (pageSize > 100) {
+      throw new ProtocolValidationError("request.params.pageSize", "must not exceed 100");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        scope: params.scope,
+        ...(cwd === undefined ? {} : { cwd }),
+        ...(query === undefined ? {} : { query }),
+        order: params.order,
+        pageSize,
+        ...(params.pageCursor === undefined
+          ? {}
+          : { pageCursor: boundedString(params.pageCursor, "request.params.pageCursor", 512) }),
+      },
+    };
   }
   if (method === "session.history") {
     exact(params, "request.params", ["snapshotId", "pageCursor"]);
@@ -1222,6 +1297,8 @@ function parseSessionSummary(value: unknown, path: string): SessionSummary {
     "firstUserMessage",
     "lastUserMessage",
     "parentSessionId",
+    "runtime",
+    "attachmentCount",
   ]);
   return {
     sessionId: parseSessionId(summary.sessionId, `${path}.sessionId`),
@@ -1240,6 +1317,28 @@ function parseSessionSummary(value: unknown, path: string): SessionSummary {
     ...(summary.parentSessionId === undefined
       ? {}
       : { parentSessionId: parseSessionId(summary.parentSessionId, `${path}.parentSessionId`) }),
+    runtime: parseSessionRuntime(summary.runtime, `${path}.runtime`),
+    attachmentCount: nonNegativeInteger(summary.attachmentCount, `${path}.attachmentCount`),
+  };
+}
+
+function parseSessionRuntime(value: unknown, path: string): SessionOpenResult["runtime"] {
+  const runtime = object(value, path);
+  exact(runtime, path, ["state", "activeOperationId"]);
+  const states = ["inactive", "idle", "running", "waiting_interaction", "disposing"] as const;
+  if (!states.includes(runtime.state as (typeof states)[number])) {
+    throw new ProtocolValidationError(`${path}.state`, "is not a valid runtime state");
+  }
+  return {
+    state: runtime.state as SessionOpenResult["runtime"]["state"],
+    ...(runtime.activeOperationId === undefined
+      ? {}
+      : {
+          activeOperationId: parseOperationId(
+            runtime.activeOperationId,
+            `${path}.activeOperationId`,
+          ),
+        }),
   };
 }
 
@@ -1329,13 +1428,26 @@ export function parseRpcResult<Method extends RpcMethod>(
     const result = object(value, path);
     exact(result, path, []);
     parsed = {};
+  } else if (method === "request.cancel") {
+    parsed = parseBooleanResult(value, path, "cancellationRequested");
   } else if (method === "session.create" || method === "session.resume") {
     parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
-    if (!Array.isArray(value) || value.length > 10_000) {
-      throw new ProtocolValidationError(path, "must contain at most 10000 sessions");
+    const result = object(value, path);
+    exact(result, path, ["sessions", "nextPageCursor"]);
+    if (!Array.isArray(result.sessions) || result.sessions.length > 100) {
+      throw new ProtocolValidationError(`${path}.sessions`, "must contain at most 100 sessions");
     }
-    parsed = value.map((summary, index) => parseSessionSummary(summary, `${path}[${index}]`));
+    parsed = {
+      sessions: result.sessions.map((summary, index) =>
+        parseSessionSummary(summary, `${path}.sessions[${index}]`),
+      ),
+      ...(result.nextPageCursor === undefined
+        ? {}
+        : {
+            nextPageCursor: boundedString(result.nextPageCursor, `${path}.nextPageCursor`, 512),
+          }),
+    };
   } else if (method === "session.history") {
     const result = object(value, path);
     exact(result, path, ["snapshotId", "page"]);
@@ -1563,6 +1675,7 @@ const RPC_METHODS = new Set<RpcMethod>([
   "daemon.info",
   "connection.initialize",
   "connection.ping",
+  "request.cancel",
   "session.create",
   "session.resume",
   "session.list",

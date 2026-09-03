@@ -20,6 +20,7 @@ const sessionId = "123e4567-e89b-42d3-a456-426614174000";
 
 test("maps feature methods to negotiated capabilities", () => {
   assert.equal(requiredCapability("daemon.info"), undefined);
+  assert.equal(requiredCapability("request.cancel"), undefined);
   assert.equal(requiredCapability("session.history"), undefined);
   assert.equal(requiredCapability("session.send"), "session.send.prompt");
   assert.equal(requiredCapability("session.blob.abort"), "session.blob.abort");
@@ -38,6 +39,7 @@ test("validates every request shape", () => {
       },
     },
     { kind: "request", id: 23, method: "connection.ping", params: {} },
+    { kind: "request", id: 24, method: "request.cancel", params: { requestId: 7 } },
     {
       kind: "request",
       id: 1,
@@ -50,7 +52,12 @@ test("validates every request shape", () => {
       method: "session.resume",
       params: { sessionId },
     },
-    { kind: "request", id: 17, method: "session.list", params: {} },
+    {
+      kind: "request",
+      id: 17,
+      method: "session.list",
+      params: { scope: "all_local", order: "recent", pageSize: 50 },
+    },
     {
       kind: "request",
       id: 20,
@@ -479,6 +486,35 @@ test("validates server messages and newline framing", () => {
     },
   } as const;
   assert.deepEqual(parseServerMessage(initialized), initialized);
+  const cancelled = {
+    kind: "success",
+    id: 2,
+    method: "request.cancel",
+    result: { cancellationRequested: true },
+  } as const;
+  assert.deepEqual(parseServerMessage(cancelled), cancelled);
+  const listed = {
+    kind: "success",
+    id: 3,
+    method: "session.list",
+    result: {
+      sessions: [
+        {
+          sessionId,
+          cwd: "/repo",
+          createdAt: 1,
+          updatedAt: 2,
+          userMessageCount: 1,
+          firstUserMessage: "hello",
+          lastUserMessage: "hello",
+          runtime: { state: "idle" },
+          attachmentCount: 1,
+        },
+      ],
+      nextPageCursor: "page-2",
+    },
+  } as const;
+  assert.deepEqual(parseServerMessage(listed), listed);
   assert.throws(
     () =>
       parseServerMessage({

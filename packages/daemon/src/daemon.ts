@@ -20,17 +20,19 @@ import {
   isRetryableMutationMethod,
   MAX_CANONICAL_EVENT_BYTES,
   MAX_WIRE_MESSAGE_BYTES,
-  parseOperationId,
   ProtocolValidationError,
+  parseOperationId,
   parseRpcResult,
   parseSessionId,
   parseWireRequest,
+  type RetryableMutationMethod,
   requiredCapability,
   type ServerMessage,
   type SessionActivityFrame,
   type SessionId,
+  type SessionListParams,
+  type SessionSummary,
   type SnapshotPage,
-  type RetryableMutationMethod,
   WIRE_CAPABILITIES,
   WIRE_PROTOCOL_VERSION,
   type WireRequest,
@@ -47,6 +49,8 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly securityMode?: DaemonSecurityMode;
   readonly sandboxProvider?: string;
   readonly sandboxImage?: string;
+  readonly snapshotIdleLifetimeMs?: number;
+  readonly snapshotAbsoluteLifetimeMs?: number;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -88,6 +92,14 @@ interface ConnectionSubscription {
   finalPageServed: boolean;
   activateAfterResponse: boolean;
   invalidated: boolean;
+  readonly createdAt: number;
+  lastAccessAt: number;
+}
+
+interface SessionListPage {
+  readonly queryKey: string;
+  readonly sessions: readonly SessionSummary[];
+  readonly offset: number;
 }
 
 interface ConnectionState {
@@ -98,6 +110,8 @@ interface ConnectionState {
   lastSeenAt?: number;
   grantedCapabilities: ReadonlySet<string>;
   pendingRequests: number;
+  readonly cancellableRequests: Map<number, AbortController>;
+  readonly sessionListPages: Map<string, SessionListPage>;
   readonly subscriptions: Map<string, ConnectionSubscription>;
   readonly send: (message: ServerMessage) => void;
 }
@@ -159,6 +173,8 @@ export class AxlDaemon {
   private readonly sandboxProvider: string;
   private readonly sandboxImage: string | undefined;
   private readonly dataDirectory: string;
+  private readonly snapshotIdleLifetimeMs: number;
+  private readonly snapshotAbsoluteLifetimeMs: number;
   private readonly daemonInstanceId = randomUUID();
   private commandJournal: CommandJournal | undefined;
   private dataLock: DataDirectoryLock | undefined;
@@ -175,6 +191,16 @@ export class AxlDaemon {
     this.sandboxProvider = options.sandboxProvider ?? "unknown";
     this.sandboxImage = options.sandboxImage;
     this.dataDirectory = options.dataDirectory;
+    this.snapshotIdleLifetimeMs = options.snapshotIdleLifetimeMs ?? 30_000;
+    this.snapshotAbsoluteLifetimeMs = options.snapshotAbsoluteLifetimeMs ?? 300_000;
+    if (
+      !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
+      this.snapshotIdleLifetimeMs <= 0 ||
+      !Number.isSafeInteger(this.snapshotAbsoluteLifetimeMs) ||
+      this.snapshotAbsoluteLifetimeMs < this.snapshotIdleLifetimeMs
+    ) {
+      throw new TypeError("Snapshot lifetimes must be positive and absolute must cover idle");
+    }
   }
 
   async start(): Promise<void> {
@@ -269,6 +295,8 @@ export class AxlDaemon {
       initialized: false,
       grantedCapabilities: new Set(),
       pendingRequests: 0,
+      cancellableRequests: new Map(),
+      sessionListPages: new Map(),
       subscriptions: new Map(),
       send,
     };
@@ -337,14 +365,32 @@ export class AxlDaemon {
         }
       }
     });
-    const presenceTimer = setInterval(() => {
-      if (state.lastSeenAt !== undefined && Date.now() - state.lastSeenAt > PRESENCE_TIMEOUT_MS) {
-        socket.destroy();
-      }
-    }, HEARTBEAT_INTERVAL_MS);
+    const presenceTimer = setInterval(
+      () => {
+        const now = Date.now();
+        if (state.lastSeenAt !== undefined && now - state.lastSeenAt > PRESENCE_TIMEOUT_MS) {
+          socket.destroy();
+          return;
+        }
+        for (const subscription of state.subscriptions.values()) {
+          if (
+            !subscription.active &&
+            !subscription.invalidated &&
+            (now - subscription.lastAccessAt > this.snapshotIdleLifetimeMs ||
+              now - subscription.createdAt > this.snapshotAbsoluteLifetimeMs)
+          ) {
+            this.invalidateSnapshot(subscription);
+          }
+        }
+      },
+      Math.min(HEARTBEAT_INTERVAL_MS, this.snapshotIdleLifetimeMs),
+    );
     presenceTimer.unref();
     const cleanup = (): void => {
       clearInterval(presenceTimer);
+      for (const controller of state.cancellableRequests.values()) controller.abort();
+      state.cancellableRequests.clear();
+      state.sessionListPages.clear();
       for (const subscription of state.subscriptions.values()) subscription.unsubscribe();
       state.subscriptions.clear();
       this.connections.delete(socket);
@@ -449,10 +495,17 @@ export class AxlDaemon {
           );
         }
       }
-      const result = parseRpcResult(
-        request.method,
-        await this.executeRequest(request, send, state),
-      );
+      const cancellable =
+        request.method === "session.history" || request.method === "session.workspace.diff";
+      const controller = cancellable ? new AbortController() : undefined;
+      if (controller !== undefined) state.cancellableRequests.set(request.id, controller);
+      let dispatched: unknown;
+      try {
+        dispatched = await this.executeRequest(request, send, state, controller?.signal);
+      } finally {
+        if (controller !== undefined) state.cancellableRequests.delete(request.id);
+      }
+      const result = parseRpcResult(request.method, dispatched);
       send({
         kind: "success",
         id: request.id,
@@ -503,6 +556,7 @@ export class AxlDaemon {
     request: WireRequest,
     send: (message: ServerMessage) => void,
     state: ConnectionState,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     let normalized = request;
     if (request.method === "session.create") {
@@ -524,9 +578,20 @@ export class AxlDaemon {
         ...request,
         params: { ...request.params, profile: request.params.profile ?? "minimal" },
       };
+    } else if (request.method === "session.list" && request.params.cwd !== undefined) {
+      const cwd = await realpath(request.params.cwd).catch((cause: unknown) => {
+        throw new DaemonError(
+          "invalid_cwd",
+          `Cannot open working directory ${request.params.cwd}`,
+          {
+            cause,
+          },
+        );
+      });
+      normalized = { ...request, params: { ...request.params, cwd } };
     }
     if (!isRetryableMutationMethod(normalized.method)) {
-      return this.dispatch(normalized, send, state);
+      return this.dispatch(normalized, send, state, undefined, signal);
     }
     const idempotencyKey = normalized.idempotencyKey;
     if (idempotencyKey === undefined) {
@@ -568,6 +633,7 @@ export class AxlDaemon {
     send: (message: ServerMessage) => void,
     state: ConnectionState,
     acceptance?: CommandAcceptance,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     switch (request.method) {
       case "daemon.info":
@@ -589,6 +655,11 @@ export class AxlDaemon {
       }
       case "connection.ping":
         return {};
+      case "request.cancel": {
+        const controller = state.cancellableRequests.get(request.params.requestId);
+        controller?.abort();
+        return { cancellationRequested: controller !== undefined };
+      }
       case "session.create": {
         const { cwd, modelId, thinkingLevel, profile } = request.params;
         if (profile !== undefined && profile !== "minimal") {
@@ -612,7 +683,7 @@ export class AxlDaemon {
         await this.sessions.resume(request.params.sessionId);
         return this.sessions.describe(request.params.sessionId);
       case "session.list":
-        return this.sessions.list();
+        return this.listSessions(state, request.params);
       case "session.history":
         return this.snapshotPage(state, request.params.snapshotId, request.params.pageCursor);
       case "session.ack":
@@ -720,7 +791,7 @@ export class AxlDaemon {
           request.params.enabled,
         );
       case "session.workspace.diff":
-        return this.sessions.workspaceDiff(request.params.sessionId, request.params.scope);
+        return this.sessions.workspaceDiff(request.params.sessionId, request.params.scope, signal);
       case "session.dispose":
         await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
         return { disposed: true, historyPreserved: true };
@@ -745,6 +816,103 @@ export class AxlDaemon {
       sessionId: parseSessionId(acceptance.intendedSessionId, "intendedSessionId"),
       operationId: parseOperationId(acceptance.operationId, "operationId"),
     };
+  }
+
+  private async listSessions(
+    state: ConnectionState,
+    params: SessionListParams,
+  ): Promise<{ readonly sessions: readonly SessionSummary[]; readonly nextPageCursor?: string }> {
+    const queryKey = JSON.stringify({
+      scope: params.scope,
+      ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
+      ...(params.query === undefined ? {} : { query: params.query }),
+      order: params.order,
+      pageSize: params.pageSize,
+    });
+    let sessions: readonly SessionSummary[];
+    let offset: number;
+    if (params.pageCursor !== undefined) {
+      const page = state.sessionListPages.get(params.pageCursor);
+      if (page === undefined || page.queryKey !== queryKey) {
+        throw new DaemonError("unknown_cursor", "The session-list cursor is unknown");
+      }
+      sessions = page.sessions;
+      offset = page.offset;
+    } else {
+      const query = params.query?.toLocaleLowerCase();
+      const stored = await this.sessions.list();
+      const filtered = stored.filter((summary) => {
+        if (params.scope === "current_workspace" && summary.cwd !== params.cwd) return false;
+        if (query === undefined || query.length === 0) return true;
+        return [
+          summary.sessionId,
+          summary.cwd,
+          summary.firstUserMessage ?? "",
+          summary.lastUserMessage ?? "",
+        ].some((value) => value.toLocaleLowerCase().includes(query));
+      });
+      const ordered =
+        params.order === "recent" ? this.orderRecent(filtered) : this.orderThreaded(filtered);
+      sessions = ordered.map((summary) => ({
+        ...summary,
+        runtime: this.sessions.runtimeState(summary.sessionId),
+        attachmentCount: [...this.connectionStates].filter(
+          (connection) =>
+            connection.initialized &&
+            [...connection.subscriptions.values()].some(
+              (subscription) => subscription.sessionId === summary.sessionId,
+            ),
+        ).length,
+      }));
+      offset = 0;
+    }
+    const pageSessions = sessions.slice(offset, offset + params.pageSize);
+    const nextOffset = offset + pageSessions.length;
+    if (nextOffset >= sessions.length) return { sessions: pageSessions };
+    const nextPageCursor = randomUUID();
+    state.sessionListPages.set(nextPageCursor, { queryKey, sessions, offset: nextOffset });
+    if (state.sessionListPages.size > 1_000) {
+      const oldest = state.sessionListPages.keys().next().value;
+      if (oldest !== undefined) state.sessionListPages.delete(oldest);
+    }
+    return { sessions: pageSessions, nextPageCursor };
+  }
+
+  private orderRecent<Summary extends { readonly updatedAt: number; readonly sessionId: string }>(
+    sessions: readonly Summary[],
+  ): readonly Summary[] {
+    return sessions.toSorted(
+      (left, right) =>
+        right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId),
+    );
+  }
+
+  private orderThreaded<
+    Summary extends {
+      readonly updatedAt: number;
+      readonly sessionId: SessionId;
+      readonly parentSessionId?: SessionId;
+    },
+  >(sessions: readonly Summary[]): readonly Summary[] {
+    const included = new Set(sessions.map((session) => session.sessionId));
+    const children = new Map<SessionId, Summary[]>();
+    const roots: Summary[] = [];
+    for (const session of sessions) {
+      if (session.parentSessionId === undefined || !included.has(session.parentSessionId)) {
+        roots.push(session);
+        continue;
+      }
+      const siblings = children.get(session.parentSessionId) ?? [];
+      siblings.push(session);
+      children.set(session.parentSessionId, siblings);
+    }
+    const ordered: Summary[] = [];
+    const visit = (session: Summary): void => {
+      ordered.push(session);
+      for (const child of this.orderRecent(children.get(session.sessionId) ?? [])) visit(child);
+    };
+    for (const root of this.orderRecent(roots)) visit(root);
+    return ordered;
   }
 
   private subscribe(
@@ -799,6 +967,7 @@ export class AxlDaemon {
       resumedPosition === undefined
         ? this.createCursor(subscriptionId, params.sessionId, params.fromNodeId, boundaryPosition)
         : undefined;
+    const now = Date.now();
     owned = {
       id: subscriptionId,
       sessionId: params.sessionId,
@@ -820,6 +989,8 @@ export class AxlDaemon {
       finalPageServed: false,
       activateAfterResponse: resumedPosition !== undefined,
       invalidated: false,
+      createdAt: now,
+      lastAccessAt: now,
     };
     state.subscriptions.set(subscriptionId, owned);
 
@@ -872,9 +1043,8 @@ export class AxlDaemon {
     }
     const cached = subscription.pageResults.get(pageCursor);
     if (cached !== undefined) return { snapshotId, page: cached };
-    if (subscription.invalidated) {
-      throw new DaemonError("snapshot_required", "The snapshot tail exceeded its delivery limit");
-    }
+    this.assertSnapshotAvailable(subscription);
+    subscription.lastAccessAt = Date.now();
     const offset = subscription.pageCursors.get(pageCursor);
     if (offset === undefined) {
       throw new DaemonError("unknown_cursor", "The page cursor does not belong to this snapshot");
@@ -894,9 +1064,8 @@ export class AxlDaemon {
     if (subscription === undefined) {
       throw new DaemonError("unknown_subscription", "The subscription is not attached here");
     }
-    if (subscription.invalidated) {
-      throw new DaemonError("snapshot_required", "The snapshot tail exceeded its delivery limit");
-    }
+    this.assertSnapshotAvailable(subscription);
+    subscription.lastAccessAt = Date.now();
     const record = this.cursors.get(cursor);
     if (record === undefined || record.subscriptionId !== subscriptionId) {
       throw new DaemonError("unknown_cursor", "The cursor does not belong to this subscription");
@@ -1011,6 +1180,19 @@ export class AxlDaemon {
     }
     subscription.bufferedEvents.push({ event, position });
     subscription.bufferedEventBytes += bytes;
+  }
+
+  private assertSnapshotAvailable(subscription: ConnectionSubscription): void {
+    const now = Date.now();
+    if (
+      subscription.invalidated ||
+      (!subscription.active &&
+        (now - subscription.lastAccessAt > this.snapshotIdleLifetimeMs ||
+          now - subscription.createdAt > this.snapshotAbsoluteLifetimeMs))
+    ) {
+      this.invalidateSnapshot(subscription);
+      throw new DaemonError("snapshot_required", "The snapshot is no longer available");
+    }
   }
 
   private invalidateSnapshot(subscription: ConnectionSubscription): void {

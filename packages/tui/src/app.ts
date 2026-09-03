@@ -61,9 +61,9 @@ import {
   type Component,
   type CursorPlacement,
   DifferentialScreen,
-  sanitizeTerminalText,
   SYNC_BEGIN,
   SYNC_END,
+  sanitizeTerminalText,
   truncateToWidth,
   visibleWidth,
   wrapLine,
@@ -2897,7 +2897,11 @@ export class AxlApp {
 
   private async openResume(): Promise<void> {
     try {
-      const sessions = (await this.client.request("session.list", {})) as SessionSummary[];
+      const { sessions } = await this.client.request("session.list", {
+        scope: "all_local",
+        order: "recent",
+        pageSize: 100,
+      });
       if (sessions.length === 0) {
         this.notice = this.view.palette.dim("· no saved sessions");
         this.redraw();
