@@ -75,32 +75,36 @@ export async function listLocalSessions(
     { directory: axlHome, placement: { type: "native" }, label: "SANDBOXED · native" },
     { directory: join(axlHome, "unsafe"), placement: { type: "unsafe" }, label: "UNSAFE" },
   ];
+  const listed = (
+    await Promise.all(
+      sources.map(async (source) =>
+        (
+          await listStoredSessions(source.directory)
+        ).map((summary) => ({
+          ...summary,
+          placement: source.placement,
+          placementLabel: source.label,
+        })),
+      ),
+    )
+  ).flat();
   for (const engine of ["podman", "docker"] as const) {
     const engineDirectory = join(axlHome, "oci", engine);
     for (const digest of await directories(engineDirectory)) {
       if (digest.length !== 64) continue;
       const directory = join(engineDirectory, digest);
-      const summaries = await listStoredSessions(directory);
-      const image = summaries.find((summary) => summary.sandboxImage !== undefined)?.sandboxImage;
-      if (image === undefined) continue;
-      const selection = { type: "oci" as const, engine, image };
-      if (localSandboxStateKey(selection) !== join("oci", engine, digest)) {
-        throw new Error(`OCI session image does not match state directory ${directory}`);
+      for (const summary of await listStoredSessions(directory)) {
+        const image = summary.sandboxImage;
+        if (image === undefined) continue;
+        const placement = { type: "oci" as const, engine, image };
+        if (localSandboxStateKey(placement) !== join("oci", engine, digest)) {
+          throw new Error(`OCI session image does not match state directory ${directory}`);
+        }
+        listed.push({ ...summary, placement, placementLabel: `SANDBOXED · ${engine}` });
       }
-      sources.push({ directory, placement: selection, label: `SANDBOXED · ${engine}` });
     }
   }
-
-  const listed = await Promise.all(
-    sources.map(async (source) =>
-      (await listStoredSessions(source.directory)).map((summary) => ({
-        ...summary,
-        placement: source.placement,
-        placementLabel: source.label,
-      })),
-    ),
-  );
-  return listed.flat().sort((left, right) => right.updatedAt - left.updatedAt);
+  return listed.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 export async function diagnoseLocalSandboxes(): Promise<{

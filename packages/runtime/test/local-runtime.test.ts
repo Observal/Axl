@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,7 +11,7 @@ import test from "node:test";
 import { FileCredentialStore } from "@axl/ai";
 import { AxlDaemon, DaemonClient, type SessionSnapshot } from "@axl/daemon";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
-import type { ModelStreamEvent } from "@axl/protocol";
+import { EVENT_FORMAT_VERSION, type ModelStreamEvent } from "@axl/protocol";
 
 import { listLocalSessions, localSandboxStateKey, startLocalDaemon } from "../src/index.ts";
 
@@ -76,6 +77,58 @@ test("discovers native and unsafe histories with explicit placement labels", asy
       [nativeId, "SANDBOXED · native"],
       [unsafeId, "UNSAFE"],
     ]),
+  );
+});
+
+test("preserves each OCI session's image alias", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-runtime-catalog-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const axlHome = join(root, ".axl");
+  const digest = "a".repeat(64);
+  const sessionDirectory = join(axlHome, "oci", "docker", digest, "sessions");
+  await mkdir(sessionDirectory, { recursive: true });
+  const expected = new Map<string, string>();
+  for (const [index, name] of ["example.invalid/image", "example.invalid/alias"].entries()) {
+    const sessionId = randomUUID();
+    const createdId = randomUUID();
+    const image = `${name}@sha256:${digest}`;
+    expected.set(sessionId, image);
+    await writeFile(
+      join(sessionDirectory, `${sessionId}.jsonl`),
+      `${[
+        {
+          version: EVENT_FORMAT_VERSION,
+          id: createdId,
+          sessionId,
+          parentId: null,
+          timestamp: index * 2 + 1,
+          type: "session.created",
+          payload: { cwd: root },
+        },
+        {
+          version: EVENT_FORMAT_VERSION,
+          id: randomUUID(),
+          sessionId,
+          parentId: createdId,
+          timestamp: index * 2 + 2,
+          type: "sandbox.configured",
+          payload: { provider: "docker", enforced: true, controls: [], details: { image } },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n")}\n`,
+    );
+  }
+
+  const sessions = await listLocalSessions(axlHome);
+  assert.deepEqual(
+    new Map(
+      sessions.map((session) => [
+        session.sessionId,
+        session.placement.type === "oci" ? session.placement.image : session.placement.type,
+      ]),
+    ),
+    expected,
   );
 });
 
