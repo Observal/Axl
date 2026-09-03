@@ -420,8 +420,11 @@ test("a failed target subscription leaves the current session fully active", asy
   const { output, text } = captureOutput();
   const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
   const sourceSessionId = app.sessionId;
-  const request = client.request.bind(client);
-  client.request = (method, params) => {
+  const mutableClient = client as unknown as {
+    request(method: string, params: Record<string, unknown>): Promise<unknown>;
+  };
+  const request = mutableClient.request.bind(client);
+  mutableClient.request = (method, params) => {
     if (method === "session.subscribe" && params.sessionId === target.sessionId) {
       return Promise.reject(new Error("target subscription failed"));
     }

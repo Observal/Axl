@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-/** Version written into each canonical JSONL event. */
+/** Version of persisted session events. */
 export const EVENT_FORMAT_VERSION = 1 as const;
 
 /** Version negotiated by local daemon clients. */
-export const WIRE_PROTOCOL_VERSION = 7 as const;
+export const WIRE_PROTOCOL_VERSION = 8 as const;

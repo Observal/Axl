@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import { StringDecoder } from "node:string_decoder";
 
@@ -8,19 +9,37 @@ import {
   encodeWireMessage,
   parseServerMessage,
   parseWireRequest,
+  requiredCapability,
   WIRE_PROTOCOL_VERSION,
+  type CapabilityId,
+  type ClientIdentity,
+  type ConnectionInitializeResult,
+  type RpcMethod,
+  type RpcParams,
+  type RpcResult,
   type WireActivity,
   type WireEvent,
-  type WireMethod,
 } from "@axl/protocol";
 
 export class WireClientError extends Error {
   readonly code: string;
+  readonly retryable: boolean;
+  readonly details: Readonly<Record<string, unknown>> | undefined;
 
-  constructor(code: string, message: string, options?: { cause?: unknown }) {
+  constructor(
+    code: string,
+    message: string,
+    options?: {
+      cause?: unknown;
+      retryable?: boolean;
+      details?: Readonly<Record<string, unknown>>;
+    },
+  ) {
     super(message, options);
     this.name = "WireClientError";
     this.code = code;
+    this.retryable = options?.retryable ?? false;
+    this.details = options?.details;
   }
 }
 
@@ -30,6 +49,8 @@ const HANDSHAKE_TIMEOUT_MS = 5_000;
 /** Thin local client. Session state and the agent loop remain in the daemon. */
 export class DaemonClient {
   private readonly socket: Socket;
+  private readonly identity: ClientIdentity;
+  private readonly requestedCapabilities: readonly CapabilityId[] | undefined;
   private readonly ready: Promise<void>;
   private settleReady: ((error?: Error) => void) | undefined;
   private nextId = 1;
@@ -37,16 +58,27 @@ export class DaemonClient {
   private readonly decoder = new StringDecoder("utf8");
   private helloReceived = false;
   private closed = false;
+  private initialized: ConnectionInitializeResult | undefined;
   private readonly pending = new Map<
     number,
-    { resolve: (value: unknown) => void; reject: (error: Error) => void }
+    {
+      readonly method: RpcMethod;
+      readonly resolve: (value: unknown) => void;
+      readonly reject: (error: Error) => void;
+    }
   >();
   private readonly eventListeners = new Set<(event: WireEvent) => void>();
   private readonly activityListeners = new Set<(event: WireActivity) => void>();
   private readonly disconnectListeners = new Set<(error: Error) => void>();
 
-  private constructor(socket: Socket) {
+  private constructor(
+    socket: Socket,
+    identity: ClientIdentity,
+    requestedCapabilities: readonly CapabilityId[] | undefined,
+  ) {
     this.socket = socket;
+    this.identity = identity;
+    this.requestedCapabilities = requestedCapabilities;
     this.ready = new Promise<void>((resolve, reject) => {
       this.settleReady = (error) => {
         this.settleReady = undefined;
@@ -63,9 +95,19 @@ export class DaemonClient {
     );
   }
 
-  static async connect(socketPath: string): Promise<DaemonClient> {
+  static async connect(
+    socketPath: string,
+    options: {
+      readonly identity?: ClientIdentity;
+      readonly requestedCapabilities?: readonly CapabilityId[];
+    } = {},
+  ): Promise<DaemonClient> {
     const socket = connect(socketPath);
-    const client = new DaemonClient(socket);
+    const client = new DaemonClient(
+      socket,
+      options.identity ?? { kind: "tui", version: "0.0.0", instanceId: randomUUID() },
+      options.requestedCapabilities,
+    );
     const timeout = setTimeout(
       () =>
         client.fail(
@@ -82,7 +124,25 @@ export class DaemonClient {
     }
   }
 
-  request(method: WireMethod, params: Record<string, unknown>): Promise<unknown> {
+  request<Method extends RpcMethod>(
+    method: Method,
+    params: RpcParams<Method>,
+  ): Promise<RpcResult<Method>>;
+  request<Method extends RpcMethod>(
+    method: Method,
+    params: Record<string, unknown>,
+  ): Promise<RpcResult<Method>>;
+  request<Method extends RpcMethod>(
+    method: Method,
+    params: RpcParams<Method> | Record<string, unknown>,
+  ): Promise<RpcResult<Method>> {
+    return this.ready.then(() => this.sendRequest(method, params as RpcParams<Method>));
+  }
+
+  private sendRequest<Method extends RpcMethod>(
+    method: Method,
+    params: RpcParams<Method>,
+  ): Promise<RpcResult<Method>> {
     if (this.closed)
       return Promise.reject(new WireClientError("disconnected", "Daemon connection is closed"));
     const id = this.nextId++;
@@ -92,8 +152,21 @@ export class DaemonClient {
     } catch (cause) {
       return Promise.reject(new WireClientError("bad_request", "Invalid request", { cause }));
     }
+    const capability = requiredCapability(request.method);
+    if (
+      this.initialized !== undefined &&
+      capability !== undefined &&
+      !this.initialized.grantedCapabilities.includes(capability)
+    ) {
+      return Promise.reject(
+        new WireClientError(
+          "unsupported_capability",
+          `Connection was not granted capability ${capability}`,
+        ),
+      );
+    }
     const response = new Promise<unknown>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { method, resolve, reject });
     });
     try {
       this.socket.write(encodeWireMessage(request), (error) => {
@@ -110,7 +183,14 @@ export class DaemonClient {
         new WireClientError("write_failed", "Could not write to daemon", { cause }),
       );
     }
-    return response;
+    return response as Promise<RpcResult<Method>>;
+  }
+
+  get connection(): ConnectionInitializeResult {
+    if (this.initialized === undefined) {
+      throw new WireClientError("connection_not_initialized", "Connection is not initialized");
+    }
+    return this.initialized;
   }
 
   onEvent(listener: (event: WireEvent) => void): () => void {
@@ -175,13 +255,45 @@ export class DaemonClient {
         );
       } else {
         this.helloReceived = true;
-        this.settleReady?.();
+        const requestedCapabilities = this.requestedCapabilities ?? message.capabilities;
+        void this.sendRequest("connection.initialize", {
+          client: this.identity,
+          requestedCapabilities,
+        }).then(
+          (initialized) => {
+            if (
+              initialized.wireVersion !== WIRE_PROTOCOL_VERSION ||
+              initialized.daemonInstanceId !== message.daemonInstanceId ||
+              initialized.grantedCapabilities.some(
+                (capability) =>
+                  !message.capabilities.includes(capability) ||
+                  !requestedCapabilities.includes(capability),
+              )
+            ) {
+              this.fail(
+                new WireClientError(
+                  "protocol_error",
+                  "Daemon initialization did not match its hello",
+                ),
+              );
+              return;
+            }
+            this.initialized = initialized;
+            this.settleReady?.();
+          },
+          (error: unknown) =>
+            this.fail(
+              error instanceof Error
+                ? error
+                : new WireClientError("protocol_error", "Daemon initialization failed"),
+            ),
+        );
       }
       return;
     }
     if (message.kind === "hello") {
       this.fail(new WireClientError("protocol_error", "Daemon sent a second hello"));
-    } else if (message.kind === "response") {
+    } else if (message.kind === "success") {
       const pending = this.pending.get(message.id);
       if (pending === undefined) {
         this.fail(
@@ -189,10 +301,44 @@ export class DaemonClient {
         );
         return;
       }
+      if (pending.method !== message.method) {
+        this.fail(
+          new WireClientError(
+            "protocol_error",
+            `Daemon answered ${pending.method} request with ${message.method}`,
+          ),
+        );
+        return;
+      }
       this.pending.delete(message.id);
       pending.resolve(message.result);
     } else if (message.kind === "error") {
-      this.rejectRequest(message.id, new WireClientError(message.code, message.message));
+      const pending = this.pending.get(message.id);
+      if (message.id !== -1 && pending === undefined) {
+        this.fail(
+          new WireClientError("protocol_error", `Daemon rejected unknown request ${message.id}`),
+        );
+        return;
+      }
+      if (
+        pending !== undefined &&
+        message.method !== undefined &&
+        message.method !== pending.method
+      ) {
+        this.fail(
+          new WireClientError(
+            "protocol_error",
+            `Daemon rejected ${pending.method} request as ${message.method}`,
+          ),
+        );
+        return;
+      }
+      const error = new WireClientError(message.error.code, message.error.message, {
+        retryable: message.error.retryable,
+        ...(message.error.details === undefined ? {} : { details: message.error.details }),
+      });
+      if (message.id === -1) this.fail(error);
+      else this.rejectRequest(message.id, error);
     } else if (message.kind === "event") {
       for (const listener of this.eventListeners) listener(message);
     } else {

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
+import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
@@ -10,9 +11,12 @@ import { StringDecoder } from "node:string_decoder";
 import {
   type CanonicalEvent,
   encodeWireMessage,
+  parseRpcResult,
   parseWireRequest,
+  requiredCapability,
   type ServerMessage,
   type SessionActivityFrame,
+  WIRE_CAPABILITIES,
   WIRE_PROTOCOL_VERSION,
   type WireRequest,
 } from "@axl/protocol";
@@ -29,7 +33,17 @@ export interface DaemonOptions extends SessionManagerOptions {
 }
 
 const MAX_REQUEST_BYTES = 1_048_576;
+const MAX_PENDING_REQUESTS = 64;
+const HEARTBEAT_INTERVAL_MS = 20_000;
+const PRESENCE_TIMEOUT_MS = 60_000;
 const SOCKET_PROBE_TIMEOUT_MS = 500;
+
+interface ConnectionState {
+  initialized: boolean;
+  attachmentId?: string;
+  grantedCapabilities: ReadonlySet<string>;
+  pendingRequests: number;
+}
 
 type SocketIdentity = { readonly dev: number; readonly ino: number };
 
@@ -87,6 +101,7 @@ export class AxlDaemon {
   private readonly securityMode: DaemonSecurityMode;
   private readonly sandboxProvider: string;
   private readonly sandboxImage: string | undefined;
+  private readonly daemonInstanceId = randomUUID();
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
@@ -148,10 +163,24 @@ export class AxlDaemon {
   private accept(socket: Socket): void {
     this.connections.add(socket);
     const subscriptions = new Set<() => void>();
+    const state: ConnectionState = {
+      initialized: false,
+      grantedCapabilities: new Set(),
+      pendingRequests: 0,
+    };
     const send = (message: ServerMessage): void => {
       if (!socket.destroyed) socket.write(encodeWireMessage(message));
     };
-    send({ kind: "hello", wireVersion: WIRE_PROTOCOL_VERSION });
+    send({
+      kind: "hello",
+      wireVersion: WIRE_PROTOCOL_VERSION,
+      daemonInstanceId: this.daemonInstanceId,
+      capabilities: WIRE_CAPABILITIES,
+      limits: {
+        maxMessageBytes: MAX_REQUEST_BYTES,
+        maxPendingRequests: MAX_PENDING_REQUESTS,
+      },
+    });
 
     let buffer = "";
     const decoder = new StringDecoder("utf8");
@@ -161,8 +190,11 @@ export class AxlDaemon {
         send({
           kind: "error",
           id: -1,
-          code: "frame_too_large",
-          message: "Request exceeded the size limit",
+          error: {
+            code: "frame_too_large",
+            message: "Request exceeded the size limit",
+            retryable: false,
+          },
         });
         socket.destroy();
         return;
@@ -174,13 +206,33 @@ export class AxlDaemon {
           send({
             kind: "error",
             id: -1,
-            code: "frame_too_large",
-            message: "Request exceeded the size limit",
+            error: {
+              code: "frame_too_large",
+              message: "Request exceeded the size limit",
+              retryable: false,
+            },
           });
           socket.destroy();
           return;
         }
-        if (line.trim()) void this.handleLine(line, send, subscriptions);
+        if (line.trim()) {
+          if (state.pendingRequests >= MAX_PENDING_REQUESTS) {
+            send({
+              kind: "error",
+              id: -1,
+              error: {
+                code: "rate_limited",
+                message: "Too many pending requests",
+                retryable: true,
+              },
+            });
+            continue;
+          }
+          state.pendingRequests += 1;
+          void this.handleLine(line, send, subscriptions, state).finally(() => {
+            state.pendingRequests -= 1;
+          });
+        }
       }
     });
     const cleanup = (): void => {
@@ -196,6 +248,7 @@ export class AxlDaemon {
     line: string,
     send: (message: ServerMessage) => void,
     subscriptions: Set<() => void>,
+    state: ConnectionState,
   ): Promise<void> {
     let request: WireRequest;
     try {
@@ -204,23 +257,69 @@ export class AxlDaemon {
       send({
         kind: "error",
         id: -1,
-        code: "bad_request",
-        message: error instanceof Error ? error.message : "Undecodable request",
+        error: {
+          code: "bad_request",
+          message: error instanceof Error ? error.message : "Undecodable request",
+          retryable: false,
+        },
       });
       return;
     }
     try {
+      if (
+        !state.initialized &&
+        request.method !== "daemon.info" &&
+        request.method !== "connection.initialize" &&
+        request.method !== "connection.ping"
+      ) {
+        throw new DaemonError(
+          "connection_not_initialized",
+          "Initialize the connection before accessing sessions",
+        );
+      }
+      if (request.method === "connection.initialize") {
+        if (state.initialized) {
+          throw new DaemonError(
+            "connection_already_initialized",
+            "Connection is already initialized",
+          );
+        }
+        state.initialized = true;
+        state.attachmentId = randomUUID();
+        state.grantedCapabilities = new Set(
+          request.params.requestedCapabilities.filter((capability) =>
+            WIRE_CAPABILITIES.includes(capability as (typeof WIRE_CAPABILITIES)[number]),
+          ),
+        );
+      } else {
+        const capability = requiredCapability(request.method);
+        if (capability !== undefined && !state.grantedCapabilities.has(capability)) {
+          throw new DaemonError(
+            "unsupported_capability",
+            `Connection was not granted capability ${capability}`,
+          );
+        }
+      }
+      const result = parseRpcResult(
+        request.method,
+        await this.dispatch(request, send, subscriptions, state),
+      );
       send({
-        kind: "response",
+        kind: "success",
         id: request.id,
-        result: await this.dispatch(request, send, subscriptions),
-      });
+        method: request.method,
+        result,
+      } as ServerMessage);
     } catch (error) {
       send({
         kind: "error",
         id: request.id,
-        code: error instanceof DaemonError ? error.code : "internal_error",
-        message: error instanceof Error ? error.message : "Request failed",
+        method: request.method,
+        error: {
+          code: error instanceof DaemonError ? error.code : "internal_error",
+          message: error instanceof Error ? error.message : "Request failed",
+          retryable: false,
+        },
       });
     }
   }
@@ -229,6 +328,7 @@ export class AxlDaemon {
     request: WireRequest,
     send: (message: ServerMessage) => void,
     subscriptions: Set<() => void>,
+    state: ConnectionState,
   ): Promise<unknown> {
     switch (request.method) {
       case "daemon.info":
@@ -237,6 +337,19 @@ export class AxlDaemon {
           sandboxProvider: this.sandboxProvider,
           ...(this.sandboxImage === undefined ? {} : { sandboxImage: this.sandboxImage }),
         };
+      case "connection.initialize": {
+        return {
+          attachmentId: state.attachmentId,
+          daemonInstanceId: this.daemonInstanceId,
+          wireVersion: WIRE_PROTOCOL_VERSION,
+          grantedCapabilities: [...state.grantedCapabilities],
+          scope: "local_control",
+          heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+          presenceTimeoutMs: PRESENCE_TIMEOUT_MS,
+        };
+      }
+      case "connection.ping":
+        return {};
       case "session.create": {
         const { cwd, modelId, thinkingLevel, webFetch, webSearch, profile } = request.params;
         return this.sessions.create(cwd, {

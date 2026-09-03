@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 
@@ -18,6 +20,15 @@ import type {
   SessionHistoryPage,
   SessionSummary,
   Usage,
+} from "@axl/protocol";
+import {
+  encodeWireMessage,
+  parseEventId,
+  parseServerMessage,
+  parseSessionId,
+  type ServerMessage,
+  WIRE_PROTOCOL_VERSION,
+  type WireRequest,
 } from "@axl/protocol";
 
 import {
@@ -91,10 +102,126 @@ function types(events: readonly CanonicalEvent[]): readonly string[] {
   return events.map((event) => event.type);
 }
 
+function rawConnection(socketPath: string): {
+  readonly socket: Socket;
+  readonly next: () => Promise<ServerMessage>;
+  readonly send: (request: WireRequest) => void;
+} {
+  const socket = createConnection(socketPath);
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+  const queued: ServerMessage[] = [];
+  const waiters: Array<(message: ServerMessage) => void> = [];
+  socket.on("data", (chunk) => {
+    buffer += decoder.write(chunk);
+    for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      const message = parseServerMessage(JSON.parse(line) as unknown);
+      const waiter = waiters.shift();
+      if (waiter === undefined) queued.push(message);
+      else waiter(message);
+    }
+  });
+  return {
+    socket,
+    next: () => {
+      const message = queued.shift();
+      return message === undefined
+        ? new Promise((resolvePromise) => waiters.push(resolvePromise))
+        : Promise.resolve(message);
+    },
+    send: (request) => socket.write(encodeWireMessage(request)),
+  };
+}
+
+test("requires version-4 initialization before session access", async (context) => {
+  const fixture = await startDaemon(context);
+  const raw = rawConnection(fixture.socketPath);
+  context.after(() => raw.socket.destroy());
+
+  const hello = await raw.next();
+  assert.equal(hello.kind, "hello");
+  if (hello.kind !== "hello") return;
+  assert.equal(hello.wireVersion, WIRE_PROTOCOL_VERSION);
+  assert.equal(hello.limits.maxMessageBytes, 1_048_576);
+  assert.equal(hello.limits.maxPendingRequests, 64);
+
+  raw.send({ kind: "request", id: 0, method: "daemon.info", params: {} });
+  const info = await raw.next();
+  assert.equal(info.kind, "success");
+  if (info.kind === "success" && info.method === "daemon.info") {
+    assert.equal(info.result.securityMode, "sandboxed");
+  }
+
+  raw.send({ kind: "request", id: 1, method: "session.list", params: {} });
+  const beforeInitialization = await raw.next();
+  assert.equal(beforeInitialization.kind, "error");
+  if (beforeInitialization.kind === "error") {
+    assert.equal(beforeInitialization.method, "session.list");
+    assert.deepEqual(beforeInitialization.error, {
+      code: "connection_not_initialized",
+      message: "Initialize the connection before accessing sessions",
+      retryable: false,
+    });
+  }
+
+  raw.send({
+    kind: "request",
+    id: 2,
+    method: "connection.initialize",
+    params: {
+      client: { kind: "future_client", version: "9.1.0", instanceId: "fixture-client" },
+      requestedCapabilities: ["session.create", "future.capability"],
+    },
+  });
+  const initialized = await raw.next();
+  assert.equal(initialized.kind, "success");
+  if (initialized.kind === "success" && initialized.method === "connection.initialize") {
+    assert.equal(initialized.result.daemonInstanceId, hello.daemonInstanceId);
+    assert.equal(initialized.result.scope, "local_control");
+    assert.deepEqual(initialized.result.grantedCapabilities, ["session.create"]);
+  }
+
+  raw.send({ kind: "request", id: 4, method: "session.list", params: {} });
+  const unsupported = await raw.next();
+  assert.equal(unsupported.kind, "error");
+  if (unsupported.kind === "error") {
+    assert.equal(unsupported.error.code, "unsupported_capability");
+  }
+
+  raw.send({
+    kind: "request",
+    id: 3,
+    method: "connection.initialize",
+    params: {
+      client: { kind: "future_client", version: "9.1.0", instanceId: "fixture-client" },
+      requestedCapabilities: [],
+    },
+  });
+  const repeated = await raw.next();
+  assert.equal(repeated.kind, "error");
+  if (repeated.kind === "error") {
+    assert.equal(repeated.error.code, "connection_already_initialized");
+  }
+});
+
 test("reports the daemon security mode", async (context) => {
   const sandboxed = await startDaemon(context);
-  const sandboxedClient = await DaemonClient.connect(sandboxed.socketPath);
+  const sandboxedClient = await DaemonClient.connect(sandboxed.socketPath, {
+    identity: { kind: "future_client", version: "1.0.0", instanceId: "future-client-1" },
+    requestedCapabilities: ["session.create", "future.capability"],
+  });
   context.after(() => sandboxedClient.close());
+  assert.equal(sandboxedClient.connection.wireVersion, WIRE_PROTOCOL_VERSION);
+  assert.equal(sandboxedClient.connection.scope, "local_control");
+  assert.deepEqual(sandboxedClient.connection.grantedCapabilities, ["session.create"]);
+  assert.deepEqual(await sandboxedClient.request("connection.ping", {}), {});
+  await assert.rejects(
+    sandboxedClient.request("session.list", {}),
+    (error) => error instanceof WireClientError && error.code === "unsupported_capability",
+  );
   assert.deepEqual(await sandboxedClient.request("daemon.info", {}), {
     securityMode: "sandboxed",
     sandboxProvider: "unknown",
@@ -338,7 +465,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   assert.equal((rejectedStart.reason as WireClientError).code, "too_many_uploads");
 
   const active = starts.find(
-    (result): result is PromiseFulfilledResult<{ uploadId: string }> =>
+    (result): result is PromiseFulfilledResult<{ uploadId: string; chunkBytes: number }> =>
       result.status === "fulfilled",
   );
   assert.ok(active);
@@ -404,9 +531,11 @@ test("a session survives daemon termination and resumes with full history", asyn
   })) as SessionHistoryPage;
   assert.deepEqual(types(firstPage.events), ["session.created", "user.message"]);
   assert.equal(firstPage.done, false);
+  const firstPageCursor = firstPage.events.at(-1)?.id;
+  assert.ok(firstPageCursor);
   const secondPage = (await reconnected.request("session.history", {
     sessionId: created.sessionId,
-    afterEventId: firstPage.events.at(-1)?.id,
+    afterEventId: firstPageCursor,
     limit: 2,
   })) as SessionHistoryPage;
   assert.deepEqual(types(secondPage.events), ["assistant.message"]);
@@ -414,7 +543,7 @@ test("a session survives daemon termination and resumes with full history", asyn
   await assert.rejects(
     reconnected.request("session.history", {
       sessionId: created.sessionId,
-      afterEventId: "00000000-0000-4000-8000-000000000099",
+      afterEventId: parseEventId("00000000-0000-4000-8000-000000000099"),
     }),
     (error) => error instanceof WireClientError && error.code === "unknown_cursor",
   );
@@ -518,7 +647,7 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
   const lastTurn = (await client.request("session.workspace.diff", {
     sessionId: created.sessionId,
     scope: "last-turn",
-  })) as { files: Array<{ path: string; status: string; additions: number }> };
+  })) as { files: readonly { path: string; status: string; additions: number }[] };
   assert.deepEqual(
     lastTurn.files.map((file) => [file.path, file.status, file.additions]),
     [
@@ -529,12 +658,12 @@ test("serves bounded working and last-turn workspace diffs", async (context) => 
 
   const previousGitDirectory = process.env.GIT_DIR;
   process.env.GIT_DIR = join(workspace, "attacker-controlled-git-directory");
-  let working: { files: Array<{ path: string }> };
+  let working: { files: readonly { path: string }[] };
   try {
     working = (await client.request("session.workspace.diff", {
       sessionId: created.sessionId,
       scope: "working",
-    })) as { files: Array<{ path: string }> };
+    })) as { files: readonly { path: string }[] };
   } finally {
     if (previousGitDirectory === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = previousGitDirectory;
@@ -835,7 +964,7 @@ test("subscribe supports an afterEventId cursor and multiple attached clients", 
   const cursor = created.events[0]?.id;
   const { snapshot } = (await two.request("session.subscribe", {
     sessionId: created.sessionId,
-    afterEventId: cursor,
+    ...(cursor === undefined ? {} : { afterEventId: cursor }),
   })) as { snapshot: CanonicalEvent[] };
   assert.deepEqual(types(snapshot), ["user.message", "assistant.message"]);
 
@@ -854,7 +983,7 @@ test("subscribe supports an afterEventId cursor and multiple attached clients", 
   await assert.rejects(
     two.request("session.subscribe", {
       sessionId: created.sessionId,
-      afterEventId: "00000000-0000-4000-8000-00000000dead",
+      afterEventId: parseEventId("00000000-0000-4000-8000-00000000dead"),
     }),
     (error) => error instanceof WireClientError && error.code === "unknown_cursor",
   );
@@ -874,13 +1003,18 @@ test("dispose removes the session and errors surface typed codes", async (contex
 
   await assert.rejects(
     client.request("session.resume", {
-      sessionId: "123e4567-e89b-42d3-a456-42661417ffff",
+      sessionId: parseSessionId("123e4567-e89b-42d3-a456-42661417ffff"),
     }),
     (error) => error instanceof WireClientError && error.code === "unknown_session",
   );
 
   await assert.rejects(
-    client.request("bogus.method" as never, {}),
+    (
+      client.request as unknown as (
+        method: string,
+        params: Record<string, unknown>,
+      ) => Promise<unknown>
+    )("bogus.method", {}),
     (error) => error instanceof WireClientError && error.code === "bad_request",
   );
 });

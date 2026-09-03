@@ -11,14 +11,32 @@ import {
   parseSessionHistoryPage,
   parseWireRequest,
   parseWorkspaceDiff,
+  requiredCapability,
   WIRE_PROTOCOL_VERSION,
 } from "../src/index.ts";
 
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
 
+test("maps feature methods to negotiated capabilities", () => {
+  assert.equal(requiredCapability("daemon.info"), undefined);
+  assert.equal(requiredCapability("session.history"), undefined);
+  assert.equal(requiredCapability("session.send"), "session.send.prompt");
+  assert.equal(requiredCapability("session.blob.abort"), "session.blob.abort");
+});
+
 test("validates every request shape", () => {
   const requests = [
     { kind: "request", id: 0, method: "daemon.info", params: {} },
+    {
+      kind: "request",
+      id: 22,
+      method: "connection.initialize",
+      params: {
+        client: { kind: "future_client", version: "1.2.3", instanceId: "client-1" },
+        requestedCapabilities: ["session.create"],
+      },
+    },
+    { kind: "request", id: 23, method: "connection.ping", params: {} },
     { kind: "request", id: 1, method: "session.create", params: { cwd: "/repo" } },
     {
       kind: "request",
@@ -158,6 +176,33 @@ test("rejects malformed requests at the wire boundary", () => {
   for (const request of [
     { kind: "request", id: -1, method: "session.create", params: { cwd: "/repo" } },
     { kind: "request", id: 1, method: "daemon.info", params: { extra: true } },
+    {
+      kind: "request",
+      id: 1,
+      method: "connection.initialize",
+      params: {
+        client: { kind: "Web", version: "1", instanceId: "client-1" },
+        requestedCapabilities: [],
+      },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "connection.initialize",
+      params: {
+        client: { kind: "web", version: "1", instanceId: "client-1" },
+        requestedCapabilities: ["session.create", "session.create"],
+      },
+    },
+    {
+      kind: "request",
+      id: 1,
+      method: "connection.initialize",
+      params: {
+        client: { kind: "web", version: "1", instanceId: "client-1" },
+        requestedCapabilities: ["Invalid Capability"],
+      },
+    },
     { kind: "request", id: 1, method: "unknown", params: {} },
     { kind: "request", id: 1, method: "session.create", params: { cwd: "" } },
     {
@@ -311,16 +356,77 @@ test("validates bounded workspace diff responses", () => {
 });
 
 test("validates server messages and newline framing", () => {
-  const hello = { kind: "hello", wireVersion: WIRE_PROTOCOL_VERSION } as const;
+  const hello = {
+    kind: "hello",
+    wireVersion: WIRE_PROTOCOL_VERSION,
+    daemonInstanceId: "daemon-1",
+    capabilities: ["session.create"],
+    limits: { maxMessageBytes: 1_048_576, maxPendingRequests: 64 },
+  } as const;
   assert.deepEqual(parseServerMessage(hello), hello);
   assert.equal(encodeWireMessage(hello), `${JSON.stringify(hello)}\n`);
-  assert.deepEqual(parseServerMessage({ kind: "hello", wireVersion: 99 }), {
-    kind: "hello",
+  assert.deepEqual(parseServerMessage({ ...hello, wireVersion: 99 }), {
+    ...hello,
     wireVersion: 99,
   });
+  assert.throws(() => parseServerMessage({ ...hello, wireVersion: 0 }), ProtocolValidationError);
+
+  const initialized = {
+    kind: "success",
+    id: 1,
+    method: "connection.initialize",
+    result: {
+      attachmentId: "attachment-1",
+      daemonInstanceId: "daemon-1",
+      wireVersion: WIRE_PROTOCOL_VERSION,
+      grantedCapabilities: ["session.create"],
+      scope: "local_control",
+      heartbeatIntervalMs: 20_000,
+      presenceTimeoutMs: 60_000,
+    },
+  } as const;
+  assert.deepEqual(parseServerMessage(initialized), initialized);
   assert.throws(
-    () => parseServerMessage({ kind: "hello", wireVersion: 0 }),
+    () =>
+      parseServerMessage({
+        ...initialized,
+        result: { ...initialized.result, unexpected: true },
+      }),
     ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseServerMessage({
+        kind: "success",
+        id: 2,
+        method: "session.interrupt",
+        result: { stopReason: "stop" },
+      }),
+    ProtocolValidationError,
+  );
+  assert.deepEqual(
+    parseServerMessage({
+      kind: "error",
+      id: 2,
+      method: "session.interrupt",
+      error: {
+        code: "operation_active",
+        message: "An operation is active",
+        retryable: false,
+        details: { sessionId },
+      },
+    }),
+    {
+      kind: "error",
+      id: 2,
+      method: "session.interrupt",
+      error: {
+        code: "operation_active",
+        message: "An operation is active",
+        retryable: false,
+        details: { sessionId },
+      },
+    },
   );
 
   const activity = {
