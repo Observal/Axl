@@ -38,8 +38,9 @@ Treat repository content, tool output, web content, extensions, MCP servers, imp
 - Canonical path checks, explicit file-tool readable roots, and symlink-escape rejection
 - Bubblewrap confinement on Linux with explicit Landlock read rules, a versioned seccomp denylist, dropped capabilities, private runtime directories, rlimits, and the user home masked
 - Digest-pinned Podman and Docker execution with read-only roots, restricted mounts, no network, seccomp, cgroups v2 limits, and verified container removal
-- Fail-closed startup when required isolation is unavailable, unless the user explicitly starts a separate `--unsafe` daemon
+- Fail-closed startup when required isolation is unavailable, unless the user explicitly starts `--unsafe` or selects a visibly marked unsafe history
 - Logged unenforced state and a persistent terminal warning for unsafe sessions
+- Mediated web GETs with DNS pinning, private-address rejection, bounded redirects, timeouts, response sizes, and untrusted-content labels
 - Sandboxed stdio MCP servers with limited environment variables and no network
 - Explicit approval for MCP tools, sampling, OAuth browser launches, and elicitation
 - Restricted credential, OAuth, task, and blob storage permissions
@@ -58,9 +59,10 @@ Treat repository content, tool output, web content, extensions, MCP servers, imp
 - Seatbelt does not provide Linux-style namespaces.
 - Windows native sandboxing is not implemented yet.
 - Streamable HTTP MCP servers run remotely and must be trusted with requests sent to them.
+- Enabled web tools can send model-selected queries and URLs to public hosts. Full domain policy, egress brokering, and credential substitution are not implemented yet; web tools never forward ambient credentials.
 - GitHub branch protection and Private Vulnerability Reporting depend on repository settings outside this tree.
 - No signed release artifacts exist yet.
-- Explicit `--unsafe` sessions grant shell, file tools, and local stdio MCP processes the user's full host authority. They rely on the startup warning and separate state until permission profiles are implemented.
+- Explicit unsafe sessions grant Bash, file tools, and local stdio MCP processes the user's full host authority. They rely on a visibly marked selection or `--unsafe`, the persistent warning, and separate state until permission profiles are implemented.
 
 ## Maintenance
 

@@ -19,8 +19,10 @@ This file records notable user-facing changes.
 - Dependency-free event and local wire protocols with runtime validation
 - Crash-safe JSONL sessions, branch reconstruction, redaction, and deterministic replay
 - Provider and credential contracts, thinking levels, tool dialects, a deterministic fake provider, and the built-in Azure OpenAI model catalog
-- An agent loop with shell, read, and edit tools, stable prompts, cancellation, and operation ownership
+- An agent loop with `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search` tools, stable prompts, cancellation, and operation ownership
+- Public-web fetching with redirect and response bounds, DNS pinning, private-address rejection, readable HTML extraction, keyless DuckDuckGo search, and optional Brave Search
 - An authoritative Unix-socket daemon with required operating-system sandboxing and resumable, forkable sessions
+- `axl -r` and `axl --resume` startup selection across native, OCI, and visibly labeled unsafe histories
 - A terminal client with multiline editing, resize-safe rendering, session metrics, rich tool output, syntax-highlighted line-numbered diffs, full-width selectors, global preferences, prompt queues, and reconnect support
 - Buffered terminal input and fail-closed terminal lifecycle handling for fragmented escape sequences, large pastes, redirected streams, and cleanup failures
 - A retained responsive editor frame with rounded Axl styling and a compact borderless narrow-terminal layout
@@ -28,7 +30,7 @@ This file records notable user-facing changes.
 - Shared searchable picker behavior for model, thinking, and theme selection
 - Standard prompt selection, clipboard, modified-Enter newline, interruption, and searchable hotkey controls
 - Searchable command and prompt-history palettes, argument completion, and external-editor handoff
-- Atomic persistence of the last model, thinking level, theme, tool-detail mode, thought-display mode, and fullscreen preferences
+- Atomic persistence of the last model, thinking level, web-tool state, theme, tool-detail mode, thought-display mode, and fullscreen preferences
 - Optional fullscreen transcript mode with a separated fixed editor dock, follow state, highlighted search with match counts, prompt jumps, line and page navigation, text selection, verified copy, draggable scrollbars, safe links, live mode switching, and configurable mouse and exit behavior
 - Sandboxed `!command` passthrough and context-excluded `!!command` passthrough
 - Live previews for versioned Axl Dark, Axl Light, Terminal System, High Contrast, ANSI, and No Color themes
@@ -42,6 +44,8 @@ This file records notable user-facing changes.
 
 - Local provider, tool, extension, and sandbox assembly now lives outside the terminal client, so clients remain replaceable projections over the daemon protocol.
 - File tools now require explicit readable roots, and the default runtime limits them to the workspace.
+- The canonical command tool is named `bash`; historical `shell` calls remain replayable.
+- The exact-match local wire protocol is version 4 for per-session web-tool configuration.
 - Bubblewrap masks the user's home directory while rebinding the authorized workspace.
 - Shell cancellation now terminates the complete process group and refuses to start with an already-aborted signal.
 

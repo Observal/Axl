@@ -40,12 +40,15 @@ export AZURE_OPENAI_BASE_URL=https://your-resource.openai.azure.com/
 
 You can also set `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_RESOURCE_NAME`, and `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. Exported endpoint, API-version, and deployment settings override values saved by an earlier interactive login. A stored API key still takes precedence over `AZURE_OPENAI_API_KEY`.
 
-Start a new session or resume an existing one:
+Start a new session, resume by ID, or open the all-placement resume picker:
 
 ```bash
 axl
 axl <session-id>
+axl -r
 ```
+
+`axl -r` and `axl --resume` list native, OCI, and unsafe histories across workspaces. Each row shows its placement. Selecting a row marked `UNSAFE` explicitly reconnects to the unsafe daemon and retains the persistent warning.
 
 The client uses `~/.axl/axl.sock`. It starts a detached local daemon when one is not already running. Use `axl daemon` to keep the daemon in the foreground for troubleshooting. Restart an existing daemon after changing exported environment variables because a running process cannot inherit later shell changes.
 
@@ -90,9 +93,19 @@ Axl reads global configuration from `~/.axl`:
 - `skills/<name>/SKILL.md` for global Agent Skills
 - `mcp.json` for global MCP servers
 - `credentials.json` for credentials managed by `axl login`
-- `settings.json` for model, thinking, theme, and terminal preferences
+- `settings.json` for model, thinking, web-tool, theme, and terminal preferences
 
 Credentials and settings apply in every workspace. Axl also reads `AGENTS.md`, `.axl/skills`, and `.axl/mcp.json` from the workspace root. A project skill or MCP server replaces the global entry with the same name. Reload the session after changing instructions, skills, or MCP configuration.
+
+The standard tool set is `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`. Web tools are enabled by default. Toggle them for the current session through `/settings`, or set their initial state from the command line:
+
+```bash
+axl --no-web-fetch
+axl --no-web-search
+axl --no-web
+```
+
+`web_search` uses DuckDuckGo's keyless Instant Answer endpoint by default. For ranked Brave Search results, export `BRAVE_SEARCH_API_KEY`. `web_fetch` accepts only public HTTP and HTTPS destinations and rejects private, loopback, link-local, and reserved addresses.
 
 ## Unsafe mode
 
@@ -103,7 +116,7 @@ axl --unsafe
 axl daemon --unsafe
 ```
 
-This disables Bubblewrap or Seatbelt and removes file-tool path restrictions. Shell commands, reads, edits, and local stdio MCP servers receive the user's full host authority. The TUI displays a persistent warning, and the canonical log records `sandbox.configured` with `enforced: false`.
+This disables Bubblewrap or Seatbelt and removes file-tool path restrictions. Bash commands, reads, writes, edits, and local stdio MCP servers receive the user's full host authority. The TUI displays a persistent warning, and the canonical log records `sandbox.configured` with `enforced: false`.
 
 Unsafe mode uses a separate daemon socket and session directory under `~/.axl/unsafe/`. This prevents a normal client from silently attaching to an unsafe daemon. Provider credentials remain in the normal credential store.
 

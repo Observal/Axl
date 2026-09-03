@@ -39,14 +39,17 @@ axl login
 axl
 ```
 
-The `axl` command connects to the local daemon and starts one in the background when necessary. Pass a session ID to resume earlier work:
+The `axl` command connects to the local daemon and starts one in the background when necessary. Pass a session ID to resume earlier work, or open the all-placement resume picker with `-r`:
 
 ```bash
 axl <session-id>
+axl -r
 axl --cwd ~/code/project
 axl daemon
 axl doctor
 ```
+
+The resume picker includes native, OCI, and unsafe histories. Every row shows its placement, and unsafe sessions are marked `UNSAFE` before selection.
 
 The TUI supports multiline editing, model and theme selection, queued prompts, compact tool output, session metrics, and terminal scrollback. Run `/help` for commands and keys. Run `/quit` to detach without stopping the session.
 
@@ -68,7 +71,19 @@ To opt out explicitly, start a separate unsafe daemon and session with:
 axl --unsafe
 ```
 
-Unsafe mode disables operating-system isolation and file-tool path policy. Shell commands, MCP stdio servers, reads, and edits run with the user's full host access. Axl stores unsafe sessions separately under `~/.axl/unsafe/`, records the unenforced sandbox state, and keeps a warning visible in the terminal client.
+Unsafe mode disables operating-system isolation and file-tool path policy. Bash commands, MCP stdio servers, reads, writes, and edits run with the user's full host access. Axl stores unsafe sessions separately under `~/.axl/unsafe/`, records the unenforced sandbox state, and keeps a warning visible in the terminal client. Selecting a visibly marked unsafe session from `axl --resume` is also an explicit unsafe-mode choice.
+
+## Built-in tools
+
+The standard session exposes `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`. Web tools are enabled by default and can be toggled per session in `/settings` or at startup:
+
+```bash
+axl --no-web-fetch
+axl --no-web-search
+axl --no-web
+```
+
+`web_fetch` accepts public HTTP and HTTPS URLs, blocks private and reserved destinations, limits redirects and response size, and returns readable or raw text. `web_search` uses the keyless DuckDuckGo Instant Answer API by default. Set `BRAVE_SEARCH_API_KEY` for ranked Brave Search results.
 
 ## Packages
 

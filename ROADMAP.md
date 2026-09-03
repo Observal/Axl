@@ -557,7 +557,7 @@ name: reviewer
 description: Adversarial review of a diff, reports findings with evidence
 model: provider/model-id
 thinking: high
-tools: [read, shell, web_search]
+tools: [read, bash, web_search]
 exec: sandbox-only   # open | sandbox-only | cloud-only | local-only
 ```
 
@@ -611,7 +611,7 @@ Content outside this block remains user-owned.
 
 #### 7.3 Minimal profile
 
-A DSH-style minimal profile includes only the base prompt, shell, and file editing. It serves cheap models, benchmarks, and users who prefer a bare harness.
+A DSH-style minimal profile includes only the base prompt, Bash, and file editing. It serves cheap models, benchmarks, and users who prefer a bare harness.
 
 #### 7.4 Tool surface
 
@@ -619,8 +619,8 @@ Profiles define the model's base tool surface:
 
 ```text
 chat      (none)
-minimal   shell, edit
-standard  shell, read, edit, write, web_search, fetch_content, ask_user_question
+minimal   bash, edit
+standard  bash, read, write, edit, web_search, web_fetch, ask_user_question
 ```
 
 `ask_user_question` appears only in interactive sessions. Goal sessions, headless runs, and unattended automation omit both its schema and instructions. A goal that needs more information either records a safe, reversible assumption or emits a blocker and pauses.
@@ -870,7 +870,7 @@ Provide at least:
 
 A normal session requires an operating-system sandbox and uses `direct` inside that boundary. If the requested sandbox is unavailable, startup fails.
 
-Unsandboxed execution requires `axl --unsafe`. Unsafe sessions default to `auto`, record that mode in the session log, and show a persistent warning in every client. Users may choose `manual` or `deny` for tighter control. The classifier helps with decisions but is not a security boundary. Bypassing an active sandbox is a separate action that always requires approval.
+Unsandboxed execution requires `axl --unsafe` or explicit selection of a visibly marked unsafe session from the all-placement resume picker. Unsafe sessions default to `auto`, record that mode in the session log, and show a persistent warning in every client. Users may choose `manual` or `deny` for tighter control. The classifier helps with decisions but is not a security boundary. Bypassing an active sandbox is a separate action that always requires approval.
 
 #### 9.3 Auto mode
 
@@ -957,7 +957,7 @@ Use shell and file tools first, MCP and APIs second, and browser automation when
 
 Web search and content fetching are core capabilities. Axl exposes a small two-tool interface:
 
-- Two public tools, `web_search` and `fetch_content`, with provider routing behind them.
+- Two public tools, `web_search` and `web_fetch`, with provider routing behind them.
 - Keyless search works by default. API keys, reused subscription auth, and self-hosted endpoints enable more providers.
 - Provider fallback chains with private-first routing: a self-hosted or local search endpoint is tried before any hosted provider.
 - Content extraction as readable Markdown, raw bodies, or a grounded answer from a cheap summary model. The main model receives full pages only when it asks for them.
@@ -1531,7 +1531,7 @@ No. Features have useful defaults, introduce themselves gradually, and can be di
 
 This section is the source of truth for delivery order and completion status. Build the smallest complete vertical slice, satisfy each exit gate, and do not scaffold later phases without a current consumer.
 
-Phases 0 through 4 are complete. Selected TUI, Agent Skills, and MCP work was brought forward. The immediate next slice at the end of this section takes priority over remaining Phase 5 work.
+Phases 0 through 4 are complete. Selected TUI, web-tool, Agent Skills, and MCP work was brought forward. The immediate next slice at the end of this section takes priority over remaining Phase 5 work.
 
 ### Delivery rules
 
@@ -1708,14 +1708,14 @@ The fake provider and one real provider produce identical canonical stream shape
 - [x] Preserve an append-only prompt-cache prefix.
 - [x] Append loaded skills, context, steering, and injected instructions rather than rewriting prior content.
 - [x] Exclude subagent instructions and tools by default.
-- [x] Add the minimal profile with only shell and editing capabilities.
+- [x] Add the minimal profile with only Bash and editing capabilities.
 
 #### Minimal tools
 
-- [x] Implement canonical `shell`, `read`, and `edit` tools.
+- [x] Implement canonical `bash`, `read`, and `edit` tools.
 - [x] Validate tool input before execution.
 - [x] Enforce tool cancellation and output bounds.
-- [x] Preserve complete tool outputs outside the model surface when truncation is needed. Shell overflow is written whole to the configured overflow directory and referenced from the result.
+- [x] Preserve complete tool outputs outside the model surface when truncation is needed. Bash overflow is written whole to the configured overflow directory and referenced from the result.
 
 #### Exit gate
 
@@ -1739,7 +1739,7 @@ This is the final phase built primarily with the stable external harness.
 - [x] Build a plain terminal or headless client.
 - [x] Show streamed text, tool activity, errors, model, thinking level, and sandbox status. Text currently arrives one event at a time. Phase 9 adds token-delta streaming over the wire.
 - [x] Support send, interrupt, detach, reconnect, and resume.
-- [x] Add a searchable `/resume` selector over daemon-owned session metadata. Treat this as bootstrap behavior, not a later convenience.
+- [x] Add searchable `/resume`, `-r`, and `--resume` selection across local placements. Unsafe histories remain separate and are visibly labeled before selection.
 - [x] Defer the polished TUI and public SDK at the Phase 4 gate. The TUI work below was later brought forward. The public SDK remains deferred.
 
 #### Minimum enforceable sandbox
@@ -1747,11 +1747,11 @@ This is the final phase built primarily with the stable external harness.
 - [x] Canonicalize every file path before policy evaluation.
 - [x] Reject symlink escapes and writes outside the workspace.
 - [x] Protect Axl configuration, credentials, and session storage from tool access.
-- [x] Execute shell commands through Bubblewrap on Linux.
+- [x] Execute Bash commands through Bubblewrap on Linux.
 - [x] Start with workspace-scoped writes and no tool-process network access.
 - [x] Set `failIfUnavailable` for dogfood sessions.
 - [x] Emit explicit sandbox violation events.
-- [x] Provide no implicit unsandboxed fallback. The later explicit `--unsafe` mode uses separate state, logs the unenforced configuration, and shows a persistent warning.
+- [x] Provide no implicit unsandboxed fallback. Explicit `--unsafe` startup or selection of a visibly marked unsafe history uses separate state, logs the unenforced configuration, and shows a persistent warning.
 
 #### Dogfood gate
 
@@ -1786,12 +1786,14 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 
 #### Standard profile and web access
 
-- [ ] Add `write`, `web_search`, and `fetch_content` to the standard profile.
-- [ ] Implement the two-tool search and fetch surface through Axl's provider-routing contract.
-- [ ] Provide keyless search where available and explicit configuration for optional providers.
-- [ ] Add readable, raw, and summarized fetch modes.
+- [x] Add `write`, `web_search`, and `web_fetch` to the standard profile.
+- [x] Implement the initial two-tool search and fetch surface with keyless DuckDuckGo routing and optional Brave Search.
+- [x] Provide keyless search and explicit configuration for the optional Brave provider.
+- [x] Add readable and raw fetch modes.
+- [ ] Add summarized fetch mode through a configured model role.
 - [ ] Clone GitHub repositories locally instead of scraping rendered pages.
-- [ ] Add SSRF protection, content sanitization, and explicit third-party-fetch opt-in.
+- [x] Add SSRF protection and content sanitization.
+- [ ] Add explicit third-party-fetch opt-in for hosted page extraction services.
 - [ ] Defer browser automation to the full sandbox phase.
 
 #### Compaction
@@ -1949,7 +1951,7 @@ The terminal presentation surface already has first-party renderer consumers and
 - [ ] Implement `direct`, `auto`, `manual`, and `deny`.
 - [ ] Use `direct` by default only when the requested operating-system sandbox is active.
 - [ ] Fail startup when the requested sandbox is unavailable.
-- [x] Add `axl --unsafe` as the only way to start without operating-system isolation.
+- [x] Require an explicit unsafe choice through `axl --unsafe` or a visibly marked unsafe row in the all-placement resume picker.
 - [ ] Default an unsafe session to `auto`, show the unsafe state in every client, and record it in the session log.
 - [ ] Allow users to choose a stricter permission level while unsafe.
 - [ ] Treat bypassing an active sandbox as a separate action that always requires approval.

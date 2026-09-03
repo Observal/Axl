@@ -400,7 +400,7 @@ Responsibilities:
 - append-only JSONL logs;
 - event-tree reconstruction and replay;
 - the agent session and turn loop;
-- canonical shell, read, and edit tools;
+- canonical Bash, read, write, edit, web fetch, and web search tools;
 - prompt construction and instruction loading;
 - secret redaction;
 - path policy;
