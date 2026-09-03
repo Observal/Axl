@@ -7,7 +7,9 @@ import test from "node:test";
 import {
   CanonicalEventSizeError,
   encodeCanonicalEvent,
+  encodeWireMessage,
   MAX_CANONICAL_EVENT_BYTES,
+  MAX_WIRE_MESSAGE_BYTES,
   parseEvent,
 } from "../src/index.ts";
 
@@ -50,6 +52,21 @@ test("accepts the exact canonical event limit and rejects the next UTF-8 byte", 
       return true;
     },
   );
+});
+
+test("reserves transport headroom for a maximum-size canonical event", () => {
+  const emptyBytes = encodeCanonicalEvent(eventWithText("")).byteLength;
+  const event = parseEvent(eventWithText("a".repeat(MAX_CANONICAL_EVENT_BYTES - emptyBytes)));
+  const message = encodeWireMessage({
+    kind: "event",
+    subscriptionId: "s".repeat(128),
+    sessionId: event.sessionId,
+    sequence: Number.MAX_SAFE_INTEGER,
+    cursor: "c".repeat(512),
+    event,
+  });
+  assert.ok(new TextEncoder().encode(message).byteLength <= MAX_WIRE_MESSAGE_BYTES);
+  assert.equal(MAX_WIRE_MESSAGE_BYTES - MAX_CANONICAL_EVENT_BYTES, 256 * 1024);
 });
 
 test("measures multibyte content by UTF-8 bytes rather than JavaScript length", () => {

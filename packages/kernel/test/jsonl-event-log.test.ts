@@ -8,7 +8,9 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import {
+  CanonicalEventSizeError,
   EVENT_FORMAT_VERSION,
+  MAX_CANONICAL_EVENT_BYTES,
   type CanonicalEvent,
   type EventPayloadMap,
   type EventType,
@@ -19,6 +21,7 @@ import {
 
 import {
   EventLogCorruptionError,
+  EventLogMigrationRequiredError,
   type EventLogOptions,
   JsonlEventLog,
   REDACTED_VALUE,
@@ -156,6 +159,39 @@ test("reports committed corruption without modifying the file", async (context) 
     (error) => error instanceof EventLogCorruptionError && error.line === 2,
   );
   assert.deepEqual(await readFile(path), corrupt);
+});
+
+test("rejects oversized appends without modifying the log", async (context) => {
+  const { path, log } = await openTemporaryLog(context);
+  await log.append(makeEvent(1, "session.created", { cwd: "/workspace" }));
+  const before = await readFile(path);
+  const oversized = makeEvent(2, "user.message", {
+    content: [{ type: "text", text: "é".repeat(MAX_CANONICAL_EVENT_BYTES) }],
+  });
+
+  await assert.rejects(log.append(oversized), CanonicalEventSizeError);
+  assert.deepEqual(await readFile(path), before);
+});
+
+test("quarantines oversized committed legacy events without modifying the log", async (context) => {
+  const { path, log } = await openTemporaryLog(context);
+  await log.append(makeEvent(1, "session.created", { cwd: "/workspace" }));
+  const oversized = makeEvent(2, "user.message", {
+    content: [{ type: "text", text: "é".repeat(MAX_CANONICAL_EVENT_BYTES) }],
+  });
+  await appendFile(path, `${JSON.stringify(oversized)}\n`);
+  const before = await readFile(path);
+
+  await assert.rejects(JsonlEventLog.open(path, sessionId), (error: unknown) => {
+    assert.ok(error instanceof EventLogMigrationRequiredError);
+    assert.equal(error.sessionId, sessionId);
+    assert.equal(error.eventId, oversized.id);
+    assert.equal(error.eventType, "user.message");
+    assert.equal(error.encodedBytes, Buffer.byteLength(JSON.stringify(oversized)));
+    assert.equal(error.maximumBytes, MAX_CANONICAL_EVENT_BYTES);
+    return true;
+  });
+  assert.deepEqual(await readFile(path), before);
 });
 
 test("rolls back a failed durable append and keeps the queue usable", async (context) => {

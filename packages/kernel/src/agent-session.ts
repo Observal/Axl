@@ -83,6 +83,8 @@ export interface AgentSessionOptions {
   readonly configThinking?: EventPayloadMap["config.thinking"];
   /** Dialect boundary announced at open; the payload carries its own reason. */
   readonly configDialect?: EventPayloadMap["config.dialect"];
+  /** Canonical operation that durably reserved a newly created session. */
+  readonly creationOperationId?: OperationId;
   /** Canonical operation owning configuration events emitted at this boundary. */
   readonly boundaryOperationId?: OperationId;
   /** Live tail: invoked after each event is durably appended, in append order. */
@@ -97,6 +99,15 @@ export interface TurnResult {
   readonly stopReason: AssistantStopReason;
 }
 
+function shellModelContent(event: CanonicalEvent<"user.shell">): readonly UserContent[] {
+  const text = event.payload.content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("");
+  const blobs = event.payload.content.filter((item) => item.type === "blob");
+  return [{ type: "text", text: `[shell]\n$ ${event.payload.command}\n${text}` }, ...blobs];
+}
+
 /** Projects a branch lineage onto the model-facing message history. */
 export function messagesFromLineage(events: readonly CanonicalEvent[]): readonly ModelMessage[] {
   const messages: ModelMessage[] = [];
@@ -108,18 +119,7 @@ export function messagesFromLineage(events: readonly CanonicalEvent[]): readonly
     } else if (event.type === "user.shell") {
       toolCallingAssistant = undefined;
       if (!event.payload.excluded) {
-        messages.push({
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `[shell]\n$ ${event.payload.command}\n${event.payload.content
-                .filter((item) => item.type === "text")
-                .map((item) => item.text)
-                .join("")}`,
-            },
-          ],
-        });
+        messages.push({ role: "user", content: shellModelContent(event) });
       }
     } else if (event.type === "assistant.message") {
       toolCallingAssistant = { role: "assistant", content: event.payload.content, toolCalls: [] };
@@ -243,7 +243,7 @@ export class AgentSession {
       });
     }
     if (opened.events.length === 0) {
-      await session.append(undefined, "session.created", { cwd: options.cwd });
+      await session.append(options.creationOperationId, "session.created", { cwd: options.cwd });
       // The stable prompt freezes at session start; its sections are logged once.
       for (const section of options.prompt?.sections ?? []) {
         await session.append(undefined, "prompt.section", section);
@@ -340,14 +340,7 @@ export class AgentSession {
         excluded,
       });
       if (!excluded) {
-        const output = result.content
-          .filter((item) => item.type === "text")
-          .map((item) => item.text)
-          .join("");
-        this.messages.push({
-          role: "user",
-          content: [{ type: "text", text: `[shell]\n$ ${command}\n${output}` }],
-        });
+        this.messages.push({ role: "user", content: shellModelContent(event) });
       }
       return event;
     } finally {
@@ -370,8 +363,9 @@ export class AgentSession {
     this.activeOperation = operationId;
     const appended: CanonicalEvent[] = [];
     try {
-      appended.push(await this.append(operationId, "user.message", { content }));
-      this.messages.push({ role: "user", content });
+      const userEvent = await this.append(operationId, "user.message", { content });
+      appended.push(userEvent);
+      this.messages.push({ role: "user", content: userEvent.payload.content });
 
       const activity = { sequence: 0 };
       for (let call = 0; ; call += 1) {
@@ -387,17 +381,16 @@ export class AgentSession {
         }
 
         const outcome = await this.modelTurn(operationId, activity, signal);
-        appended.push(
-          await this.append(operationId, "assistant.message", {
-            content: outcome.content,
-            stopReason: outcome.stopReason,
-            ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
-            ...(outcome.errorMessage === undefined ? {} : { errorMessage: outcome.errorMessage }),
-          }),
-        );
+        const assistantEvent = await this.append(operationId, "assistant.message", {
+          content: outcome.content,
+          stopReason: outcome.stopReason,
+          ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
+          ...(outcome.errorMessage === undefined ? {} : { errorMessage: outcome.errorMessage }),
+        });
+        appended.push(assistantEvent);
         this.messages.push({
           role: "assistant",
-          content: outcome.content,
+          content: assistantEvent.payload.content,
           toolCalls: outcome.toolCalls,
         });
         this.onActivity?.({
@@ -566,20 +559,19 @@ export class AgentSession {
           }),
         );
       }
-      appended.push(
-        await this.append(operationId, "tool.result", {
-          callId: call.callId,
-          name: call.name,
-          content: result.content,
-          isError: result.isError,
-          ...(result.details === undefined ? {} : { details: result.details }),
-        }),
-      );
+      const resultEvent = await this.append(operationId, "tool.result", {
+        callId: call.callId,
+        name: call.name,
+        content: result.content,
+        isError: result.isError,
+        ...(result.details === undefined ? {} : { details: result.details }),
+      });
+      appended.push(resultEvent);
       this.messages.push({
         role: "tool",
         callId: call.callId,
         name: call.name,
-        content: result.content,
+        content: resultEvent.payload.content,
         isError: result.isError,
       });
       if (signal?.aborted) return true;

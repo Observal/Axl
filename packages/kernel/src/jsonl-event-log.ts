@@ -6,6 +6,9 @@ import { dirname, resolve } from "node:path";
 
 import {
   type CanonicalEvent,
+  CanonicalEventSizeError,
+  encodeCanonicalEvent,
+  MAX_CANONICAL_EVENT_BYTES,
   type SessionId,
   parseEvent,
   parseSessionId,
@@ -16,6 +19,10 @@ import { redactEventForStorage } from "./redaction.ts";
 
 export interface EventLogOptions {
   readonly secretValues?: readonly string[];
+  /** Daemon-owned transformation available only when canonical encoding exceeds the limit. */
+  readonly prepareOversizedEvent?: (
+    event: CanonicalEvent,
+  ) => CanonicalEvent | Promise<CanonicalEvent>;
 }
 
 export interface EventLogReadResult {
@@ -38,6 +45,25 @@ export class EventLogCorruptionError extends Error {
     this.name = "EventLogCorruptionError";
     this.logPath = logPath;
     this.line = line;
+  }
+}
+
+export class EventLogMigrationRequiredError extends Error {
+  readonly sessionId: SessionId;
+  readonly eventId: CanonicalEvent["id"];
+  readonly eventType: CanonicalEvent["type"];
+  readonly encodedBytes: number;
+  readonly maximumBytes = MAX_CANONICAL_EVENT_BYTES;
+
+  constructor(event: CanonicalEvent, encodedBytes: number) {
+    super(
+      `Session ${event.sessionId} contains oversized event ${event.id} (${event.type}): ${encodedBytes} bytes`,
+    );
+    this.name = "EventLogMigrationRequiredError";
+    this.sessionId = event.sessionId;
+    this.eventId = event.id;
+    this.eventType = event.type;
+    this.encodedBytes = encodedBytes;
   }
 }
 
@@ -81,6 +107,7 @@ function decodeEventLine(
   expectedSessionId: SessionId,
 ): CanonicalEvent {
   try {
+    const oversized = line.byteLength > MAX_CANONICAL_EVENT_BYTES;
     const text = new TextDecoder("utf-8", { fatal: true }).decode(line);
     const event = parseEvent(JSON.parse(text) as unknown);
     if (event.sessionId !== expectedSessionId) {
@@ -89,8 +116,10 @@ function decodeEventLine(
         `must match log session ${expectedSessionId}`,
       );
     }
+    if (oversized) throw new EventLogMigrationRequiredError(event, line.byteLength);
     return event;
   } catch (error) {
+    if (error instanceof EventLogMigrationRequiredError) throw error;
     throw new EventLogCorruptionError(
       path,
       lineNumber,
@@ -194,12 +223,16 @@ export class JsonlEventLog {
   readonly path: string;
   readonly sessionId: SessionId;
   private readonly secretValues: readonly string[];
+  private readonly prepareOversizedEvent:
+    | ((event: CanonicalEvent) => CanonicalEvent | Promise<CanonicalEvent>)
+    | undefined;
   private tail: Promise<void> = Promise.resolve();
 
   private constructor(path: string, sessionId: SessionId, options: EventLogOptions) {
     this.path = path;
     this.sessionId = sessionId;
     this.secretValues = [...(options.secretValues ?? [])];
+    this.prepareOversizedEvent = options.prepareOversizedEvent;
   }
 
   static async open(
@@ -216,10 +249,10 @@ export class JsonlEventLog {
   }
 
   append(value: unknown): Promise<CanonicalEvent> {
-    let event: CanonicalEvent;
+    let redacted: CanonicalEvent;
     try {
-      event = redactEventForStorage(value, this.secretValues);
-      if (event.sessionId !== this.sessionId) {
+      redacted = redactEventForStorage(value, this.secretValues);
+      if (redacted.sessionId !== this.sessionId) {
         throw new ProtocolValidationError(
           "event.sessionId",
           `must match log session ${this.sessionId}`,
@@ -229,8 +262,30 @@ export class JsonlEventLog {
       return Promise.reject(error);
     }
 
-    const line = Buffer.from(`${JSON.stringify(event)}\n`);
     return this.enqueue(async () => {
+      let event = redacted;
+      let encoded: Uint8Array;
+      try {
+        encoded = encodeCanonicalEvent(event);
+      } catch (error) {
+        if (
+          !(error instanceof CanonicalEventSizeError) ||
+          this.prepareOversizedEvent === undefined
+        ) {
+          throw error;
+        }
+        event = parseEvent(await this.prepareOversizedEvent(event));
+        if (event.sessionId !== this.sessionId) {
+          throw new ProtocolValidationError(
+            "event.sessionId",
+            `must match log session ${this.sessionId}`,
+          );
+        }
+        encoded = encodeCanonicalEvent(event);
+      }
+      const line = Buffer.allocUnsafe(encoded.byteLength + 1);
+      line.set(encoded);
+      line[encoded.byteLength] = 0x0a;
       await appendDurably(this.path, line);
       return event;
     });

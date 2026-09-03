@@ -355,6 +355,13 @@ export class CommandJournal {
                       : "internal_error",
                   message: cause instanceof Error ? cause.message : "Request failed",
                   retryable: false,
+                  ...(cause instanceof Error &&
+                  "details" in cause &&
+                  typeof cause.details === "object" &&
+                  cause.details !== null &&
+                  !Array.isArray(cause.details)
+                    ? { details: cause.details as JsonObject }
+                    : {}),
                 };
           const terminal: CommandCompletion = {
             version: 1,

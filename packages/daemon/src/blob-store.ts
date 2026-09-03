@@ -70,6 +70,15 @@ function decodeBase64(value: string): Buffer {
   return bytes;
 }
 
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 function detectedImageType(bytes: Uint8Array): string | undefined {
   if (
     bytes.length >= 24 &&
@@ -237,9 +246,17 @@ export class BlobStore {
         try {
           await rename(upload.path, destination);
           await chmod(destination, 0o600);
+          await syncDirectory(this.directory);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           await rm(upload.path, { force: true });
+        }
+        const stored = await readFile(destination);
+        if (
+          stored.byteLength !== upload.sizeBytes ||
+          createHash("sha256").update(stored).digest("hex") !== sha256
+        ) {
+          throw new BlobStoreError("blob_corrupt", `Blob ${sha256} failed durable verification`);
         }
         const reference: BlobReference = {
           sha256,
@@ -254,6 +271,30 @@ export class BlobStore {
         throw error;
       }
     });
+  }
+
+  async storeText(sessionId: SessionId, text: string): Promise<BlobReference> {
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_BLOB_BYTES) {
+      throw new BlobStoreError(
+        "blob_too_large",
+        `Text attachments must contain between 1 and ${MAX_BLOB_BYTES} bytes`,
+      );
+    }
+    const upload = await this.start(sessionId, {
+      mediaType: "text/plain",
+      sizeBytes: bytes.byteLength,
+    });
+    try {
+      for (let offset = 0; offset < bytes.byteLength; offset += MAX_CHUNK_BYTES) {
+        const chunk = bytes.subarray(offset, Math.min(offset + MAX_CHUNK_BYTES, bytes.byteLength));
+        await this.append(sessionId, upload.uploadId, offset, chunk.toString("base64"));
+      }
+      return await this.commit(sessionId, upload.uploadId);
+    } catch (error) {
+      await this.abort(sessionId, upload.uploadId);
+      throw error;
+    }
   }
 
   abort(sessionId: SessionId, uploadId: string): Promise<{ aborted: boolean }> {

@@ -8,6 +8,7 @@ import { StringDecoder } from "node:string_decoder";
 import {
   encodeWireMessage,
   isRetryableMutationMethod,
+  MAX_WIRE_MESSAGE_BYTES,
   parseServerMessage,
   parseWireRequest,
   requiredCapability,
@@ -45,7 +46,6 @@ export class WireClientError extends Error {
   }
 }
 
-const MAX_LINE_BYTES = 1_048_576;
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 
 /** Thin local client. Session state and the agent loop remain in the daemon. */
@@ -244,7 +244,7 @@ export class DaemonClient {
 
   private receive(chunk: Buffer): void {
     this.buffer += this.decoder.write(chunk);
-    if (Buffer.byteLength(this.buffer) > MAX_LINE_BYTES && !this.buffer.includes("\n")) {
+    if (Buffer.byteLength(this.buffer) > MAX_WIRE_MESSAGE_BYTES && !this.buffer.includes("\n")) {
       this.fail(new WireClientError("frame_too_large", "Daemon message exceeded the size limit"));
       return;
     }
@@ -255,7 +255,7 @@ export class DaemonClient {
     ) {
       const line = this.buffer.slice(0, newline);
       this.buffer = this.buffer.slice(newline + 1);
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
+      if (Buffer.byteLength(line) > MAX_WIRE_MESSAGE_BYTES) {
         this.fail(new WireClientError("frame_too_large", "Daemon message exceeded the size limit"));
         return;
       }

@@ -11,12 +11,15 @@ import { StringDecoder } from "node:string_decoder";
 import {
   type AttachmentPresence,
   type CanonicalEvent,
+  CanonicalEventSizeError,
   type ClientIdentity,
   type EventCursor,
   type EventId,
   encodeWireMessage,
   hashCanonicalRequest,
   isRetryableMutationMethod,
+  MAX_CANONICAL_EVENT_BYTES,
+  MAX_WIRE_MESSAGE_BYTES,
   parseOperationId,
   ProtocolValidationError,
   parseRpcResult,
@@ -34,6 +37,7 @@ import {
 } from "@axl/protocol";
 
 import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
+import { DataDirectoryLock } from "./data-directory-lock.ts";
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
 export type DaemonSecurityMode = "sandboxed" | "unsafe";
@@ -45,10 +49,9 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly sandboxImage?: string;
 }
 
-const MAX_REQUEST_BYTES = 1_048_576;
 const MAX_PENDING_REQUESTS = 64;
 const MAX_ATTACHMENTS = 256;
-const MAX_SNAPSHOT_PAGE_BYTES = 768 * 1024;
+const MAX_SNAPSHOT_PAGE_BYTES = MAX_CANONICAL_EVENT_BYTES;
 const MAX_SNAPSHOT_PAGE_EVENTS = 5_000;
 const MAX_SNAPSHOT_TAIL_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_TAIL_EVENTS = 1_024;
@@ -158,6 +161,7 @@ export class AxlDaemon {
   private readonly dataDirectory: string;
   private readonly daemonInstanceId = randomUUID();
   private commandJournal: CommandJournal | undefined;
+  private dataLock: DataDirectoryLock | undefined;
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
@@ -174,27 +178,31 @@ export class AxlDaemon {
   }
 
   async start(): Promise<void> {
-    if (this.server) throw new DaemonError("already_started", "Daemon already started");
-    this.commandJournal = await CommandJournal.open(this.dataDirectory);
-    await this.commandJournal.reconcile(async (acceptance) => {
-      try {
-        const result = await this.sessions.reconcileAcceptedMutation(acceptance);
-        return result === undefined ? undefined : { result };
-      } catch (error) {
-        if (error instanceof DaemonError && error.code === "cancelled") {
-          return {
-            error: { code: error.code, message: error.message, retryable: false },
-          };
-        }
-        throw error;
-      }
-    });
+    if (this.server || this.dataLock) {
+      throw new DaemonError("already_started", "Daemon already started");
+    }
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
     await removeStaleSocket(this.socketPath);
-
-    const server = createServer((socket) => this.accept(socket));
-    this.server = server;
+    this.dataLock = await DataDirectoryLock.acquire(this.dataDirectory, "daemon");
     try {
+      await this.sessions.scanLegacyEvents();
+      this.commandJournal = await CommandJournal.open(this.dataDirectory);
+      await this.commandJournal.reconcile(async (acceptance) => {
+        try {
+          const result = await this.sessions.reconcileAcceptedMutation(acceptance);
+          return result === undefined ? undefined : { result };
+        } catch (error) {
+          if (error instanceof DaemonError && error.code === "cancelled") {
+            return {
+              error: { code: error.code, message: error.message, retryable: false },
+            };
+          }
+          throw error;
+        }
+      });
+
+      const server = createServer((socket) => this.accept(socket));
+      this.server = server;
       await new Promise<void>((resolve, reject) => {
         const failed = (error: Error): void => {
           server.off("listening", listening);
@@ -212,11 +220,16 @@ export class AxlDaemon {
       this.socketIdentity = { dev: stats.dev, ino: stats.ino };
       await chmod(this.socketPath, 0o600);
     } catch (error) {
-      if (server.listening) {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+      if (this.server?.listening) {
+        await new Promise<void>((resolve) => this.server?.close(() => resolve()));
       }
       this.server = undefined;
-      await this.removeOwnedSocket();
+      try {
+        await this.removeOwnedSocket();
+      } finally {
+        await this.dataLock.release();
+        this.dataLock = undefined;
+      }
       throw error;
     }
   }
@@ -229,14 +242,28 @@ export class AxlDaemon {
     if (server?.listening) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    await this.sessions.disposeAll();
-    await this.removeOwnedSocket();
+    try {
+      await this.sessions.disposeAll();
+    } finally {
+      try {
+        await this.removeOwnedSocket();
+      } finally {
+        await this.dataLock?.release({ allowMissing: true });
+        this.dataLock = undefined;
+      }
+    }
   }
 
   private accept(socket: Socket): void {
     this.connections.add(socket);
     const send = (message: ServerMessage): void => {
-      if (!socket.destroyed) socket.write(encodeWireMessage(message));
+      if (socket.destroyed) return;
+      const encoded = encodeWireMessage(message);
+      if (Buffer.byteLength(encoded) > MAX_WIRE_MESSAGE_BYTES) {
+        socket.destroy(new Error("Daemon message exceeded the negotiated size limit"));
+        return;
+      }
+      socket.write(encoded);
     };
     const state: ConnectionState = {
       initialized: false,
@@ -252,7 +279,7 @@ export class AxlDaemon {
       daemonInstanceId: this.daemonInstanceId,
       capabilities: WIRE_CAPABILITIES,
       limits: {
-        maxMessageBytes: MAX_REQUEST_BYTES,
+        maxMessageBytes: MAX_WIRE_MESSAGE_BYTES,
         maxPendingRequests: MAX_PENDING_REQUESTS,
       },
     });
@@ -261,7 +288,7 @@ export class AxlDaemon {
     const decoder = new StringDecoder("utf8");
     socket.on("data", (chunk) => {
       buffer += decoder.write(chunk);
-      if (Buffer.byteLength(buffer) > MAX_REQUEST_BYTES && !buffer.includes("\n")) {
+      if (Buffer.byteLength(buffer) > MAX_WIRE_MESSAGE_BYTES && !buffer.includes("\n")) {
         send({
           kind: "error",
           id: -1,
@@ -277,7 +304,7 @@ export class AxlDaemon {
       for (let newline = buffer.indexOf("\n"); newline !== -1; newline = buffer.indexOf("\n")) {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
-        if (Buffer.byteLength(line) > MAX_REQUEST_BYTES) {
+        if (Buffer.byteLength(line) > MAX_WIRE_MESSAGE_BYTES) {
           send({
             kind: "error",
             id: -1,
@@ -450,12 +477,23 @@ export class AxlDaemon {
           code:
             error instanceof DaemonError || error instanceof CommandJournalError
               ? error.code
-              : "internal_error",
+              : error instanceof CanonicalEventSizeError
+                ? "content_too_large"
+                : "internal_error",
           message: error instanceof Error ? error.message : "Request failed",
           retryable: error instanceof CommandJournalError ? error.retryable : false,
-          ...(error instanceof CommandJournalError && error.details !== undefined
+          ...((error instanceof DaemonError || error instanceof CommandJournalError) &&
+          error.details !== undefined
             ? { details: error.details }
-            : {}),
+            : error instanceof CanonicalEventSizeError
+              ? {
+                  details: {
+                    field: "canonicalEvent",
+                    encodedBytes: error.encodedBytes,
+                    maximumBytes: error.maximumBytes,
+                  },
+                }
+              : {}),
         },
       });
     }

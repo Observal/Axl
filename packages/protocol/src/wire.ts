@@ -19,6 +19,7 @@ import type {
 import { parseBlobReference, parseEvent, parseUserContent } from "./events.ts";
 
 export const MAX_HISTORY_PAGE_EVENTS = 5_000;
+export const MAX_WIRE_MESSAGE_BYTES = 1024 * 1024;
 
 export type EventCursor = string;
 

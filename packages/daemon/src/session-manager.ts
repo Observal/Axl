@@ -3,11 +3,21 @@
 
 import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, open as openFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  open as openFile,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 import {
   AgentSession,
+  EventLogMigrationRequiredError,
   type EventLogOptions,
   type ExtensionHost,
   JsonlEventLog,
@@ -19,6 +29,7 @@ import {
 import {
   type BlobReference,
   type CanonicalEvent,
+  encodeCanonicalEvent,
   EVENT_FORMAT_VERSION,
   type EventId,
   type EventPayloadMap,
@@ -45,11 +56,13 @@ import { WorkspaceCheckpointError, WorkspaceCheckpointStore } from "./workspace-
 
 export class DaemonError extends Error {
   readonly code: string;
+  readonly details: JsonObject | undefined;
 
-  constructor(code: string, message: string, options?: { cause?: unknown }) {
+  constructor(code: string, message: string, options?: { cause?: unknown; details?: JsonObject }) {
     super(message, options);
     this.name = "DaemonError";
     this.code = code;
+    this.details = options?.details;
   }
 }
 
@@ -177,6 +190,8 @@ export class SessionManager {
   private readonly options: SessionManagerOptions;
   private readonly sessions = new Map<SessionId, ManagedSession>();
   private readonly opening = new Map<SessionId, Promise<ManagedSession>>();
+  private readonly quarantined = new Map<SessionId, EventLogMigrationRequiredError>();
+  private readonly incompleteMigrations = new Set<SessionId>();
   private readonly workspaceCheckpoints: WorkspaceCheckpointStore;
   private readonly blobs: BlobStore;
 
@@ -188,6 +203,93 @@ export class SessionManager {
 
   private logPath(sessionId: SessionId): string {
     return join(this.options.dataDirectory, "sessions", `${sessionId}.jsonl`);
+  }
+
+  async scanLegacyEvents(): Promise<void> {
+    const directory = join(this.options.dataDirectory, "sessions");
+    let entries: Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    this.quarantined.clear();
+    this.incompleteMigrations.clear();
+    const pendingDirectory = join(this.options.dataDirectory, "migrations", "pending");
+    try {
+      for (const entry of await readdir(pendingDirectory, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+        const pending = JSON.parse(await readFile(join(pendingDirectory, entry.name), "utf8")) as {
+          readonly targetSessionId?: unknown;
+        };
+        this.incompleteMigrations.add(
+          parseSessionId(pending.targetSessionId, "pending.targetSessionId"),
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const sessionId = parseSessionId(basename(entry.name, ".jsonl"), "session file name");
+      if (this.incompleteMigrations.has(sessionId)) continue;
+      try {
+        await JsonlEventLog.open(join(directory, entry.name), sessionId);
+      } catch (error) {
+        if (!(error instanceof EventLogMigrationRequiredError)) throw error;
+        this.quarantined.set(sessionId, error);
+      }
+    }
+  }
+
+  private assertNotQuarantined(sessionId: SessionId): void {
+    if (this.incompleteMigrations.has(sessionId)) {
+      throw new DaemonError("unknown_session", `Session ${sessionId} is not published`);
+    }
+    const error = this.quarantined.get(sessionId);
+    if (error === undefined) return;
+    throw new DaemonError(
+      "event_migration_required",
+      `Session ${sessionId} requires offline event migration`,
+      {
+        cause: error,
+        details: {
+          sessionId,
+          eventId: error.eventId,
+          eventType: error.eventType,
+          encodedBytes: error.encodedBytes,
+          maximumBytes: error.maximumBytes,
+          recoveryCommand: `axl session migrate-events ${sessionId}`,
+        },
+      },
+    );
+  }
+
+  private async externalizeOversizedContent(
+    sessionId: SessionId,
+    event: CanonicalEvent,
+  ): Promise<CanonicalEvent> {
+    if (
+      event.type !== "user.message" &&
+      event.type !== "assistant.message" &&
+      event.type !== "user.shell" &&
+      event.type !== "tool.result"
+    ) {
+      return event;
+    }
+    const content = await Promise.all(
+      event.payload.content.map(async (item) => {
+        if (item.type !== "text" || item.text.length === 0) return item;
+        try {
+          return { type: "blob" as const, blob: await this.blobs.storeText(sessionId, item.text) };
+        } catch (error) {
+          if (error instanceof BlobStoreError && error.code === "blob_too_large") return item;
+          throw error;
+        }
+      }),
+    );
+    return parseEvent({ ...event, payload: { ...event.payload, content } });
   }
 
   private async buildSession(
@@ -205,6 +307,7 @@ export class SessionManager {
     boundary: SessionRuntimeBoundary,
     selection: SessionModelSelection,
     boundaryOperationId?: OperationId,
+    creationOperationId?: OperationId,
   ): Promise<AgentSession> {
     const runtime = await this.options.runtime({
       sessionId,
@@ -220,13 +323,19 @@ export class SessionManager {
       cwd,
       ...(runtime.prompt === undefined ? {} : { prompt: runtime.prompt }),
       ...(runtime.system === undefined ? {} : { system: runtime.system }),
-      ...(runtime.log === undefined ? {} : { log: runtime.log }),
+      log: {
+        ...(runtime.log?.secretValues === undefined
+          ? {}
+          : { secretValues: runtime.log.secretValues }),
+        prepareOversizedEvent: (event) => this.externalizeOversizedContent(sessionId, event),
+      },
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
       ...(boundaryOperationId === undefined ? {} : { boundaryOperationId }),
+      ...(creationOperationId === undefined ? {} : { creationOperationId }),
       onEvent: (event) => {
         events.push(event);
         this.authorizeEventBlobs(sessionId, event);
@@ -243,6 +352,7 @@ export class SessionManager {
     sessionId: SessionId,
     cwd: string,
     selection: SessionModelSelection,
+    creationOperationId?: OperationId,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [];
     const listeners = new Set<(event: CanonicalEvent) => void>();
@@ -261,6 +371,8 @@ export class SessionManager {
       activityState,
       "session_start",
       selection,
+      undefined,
+      creationOperationId,
     );
     const stored = await session.log.read();
     events.length = 0;
@@ -294,22 +406,11 @@ export class SessionManager {
     if (reservation !== undefined) {
       const opened = await JsonlEventLog.open(this.logPath(sessionId), sessionId);
       const root = opened.events[0];
-      if (root === undefined) {
-        await opened.log.append({
-          version: EVENT_FORMAT_VERSION,
-          id: randomUUID(),
-          sessionId,
-          operationId: reservation.operationId,
-          parentId: null,
-          timestamp: Date.now(),
-          type: "session.created",
-          payload: { cwd: canonicalCwd },
-        });
-        await opened.log.drain();
-      } else if (
-        root.type !== "session.created" ||
-        root.operationId !== reservation.operationId ||
-        root.payload.cwd !== canonicalCwd
+      if (
+        root !== undefined &&
+        (root.type !== "session.created" ||
+          root.operationId !== reservation.operationId ||
+          root.payload.cwd !== canonicalCwd)
       ) {
         throw new DaemonError(
           "corrupt_session",
@@ -317,7 +418,7 @@ export class SessionManager {
         );
       }
     }
-    const managed = await this.open(sessionId, canonicalCwd, selection);
+    const managed = await this.open(sessionId, canonicalCwd, selection, reservation?.operationId);
     return { sessionId, events: [...managed.events] };
   }
 
@@ -496,6 +597,8 @@ export class SessionManager {
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
       const sessionId = parseSessionId(basename(entry.name, ".jsonl"), "session file name");
+      if (this.incompleteMigrations.has(sessionId)) continue;
+      this.assertNotQuarantined(sessionId);
       const active = this.sessions.get(sessionId);
       const events =
         active?.events ?? (await JsonlEventLog.open(join(directory, entry.name), sessionId)).events;
@@ -551,6 +654,7 @@ export class SessionManager {
     sessionId: unknown,
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const parsed = parseSessionId(sessionId, "sessionId");
+    this.assertNotQuarantined(parsed);
     const existing = this.sessions.get(parsed);
     if (existing) return { sessionId: parsed, events: [...existing.events] };
     const pending = this.opening.get(parsed);
@@ -699,6 +803,7 @@ export class SessionManager {
   }
 
   private async resumeFromLog(sessionId: SessionId): Promise<ManagedSession> {
+    this.assertNotQuarantined(sessionId);
     const path = this.logPath(sessionId);
     try {
       await stat(path);
@@ -872,6 +977,30 @@ export class SessionManager {
       }
       return { operationId, isError: recorded.payload.isError, resultEventId: recorded.id };
     }
+    encodeCanonicalEvent({
+      version: EVENT_FORMAT_VERSION,
+      id: randomUUID(),
+      sessionId: managed.session.log.sessionId,
+      operationId,
+      parentId: managed.events.at(-1)?.id ?? null,
+      timestamp: Date.now(),
+      type: "user.shell",
+      payload: {
+        command,
+        content: [
+          {
+            type: "blob",
+            blob: {
+              sha256: "0".repeat(64),
+              mediaType: "application/octet-stream",
+              sizeBytes: 20 * 1024 * 1024,
+            },
+          },
+        ],
+        isError: false,
+        excluded,
+      },
+    });
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
@@ -1246,6 +1375,7 @@ export class SessionManager {
 
   private managed(sessionId: unknown): ManagedSession {
     const parsed = parseSessionId(sessionId, "sessionId");
+    this.assertNotQuarantined(parsed);
     const managed = this.sessions.get(parsed);
     if (!managed)
       throw new DaemonError("unknown_session", `Session ${parsed} is not open; resume it first`);

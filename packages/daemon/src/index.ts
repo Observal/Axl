@@ -3,5 +3,6 @@
 
 export * from "./client.ts";
 export * from "./daemon.ts";
+export * from "./event-migration.ts";
 export * from "./session-manager.ts";
 export type { WireEvent } from "@axl/protocol";

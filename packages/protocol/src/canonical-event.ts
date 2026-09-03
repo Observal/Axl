@@ -6,9 +6,15 @@ import { type CanonicalEvent, parseEvent } from "./events.ts";
 export const MAX_CANONICAL_EVENT_BYTES = 768 * 1024;
 
 export class CanonicalEventSizeError extends Error {
+  readonly code = "content_too_large";
   readonly event: CanonicalEvent;
   readonly encodedBytes: number;
   readonly maximumBytes = MAX_CANONICAL_EVENT_BYTES;
+  readonly details: {
+    readonly field: "canonicalEvent";
+    readonly encodedBytes: number;
+    readonly maximumBytes: number;
+  };
 
   constructor(event: CanonicalEvent, encodedBytes: number) {
     super(
@@ -17,6 +23,11 @@ export class CanonicalEventSizeError extends Error {
     this.name = "CanonicalEventSizeError";
     this.event = event;
     this.encodedBytes = encodedBytes;
+    this.details = {
+      field: "canonicalEvent",
+      encodedBytes,
+      maximumBytes: MAX_CANONICAL_EVENT_BYTES,
+    };
   }
 }
 

@@ -25,6 +25,7 @@ import type {
 } from "@axl/protocol";
 import {
   encodeWireMessage,
+  MAX_CANONICAL_EVENT_BYTES,
   parseServerMessage,
   parseSessionId,
   type ServerMessage,
@@ -1498,6 +1499,182 @@ test("routes runtime interaction requests to an attached client", async (context
     events.find((event) => event.type === "interaction.resolved")?.operationId,
     responseKey,
   );
+});
+
+test("externalizes oversized schema-supported content before persistence", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const dataDirectory = join(directory, "data");
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await DaemonClient.connect(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: directory });
+  const text = "é".repeat(393_100);
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text }],
+  });
+
+  const raw = await readFile(join(dataDirectory, "sessions", `${created.sessionId}.jsonl`), "utf8");
+  assert.equal(raw.includes("é"), false);
+  for (const line of raw.trimEnd().split("\n")) {
+    assert.ok(Buffer.byteLength(line) <= MAX_CANONICAL_EVENT_BYTES);
+  }
+  const events = raw
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent);
+  const message = events.find((event) => event.type === "user.message");
+  assert.equal(message?.type, "user.message");
+  if (message?.type !== "user.message") return;
+  const content = message.payload.content[0];
+  assert.equal(content?.type, "blob");
+  if (content?.type !== "blob") return;
+  assert.equal(
+    (await readFile(join(dataDirectory, "blobs", content.blob.sha256))).toString("utf8"),
+    text,
+  );
+});
+
+test("rejects oversized fields without schema-defined blob semantics", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: () => ({
+      model: replyPort(),
+      tools: new ToolRegistry(),
+      prompt: {
+        text: "oversized",
+        sections: [
+          {
+            name: "unsupported",
+            source: "test",
+            content: "é".repeat(MAX_CANONICAL_EVENT_BYTES),
+          },
+        ],
+      },
+    }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await DaemonClient.connect(socketPath);
+  context.after(() => client.close());
+
+  await assert.rejects(client.request("session.create", { cwd: directory }), (error: unknown) => {
+    assert.ok(error instanceof WireClientError);
+    assert.equal(error.code, "content_too_large");
+    assert.equal(error.details?.field, "canonicalEvent");
+    assert.equal(error.details?.maximumBytes, MAX_CANONICAL_EVENT_BYTES);
+    return true;
+  });
+});
+
+test("quarantines oversized legacy events with safe recovery details", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const dataDirectory = join(directory, "data");
+  const sessionsDirectory = join(dataDirectory, "sessions");
+  const sessionId = "00000000-0000-4000-8000-000000000201";
+  const oversizedEventId = "00000000-0000-4000-8000-000000000203";
+  const root = {
+    version: 1,
+    id: "00000000-0000-4000-8000-000000000202",
+    sessionId,
+    parentId: null,
+    timestamp: 1,
+    type: "session.created",
+    payload: { cwd: directory },
+  };
+  const oversized = {
+    version: 1,
+    id: oversizedEventId,
+    sessionId,
+    parentId: root.id,
+    timestamp: 2,
+    type: "user.message",
+    payload: { content: [{ type: "text", text: "é".repeat(MAX_CANONICAL_EVENT_BYTES) }] },
+  };
+  await mkdir(sessionsDirectory, { recursive: true });
+  const logPath = join(sessionsDirectory, `${sessionId}.jsonl`);
+  await writeFile(logPath, `${JSON.stringify(root)}\n${JSON.stringify(oversized)}\n`);
+  const original = await readFile(logPath);
+
+  const daemon = new AxlDaemon({
+    socketPath: join(directory, "axl.sock"),
+    dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await DaemonClient.connect(join(directory, "axl.sock"));
+  context.after(() => client.close());
+
+  await assert.rejects(client.request("session.resume", { sessionId }), (error: unknown) => {
+    assert.ok(error instanceof WireClientError);
+    assert.equal(error.code, "event_migration_required");
+    assert.deepEqual(error.details, {
+      sessionId,
+      eventId: oversizedEventId,
+      eventType: "user.message",
+      encodedBytes: Buffer.byteLength(JSON.stringify(oversized)),
+      maximumBytes: MAX_CANONICAL_EVENT_BYTES,
+      recoveryCommand: `axl session migrate-events ${sessionId}`,
+    });
+    return true;
+  });
+  assert.deepEqual(await readFile(logPath), original);
+});
+
+test("ignores incomplete migration targets until their manifest is published", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const dataDirectory = join(directory, "data");
+  const sessionsDirectory = join(dataDirectory, "sessions");
+  const pendingDirectory = join(dataDirectory, "migrations", "pending");
+  const sessionId = "00000000-0000-4000-8000-000000000205";
+  const root = {
+    version: 1,
+    id: "00000000-0000-4000-8000-000000000206",
+    sessionId,
+    parentId: null,
+    timestamp: 1,
+    type: "session.created",
+    payload: { cwd: directory },
+  };
+  await mkdir(sessionsDirectory, { recursive: true });
+  await mkdir(pendingDirectory, { recursive: true });
+  await writeFile(join(sessionsDirectory, `${sessionId}.jsonl`), `${JSON.stringify(root)}\n`);
+  await writeFile(
+    join(pendingDirectory, `${sessionId}.json`),
+    `${JSON.stringify({ version: 1, sourceSessionId: sessionId, targetSessionId: sessionId })}\n`,
+  );
+
+  const daemon = new AxlDaemon({
+    socketPath: join(directory, "axl.sock"),
+    dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await DaemonClient.connect(join(directory, "axl.sock"));
+  context.after(() => client.close());
+  assert.deepEqual(await client.request("session.list", {}), []);
+  await assert.rejects(client.request("session.resume", { sessionId }), (error: unknown) => {
+    assert.ok(error instanceof WireClientError);
+    assert.equal(error.code, "unknown_session");
+    return true;
+  });
 });
 
 test("configuration changes rebuild and log the selected model and thinking", async (context) => {
