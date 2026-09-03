@@ -52,7 +52,7 @@ axl doctor
 
 The resume picker includes native, OCI, and unsafe histories. Every row shows its placement, and unsafe sessions are marked `UNSAFE` before selection.
 
-The `exec` profile is selected when creating a session and gives the model only the canonical `bash` tool, which runs through the configured sandbox. It does not activate file tools, web tools, Skills, or MCP servers. It does not make `--unsafe` sessions safer.
+The [`exec` session profile](docs/session-profiles.md) is selected when creating a session and gives the model only the canonical `bash` tool, which runs through the configured sandbox. It does not activate file tools, `web_fetch`, `web_search`, Skills, or MCP servers. It does not make `--unsafe` sessions safer.
 
 The TUI supports multiline editing, model and theme selection, daemon-owned steering and follow-up prompts, manual context compaction with `/compact [instructions]`, compact tool output, session metrics, and terminal scrollback. While a turn runs, Enter steers it after the current tool-call batch and Alt+Enter queues a follow-up for when it would otherwise finish. Run `/help` for commands and keys. Run `/quit` to detach without stopping the session.
 
@@ -78,7 +78,7 @@ Unsafe mode disables operating-system isolation and file-tool path policy. Bash 
 
 ## Built-in tools
 
-The standard session exposes `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`. Web tools are enabled by default and can be toggled per session in `/settings` or at startup:
+The standard session exposes `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`. `web_fetch` and `web_search` are enabled by default and can be toggled per session in `/settings` or at startup:
 
 ```bash
 axl --no-web-fetch
@@ -106,6 +106,7 @@ axl --no-web
 ## Project documents
 
 - [Setup](SETUP.md)
+- [Session profiles](docs/session-profiles.md)
 - [Development guide](docs/DEVELOPMENT_GUIDE.md)
 - [Contributing](CONTRIBUTING.md)
 - [Governance](GOVERNANCE.md)

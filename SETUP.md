@@ -97,7 +97,19 @@ Axl reads global configuration from `~/.axl`:
 
 Credentials and settings apply in every workspace. Axl also reads `AGENTS.md`, `.axl/skills`, and `.axl/mcp.json` from the workspace root. A project skill or MCP server replaces the global entry with the same name. Reload the session after changing instructions, skills, or MCP configuration.
 
-The standard tool set is `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`. Web tools are enabled by default. Toggle them for the current session through `/settings`, or set their initial state from the command line:
+## Session profiles
+
+The `standard` profile is the default. It exposes `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`, then adds configured Skills and MCP servers.
+
+Use the `exec` profile to create a Bash-only session:
+
+```bash
+axl --profile exec
+```
+
+The profile is fixed for the session and survives daemon restart. Exec sessions keep normal `AGENTS.md` instructions and sandbox enforcement, but do not register file tools, `web_fetch`, or `web_search`. They also skip Skill discovery, MCP configuration parsing, and MCP server startup. See [Session profiles](docs/session-profiles.md) for lifecycle, performance, and security details.
+
+`web_fetch` and `web_search` are enabled by default in standard sessions. Toggle them for the current session through `/settings`, or set their initial state from the command line:
 
 ```bash
 axl --no-web-fetch
