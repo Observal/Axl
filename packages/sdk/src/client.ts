@@ -113,6 +113,7 @@ export class AxlClient {
   private readonly activityListeners = new Set<(event: WireActivity) => void>();
   private readonly presenceListeners = new Set<(presence: PresenceDelivery) => void>();
   private readonly disconnectListeners = new Set<(error: Error) => void>();
+  private readonly reconnectListeners = new Set<() => void | Promise<void>>();
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
   private latestPresence: PresenceDelivery | undefined;
   private readonly shellResults = new Map<OperationId, RpcResult<"session.shell">>();
@@ -168,6 +169,19 @@ export class AxlClient {
         this.initialized = undefined;
         this.setState("incompatible");
         this.fail(error, false);
+        throw error;
+      }
+      try {
+        for (const listener of [...this.reconnectListeners]) await listener();
+      } catch (cause) {
+        const error =
+          cause instanceof AxlClientError
+            ? cause
+            : new AxlClientError("reconnect_failed", "Could not restore active subscriptions", {
+                cause,
+              });
+        this.initialized = undefined;
+        this.fail(error);
         throw error;
       }
     })();
@@ -254,6 +268,12 @@ export class AxlClient {
   onDisconnect(listener: (error: Error) => void): () => void {
     this.disconnectListeners.add(listener);
     return () => this.disconnectListeners.delete(listener);
+  }
+
+  /** Registers view restoration that must complete before reconnect succeeds. */
+  onReconnect(listener: () => void | Promise<void>): () => void {
+    this.reconnectListeners.add(listener);
+    return () => this.reconnectListeners.delete(listener);
   }
 
   onStateChange(listener: (state: ConnectionState) => void): () => void {

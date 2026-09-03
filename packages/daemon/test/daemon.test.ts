@@ -2341,7 +2341,6 @@ test("SDK replaces an expired reconnect cursor with an authoritative snapshot", 
 
   expireNextResume = true;
   await client.reconnect();
-  await subscription.reconnect(client);
 
   assert.equal(resumedRequests, 1);
   assert.equal(freshRequests, 2);

@@ -93,6 +93,10 @@ class FixtureClient {
     };
   }
 
+  onReconnect(): () => void {
+    return () => undefined;
+  }
+
   loadingSnapshot<Result>(load: () => Promise<Result>): Promise<Result> {
     return load();
   }

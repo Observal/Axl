@@ -190,11 +190,17 @@ test("retries a mutation after reconnect with the same idempotency key", async (
   client.close();
 });
 
-test("coalesces concurrent reconnect attempts onto one new transport", async () => {
+test("coalesces reconnects and restores registered views once", async () => {
   const factory = new Factory();
   const { client } = await connect(factory);
+  let restorations = 0;
+  client.onReconnect(async () => {
+    await new Promise((resolve) => setImmediate(resolve));
+    restorations += 1;
+  });
   await Promise.all([client.reconnect(), client.reconnect()]);
   assert.equal(factory.transports.length, 2);
+  assert.equal(restorations, 1);
   client.close();
 });
 

@@ -52,6 +52,7 @@ class ResumableSessionSubscription implements SessionSubscription {
   private removeEvent: () => void = () => undefined;
   private removeActivity: () => void = () => undefined;
   private removeDisconnect: () => void = () => undefined;
+  private removeReconnect: () => void = () => undefined;
   private readonly sessionId: SessionId;
   private readonly options: SessionSubscriptionOptions;
 
@@ -88,6 +89,8 @@ class ResumableSessionSubscription implements SessionSubscription {
     this.closed = true;
     this.generation += 1;
     this.unbind();
+    this.removeReconnect();
+    this.removeReconnect = () => undefined;
     this.projector.resetActivity();
     this.options.onChange?.(this.projector);
   }
@@ -111,6 +114,8 @@ class ResumableSessionSubscription implements SessionSubscription {
   private async establish(client: AxlClient, forceSnapshot = false): Promise<void> {
     const generation = ++this.generation;
     this.unbind();
+    this.removeReconnect();
+    this.removeReconnect = () => undefined;
     this.client = client;
     this.sequence = 0;
     this.projector.resetActivity();
@@ -251,6 +256,8 @@ class ResumableSessionSubscription implements SessionSubscription {
       for (const delivery of pendingActivity) {
         if (delivery.subscriptionId === this.currentSubscriptionId) this.applyActivity(delivery);
       }
+      if (this.closed || generation !== this.generation) return;
+      this.removeReconnect = client.onReconnect(() => this.reconnect(client));
     } catch (error) {
       this.unbind();
       const failedSubscriptionId = this.currentSubscriptionId;

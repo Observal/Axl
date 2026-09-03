@@ -186,6 +186,9 @@ function client(
     onDisconnect() {
       return () => undefined;
     },
+    onReconnect() {
+      return () => undefined;
+    },
     close() {},
   } as unknown as AxlClient;
 }
@@ -236,6 +239,10 @@ class ReconnectClient {
     return () => {
       this.disconnectListeners.delete(listener);
     };
+  }
+
+  onReconnect(): () => void {
+    return () => undefined;
   }
 
   disconnect(): void {
