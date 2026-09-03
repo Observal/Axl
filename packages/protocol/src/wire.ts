@@ -210,6 +210,12 @@ export type WireRequest =
   | {
       readonly kind: "request";
       readonly id: number;
+      readonly method: "session.compact";
+      readonly params: { readonly sessionId: SessionId; readonly instructions?: string };
+    }
+  | {
+      readonly kind: "request";
+      readonly id: number;
       readonly method: "session.shell";
       readonly params: {
         readonly sessionId: SessionId;
@@ -631,6 +637,25 @@ export function parseWireRequest(value: unknown): WireRequest {
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
         content: parseUserContent(params.content, "request.params.content"),
+      },
+    };
+  }
+  if (method === "session.compact") {
+    exact(params, "request.params", ["sessionId", "instructions"]);
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        ...(params.instructions === undefined
+          ? {}
+          : {
+              instructions: boundedString(
+                params.instructions,
+                "request.params.instructions",
+                16_384,
+              ),
+            }),
       },
     };
   }

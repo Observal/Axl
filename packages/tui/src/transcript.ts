@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ModelInfo } from "@axl/ai";
-import type { BlobReference, CanonicalEvent } from "@axl/protocol";
+import type { BlobReference, CanonicalEvent, Usage } from "@axl/protocol";
 
 import { renderMarkdown } from "./markdown.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapLine } from "./render.ts";
@@ -107,7 +107,7 @@ export class SessionView {
   outputTokens = 0;
   cacheReadTokens = 0;
   cacheWriteTokens = 0;
-  contextTokens = 0;
+  contextTokens: number | undefined = 0;
   cacheHitPercent: number | undefined;
   totalCostUsd = 0;
   tokensPerSecond: number | undefined;
@@ -155,6 +155,24 @@ export class SessionView {
     this.tokensPerSecond = undefined;
   }
 
+  private addUsage(usage: Usage): void {
+    this.inputTokens += usage.inputTokens;
+    this.outputTokens += usage.outputTokens;
+    this.cacheReadTokens += usage.cacheReadTokens;
+    this.cacheWriteTokens += usage.cacheWriteTokens;
+    this.totalTokens += usage.inputTokens + usage.outputTokens;
+    const cost = this.models.find((candidate) => candidate.modelId === this.model)?.cost;
+    this.totalCostUsd +=
+      usage.costUsd ??
+      (cost === undefined
+        ? 0
+        : (cost.inputUsdPerMTok * usage.inputTokens +
+            cost.outputUsdPerMTok * usage.outputTokens +
+            (cost.cacheReadUsdPerMTok ?? 0) * usage.cacheReadTokens +
+            (cost.cacheWriteUsdPerMTok ?? 0) * usage.cacheWriteTokens) /
+          1_000_000);
+  }
+
   frameBorder(text: string): string {
     return (
       this.palette.thinking?.(this.thinking ?? "off", text) ??
@@ -179,9 +197,11 @@ export class SessionView {
       if (parts.length === 0) parts.push("ready");
     } else {
       const percent =
-        this.contextTokens === 0
-          ? "0.0%"
-          : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
+        this.contextTokens === undefined
+          ? "?"
+          : this.contextTokens === 0
+            ? "0.0%"
+            : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
       parts.push(`${percent}/${compactNumber(model.contextWindow)} context`);
     }
     return parts.join(" ");
@@ -228,25 +248,11 @@ export class SessionView {
       case "assistant.message": {
         const usage = event.payload.usage;
         if (usage !== undefined) {
-          this.inputTokens += usage.inputTokens;
-          this.outputTokens += usage.outputTokens;
-          this.cacheReadTokens += usage.cacheReadTokens;
-          this.cacheWriteTokens += usage.cacheWriteTokens;
-          this.totalTokens += usage.inputTokens + usage.outputTokens;
+          this.addUsage(usage);
           const promptTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
           this.contextTokens = promptTokens;
           this.cacheHitPercent =
             promptTokens > 0 ? (usage.cacheReadTokens / promptTokens) * 100 : undefined;
-          const cost = this.models.find((candidate) => candidate.modelId === this.model)?.cost;
-          this.totalCostUsd +=
-            usage.costUsd ??
-            (cost === undefined
-              ? 0
-              : (cost.inputUsdPerMTok * usage.inputTokens +
-                  cost.outputUsdPerMTok * usage.outputTokens +
-                  (cost.cacheReadUsdPerMTok ?? 0) * usage.cacheReadTokens +
-                  (cost.cacheWriteUsdPerMTok ?? 0) * usage.cacheWriteTokens) /
-                1_000_000);
           if (this.responseStartedAt !== undefined && usage.outputTokens > 0) {
             const elapsedMs = performance.now() - this.responseStartedAt;
             this.tokensPerSecond =
@@ -354,6 +360,9 @@ export class SessionView {
       case "context.injected":
         return this.wrap(dim(`+ context [${sanitizeTerminalText(event.payload.source)}]`));
       case "context.compacted":
+        if (event.payload.usage !== undefined) this.addUsage(event.payload.usage);
+        this.contextTokens = undefined;
+        this.cacheHitPercent = undefined;
         return [
           "",
           this.palette.accent("◇ Context compacted"),

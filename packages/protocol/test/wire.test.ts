@@ -56,6 +56,12 @@ test("validates every request shape", () => {
       method: "session.shell",
       params: { sessionId, command: "pwd", excluded: false },
     },
+    {
+      kind: "request",
+      id: 22,
+      method: "session.compact",
+      params: { sessionId, instructions: "Focus on code changes" },
+    },
     { kind: "request", id: 5, method: "session.interrupt", params: { sessionId } },
     { kind: "request", id: 5, method: "session.subscribe", params: { sessionId } },
     { kind: "request", id: 6, method: "session.reload", params: { sessionId } },
@@ -175,6 +181,7 @@ test("rejects malformed requests at the wire boundary", () => {
       method: "session.shell",
       params: { sessionId, command: "pwd", excluded: "no" },
     },
+    { kind: "request", id: 1, method: "session.compact", params: { sessionId, instructions: "" } },
     { kind: "request", id: 1, method: "session.configure", params: { sessionId } },
     {
       kind: "request",

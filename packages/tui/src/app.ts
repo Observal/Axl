@@ -338,6 +338,7 @@ const COMMANDS: readonly { readonly name: string; readonly summary: string }[] =
   { name: "/regular", summary: "return to terminal scrollback mode" },
   { name: "/login", summary: "configure Azure OpenAI credentials" },
   { name: "/reload", summary: "reload AGENTS.md, prompt, and tools" },
+  { name: "/compact", summary: "summarize older context, optionally with instructions" },
   { name: "/status", summary: "show session, display, and queue state" },
   { name: "/resume", summary: "open another saved session" },
   { name: "/fork", summary: "fork from an earlier user message" },
@@ -2251,11 +2252,12 @@ export class AxlApp {
       this.selectThinking(argument);
       return;
     }
-    if (command === "/login" || command === "/reload") {
+    if (command === "/login" || command === "/reload" || command === "/compact") {
       if (this.view.working)
         this.notice = this.view.palette.dim("· finish or interrupt the turn first");
       else if (command === "/login") void this.openLogin();
-      else void this.reload();
+      else if (command === "/reload") void this.reload();
+      else void this.compact(argument || undefined);
       return;
     }
     const extensionCommand = this.extensionHost
@@ -3828,6 +3830,29 @@ export class AxlApp {
     if (branch !== this.branch) {
       this.branch = branch;
       this.redraw();
+    }
+  }
+
+  private async compact(instructions?: string): Promise<void> {
+    this.sending = true;
+    this.setWorking(true);
+    this.notice = this.view.palette.dim("· compacting context");
+    this.redraw();
+    try {
+      await this.requireClient().request("session.compact", {
+        sessionId: this.sessionId,
+        ...(instructions === undefined ? {} : { instructions }),
+      });
+      this.notice = undefined;
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "compaction failed"}`,
+      );
+    } finally {
+      this.sending = false;
+      this.setWorking(false);
+      this.redraw();
+      void this.drainQueue();
     }
   }
 

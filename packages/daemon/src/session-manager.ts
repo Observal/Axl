@@ -8,6 +8,7 @@ import { basename, join, resolve } from "node:path";
 
 import {
   AgentSession,
+  type CompactionSettings,
   type EventLogOptions,
   type ExtensionHost,
   JsonlEventLog,
@@ -62,6 +63,7 @@ export interface SessionRuntime {
   readonly system?: string;
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
+  readonly compaction?: Partial<CompactionSettings>;
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
@@ -269,6 +271,7 @@ export class SessionManager {
       ...(runtime.system === undefined ? {} : { system: runtime.system }),
       ...(runtime.log === undefined ? {} : { log: runtime.log }),
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
+      ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
@@ -618,6 +621,25 @@ export class SessionManager {
       await this.captureWorkspaceCheckpoint(managed);
       const result = await managed.session.runTurn(content, active.controller.signal);
       return { stopReason: result.stopReason };
+    } finally {
+      if (managed.activeTurn === active) delete managed.activeTurn;
+      active.finish();
+    }
+  }
+
+  async compact(
+    sessionId: unknown,
+    customInstructions?: string,
+  ): Promise<EventPayloadMap["context.compacted"]> {
+    const managed = this.managed(sessionId);
+    if (managed.activeTurn || managed.rebuilding) {
+      throw new DaemonError("operation_active", "An operation already owns this branch");
+    }
+    const active = deferredTurn();
+    managed.activeTurn = active;
+    try {
+      const event = await managed.session.compact(customInstructions, active.controller.signal);
+      return event.payload;
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();

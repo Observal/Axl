@@ -1799,14 +1799,14 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 #### Compaction
 
 - [ ] Implement proactive threshold compaction and overflow recovery.
-- [ ] Implement manual compaction.
-- [ ] Preserve turn boundaries and tool call/result integrity.
-- [ ] Handle split turns and previous-summary iteration.
-- [ ] Produce structured continuation summaries.
+- [x] Implement manual compaction.
+- [x] Preserve turn boundaries and tool call/result integrity.
+- [x] Handle split turns and previous-summary iteration.
+- [x] Produce structured continuation summaries.
 - [ ] Track cumulative read and modified files.
 - [ ] Summarize branches independently and exclude side-channel branches.
-- [ ] Retain original history outside the compacted model surface.
-- [ ] Track compaction tokens and cost.
+- [x] Retain original history outside the compacted model surface.
+- [x] Track compaction tokens and cost.
 - [ ] Add independent compaction behavior fixtures.
 
 #### Session controls

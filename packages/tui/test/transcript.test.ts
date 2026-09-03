@@ -189,11 +189,20 @@ test("renders compaction and session lifecycle entries distinctly", () => {
     makeEvent("context.compacted", {
       summary: "## Continued work\n\n- keep the sandbox active",
       replacedEventIds: [parseEventId("00000000-0000-4000-8000-000000000001")],
+      usage: {
+        inputTokens: 20,
+        outputTokens: 5,
+        cacheReadTokens: 3,
+        cacheWriteTokens: 2,
+      },
     }),
   );
   assert.match(compacted.join("\n"), /◇ Context compacted/);
   assert.match(compacted.join("\n"), /Continued work/);
   assert.match(compacted.join("\n"), /• keep the sandbox active/);
+  assert.equal(view.totalTokens, 25);
+  assert.equal(view.cacheReadTokens, 3);
+  assert.equal(view.contextTokens, undefined);
   assert.deepEqual(view.apply(makeEvent("session.closed", { reason: "completed" })), [
     "· session completed",
   ]);

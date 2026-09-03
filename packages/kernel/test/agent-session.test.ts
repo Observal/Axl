@@ -85,6 +85,7 @@ async function makeSession(
   options: {
     system?: string;
     maxModelCallsPerTurn?: number;
+    compaction?: { keepRecentTokens?: number; maxOutputTokens?: number };
     onActivity?: (frame: SessionActivityFrame) => void;
   } = {},
 ): Promise<{ session: AgentSession; path: string; tools: ToolRegistry }> {
@@ -146,6 +147,105 @@ test("runs a plain turn and persists the canonical events", async (context) => {
   await session.dispose();
 });
 
+test("manual compaction replaces old model context without deleting history", async (context) => {
+  const port = makePort([
+    say("old answer"),
+    say("recent answer"),
+    say("## Goal\nContinue the test"),
+    say("new answer"),
+    say("## Goal\nContinue the updated test"),
+  ]);
+  const { session, path } = await makeSession(context, port, new ToolRegistry(), {
+    compaction: { keepRecentTokens: 7, maxOutputTokens: 123 },
+  });
+  await session.runTurn([{ type: "text", text: "old prompt" }]);
+  await session.runTurn([{ type: "text", text: "recent prompt" }]);
+
+  const compacted = await session.compact("Focus on exact test state");
+  assert.equal(compacted.payload.summary, "## Goal\nContinue the test");
+  assert.deepEqual(compacted.payload.usage, usage);
+  assert.equal(compacted.payload.replacedEventIds.length, 2);
+  assert.deepEqual(port.requests[2]?.tools, []);
+  assert.equal(port.requests[2]?.toolChoice, "none");
+  assert.equal(port.requests[2]?.maxOutputTokens, 123);
+  const summaryPrompt = port.requests[2]?.messages[0];
+  assert.match(
+    summaryPrompt?.role === "user" && summaryPrompt.content[0]?.type === "text"
+      ? summaryPrompt.content[0].text
+      : "",
+    /Focus on exact test state/,
+  );
+
+  let stored = (await session.log.read()).events;
+  assert.equal(stored.filter((event) => event.type === "user.message").length, 2);
+  assert.deepEqual(
+    messagesFromLineage(stored).map((message) => message.role),
+    ["user", "user", "assistant"],
+  );
+
+  await session.runTurn([{ type: "text", text: "new prompt" }]);
+  const compactedAgain = await session.compact();
+  assert.ok(compactedAgain.payload.replacedEventIds.includes(compacted.id));
+  const updatePrompt = port.requests[4]?.messages[0];
+  assert.match(
+    updatePrompt?.role === "user" && updatePrompt.content[0]?.type === "text"
+      ? updatePrompt.content[0].text
+      : "",
+    /<previous-summary>\n## Goal\nContinue the test/,
+  );
+  stored = (await session.log.read()).events;
+  assert.equal(stored.filter((event) => event.type === "user.message").length, 3);
+  await session.dispose();
+
+  const resumedPort = makePort([say("continued")]);
+  const resumed = await AgentSession.open(path, sessionId, {
+    model: resumedPort,
+    tools: new ToolRegistry(),
+    cwd: "/workspace",
+  });
+  await resumed.runTurn([{ type: "text", text: "continue" }]);
+  const resumedMessages = resumedPort.requests[0]?.messages ?? [];
+  assert.deepEqual(
+    resumedMessages.map((message) => message.role),
+    ["user", "user", "assistant", "user"],
+  );
+  const summary = resumedMessages[0];
+  assert.match(
+    summary?.role === "user" && summary.content[0]?.type === "text" ? summary.content[0].text : "",
+    /Continue the updated test/,
+  );
+  await resumed.dispose();
+});
+
+test("failed compaction leaves the original context active", async (context) => {
+  const port = makePort([
+    say("old answer"),
+    say("recent answer"),
+    [
+      { type: "text_delta", text: "partial summary" },
+      { type: "completed", stopReason: "length", usage },
+    ],
+    say("continued"),
+  ]);
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    compaction: { keepRecentTokens: 7 },
+  });
+  await session.runTurn([{ type: "text", text: "old prompt" }]);
+  await session.runTurn([{ type: "text", text: "recent prompt" }]);
+
+  await assert.rejects(session.compact(), /ended with length/);
+  assert.equal(
+    (await session.log.read()).events.some((event) => event.type === "context.compacted"),
+    false,
+  );
+  await session.runTurn([{ type: "text", text: "continue" }]);
+  assert.deepEqual(
+    port.requests[3]?.messages.map((message) => message.role),
+    ["user", "assistant", "user", "assistant", "user"],
+  );
+  await session.dispose();
+});
+
 test("publishes ordered deltas and clears them after the canonical assistant event", async (context) => {
   const frames: SessionActivityFrame[] = [];
   const port = makePort([say("hello")]);
@@ -195,6 +295,28 @@ test("dispatches tool calls, pairs results, and feeds them back", async (context
   // The single operation owns every event of the turn.
   const operationIds = new Set(result.events.map((event) => event.operationId));
   assert.equal(operationIds.size, 1);
+});
+
+test("split-turn compaction keeps tool calls paired with their results", async (context) => {
+  const port = makePort([callTool("call-1", { value: 1 }), say("done"), say("summary")]);
+  const registry = new ToolRegistry();
+  registry.register(echoTool().tool);
+  const { session } = await makeSession(context, port, registry, {
+    compaction: { keepRecentTokens: 1 },
+  });
+
+  await session.runTurn([{ type: "text", text: "use the tool" }]);
+  const compacted = await session.compact();
+  const events = (await session.log.read()).events;
+  assert.deepEqual(
+    compacted.payload.replacedEventIds.map((id) => events.find((event) => event.id === id)?.type),
+    ["user.message", "assistant.message", "tool.call", "tool.result"],
+  );
+  assert.deepEqual(
+    messagesFromLineage(events).map((message) => message.role),
+    ["user", "assistant"],
+  );
+  await session.dispose();
 });
 
 test("an unregistered tool yields an error result, not a crash", async (context) => {

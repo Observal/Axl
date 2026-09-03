@@ -13,7 +13,7 @@ The TUI includes:
 - Atomic global preferences in `~/.axl/settings.json` for model, thinking, web-tool availability, theme, and terminal presentation
 - Sandboxed `!command` passthrough, plus context-excluded `!!command` passthrough
 - Model and thinking changes recorded by the daemon
-- Queued follow-up prompts while a turn is running
+- Queued follow-up prompts while a turn or manual context compaction is running
 - GFM Markdown, syntax highlighting, Unicode Mermaid diagrams, safe visible links, bordered prompts, retained tool transactions, bounded shell output, and line-numbered diffs that switch between unified and split views
 - A framed editor showing token use, cache rate, cost, context, model, effort, path, Git branch, and local throughput
 - Clean resize reconstruction, interruption, detach, daemon restart reconnect, searchable all-placement session resume with visible unsafe labels, fork, clone, and visible connection state
@@ -33,7 +33,7 @@ The TUI attaches to an injected daemon client. It does not construct providers, 
 
 Terminal extensions declare capabilities before activation. Every registration returns a disposer, and `/reload` removes all extension-owned UI, listeners, and tracked work before activating a fresh instance. MCP and Agent Skills use the public tool-renderer registration. Renderer output is sanitized and bounded, and failures remain visible while the built-in generic renderer preserves the canonical tool transaction.
 
-Run `/commands` for searchable actions, `/hotkeys` for keybindings, `/details` for compact, full, or focus transcript presentation, and `/settings` for persistent terminal preferences. `/stash` preserves or swaps a draft, `/favorite` manages model favorites, `/developer` toggles the wide workspace panel, `/vim` toggles Vim editing, and `/review` opens bounded workspace review. Workspace checkpoints remain off until review is enabled and can be disabled with `/review off`.
+Run `/commands` for searchable actions, `/hotkeys` for keybindings, `/details` for compact, full, or focus transcript presentation, and `/settings` for persistent terminal preferences. `/compact [instructions]` summarizes older context while retaining recent work and the complete JSONL history. `/stash` preserves or swaps a draft, `/favorite` manages model favorites, `/developer` toggles the wide workspace panel, `/vim` toggles Vim editing, and `/review` opens bounded workspace review. Workspace checkpoints remain off until review is enabled and can be disabled with `/review off`.
 
 Ctrl plus V pastes text. Dropping image paths attaches them to the next prompt. `/attach <path>` provides an explicit keyboard flow, while `/attach clear` removes pending attachments. Clipboard image paste is deferred until its terminal-specific paths pass real-terminal verification. Image display can be set to auto, inline, or metadata in `/settings`. See `docs/terminal-compatibility.md` for capability overrides and the manual terminal matrix.
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "./agent-session.ts";
+export type { CompactionSettings } from "./compaction.ts";
 export * from "./event-reader-fuzz.ts";
 export * from "./extension-host.ts";
 export * from "./jsonl-event-log.ts";

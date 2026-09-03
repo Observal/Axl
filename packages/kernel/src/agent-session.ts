@@ -23,12 +23,20 @@ import {
   type UserContent,
 } from "@axl/protocol";
 
+import {
+  type CompactionSettings,
+  DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+  DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+  messagesFromCompactedLineage,
+  prepareCompaction,
+  summarizeCompaction,
+} from "./compaction.ts";
 import { type ExtensionHost, NOOP_EXTENSION_HOST } from "./extension-host.ts";
 import { type EventLogOptions, JsonlEventLog } from "./jsonl-event-log.ts";
 import type { ModelPort } from "./model-port.ts";
 import { SandboxViolationError } from "./path-policy.ts";
 import type { StablePrompt } from "./prompt.ts";
-import { ReplayError, verifyToolCallIntegrity } from "./replay.ts";
+import { verifyToolCallIntegrity } from "./replay.ts";
 import { SessionTree } from "./session-tree.ts";
 import type { ToolExecutionResult, ToolRegistry } from "./tools.ts";
 
@@ -74,6 +82,7 @@ export interface AgentSessionOptions {
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
   readonly maxModelCallsPerTurn?: number;
+  readonly compaction?: Partial<CompactionSettings>;
   readonly log?: EventLogOptions;
   /** Sandbox state announced at every open as a `sandbox.configured` event. */
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
@@ -99,58 +108,7 @@ export interface TurnResult {
 
 /** Projects a branch lineage onto the model-facing message history. */
 export function messagesFromLineage(events: readonly CanonicalEvent[]): readonly ModelMessage[] {
-  const messages: ModelMessage[] = [];
-  let toolCallingAssistant: Extract<ModelMessage, { role: "assistant" }> | undefined;
-  for (const event of events) {
-    if (event.type === "user.message") {
-      toolCallingAssistant = undefined;
-      messages.push({ role: "user", content: event.payload.content });
-    } else if (event.type === "user.shell") {
-      toolCallingAssistant = undefined;
-      if (!event.payload.excluded) {
-        messages.push({
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: `[shell]\n$ ${event.payload.command}\n${event.payload.content
-                .filter((item) => item.type === "text")
-                .map((item) => item.text)
-                .join("")}`,
-            },
-          ],
-        });
-      }
-    } else if (event.type === "assistant.message") {
-      toolCallingAssistant = { role: "assistant", content: event.payload.content, toolCalls: [] };
-      messages.push(toolCallingAssistant);
-    } else if (event.type === "tool.call") {
-      if (toolCallingAssistant === undefined) {
-        throw new ReplayError(`Tool call ${event.id} has no preceding assistant turn`);
-      }
-      (toolCallingAssistant.toolCalls as ToolCallRequest[]).push({
-        callId: event.payload.callId,
-        name: event.payload.name === "shell" ? "bash" : event.payload.name,
-        input: event.payload.input,
-      });
-    } else if (event.type === "tool.result") {
-      messages.push({
-        role: "tool",
-        callId: event.payload.callId,
-        name: event.payload.name === "shell" ? "bash" : event.payload.name,
-        content: event.payload.content,
-        isError: event.payload.isError,
-      });
-    } else if (event.type === "context.injected") {
-      toolCallingAssistant = undefined;
-      messages.push({
-        role: "user",
-        content: [{ type: "text", text: `[${event.payload.source}]\n${event.payload.content}` }],
-      });
-    }
-    // Configuration, prompt, sandbox, and error events are not model messages.
-  }
-  return messages;
+  return messagesFromCompactedLineage(events);
 }
 
 interface TurnOutcome {
@@ -175,6 +133,7 @@ export class AgentSession {
   private readonly onActivity: ((frame: SessionActivityFrame) => void) | undefined;
   private readonly system: string | undefined;
   private readonly maxModelCalls: number;
+  private readonly compaction: CompactionSettings;
   private tip: EventId | null;
   private messages: ModelMessage[];
   private activeOperation: OperationId | null = null;
@@ -194,6 +153,16 @@ export class AgentSession {
     this.maxModelCalls = options.maxModelCallsPerTurn ?? DEFAULT_MAX_MODEL_CALLS_PER_TURN;
     if (!Number.isSafeInteger(this.maxModelCalls) || this.maxModelCalls < 1) {
       throw new TypeError("maxModelCallsPerTurn must be a positive safe integer");
+    }
+    this.compaction = {
+      keepRecentTokens:
+        options.compaction?.keepRecentTokens ?? DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
+      maxOutputTokens: options.compaction?.maxOutputTokens ?? DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+    };
+    for (const [name, value] of Object.entries(this.compaction)) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new TypeError(`compaction.${name} must be a positive safe integer`);
+      }
     }
     this.tip = events.at(-1)?.id ?? null;
     this.messages = [...messagesFromLineage(events)];
@@ -350,6 +319,48 @@ export class AgentSession {
           content: [{ type: "text", text: `[shell]\n$ ${command}\n${output}` }],
         });
       }
+      return event;
+    } finally {
+      this.activeOperation = null;
+    }
+  }
+
+  /** Replaces older model-visible context with a durable continuation summary. */
+  async compact(
+    customInstructions?: string,
+    signal?: AbortSignal,
+  ): Promise<CanonicalEvent<"context.compacted">> {
+    if (this.activeOperation !== null) {
+      throw new OperationConflictError(
+        `Operation ${this.activeOperation} already owns this branch`,
+      );
+    }
+    const instructions = customInstructions?.trim();
+    if (customInstructions !== undefined && !instructions) {
+      throw new TypeError("Compaction instructions must not be empty");
+    }
+    const operationId = parseOperationId(randomUUID(), "operationId");
+    this.activeOperation = operationId;
+    try {
+      const stored = await this.log.read();
+      const tree = SessionTree.fromEvents(this.log.sessionId, stored.events);
+      const lineage = this.tip === null ? [] : tree.lineage(this.tip);
+      const plan = prepareCompaction(lineage, this.compaction.keepRecentTokens);
+      if (plan === undefined) throw new Error("Nothing to compact");
+      const result = await summarizeCompaction(
+        plan,
+        this.model,
+        instructions,
+        signal,
+        this.compaction.maxOutputTokens,
+      );
+      signal?.throwIfAborted();
+      const event = await this.append(operationId, "context.compacted", {
+        summary: result.summary,
+        replacedEventIds: plan.replacedEventIds,
+        usage: result.usage,
+      });
+      this.messages = [...messagesFromLineage([...lineage, event])];
       return event;
     } finally {
       this.activeOperation = null;

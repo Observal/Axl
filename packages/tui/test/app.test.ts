@@ -10,7 +10,12 @@ import test, { type TestContext } from "node:test";
 
 import { AxlDaemon, DaemonClient, type SessionInteractionRequest } from "@axl/daemon";
 import type { TerminalExtension } from "@axl/extension-api";
-import { type ModelPort, ToolRegistry } from "@axl/kernel";
+import {
+  type CompactionSettings,
+  type ModelPort,
+  type ModelTurnRequest,
+  ToolRegistry,
+} from "@axl/kernel";
 import type {
   EventPayloadMap,
   JsonObject,
@@ -56,6 +61,7 @@ async function startStack(
     }>,
   ) => ToolRegistry = () => new ToolRegistry(),
   sandbox?: EventPayloadMap["sandbox.configured"],
+  compaction?: Partial<CompactionSettings>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "axl-tui-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -68,6 +74,7 @@ async function startStack(
       tools: makeTools(interact),
       system: "You are Axl.",
       ...(sandbox === undefined ? {} : { sandbox }),
+      ...(compaction === undefined ? {} : { compaction }),
       ...(selection.modelId === undefined ? {} : { configModel: { modelId: selection.modelId } }),
       ...(selection.thinkingLevel === undefined
         ? {}
@@ -164,6 +171,50 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   assert.match(resumed.text(), /│ hello axl/);
   assert.match(resumed.text(), /the answer/);
   resumedApp.stop();
+});
+
+test("/compact summarizes older context through the daemon", async (context) => {
+  const requests: ModelTurnRequest[] = [];
+  const model: ModelPort = {
+    stream(request) {
+      requests.push(request);
+      const text = requests.length === 3 ? "## Goal\nKeep working" : "the answer";
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        yield { type: "text_delta", text };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, undefined, undefined, {
+    keepRecentTokens: 7,
+    maxOutputTokens: 123,
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await DaemonClient.connect(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+
+  input.write("old prompt\r");
+  await until(() => requests.length === 1, "old response");
+  input.write("recent prompt\r");
+  await until(() => requests.length === 2, "recent response");
+  input.write("/compact Focus on the current task\r");
+  await until(() => text().includes("Context compacted"), "compaction");
+
+  assert.equal(requests[2]?.toolChoice, "none");
+  assert.match(
+    requests[2]?.messages[0]?.content[0]?.type === "text"
+      ? requests[2].messages[0].content[0].text
+      : "",
+    /Focus on the current task/,
+  );
+  assert.match(text(), /Keep working/);
+  app.stop();
 });
 
 test("an unenforced session keeps a persistent unsafe warning", async (context) => {
