@@ -234,6 +234,27 @@ test("requires version-4 initialization before session access", async (context) 
   if (repeated.kind === "error") {
     assert.equal(repeated.error.code, "connection_already_initialized");
   }
+
+  raw.send({ kind: "request", id: 5, method: "session.create", params: { cwd: fixture.cwd } });
+  const missingKey = await raw.next();
+  assert.equal(missingKey.kind, "error");
+  if (missingKey.kind === "error") {
+    assert.equal(missingKey.id, 5);
+    assert.equal(missingKey.error.code, "invalid_idempotency_key");
+  }
+  raw.send({
+    kind: "request",
+    id: 6,
+    method: "daemon.info",
+    params: {},
+    idempotencyKey: "00000000-0000-4000-8000-000000000109",
+  });
+  const keyOnRead = await raw.next();
+  assert.equal(keyOnRead.kind, "error");
+  if (keyOnRead.kind === "error") {
+    assert.equal(keyOnRead.id, 6);
+    assert.equal(keyOnRead.error.code, "invalid_idempotency_key");
+  }
 });
 
 test("publishes bounded attachment presence and subscription membership", async (context) => {
@@ -385,12 +406,10 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
     { idempotencyKey: createKey },
   );
   assert.deepEqual(retriedCreate, created);
+  const otherCwd = join(fixture.cwd, "other");
+  await mkdir(otherCwd);
   await assert.rejects(
-    client.request(
-      "session.create",
-      { cwd: join(fixture.cwd, "other") },
-      { idempotencyKey: createKey },
-    ),
+    client.request("session.create", { cwd: otherCwd }, { idempotencyKey: createKey }),
     (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
   );
 
@@ -414,10 +433,50 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
   );
   assert.deepEqual(retriedSend, sent);
   const beforeRestart = await subscribeAll(client, created.sessionId);
+  assert.equal(beforeRestart.events[0]?.operationId, createKey);
   assert.equal(beforeRestart.events.filter((event) => event.type === "user.message").length, 1);
+  assert.equal(
+    beforeRestart.events
+      .filter((event) => event.type === "user.message" || event.type === "assistant.message")
+      .every((event) => event.operationId === sendKey),
+    true,
+  );
+  const sourceMessage = beforeRestart.events.find((event) => event.type === "user.message");
+  assert.ok(sourceMessage);
+  const forkKey = "00000000-0000-4000-8000-000000000108";
+  const forked = await client.request(
+    "session.fork",
+    { sessionId: created.sessionId, fromEventId: sourceMessage.id },
+    { idempotencyKey: forkKey },
+  );
+  const forkSnapshot = await subscribeAll(client, forked.sessionId);
+  assert.equal(forkSnapshot.events[0]?.operationId, forkKey);
+  assert.equal(
+    forkSnapshot.events[0]?.type === "session.created" &&
+      forkSnapshot.events[0].payload.sourceEventId,
+    sourceMessage.id,
+  );
 
   client.close();
   await fixture.daemon.stop();
+  const journalPath = join(fixture.dataDirectory, "commands.jsonl");
+  const beforeRecovery = (await readFile(journalPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  await writeFile(
+    journalPath,
+    `${beforeRecovery
+      .filter(
+        (record) =>
+          !(
+            record.type === "succeeded" &&
+            (record.idempotencyKey === sendKey || record.idempotencyKey === forkKey)
+          ),
+      )
+      .map((record) => JSON.stringify(record))
+      .join("\n")}\n`,
+  );
   const restarted = new AxlDaemon({
     socketPath: fixture.socketPath,
     dataDirectory: fixture.dataDirectory,
@@ -425,6 +484,22 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
   });
   await restarted.start();
   context.after(() => restarted.stop());
+  const recoveredBeforeRequests = (await readFile(journalPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(
+    recoveredBeforeRequests.some(
+      (record) => record.type === "succeeded" && record.idempotencyKey === sendKey,
+    ),
+    true,
+  );
+  assert.equal(
+    recoveredBeforeRequests.some(
+      (record) => record.type === "succeeded" && record.idempotencyKey === forkKey,
+    ),
+    true,
+  );
   const reconnected = await DaemonClient.connect(fixture.socketPath);
   context.after(() => reconnected.close());
   assert.deepEqual(
@@ -434,6 +509,14 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
       { idempotencyKey: createKey },
     ),
     created,
+  );
+  assert.deepEqual(
+    await reconnected.request(
+      "session.fork",
+      { sessionId: created.sessionId, fromEventId: sourceMessage.id },
+      { idempotencyKey: forkKey },
+    ),
+    forked,
   );
   assert.deepEqual(
     await reconnected.request(
@@ -451,7 +534,7 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
   const afterRestart = await subscribeAll(reconnected, created.sessionId);
   assert.equal(afterRestart.events.filter((event) => event.type === "user.message").length, 1);
 
-  const journal = (await readFile(join(fixture.dataDirectory, "commands.jsonl"), "utf8"))
+  const journal = (await readFile(journalPath, "utf8"))
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -460,6 +543,69 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
   );
   assert.equal(acceptance?.operationId, createKey);
   assert.equal(typeof acceptance?.intendedSessionId, "string");
+});
+
+test("restart reconciliation aborts an accepted non-terminal send", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await DaemonClient.connect(fixture.socketPath);
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const sendKey = "00000000-0000-4000-8000-000000000107";
+  await client.request(
+    "session.send",
+    {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "interrupted by restart" }],
+    },
+    { idempotencyKey: sendKey },
+  );
+  client.close();
+  await fixture.daemon.stop();
+
+  const logPath = join(fixture.dataDirectory, "sessions", `${created.sessionId}.jsonl`);
+  const events = (await readFile(logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent)
+    .filter((event) => !(event.type === "assistant.message" && event.operationId === sendKey));
+  await writeFile(logPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`);
+  const journalPath = join(fixture.dataDirectory, "commands.jsonl");
+  const records = (await readFile(journalPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>)
+    .filter((record) => !(record.type === "succeeded" && record.idempotencyKey === sendKey));
+  await writeFile(journalPath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+
+  const restarted = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const reconnected = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => reconnected.close());
+  await reconnected.request("session.resume", { sessionId: created.sessionId });
+  assert.deepEqual(
+    await reconnected.request(
+      "session.send",
+      {
+        sessionId: created.sessionId,
+        delivery: "prompt",
+        content: [{ type: "text", text: "interrupted by restart" }],
+      },
+      { idempotencyKey: sendKey },
+    ),
+    { stopReason: "aborted" },
+  );
+  const recovered = await subscribeAll(reconnected, created.sessionId);
+  const operationEvents = recovered.events.filter((event) => event.operationId === sendKey);
+  assert.deepEqual(types(operationEvents), ["user.message", "assistant.message"]);
+  assert.equal(
+    operationEvents[1]?.type === "assistant.message" && operationEvents[1].payload.stopReason,
+    "aborted",
+  );
 });
 
 test("creates a session, streams the live tail, and answers sends", async (context) => {
@@ -1199,12 +1345,25 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
 });
 
 test("dispose removes the session and errors surface typed codes", async (context) => {
-  const { socketPath, cwd } = await startDaemon(context);
+  const { socketPath, cwd, dataDirectory } = await startDaemon(context);
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
 
   const created = await client.request("session.create", { cwd });
-  await client.request("session.dispose", { sessionId: created.sessionId });
+  const disposeKey = "00000000-0000-4000-8000-000000000103";
+  await client.request(
+    "session.dispose",
+    { sessionId: created.sessionId },
+    { idempotencyKey: disposeKey },
+  );
+  const persisted = (
+    await readFile(join(dataDirectory, "sessions", `${created.sessionId}.jsonl`), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent);
+  assert.equal(persisted.at(-1)?.type, "session.closed");
+  assert.equal(persisted.at(-1)?.operationId, disposeKey);
   await assert.rejects(
     client.request("session.send", {
       sessionId: created.sessionId,
@@ -1320,15 +1479,24 @@ test("routes runtime interaction requests to an attached client", async (context
     if (!interaction) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
   assert.ok(interaction);
-  await client.request("session.interaction.respond", {
-    sessionId: created.sessionId,
-    interactionId: interaction.payload.interactionId,
-    action: "accept",
-  });
+  const responseKey = "00000000-0000-4000-8000-000000000104";
+  await client.request(
+    "session.interaction.respond",
+    {
+      sessionId: created.sessionId,
+      interactionId: interaction.payload.interactionId,
+      action: "accept",
+    },
+    { idempotencyKey: responseKey },
+  );
   await sending;
   assert.deepEqual(
     events.filter((event) => event.type.startsWith("interaction.")).map((event) => event.type),
     ["interaction.requested", "interaction.resolved"],
+  );
+  assert.equal(
+    events.find((event) => event.type === "interaction.resolved")?.operationId,
+    responseKey,
   );
 });
 
@@ -1372,17 +1540,26 @@ test("configuration changes rebuild and log the selected model and thinking", as
     modelId: "gpt-5",
     thinkingLevel: "medium",
   });
-  const changed = (await client.request("session.configure", {
-    sessionId: created.sessionId,
-    modelId: "gpt-4.1",
-    thinkingLevel: "high",
-  })) as { events: CanonicalEvent[] };
+  const configureKey = "00000000-0000-4000-8000-000000000105";
+  const changed = (await client.request(
+    "session.configure",
+    {
+      sessionId: created.sessionId,
+      modelId: "gpt-4.1",
+      thinkingLevel: "high",
+    },
+    { idempotencyKey: configureKey },
+  )) as { events: CanonicalEvent[] };
 
   assert.deepEqual(configured, [
     { boundary: "session_start", model: "gpt-5", thinking: "medium" },
     { boundary: "model_switch", model: "gpt-4.1", thinking: "high" },
   ]);
   assert.deepEqual(types(changed.events), ["config.model", "config.thinking"]);
+  assert.equal(
+    changed.events.every((event) => event.operationId === configureKey),
+    true,
+  );
 });
 
 test("reload rebuilds the runtime as a logged boundary with live subscriptions", async (context) => {
@@ -1420,12 +1597,21 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   client.onEvent((message) => pushed.push(message.event.type));
   await subscribeAll(client, created.sessionId);
 
-  const reloaded = (await client.request("session.reload", { sessionId: created.sessionId })) as {
+  const reloadKey = "00000000-0000-4000-8000-000000000106";
+  const reloaded = (await client.request(
+    "session.reload",
+    { sessionId: created.sessionId },
+    { idempotencyKey: reloadKey },
+  )) as {
     events: CanonicalEvent[];
   };
   assert.deepEqual(boundaries, ["session_start", "reload"]);
   const dialect = reloaded.events.find((event) => event.type === "config.dialect");
   assert.equal(dialect?.type === "config.dialect" && dialect.payload.reason, "reload");
+  assert.equal(
+    reloaded.events.every((event) => event.operationId === reloadKey),
+    true,
+  );
   assert.equal(pushed.includes("config.dialect"), true); // streamed to subscribers
 
   // The session still works after the reload, on the same log.

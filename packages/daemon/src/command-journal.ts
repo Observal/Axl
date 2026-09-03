@@ -30,6 +30,8 @@ export interface CommandAcceptance {
   readonly requestHash: string;
   readonly targetSessionId?: SessionId;
   readonly intendedSessionId?: SessionId;
+  readonly affectedOperationId?: string;
+  readonly interactionId?: string;
   readonly operationId: string;
   readonly acceptedAt: number;
 }
@@ -130,6 +132,8 @@ function parseRecord(value: unknown, line: number): CommandRecord {
       "requestHash",
       "targetSessionId",
       "intendedSessionId",
+      "affectedOperationId",
+      "interactionId",
       "operationId",
       "acceptedAt",
     ]);
@@ -155,6 +159,24 @@ function parseRecord(value: unknown, line: number): CommandRecord {
               record.intendedSessionId,
               `${path}.intendedSessionId`,
             ),
+          }),
+      ...(record.affectedOperationId === undefined
+        ? {}
+        : {
+            affectedOperationId: parseOperationId(
+              record.affectedOperationId,
+              `${path}.affectedOperationId`,
+            ),
+          }),
+      ...(record.interactionId === undefined
+        ? {}
+        : {
+            interactionId:
+              typeof record.interactionId === "string" && record.interactionId.length > 0
+                ? record.interactionId
+                : (() => {
+                    throw new Error(`${path}.interactionId must be a non-empty string`);
+                  })(),
           }),
       operationId: parseOperationId(record.operationId, `${path}.operationId`),
       acceptedAt: timestamp(record.acceptedAt, `${path}.acceptedAt`),
@@ -247,6 +269,36 @@ export class CommandJournal {
     return journal;
   }
 
+  async reconcile(
+    recover: (
+      acceptance: CommandAcceptance,
+    ) => Promise<{ readonly result: unknown } | { readonly error: CommandFailure } | undefined>,
+  ): Promise<void> {
+    for (const entry of this.entries.values()) {
+      if (entry.completion !== undefined) continue;
+      const recovered = await recover(entry.acceptance);
+      if (recovered === undefined) continue;
+      const terminal: CommandCompletion =
+        "result" in recovered
+          ? {
+              version: 1,
+              type: "succeeded",
+              idempotencyKey: entry.acceptance.idempotencyKey,
+              result: parseRpcResult(entry.acceptance.method, recovered.result),
+              completedAt: Date.now(),
+            }
+          : {
+              version: 1,
+              type: "failed",
+              idempotencyKey: entry.acceptance.idempotencyKey,
+              error: recovered.error,
+              completedAt: Date.now(),
+            };
+      await this.append(terminal);
+      entry.completion = terminal;
+    }
+  }
+
   execute<Method extends RetryableMutationMethod>(
     input: {
       readonly idempotencyKey: string;
@@ -254,6 +306,8 @@ export class CommandJournal {
       readonly requestHash: string;
       readonly targetSessionId?: SessionId;
       readonly intendedSessionId?: SessionId;
+      readonly affectedOperationId?: string;
+      readonly interactionId?: string;
     },
     effect: (acceptance: CommandAcceptance) => Promise<RpcResult<Method>>,
   ): Promise<RpcResult<Method>> {
@@ -334,6 +388,8 @@ export class CommandJournal {
     readonly requestHash: string;
     readonly targetSessionId?: SessionId;
     readonly intendedSessionId?: SessionId;
+    readonly affectedOperationId?: string;
+    readonly interactionId?: string;
   }): Promise<CommandEntry> {
     return this.enqueue(async () => {
       const existing = this.entries.get(input.idempotencyKey);
@@ -359,6 +415,10 @@ export class CommandJournal {
         ...(input.intendedSessionId === undefined
           ? {}
           : { intendedSessionId: input.intendedSessionId }),
+        ...(input.affectedOperationId === undefined
+          ? {}
+          : { affectedOperationId: input.affectedOperationId }),
+        ...(input.interactionId === undefined ? {} : { interactionId: input.interactionId }),
         operationId: input.idempotencyKey,
         acceptedAt: Date.now(),
       };

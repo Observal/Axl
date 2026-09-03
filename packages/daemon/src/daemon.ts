@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, realpath, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -18,6 +18,7 @@ import {
   hashCanonicalRequest,
   isRetryableMutationMethod,
   parseOperationId,
+  ProtocolValidationError,
   parseRpcResult,
   parseSessionId,
   parseWireRequest,
@@ -175,6 +176,19 @@ export class AxlDaemon {
   async start(): Promise<void> {
     if (this.server) throw new DaemonError("already_started", "Daemon already started");
     this.commandJournal = await CommandJournal.open(this.dataDirectory);
+    await this.commandJournal.reconcile(async (acceptance) => {
+      try {
+        const result = await this.sessions.reconcileAcceptedMutation(acceptance);
+        return result === undefined ? undefined : { result };
+      } catch (error) {
+        if (error instanceof DaemonError && error.code === "cancelled") {
+          return {
+            error: { code: error.code, message: error.message, retryable: false },
+          };
+        }
+        throw error;
+      }
+    });
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
     await removeStaleSocket(this.socketPath);
 
@@ -319,9 +333,9 @@ export class AxlDaemon {
     send: (message: ServerMessage) => void,
     state: ConnectionState,
   ): Promise<void> {
-    let request: WireRequest;
+    let decoded: unknown;
     try {
-      request = parseWireRequest(JSON.parse(line) as unknown);
+      decoded = JSON.parse(line) as unknown;
     } catch (error) {
       send({
         kind: "error",
@@ -329,6 +343,32 @@ export class AxlDaemon {
         error: {
           code: "bad_request",
           message: error instanceof Error ? error.message : "Undecodable request",
+          retryable: false,
+        },
+      });
+      return;
+    }
+    let request: WireRequest;
+    try {
+      request = parseWireRequest(decoded);
+    } catch (error) {
+      const candidate =
+        typeof decoded === "object" && decoded !== null
+          ? (decoded as Record<string, unknown>)
+          : undefined;
+      const id =
+        Number.isSafeInteger(candidate?.id) && (candidate?.id as number) >= 0
+          ? (candidate?.id as number)
+          : -1;
+      send({
+        kind: "error",
+        id,
+        error: {
+          code:
+            error instanceof ProtocolValidationError && error.path === "request.idempotencyKey"
+              ? "invalid_idempotency_key"
+              : "bad_request",
+          message: error instanceof Error ? error.message : "Invalid request",
           retryable: false,
         },
       });
@@ -421,36 +461,59 @@ export class AxlDaemon {
     }
   }
 
-  private executeRequest(
+  private async executeRequest(
     request: WireRequest,
     send: (message: ServerMessage) => void,
     state: ConnectionState,
   ): Promise<unknown> {
-    if (!isRetryableMutationMethod(request.method)) {
-      return this.dispatch(request, send, state);
+    let normalized = request;
+    if (request.method === "session.create") {
+      const cwd = await realpath(request.params.cwd).catch((cause: unknown) => {
+        throw new DaemonError(
+          "invalid_cwd",
+          `Cannot open working directory ${request.params.cwd}`,
+          {
+            cause,
+          },
+        );
+      });
+      normalized = { ...request, params: { ...request.params, cwd } };
     }
-    const idempotencyKey = request.idempotencyKey;
+    if (!isRetryableMutationMethod(normalized.method)) {
+      return this.dispatch(normalized, send, state);
+    }
+    const idempotencyKey = normalized.idempotencyKey;
     if (idempotencyKey === undefined) {
       throw new DaemonError("invalid_idempotency_key", "Retryable mutation requires a key");
     }
     const journal = this.commandJournal;
     if (journal === undefined) throw new Error("Command journal is not open");
-    const params = request.params as { readonly sessionId?: SessionId };
+    const params = normalized.params as { readonly sessionId?: SessionId };
     const intendedSessionId =
-      request.method === "session.create" ||
-      request.method === "session.fork" ||
-      request.method === "session.clone"
-        ? (randomUUID() as SessionId)
+      normalized.method === "session.create" ||
+      normalized.method === "session.fork" ||
+      normalized.method === "session.clone"
+        ? parseSessionId(randomUUID(), "intendedSessionId")
+        : undefined;
+    const affectedOperationId =
+      normalized.method === "session.interrupt"
+        ? this.sessions.activeOperationId(normalized.params.sessionId)
+        : undefined;
+    const interactionId =
+      normalized.method === "session.interaction.respond"
+        ? normalized.params.interactionId
         : undefined;
     return journal.execute(
       {
         idempotencyKey,
-        method: request.method as RetryableMutationMethod,
-        requestHash: hashCanonicalRequest(request.method, request.params as never),
+        method: normalized.method as RetryableMutationMethod,
+        requestHash: hashCanonicalRequest(normalized.method, normalized.params as never),
         ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
         ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
+        ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
+        ...(interactionId === undefined ? {} : { interactionId }),
       },
-      (acceptance) => this.dispatch(request, send, state, acceptance) as never,
+      (acceptance) => this.dispatch(normalized, send, state, acceptance) as never,
     );
   }
 
@@ -532,7 +595,11 @@ export class AxlDaemon {
             `Delivery mode ${request.params.delivery} is not available`,
           );
         }
-        return this.sessions.send(request.params.sessionId, request.params.content);
+        return this.sessions.send(
+          request.params.sessionId,
+          request.params.content,
+          this.mutationOperationId(acceptance),
+        );
       case "session.shell":
         return this.sessions.shell(
           request.params.sessionId,
@@ -542,20 +609,29 @@ export class AxlDaemon {
       case "session.interrupt":
         return this.sessions.interrupt(request.params.sessionId);
       case "session.reload":
-        return this.sessions.reload(request.params.sessionId);
+        return this.sessions.reload(request.params.sessionId, this.mutationOperationId(acceptance));
       case "session.configure": {
         const { sessionId, modelId, thinkingLevel } = request.params;
-        return this.sessions.configure(sessionId, {
-          ...(modelId === undefined ? {} : { modelId }),
-          ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-        });
+        return this.sessions.configure(
+          sessionId,
+          {
+            ...(modelId === undefined ? {} : { modelId }),
+            ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+          },
+          this.mutationOperationId(acceptance),
+        );
       }
       case "session.interaction.respond": {
         const { sessionId, interactionId, action, content } = request.params;
-        await this.sessions.respondToInteraction(sessionId, interactionId, {
-          action,
-          ...(content === undefined ? {} : { content }),
-        });
+        await this.sessions.respondToInteraction(
+          sessionId,
+          interactionId,
+          {
+            action,
+            ...(content === undefined ? {} : { content }),
+          },
+          this.mutationOperationId(acceptance),
+        );
         return { resolved: true };
       }
       case "session.subscribe":
@@ -588,9 +664,17 @@ export class AxlDaemon {
       case "session.workspace.diff":
         return this.sessions.workspaceDiff(request.params.sessionId, request.params.scope);
       case "session.dispose":
-        await this.sessions.dispose(request.params.sessionId);
+        await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
         return { disposed: true };
     }
+  }
+
+  private mutationOperationId(
+    acceptance: CommandAcceptance | undefined,
+  ): ReturnType<typeof parseOperationId> | undefined {
+    return acceptance === undefined
+      ? undefined
+      : parseOperationId(acceptance.operationId, "operationId");
   }
 
   private creationReservation(

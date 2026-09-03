@@ -28,6 +28,7 @@ import {
   type OperationId,
   parseEvent,
   parseEventId,
+  parseOperationId,
   parseSessionId,
   type SessionActivityFrame,
   type SessionId,
@@ -97,6 +98,7 @@ export interface SessionManagerOptions {
 }
 
 interface ActiveTurn {
+  readonly operationId: OperationId;
   readonly controller: AbortController;
   readonly done: Promise<void>;
   finish(): void;
@@ -127,12 +129,12 @@ interface ManagedSession {
   workspaceCheckpointsEnabled: boolean;
 }
 
-function deferredTurn(): ActiveTurn {
+function deferredTurn(operationId = parseOperationId(randomUUID(), "operationId")): ActiveTurn {
   let resolveDone = (): void => undefined;
   const done = new Promise<void>((resolvePromise) => {
     resolveDone = resolvePromise;
   });
-  return { controller: new AbortController(), done, finish: resolveDone };
+  return { operationId, controller: new AbortController(), done, finish: resolveDone };
 }
 
 function userMessageText(event: CanonicalEvent): string | undefined {
@@ -202,6 +204,7 @@ export class SessionManager {
     },
     boundary: SessionRuntimeBoundary,
     selection: SessionModelSelection,
+    boundaryOperationId?: OperationId,
   ): Promise<AgentSession> {
     const runtime = await this.options.runtime({
       sessionId,
@@ -223,6 +226,7 @@ export class SessionManager {
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
+      ...(boundaryOperationId === undefined ? {} : { boundaryOperationId }),
       onEvent: (event) => {
         events.push(event);
         this.authorizeEventBlobs(sessionId, event);
@@ -315,6 +319,137 @@ export class SessionManager {
     }
     const managed = await this.open(sessionId, canonicalCwd, selection);
     return { sessionId, events: [...managed.events] };
+  }
+
+  async reconcileAcceptedMutation(acceptance: {
+    readonly method: string;
+    readonly operationId: string;
+    readonly targetSessionId?: SessionId;
+    readonly intendedSessionId?: SessionId;
+    readonly affectedOperationId?: string;
+    readonly interactionId?: string;
+  }): Promise<unknown | undefined> {
+    const operationId = parseOperationId(acceptance.operationId, "operationId");
+    if (
+      acceptance.method === "session.create" ||
+      acceptance.method === "session.fork" ||
+      acceptance.method === "session.clone"
+    ) {
+      const intended = acceptance.intendedSessionId;
+      if (intended === undefined)
+        throw new DaemonError("corrupt_session", "Missing intended session ID");
+      try {
+        await stat(this.logPath(intended));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      }
+      const events = (await JsonlEventLog.open(this.logPath(intended), intended)).events;
+      const root = events[0];
+      if (root === undefined) return undefined;
+      if (root.type !== "session.created" || root.operationId !== operationId) {
+        throw new DaemonError(
+          "corrupt_session",
+          `Reserved session ${intended} has conflicting history`,
+        );
+      }
+      await this.resume(intended);
+      const result = this.describe(intended);
+      if (acceptance.method !== "session.fork") return result;
+      const sourceId = root.payload.parentSessionId;
+      const sourceEventId = root.payload.sourceEventId;
+      if (sourceId === undefined || sourceEventId === undefined) {
+        throw new DaemonError(
+          "corrupt_session",
+          `Forked session ${intended} lacks source identity`,
+        );
+      }
+      await this.resume(sourceId);
+      const selected = this.managed(sourceId).events.find((event) => event.id === sourceEventId);
+      const selectedText = selected === undefined ? undefined : userMessageText(selected);
+      return { ...result, ...(selectedText === undefined ? {} : { selectedText }) };
+    }
+
+    const target = acceptance.targetSessionId;
+    if (target === undefined) throw new DaemonError("corrupt_session", "Missing target session ID");
+    try {
+      await stat(this.logPath(target));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const stored = (await JsonlEventLog.open(this.logPath(target), target)).events;
+    const evidence = stored.filter((event) => event.operationId === operationId);
+    if (acceptance.method === "session.interrupt") {
+      const affected =
+        acceptance.affectedOperationId === undefined
+          ? undefined
+          : parseOperationId(acceptance.affectedOperationId, "affectedOperationId");
+      if (affected === undefined) return { interrupted: false };
+      const affectedEvents = stored.filter((event) => event.operationId === affected);
+      const terminal = affectedEvents.some(
+        (event) =>
+          (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+          event.type === "session.error",
+      );
+      if (!terminal && affectedEvents.some((event) => event.type === "user.message")) {
+        await this.resume(target);
+        await this.managed(target).session.abortRecoveredTurn(affected);
+      }
+      return { interrupted: affectedEvents.length > 0 };
+    }
+    if (acceptance.method === "session.dispose") {
+      return evidence.some((event) => event.type === "session.closed")
+        ? { disposed: true }
+        : undefined;
+    }
+    if (acceptance.method === "session.interaction.respond") {
+      if (evidence.some((event) => event.type === "interaction.resolved")) {
+        return { resolved: true };
+      }
+      if (acceptance.interactionId === undefined) {
+        throw new DaemonError("corrupt_session", "Missing accepted interaction identity");
+      }
+      await this.resume(target);
+      const resolution = this.managed(target).events.find(
+        (event) =>
+          event.type === "interaction.resolved" &&
+          event.payload.interactionId === acceptance.interactionId,
+      );
+      if (resolution !== undefined) {
+        throw new DaemonError(
+          "cancelled",
+          `Interaction ${acceptance.interactionId} was cancelled during daemon recovery`,
+        );
+      }
+      return undefined;
+    }
+    if (evidence.length === 0) return undefined;
+    await this.resume(target);
+    if (acceptance.method === "session.send") {
+      const terminal = evidence.findLast(
+        (event) =>
+          (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+          event.type === "session.error",
+      );
+      if (terminal?.type === "assistant.message")
+        return { stopReason: terminal.payload.stopReason };
+      if (terminal?.type === "session.error") return { stopReason: "error" };
+      if (evidence.some((event) => event.type === "user.message")) {
+        const aborted = await this.managed(target).session.abortRecoveredTurn(operationId);
+        return { stopReason: aborted.payload.stopReason };
+      }
+      return undefined;
+    }
+    if (acceptance.method === "session.reload" || acceptance.method === "session.configure") {
+      return { events: evidence };
+    }
+    return undefined;
+  }
+
+  activeOperationId(sessionId: unknown): OperationId | undefined {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    return this.sessions.get(parsed)?.activeTurn?.operationId;
   }
 
   describe(sessionId: unknown): SessionOpenResult {
@@ -462,7 +597,8 @@ export class SessionManager {
         if (
           root.type !== "session.created" ||
           root.operationId !== reservation.operationId ||
-          root.payload.parentSessionId !== sourceId
+          root.payload.parentSessionId !== sourceId ||
+          root.payload.sourceEventId !== targetId
         ) {
           throw new DaemonError(
             "corrupt_session",
@@ -489,7 +625,7 @@ export class SessionManager {
         parentId: null,
         timestamp: startedAt,
         type: "session.created",
-        payload: { cwd: source.cwd, parentSessionId: sourceId },
+        payload: { cwd: source.cwd, parentSessionId: sourceId, sourceEventId: targetId },
       });
       eventIds.set(sourceRoot.id, root.id);
       let parentId = root.id;
@@ -577,21 +713,33 @@ export class SessionManager {
     });
   }
 
-  async reload(sessionId: unknown): Promise<{ events: readonly CanonicalEvent[] }> {
+  async reload(
+    sessionId: unknown,
+    operationId?: OperationId,
+  ): Promise<{ events: readonly CanonicalEvent[] }> {
     const managed = this.managed(sessionId);
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation owns this branch; reload after it");
     }
+    if (operationId !== undefined) {
+      const recovered = managed.events.filter((event) => event.operationId === operationId);
+      if (recovered.length > 0) return { events: recovered };
+    }
     const before = managed.events.length;
-    await this.rebuild(managed, "reload", managed.selection);
+    await this.rebuild(managed, "reload", managed.selection, operationId);
     return { events: managed.events.slice(before) };
   }
 
   async configure(
     sessionId: unknown,
     update: SessionModelSelection,
+    operationId?: OperationId,
   ): Promise<{ events: readonly CanonicalEvent[] }> {
     const managed = this.managed(sessionId);
+    if (operationId !== undefined) {
+      const recovered = managed.events.filter((event) => event.operationId === operationId);
+      if (recovered.length > 0) return { events: recovered };
+    }
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError(
         "operation_active",
@@ -604,13 +752,32 @@ export class SessionManager {
         ? "model_switch"
         : "config_change";
     const before = managed.events.length;
-    await this.rebuild(managed, boundary, selection);
+    await this.rebuild(managed, boundary, selection, operationId);
     managed.selection = selection;
     return { events: managed.events.slice(before) };
   }
 
-  async send(sessionId: unknown, content: readonly UserContent[]): Promise<{ stopReason: string }> {
+  async send(
+    sessionId: unknown,
+    content: readonly UserContent[],
+    operationId?: OperationId,
+  ): Promise<{ stopReason: string }> {
     const managed = this.managed(sessionId);
+    if (operationId !== undefined) {
+      const prior = managed.events.filter((event) => event.operationId === operationId);
+      const terminal = prior.findLast(
+        (event) =>
+          (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+          event.type === "session.error",
+      );
+      if (terminal?.type === "assistant.message")
+        return { stopReason: terminal.payload.stopReason };
+      if (terminal?.type === "session.error") return { stopReason: "error" };
+      if (prior.some((event) => event.type === "user.message")) {
+        const aborted = await managed.session.abortRecoveredTurn(operationId);
+        return { stopReason: aborted.payload.stopReason };
+      }
+    }
     for (const item of content) {
       if (item.type === "blob")
         await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
@@ -618,11 +785,15 @@ export class SessionManager {
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn();
+    const active = deferredTurn(operationId);
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
-      const result = await managed.session.runTurn(content, active.controller.signal);
+      const result = await managed.session.runTurn(
+        content,
+        active.controller.signal,
+        active.operationId,
+      );
       return { stopReason: result.stopReason };
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
@@ -643,7 +814,12 @@ export class SessionManager {
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
-      const event = await managed.session.runShell(command, excluded, active.controller.signal);
+      const event = await managed.session.runShell(
+        command,
+        excluded,
+        active.controller.signal,
+        active.operationId,
+      );
       return { isError: event.payload.isError };
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
@@ -844,15 +1020,24 @@ export class SessionManager {
     sessionId: unknown,
     interactionId: string,
     response: SessionInteractionResponse,
+    operationId?: OperationId,
   ): Promise<void> {
     const managed = this.managed(sessionId);
+    if (
+      operationId !== undefined &&
+      managed.events.some(
+        (event) => event.type === "interaction.resolved" && event.operationId === operationId,
+      )
+    ) {
+      return;
+    }
     const pending = managed.interactions.get(interactionId);
     if (!pending) {
       throw new DaemonError("unknown_interaction", `Interaction ${interactionId} is not pending`);
     }
     managed.interactions.delete(interactionId);
     try {
-      await managed.session.resolveInteraction({ interactionId, ...response });
+      await managed.session.resolveInteraction({ interactionId, ...response }, operationId);
       pending.resolve(response);
     } catch (error) {
       pending.reject(error instanceof Error ? error : new Error(String(error)));
@@ -864,6 +1049,7 @@ export class SessionManager {
     managed: ManagedSession,
     boundary: SessionRuntimeBoundary,
     selection: SessionModelSelection,
+    operationId?: OperationId,
   ): Promise<void> {
     const previous = managed.session;
     const rebuilding = (async () => {
@@ -876,6 +1062,7 @@ export class SessionManager {
         managed.activityState,
         boundary,
         selection,
+        operationId,
       );
       await previous.dispose();
       managed.session = next;
@@ -888,9 +1075,27 @@ export class SessionManager {
     }
   }
 
-  async dispose(sessionId: unknown): Promise<void> {
+  async dispose(sessionId: unknown, operationId?: OperationId): Promise<void> {
     const parsed = parseSessionId(sessionId, "sessionId");
-    const managed = this.sessions.get(parsed);
+    let managed = this.sessions.get(parsed);
+    if (!managed && operationId !== undefined) {
+      try {
+        await stat(this.logPath(parsed));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      const opened = await JsonlEventLog.open(this.logPath(parsed), parsed);
+      if (
+        opened.events.some(
+          (event) => event.type === "session.closed" && event.operationId === operationId,
+        )
+      ) {
+        return;
+      }
+      await this.resume(parsed);
+      managed = this.sessions.get(parsed);
+    }
     if (!managed) return;
     await managed.rebuilding;
     managed.activeTurn?.controller.abort();
@@ -899,6 +1104,14 @@ export class SessionManager {
       interaction.reject(new DaemonError("session_disposed", "Session was disposed"));
     }
     await managed.activeTurn?.done;
+    if (
+      operationId !== undefined &&
+      !managed.events.some(
+        (event) => event.type === "session.closed" && event.operationId === operationId,
+      )
+    ) {
+      await managed.session.close(operationId);
+    }
     this.sessions.delete(parsed);
     await managed.session.dispose();
     await this.blobs.disposeSession(parsed);

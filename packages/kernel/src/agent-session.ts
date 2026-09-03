@@ -23,20 +23,12 @@ import {
   type UserContent,
 } from "@axl/protocol";
 
-import {
-  type CompactionSettings,
-  DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
-  DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
-  messagesFromCompactedLineage,
-  prepareCompaction,
-  summarizeCompaction,
-} from "./compaction.ts";
 import { type ExtensionHost, NOOP_EXTENSION_HOST } from "./extension-host.ts";
 import { type EventLogOptions, JsonlEventLog } from "./jsonl-event-log.ts";
 import type { ModelPort } from "./model-port.ts";
 import { SandboxViolationError } from "./path-policy.ts";
 import type { StablePrompt } from "./prompt.ts";
-import { verifyToolCallIntegrity } from "./replay.ts";
+import { ReplayError, verifyToolCallIntegrity } from "./replay.ts";
 import { SessionTree } from "./session-tree.ts";
 import type { ToolExecutionResult, ToolRegistry } from "./tools.ts";
 
@@ -82,7 +74,6 @@ export interface AgentSessionOptions {
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
   readonly maxModelCallsPerTurn?: number;
-  readonly compaction?: Partial<CompactionSettings>;
   readonly log?: EventLogOptions;
   /** Sandbox state announced at every open as a `sandbox.configured` event. */
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
@@ -90,12 +81,10 @@ export interface AgentSessionOptions {
   readonly configModel?: EventPayloadMap["config.model"];
   /** Thinking configuration announced at every open as a `config.thinking` event. */
   readonly configThinking?: EventPayloadMap["config.thinking"];
-  /** Effective tool profile announced at every open as a `config.profile` event. */
-  readonly configProfile?: EventPayloadMap["config.profile"];
-  /** Optional web-tool configuration announced at every open. */
-  readonly configTools?: EventPayloadMap["config.tools"];
   /** Dialect boundary announced at open; the payload carries its own reason. */
   readonly configDialect?: EventPayloadMap["config.dialect"];
+  /** Canonical operation owning configuration events emitted at this boundary. */
+  readonly boundaryOperationId?: OperationId;
   /** Live tail: invoked after each event is durably appended, in append order. */
   readonly onEvent?: (event: CanonicalEvent) => void;
   /** Non-durable model deltas for responsive attached clients. */
@@ -110,7 +99,58 @@ export interface TurnResult {
 
 /** Projects a branch lineage onto the model-facing message history. */
 export function messagesFromLineage(events: readonly CanonicalEvent[]): readonly ModelMessage[] {
-  return messagesFromCompactedLineage(events);
+  const messages: ModelMessage[] = [];
+  let toolCallingAssistant: Extract<ModelMessage, { role: "assistant" }> | undefined;
+  for (const event of events) {
+    if (event.type === "user.message") {
+      toolCallingAssistant = undefined;
+      messages.push({ role: "user", content: event.payload.content });
+    } else if (event.type === "user.shell") {
+      toolCallingAssistant = undefined;
+      if (!event.payload.excluded) {
+        messages.push({
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `[shell]\n$ ${event.payload.command}\n${event.payload.content
+                .filter((item) => item.type === "text")
+                .map((item) => item.text)
+                .join("")}`,
+            },
+          ],
+        });
+      }
+    } else if (event.type === "assistant.message") {
+      toolCallingAssistant = { role: "assistant", content: event.payload.content, toolCalls: [] };
+      messages.push(toolCallingAssistant);
+    } else if (event.type === "tool.call") {
+      if (toolCallingAssistant === undefined) {
+        throw new ReplayError(`Tool call ${event.id} has no preceding assistant turn`);
+      }
+      (toolCallingAssistant.toolCalls as ToolCallRequest[]).push({
+        callId: event.payload.callId,
+        name: event.payload.name,
+        input: event.payload.input,
+      });
+    } else if (event.type === "tool.result") {
+      messages.push({
+        role: "tool",
+        callId: event.payload.callId,
+        name: event.payload.name,
+        content: event.payload.content,
+        isError: event.payload.isError,
+      });
+    } else if (event.type === "context.injected") {
+      toolCallingAssistant = undefined;
+      messages.push({
+        role: "user",
+        content: [{ type: "text", text: `[${event.payload.source}]\n${event.payload.content}` }],
+      });
+    }
+    // Configuration, prompt, sandbox, and error events are not model messages.
+  }
+  return messages;
 }
 
 interface TurnOutcome {
@@ -135,13 +175,9 @@ export class AgentSession {
   private readonly onActivity: ((frame: SessionActivityFrame) => void) | undefined;
   private readonly system: string | undefined;
   private readonly maxModelCalls: number;
-  private readonly compaction: CompactionSettings;
   private tip: EventId | null;
   private messages: ModelMessage[];
   private activeOperation: OperationId | null = null;
-  private acceptingQueuedMessages = false;
-  private readonly steeringMessages: Array<readonly UserContent[]> = [];
-  private readonly followUpMessages: Array<readonly UserContent[]> = [];
 
   private constructor(
     log: JsonlEventLog,
@@ -158,16 +194,6 @@ export class AgentSession {
     this.maxModelCalls = options.maxModelCallsPerTurn ?? DEFAULT_MAX_MODEL_CALLS_PER_TURN;
     if (!Number.isSafeInteger(this.maxModelCalls) || this.maxModelCalls < 1) {
       throw new TypeError("maxModelCallsPerTurn must be a positive safe integer");
-    }
-    this.compaction = {
-      keepRecentTokens:
-        options.compaction?.keepRecentTokens ?? DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
-      maxOutputTokens: options.compaction?.maxOutputTokens ?? DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
-    };
-    for (const [name, value] of Object.entries(this.compaction)) {
-      if (!Number.isSafeInteger(value) || value < 1) {
-        throw new TypeError(`compaction.${name} must be a positive safe integer`);
-      }
     }
     this.tip = events.at(-1)?.id ?? null;
     this.messages = [...messagesFromLineage(events)];
@@ -211,7 +237,7 @@ export class AgentSession {
       session.messages.push({
         role: "tool",
         callId: call.payload.callId,
-        name: call.payload.name === "shell" ? "bash" : call.payload.name,
+        name: call.payload.name,
         content: result.payload.content,
         isError: true,
       });
@@ -226,27 +252,21 @@ export class AgentSession {
     // Tool schemas are model-visible configuration, so every runtime boundary
     // records the exact current roster before the next model request.
     for (const tool of options.tools.declarations()) {
-      await session.append(undefined, "tool.schema", tool);
+      await session.append(options.boundaryOperationId, "tool.schema", tool);
     }
     // Sandbox and configuration are announced at every open so a resumed
     // session reflects what it is actually running under now.
     if (options.sandbox !== undefined) {
-      await session.append(undefined, "sandbox.configured", options.sandbox);
+      await session.append(options.boundaryOperationId, "sandbox.configured", options.sandbox);
     }
     if (options.configModel !== undefined) {
-      await session.append(undefined, "config.model", options.configModel);
+      await session.append(options.boundaryOperationId, "config.model", options.configModel);
     }
     if (options.configThinking !== undefined) {
-      await session.append(undefined, "config.thinking", options.configThinking);
-    }
-    if (options.configProfile !== undefined) {
-      await session.append(undefined, "config.profile", options.configProfile);
-    }
-    if (options.configTools !== undefined) {
-      await session.append(undefined, "config.tools", options.configTools);
+      await session.append(options.boundaryOperationId, "config.thinking", options.configThinking);
     }
     if (options.configDialect !== undefined) {
-      await session.append(undefined, "config.dialect", options.configDialect);
+      await session.append(options.boundaryOperationId, "config.dialect", options.configDialect);
     }
     await session.host.activate();
     return session;
@@ -268,11 +288,12 @@ export class AgentSession {
 
   async resolveInteraction(
     payload: EventPayloadMap["interaction.resolved"],
+    operationId?: OperationId,
   ): Promise<CanonicalEvent> {
     if (this.activeOperation === null) {
       throw new OperationConflictError("No active operation can receive this interaction response");
     }
-    return this.append(this.activeOperation, "interaction.resolved", payload);
+    return this.append(operationId ?? this.activeOperation, "interaction.resolved", payload);
   }
 
   async injectContext(source: string, content: string): Promise<CanonicalEvent> {
@@ -289,33 +310,6 @@ export class AgentSession {
     return event;
   }
 
-  /** Queues user input for the next model boundary of the active turn. */
-  steer(content: readonly UserContent[]): void {
-    if (!this.acceptingQueuedMessages) {
-      throw new OperationConflictError("No active model turn can receive steering");
-    }
-    this.steeringMessages.push([...content]);
-  }
-
-  /** Queues user input until the active turn would otherwise finish. */
-  followUp(content: readonly UserContent[]): void {
-    if (!this.acceptingQueuedMessages) {
-      throw new OperationConflictError("No active model turn can receive a follow-up");
-    }
-    this.followUpMessages.push([...content]);
-  }
-
-  hasQueuedMessages(): boolean {
-    return this.steeringMessages.length > 0 || this.followUpMessages.length > 0;
-  }
-
-  /** Starts a fresh turn for input left queued after an error or interruption. */
-  async continueQueued(signal?: AbortSignal): Promise<TurnResult | undefined> {
-    const queue = this.steeringMessages.length > 0 ? this.steeringMessages : this.followUpMessages;
-    const content = queue.shift();
-    return content === undefined ? undefined : this.runTurn(content, signal);
-  }
-
   async dispose(): Promise<void> {
     await this.host.dispose();
     await this.log.drain();
@@ -326,15 +320,16 @@ export class AgentSession {
     command: string,
     excluded: boolean,
     signal?: AbortSignal,
+    requestedOperationId?: OperationId,
   ): Promise<CanonicalEvent<"user.shell">> {
     if (this.activeOperation !== null) {
       throw new OperationConflictError(
         `Operation ${this.activeOperation} already owns this branch`,
       );
     }
-    const shell = this.tools.get("bash");
-    if (!shell) throw new Error("The bash tool is unavailable in this session");
-    const operationId = parseOperationId(randomUUID(), "operationId");
+    const shell = this.tools.get("shell");
+    if (!shell) throw new Error("The shell tool is unavailable in this session");
+    const operationId = requestedOperationId ?? parseOperationId(randomUUID(), "operationId");
     this.activeOperation = operationId;
     try {
       const result = await shell.execute({ command }, signal ?? new AbortController().signal);
@@ -360,61 +355,23 @@ export class AgentSession {
     }
   }
 
-  /** Replaces older model-visible context with a durable continuation summary. */
-  async compact(
-    customInstructions?: string,
+  /** Runs one user turn: model calls and tool executions until a final stop. */
+  async runTurn(
+    content: readonly UserContent[],
     signal?: AbortSignal,
-  ): Promise<CanonicalEvent<"context.compacted">> {
+    requestedOperationId?: OperationId,
+  ): Promise<TurnResult> {
     if (this.activeOperation !== null) {
       throw new OperationConflictError(
         `Operation ${this.activeOperation} already owns this branch`,
       );
     }
-    const instructions = customInstructions?.trim();
-    if (customInstructions !== undefined && !instructions) {
-      throw new TypeError("Compaction instructions must not be empty");
-    }
-    const operationId = parseOperationId(randomUUID(), "operationId");
+    const operationId = requestedOperationId ?? parseOperationId(randomUUID(), "operationId");
     this.activeOperation = operationId;
-    try {
-      const stored = await this.log.read();
-      const tree = SessionTree.fromEvents(this.log.sessionId, stored.events);
-      const lineage = this.tip === null ? [] : tree.lineage(this.tip);
-      const plan = prepareCompaction(lineage, this.compaction.keepRecentTokens);
-      if (plan === undefined) throw new Error("Nothing to compact");
-      const result = await summarizeCompaction(
-        plan,
-        this.model,
-        instructions,
-        signal,
-        this.compaction.maxOutputTokens,
-      );
-      signal?.throwIfAborted();
-      const event = await this.append(operationId, "context.compacted", {
-        summary: result.summary,
-        replacedEventIds: plan.replacedEventIds,
-        usage: result.usage,
-      });
-      this.messages = [...messagesFromLineage([...lineage, event])];
-      return event;
-    } finally {
-      this.activeOperation = null;
-    }
-  }
-
-  /** Runs one user turn: model calls, steering, follow-ups, and tools until a final stop. */
-  async runTurn(content: readonly UserContent[], signal?: AbortSignal): Promise<TurnResult> {
-    if (this.activeOperation !== null) {
-      throw new OperationConflictError(
-        `Operation ${this.activeOperation} already owns this branch`,
-      );
-    }
-    const operationId = parseOperationId(randomUUID(), "operationId");
-    this.activeOperation = operationId;
-    this.acceptingQueuedMessages = true;
     const appended: CanonicalEvent[] = [];
     try {
-      await this.appendUserMessage(operationId, content, appended);
+      appended.push(await this.append(operationId, "user.message", { content }));
+      this.messages.push({ role: "user", content });
 
       const activity = { sequence: 0 };
       for (let call = 0; ; call += 1) {
@@ -449,64 +406,53 @@ export class AgentSession {
           type: "clear",
         });
 
-        if (outcome.stopReason === "error" || outcome.stopReason === "aborted") {
+        if (outcome.stopReason !== "tool_use") {
           return { events: appended, stopReason: outcome.stopReason };
         }
-
-        if (outcome.stopReason === "tool_use") {
-          if (outcome.toolCalls.length === 0) {
-            appended.push(
-              await this.append(operationId, "session.error", {
-                code: "missing_tool_call",
-                message: "Model ended with tool_use but supplied no tool call",
-                retryable: false,
-              }),
-            );
-            return { events: appended, stopReason: "error" };
-          }
-          const aborted = await this.executeToolCalls(
-            operationId,
-            outcome.toolCalls,
-            appended,
-            signal,
+        if (outcome.toolCalls.length === 0) {
+          appended.push(
+            await this.append(operationId, "session.error", {
+              code: "missing_tool_call",
+              message: "Model ended with tool_use but supplied no tool call",
+              retryable: false,
+            }),
           );
-          if (aborted) return { events: appended, stopReason: "aborted" };
+          return { events: appended, stopReason: "error" };
         }
-
-        if (await this.appendNextQueuedMessage(this.steeringMessages, operationId, appended)) {
-          continue;
-        }
-        if (outcome.stopReason === "tool_use") continue;
-        if (await this.appendNextQueuedMessage(this.followUpMessages, operationId, appended)) {
-          continue;
-        }
-        return { events: appended, stopReason: outcome.stopReason };
+        const aborted = await this.executeToolCalls(
+          operationId,
+          outcome.toolCalls,
+          appended,
+          signal,
+        );
+        if (aborted) return { events: appended, stopReason: "aborted" };
       }
     } finally {
-      this.acceptingQueuedMessages = false;
       this.activeOperation = null;
     }
   }
 
-  private async appendUserMessage(
-    operationId: OperationId,
-    content: readonly UserContent[],
-    appended: CanonicalEvent[],
-  ): Promise<void> {
-    appended.push(await this.append(operationId, "user.message", { content }));
-    this.messages.push({ role: "user", content });
+  async abortRecoveredTurn(operationId: OperationId): Promise<CanonicalEvent<"assistant.message">> {
+    if (this.activeOperation !== null) {
+      throw new OperationConflictError(
+        `Operation ${this.activeOperation} already owns this branch`,
+      );
+    }
+    return this.append(operationId, "assistant.message", {
+      content: [],
+      stopReason: "aborted",
+      errorMessage:
+        "Operation was aborted because the daemon restarted before recording completion.",
+    });
   }
 
-  private async appendNextQueuedMessage(
-    queue: Array<readonly UserContent[]>,
-    operationId: OperationId,
-    appended: CanonicalEvent[],
-  ): Promise<boolean> {
-    const content = queue[0];
-    if (content === undefined) return false;
-    await this.appendUserMessage(operationId, content, appended);
-    queue.shift();
-    return true;
+  async close(operationId: OperationId): Promise<CanonicalEvent<"session.closed">> {
+    if (this.activeOperation !== null) {
+      throw new OperationConflictError(
+        `Operation ${this.activeOperation} already owns this branch`,
+      );
+    }
+    return this.append(operationId, "session.closed", { reason: "disposed" });
   }
 
   private async modelTurn(
