@@ -234,7 +234,10 @@ export interface RpcMethodMap {
     readonly result: Record<string, never>;
   };
   readonly "session.create": {
-    readonly params: { readonly cwd: string } & SessionModelSelection;
+    readonly params: {
+      readonly cwd: string;
+      readonly profile?: SessionProfile;
+    } & SessionModelSelection;
     readonly result: SessionOpenResult;
   };
   readonly "session.resume": {
@@ -295,11 +298,20 @@ export interface RpcMethodMap {
   };
   readonly "session.reload": {
     readonly params: { readonly sessionId: SessionId };
-    readonly result: { readonly events: readonly CanonicalEvent[] };
+    readonly result: { readonly boundaryEventIds: readonly EventId[] };
   };
   readonly "session.configure": {
-    readonly params: { readonly sessionId: SessionId } & SessionModelSelection;
-    readonly result: { readonly events: readonly CanonicalEvent[] };
+    readonly params: {
+      readonly sessionId: SessionId;
+      readonly profile?: SessionProfile;
+    } & SessionModelSelection;
+    readonly result: {
+      readonly modelId: string;
+      readonly requestedThinkingLevel: ThinkingLevel;
+      readonly effectiveThinkingLevel: ThinkingLevel;
+      readonly profile: SessionProfile;
+      readonly boundaryEventIds: readonly EventId[];
+    };
   };
   readonly "session.interaction.respond": {
     readonly params: {
@@ -796,6 +808,14 @@ const thinkingLevels: readonly ThinkingLevel[] = [
   "max",
 ];
 
+function sessionProfile(value: unknown, path: string): SessionProfile | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "minimal" && value !== "standard" && value !== "chat") {
+    throw new ProtocolValidationError(path, "must be minimal, standard, or chat");
+  }
+  return value;
+}
+
 function selection(params: Record<string, unknown>, path: string): SessionModelSelection {
   const modelId =
     params.modelId === undefined ? undefined : string(params.modelId, `${path}.modelId`);
@@ -867,13 +887,15 @@ export function parseWireRequest(value: unknown): WireRequest {
     return { ...base, method, params: {} };
   }
   if (method === "session.create") {
-    exact(params, "request.params", ["cwd", "modelId", "thinkingLevel"]);
+    exact(params, "request.params", ["cwd", "modelId", "thinkingLevel", "profile"]);
+    const profile = sessionProfile(params.profile, "request.params.profile");
     return {
       ...base,
       method,
       params: {
         cwd: string(params.cwd, "request.params.cwd"),
         ...selection(params, "request.params"),
+        profile: profile ?? "minimal",
       },
     };
   }
@@ -979,10 +1001,18 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.configure") {
-    exact(params, "request.params", ["sessionId", "modelId", "thinkingLevel"]);
+    exact(params, "request.params", ["sessionId", "modelId", "thinkingLevel", "profile"]);
     const configured = selection(params, "request.params");
-    if (configured.modelId === undefined && configured.thinkingLevel === undefined) {
-      throw new ProtocolValidationError("request.params", "must include modelId or thinkingLevel");
+    const profile = sessionProfile(params.profile, "request.params.profile");
+    if (
+      configured.modelId === undefined &&
+      configured.thinkingLevel === undefined &&
+      profile === undefined
+    ) {
+      throw new ProtocolValidationError(
+        "request.params",
+        "must include modelId, thinkingLevel, or profile",
+      );
     }
     return {
       ...base,
@@ -990,6 +1020,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
         ...configured,
+        profile: profile ?? "minimal",
       },
     };
   }
@@ -1138,16 +1169,6 @@ export function parseWireRequest(value: unknown): WireRequest {
   throw new ProtocolValidationError("request.method", `unknown method ${JSON.stringify(method)}`);
 }
 
-function parseEventList(value: unknown, path: string): readonly CanonicalEvent[] {
-  if (!Array.isArray(value) || value.length > MAX_HISTORY_PAGE_EVENTS) {
-    throw new ProtocolValidationError(
-      path,
-      `must contain at most ${MAX_HISTORY_PAGE_EVENTS} events`,
-    );
-  }
-  return value.map((event) => parseEvent(event));
-}
-
 function parseSessionOpenResult(
   value: unknown,
   path: string,
@@ -1228,15 +1249,6 @@ function parseBooleanResult(value: unknown, path: string, field: string): Record
     throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
   }
   return { [field]: result[field] as boolean };
-}
-
-function parseBoundaryResult(
-  value: unknown,
-  path: string,
-): { readonly events: readonly CanonicalEvent[] } {
-  const result = object(value, path);
-  exact(result, path, ["events"]);
-  return { events: parseEventList(result.events, `${path}.events`) };
 }
 
 function parseJsonObject(value: unknown, path: string): JsonObject {
@@ -1385,8 +1397,54 @@ export function parseRpcResult<Method extends RpcMethod>(
         ? {}
         : { operationId: parseOperationId(result.operationId, `${path}.operationId`) }),
     };
-  } else if (method === "session.reload" || method === "session.configure") {
-    parsed = parseBoundaryResult(value, path);
+  } else if (method === "session.reload") {
+    const result = object(value, path);
+    exact(result, path, ["boundaryEventIds"]);
+    if (!Array.isArray(result.boundaryEventIds) || result.boundaryEventIds.length > 256) {
+      throw new ProtocolValidationError(`${path}.boundaryEventIds`, "must contain at most 256 IDs");
+    }
+    parsed = {
+      boundaryEventIds: result.boundaryEventIds.map((id, index) =>
+        parseEventId(id, `${path}.boundaryEventIds[${index}]`),
+      ),
+    };
+  } else if (method === "session.configure") {
+    const result = object(value, path);
+    exact(result, path, [
+      "modelId",
+      "requestedThinkingLevel",
+      "effectiveThinkingLevel",
+      "profile",
+      "boundaryEventIds",
+    ]);
+    if (!thinkingLevels.includes(result.requestedThinkingLevel as ThinkingLevel)) {
+      throw new ProtocolValidationError(
+        `${path}.requestedThinkingLevel`,
+        "must be a thinking level",
+      );
+    }
+    if (!thinkingLevels.includes(result.effectiveThinkingLevel as ThinkingLevel)) {
+      throw new ProtocolValidationError(
+        `${path}.effectiveThinkingLevel`,
+        "must be a thinking level",
+      );
+    }
+    if (!Array.isArray(result.boundaryEventIds) || result.boundaryEventIds.length > 256) {
+      throw new ProtocolValidationError(`${path}.boundaryEventIds`, "must contain at most 256 IDs");
+    }
+    const profile = sessionProfile(result.profile, `${path}.profile`);
+    if (profile === undefined) {
+      throw new ProtocolValidationError(`${path}.profile`, "is required");
+    }
+    parsed = {
+      modelId: boundedString(result.modelId, `${path}.modelId`, 512),
+      requestedThinkingLevel: result.requestedThinkingLevel,
+      effectiveThinkingLevel: result.effectiveThinkingLevel,
+      profile,
+      boundaryEventIds: result.boundaryEventIds.map((id, index) =>
+        parseEventId(id, `${path}.boundaryEventIds[${index}]`),
+      ),
+    };
   } else if (method === "session.interaction.respond") {
     const result = object(value, path);
     exact(result, path, ["interactionId", "resolutionEventId"]);

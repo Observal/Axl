@@ -1541,7 +1541,7 @@ test("configuration changes rebuild and log the selected model and thinking", as
     thinkingLevel: "medium",
   });
   const configureKey = "00000000-0000-4000-8000-000000000105";
-  const changed = (await client.request(
+  const changed = await client.request(
     "session.configure",
     {
       sessionId: created.sessionId,
@@ -1549,17 +1549,17 @@ test("configuration changes rebuild and log the selected model and thinking", as
       thinkingLevel: "high",
     },
     { idempotencyKey: configureKey },
-  )) as { events: CanonicalEvent[] };
+  );
 
   assert.deepEqual(configured, [
     { boundary: "session_start", model: "gpt-5", thinking: "medium" },
     { boundary: "model_switch", model: "gpt-4.1", thinking: "high" },
   ]);
-  assert.deepEqual(types(changed.events), ["config.model", "config.thinking"]);
-  assert.equal(
-    changed.events.every((event) => event.operationId === configureKey),
-    true,
-  );
+  assert.equal(changed.modelId, "gpt-4.1");
+  assert.equal(changed.requestedThinkingLevel, "high");
+  assert.equal(changed.effectiveThinkingLevel, "high");
+  assert.equal(changed.profile, "minimal");
+  assert.equal(changed.boundaryEventIds.length, 2);
 });
 
 test("reload rebuilds the runtime as a logged boundary with live subscriptions", async (context) => {
@@ -1593,26 +1593,27 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: directory });
-  const pushed: string[] = [];
-  client.onEvent((message) => pushed.push(message.event.type));
+  const pushed: CanonicalEvent[] = [];
+  client.onEvent((message) => pushed.push(message.event));
   await subscribeAll(client, created.sessionId);
 
   const reloadKey = "00000000-0000-4000-8000-000000000106";
-  const reloaded = (await client.request(
+  const reloaded = await client.request(
     "session.reload",
     { sessionId: created.sessionId },
     { idempotencyKey: reloadKey },
-  )) as {
-    events: CanonicalEvent[];
-  };
+  );
   assert.deepEqual(boundaries, ["session_start", "reload"]);
-  const dialect = reloaded.events.find((event) => event.type === "config.dialect");
+  const dialect = pushed.find(
+    (event) => event.type === "config.dialect" && reloaded.boundaryEventIds.includes(event.id),
+  );
   assert.equal(dialect?.type === "config.dialect" && dialect.payload.reason, "reload");
   assert.equal(
-    reloaded.events.every((event) => event.operationId === reloadKey),
+    pushed
+      .filter((event) => reloaded.boundaryEventIds.includes(event.id))
+      .every((event) => event.operationId === reloadKey),
     true,
   );
-  assert.equal(pushed.includes("config.dialect"), true); // streamed to subscribers
 
   // The session still works after the reload, on the same log.
   const sent = (await client.request("session.send", {

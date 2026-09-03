@@ -38,7 +38,12 @@ test("validates every request shape", () => {
       },
     },
     { kind: "request", id: 23, method: "connection.ping", params: {} },
-    { kind: "request", id: 1, method: "session.create", params: { cwd: "/repo" } },
+    {
+      kind: "request",
+      id: 1,
+      method: "session.create",
+      params: { cwd: "/repo", profile: "minimal" },
+    },
     {
       kind: "request",
       id: 2,
@@ -105,13 +110,23 @@ test("validates every request shape", () => {
       kind: "request",
       id: 8,
       method: "session.configure",
-      params: { sessionId, modelId: "gpt-5", thinkingLevel: "high" },
+      params: {
+        sessionId,
+        modelId: "gpt-5",
+        thinkingLevel: "high",
+        profile: "minimal",
+      },
     },
     {
       kind: "request",
       id: 9,
       method: "session.create",
-      params: { cwd: "/repo", modelId: "gpt-5", thinkingLevel: "medium" },
+      params: {
+        cwd: "/repo",
+        modelId: "gpt-5",
+        thinkingLevel: "medium",
+        profile: "minimal",
+      },
     },
     {
       kind: "request",

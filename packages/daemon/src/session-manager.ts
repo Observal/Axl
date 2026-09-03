@@ -449,8 +449,11 @@ export class SessionManager {
       }
       return undefined;
     }
-    if (acceptance.method === "session.reload" || acceptance.method === "session.configure") {
-      return { events: evidence };
+    if (acceptance.method === "session.reload") {
+      return { boundaryEventIds: evidence.map((event) => event.id) };
+    }
+    if (acceptance.method === "session.configure") {
+      return this.configurationResult(this.managed(target), evidence);
     }
     return undefined;
   }
@@ -724,29 +727,37 @@ export class SessionManager {
   async reload(
     sessionId: unknown,
     operationId?: OperationId,
-  ): Promise<{ events: readonly CanonicalEvent[] }> {
+  ): Promise<{ boundaryEventIds: readonly EventId[] }> {
     const managed = this.managed(sessionId);
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation owns this branch; reload after it");
     }
     if (operationId !== undefined) {
       const recovered = managed.events.filter((event) => event.operationId === operationId);
-      if (recovered.length > 0) return { events: recovered };
+      if (recovered.length > 0) {
+        return { boundaryEventIds: recovered.map((event) => event.id) };
+      }
     }
     const before = managed.events.length;
     await this.rebuild(managed, "reload", managed.selection, operationId);
-    return { events: managed.events.slice(before) };
+    return { boundaryEventIds: managed.events.slice(before).map((event) => event.id) };
   }
 
   async configure(
     sessionId: unknown,
     update: SessionModelSelection,
     operationId?: OperationId,
-  ): Promise<{ events: readonly CanonicalEvent[] }> {
+  ): Promise<{
+    modelId: string;
+    requestedThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
+    effectiveThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
+    profile: "minimal";
+    boundaryEventIds: readonly EventId[];
+  }> {
     const managed = this.managed(sessionId);
     if (operationId !== undefined) {
       const recovered = managed.events.filter((event) => event.operationId === operationId);
-      if (recovered.length > 0) return { events: recovered };
+      if (recovered.length > 0) return this.configurationResult(managed, recovered);
     }
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError(
@@ -755,6 +766,12 @@ export class SessionManager {
       );
     }
     const selection = { ...managed.selection, ...update };
+    if (selection.modelId === undefined) {
+      throw new DaemonError(
+        "unsupported_capability",
+        "Configuration requires a runtime with a known model",
+      );
+    }
     const boundary: SessionRuntimeBoundary =
       update.modelId !== undefined && update.modelId !== managed.selection.modelId
         ? "model_switch"
@@ -762,7 +779,33 @@ export class SessionManager {
     const before = managed.events.length;
     await this.rebuild(managed, boundary, selection, operationId);
     managed.selection = selection;
-    return { events: managed.events.slice(before) };
+    return this.configurationResult(managed, managed.events.slice(before));
+  }
+
+  private configurationResult(
+    managed: ManagedSession,
+    boundaryEvents: readonly CanonicalEvent[],
+  ): {
+    modelId: string;
+    requestedThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
+    effectiveThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
+    profile: "minimal";
+    boundaryEventIds: readonly EventId[];
+  } {
+    const modelId = managed.selection.modelId;
+    if (modelId === undefined) {
+      throw new DaemonError("corrupt_session", "Configured session has no model identity");
+    }
+    const thinking = managed.events.findLast((event) => event.type === "config.thinking");
+    const requestedThinkingLevel = managed.selection.thinkingLevel ?? "off";
+    return {
+      modelId,
+      requestedThinkingLevel,
+      effectiveThinkingLevel:
+        thinking?.type === "config.thinking" ? thinking.payload.effective : requestedThinkingLevel,
+      profile: "minimal",
+      boundaryEventIds: boundaryEvents.map((event) => event.id),
+    };
   }
 
   async send(

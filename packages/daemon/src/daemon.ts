@@ -477,7 +477,15 @@ export class AxlDaemon {
           },
         );
       });
-      normalized = { ...request, params: { ...request.params, cwd } };
+      normalized = {
+        ...request,
+        params: { ...request.params, cwd, profile: request.params.profile ?? "minimal" },
+      };
+    } else if (request.method === "session.configure") {
+      normalized = {
+        ...request,
+        params: { ...request.params, profile: request.params.profile ?? "minimal" },
+      };
     }
     if (!isRetryableMutationMethod(normalized.method)) {
       return this.dispatch(normalized, send, state);
@@ -544,7 +552,13 @@ export class AxlDaemon {
       case "connection.ping":
         return {};
       case "session.create": {
-        const { cwd, modelId, thinkingLevel } = request.params;
+        const { cwd, modelId, thinkingLevel, profile } = request.params;
+        if (profile !== undefined && profile !== "minimal") {
+          throw new DaemonError(
+            "unsupported_capability",
+            `Session profile ${profile} is not available`,
+          );
+        }
         const reservation = this.creationReservation(acceptance);
         const created = await this.sessions.create(
           cwd,
@@ -612,7 +626,13 @@ export class AxlDaemon {
       case "session.reload":
         return this.sessions.reload(request.params.sessionId, this.mutationOperationId(acceptance));
       case "session.configure": {
-        const { sessionId, modelId, thinkingLevel } = request.params;
+        const { sessionId, modelId, thinkingLevel, profile } = request.params;
+        if (profile !== undefined && profile !== "minimal") {
+          throw new DaemonError(
+            "unsupported_capability",
+            `Session profile ${profile} is not available`,
+          );
+        }
         return this.sessions.configure(
           sessionId,
           {
