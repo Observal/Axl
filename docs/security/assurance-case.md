@@ -36,7 +36,8 @@ Treat repository content, tool output, web content, extensions, MCP servers, imp
 - Runtime validation for canonical events and local wire messages
 - Redaction before canonical event-log writes
 - Canonical path checks, explicit file-tool readable roots, and symlink-escape rejection
-- Bubblewrap confinement on Linux with the user home masked, and Seatbelt profiles on macOS
+- Bubblewrap confinement on Linux with explicit Landlock read rules, a versioned seccomp denylist, dropped capabilities, private runtime directories, rlimits, and the user home masked
+- Digest-pinned Podman and Docker execution with read-only roots, restricted mounts, no network, seccomp, cgroups v2 limits, and verified container removal
 - Fail-closed startup when required isolation is unavailable, unless the user explicitly starts a separate `--unsafe` daemon
 - Logged unenforced state and a persistent terminal warning for unsafe sessions
 - Sandboxed stdio MCP servers with limited environment variables and no network
@@ -49,9 +50,13 @@ Treat repository content, tool output, web content, extensions, MCP servers, imp
 
 ## Remaining risks
 
-- Bubblewrap shares the host kernel and still exposes a read-only view of system paths outside the masked user home and protected paths. Complete shell-process read allowlists require the planned Landlock enforcement.
+- Bubblewrap, Landlock, seccomp, and ordinary OCI runtimes share the host kernel. They do not provide a virtual-machine boundary.
+- The current seccomp policy is a versioned high-risk syscall denylist rather than a complete syscall allowlist.
+- Landlock enforcement depends on the running kernel ABI. Axl reports partial enforcement when newer rights are unavailable.
+- Native Linux resource enforcement uses rlimits. Cgroups v2 limits are enforced by the OCI backends, not the native provider.
+- Docker may be rootful. Axl records this distinction; rootless Podman remains the preferred local OCI engine.
 - Seatbelt does not provide Linux-style namespaces.
-- Windows sandboxing and OCI isolation are not implemented yet.
+- Windows native sandboxing is not implemented yet.
 - Streamable HTTP MCP servers run remotely and must be trusted with requests sent to them.
 - GitHub branch protection and Private Vulnerability Reporting depend on repository settings outside this tree.
 - No signed release artifacts exist yet.

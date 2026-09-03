@@ -1961,13 +1961,13 @@ The terminal presentation surface already has first-party renderer consumers and
 
 #### OS sandbox providers
 
-- [ ] Complete Linux Bubblewrap support.
-- [ ] Add Landlock capability detection and enforcement where available.
-- [ ] Add seccomp filters and report their version.
-- [ ] Add macOS Seatbelt support.
+- [x] Complete Linux Bubblewrap support.
+- [x] Add Landlock capability detection and enforcement where available.
+- [x] Add seccomp filters and report their version.
+- [x] Add macOS Seatbelt support.
 - [ ] Add Windows restricted-token, job-object, and ACL support, with WSL2 as the stronger documented path.
-- [ ] Report the exact controls each provider can enforce.
-- [ ] Fail session startup when required controls are unavailable.
+- [x] Report the exact controls each provider can enforce.
+- [x] Fail session startup when required controls are unavailable.
 
 #### Full policy controls
 
@@ -1981,19 +1981,20 @@ The terminal presentation surface already has first-party renderer consumers and
 #### Extension isolation hardening
 
 - [ ] Add resource limits and lifecycle supervision to the Phase 6 extension process host.
+- [x] Apply resource limits and lifecycle cleanup to existing sandboxed stdio MCP processes.
 - [ ] Verify that extension processes cannot bypass filesystem, network, or credential policy through host APIs.
 - [ ] Keep trusted in-process execution limited to first-party extensions throughout v1.
 
 #### OCI runtime
 
-- [ ] Detect Podman, Docker, and containerd/nerdctl rather than requiring one engine.
-- [ ] Prefer rootless execution and report rootful operation.
+- [ ] Detect Podman, Docker, and containerd/nerdctl rather than requiring one engine. Podman and Docker are implemented; containerd/nerdctl remains.
+- [x] Prefer rootless execution and report rootful operation.
 - [ ] Support runc, crun, and youki capabilities.
 - [ ] Report stronger gVisor and Kata isolation where installed.
 - [ ] Implement create, workspace upload, start, attach, snapshot, stop, terminate, and termination verification.
 - [ ] Generate runtime-spec configuration with read-only root, dropped capabilities, no-new-privileges, seccomp, masked paths, user namespaces, no devices, and cgroups v2 limits.
 - [ ] Make termination idempotent and verifiable.
-- [ ] Resolve images to platform-specific digests.
+- [ ] Resolve images to platform-specific digests. Local OCI execution currently requires the user to supply a digest-pinned image.
 - [ ] Add signature, SBOM, and attestation verification policy.
 - [ ] Use existing registry credential helpers without exposing credentials.
 - [ ] Make offline cache behavior explicit.
@@ -2011,7 +2012,7 @@ The terminal presentation surface already has first-party renderer consumers and
 
 #### Doctor
 
-- [ ] Report detected runtimes, sandbox controls, rootless support, cgroups, missing binaries, credentials needing setup, elevated extensions, and policy mismatches.
+- [ ] Complete `/doctor` coverage for credentials, elevated extensions, and policy mismatches. Runtime, sandbox-control, rootless, cgroup, and missing-binary reporting is implemented.
 
 #### Exit gate
 

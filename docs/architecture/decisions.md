@@ -17,6 +17,8 @@ These decisions set the package and compatibility boundaries established during 
 
 Other packages use the kernel through public exports. Extensions cannot import private kernel paths.
 
+Linux filesystem confinement uses `@deepseek-ai/node-addon-landlock-run` 0.1.1 from <https://github.com/deepseek-harness/deepseek-harness>. Axl uses its published JavaScript API and unmodified platform launcher as a dependency. The reviewed entry tarball SHA-256 was `02c123a4eb4acedfd386fe06192dcf05e7fbb96e2845de9e2958efee4b4f0b92`. The Linux x64 platform tarball was `392e5ee27297117a058728f3a938a5b5b3302c16b423ee2a2f2dbdf612a6c0a9`, containing launcher SHA-256 `a752bc72f111fcc573c3e61fb90fa544541dac0ca498d2e279e1630d7c659b31`. The Linux arm64 platform tarball was `ecbbe99368422ac4f28a0bcf8dc3e4cb8c0a24086fb9b73cc21e77433d5d5dc8`, containing launcher SHA-256 `f6ae2ad5893e3123f45329ade5518b33c3ac3b102978001ff1c6a6a8ebe2ad9b`. The entry tarball includes an MIT notice while its package metadata declares BSD-3-Clause; the platform packages include BSD-3-Clause. Axl retains the dependency notices and does not copy or modify launcher source.
+
 These rules are stricter than the external architecture inspected for Phase 0. DSH at `cd5ef8148158c3a752a658978873241fdf8e2bbc` builds its loop from several workspace packages and uses Schemastery at runtime. Axl treats it as a read-only behavioral reference, not as a package-layout template.
 
 ## Event identity

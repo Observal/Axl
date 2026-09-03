@@ -13,6 +13,9 @@ This file records notable user-facing changes.
 - Release-branch tooling for channel releases, tracked backports, signed tags, npm publication, and GitHub Releases
 - The public `@observal/axl` package, checksum-verifying installer, and CLI `--help` and `--version` output
 - Explicit `--unsafe` startup mode with separate state, logged unenforced status, and a persistent terminal warning
+- Linux Landlock and versioned seccomp enforcement with process and file resource limits
+- Digest-pinned local OCI execution through rootless Podman or Docker, including verified cleanup
+- `axl doctor` sandbox capability diagnostics
 - Dependency-free event and local wire protocols with runtime validation
 - Crash-safe JSONL sessions, branch reconstruction, redaction, and deterministic replay
 - Provider and credential contracts, thinking levels, tool dialects, a deterministic fake provider, and the built-in Azure OpenAI model catalog

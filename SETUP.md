@@ -49,6 +49,39 @@ axl <session-id>
 
 The client uses `~/.axl/axl.sock`. It starts a detached local daemon when one is not already running. Use `axl daemon` to keep the daemon in the foreground for troubleshooting. Restart an existing daemon after changing exported environment variables because a running process cannot inherit later shell changes.
 
+Inspect local sandbox support without configuring provider credentials:
+
+```bash
+axl doctor
+```
+
+On Linux, native execution requires Bubblewrap plus the pinned Landlock launcher installed with Axl. Axl applies its versioned seccomp policy and fails startup when Bubblewrap, Landlock, or seccomp cannot be enforced.
+
+On Ubuntu, install the local container prerequisites with:
+
+```bash
+sudo apt-get install podman uidmap slirp4netns fuse-overlayfs crun
+```
+
+For OCI execution, use rootless Podman or a Docker engine with seccomp and cgroups v2. Pull the selected image explicitly, record its digest, and start Axl with the digest-pinned reference:
+
+```bash
+podman pull docker.io/library/bash:5.2.37
+podman image inspect docker.io/library/bash:5.2.37 --format '{{.Digest}}'
+
+axl --sandbox podman \
+  --image docker.io/library/bash@sha256:<64-hex-digest>
+```
+
+Docker uses the same contract:
+
+```bash
+axl --sandbox docker \
+  --image docker.io/library/bash@sha256:<64-hex-digest>
+```
+
+Axl never pulls an OCI image implicitly. Podman must be rootless. Docker privilege and VM isolation are reported by `axl doctor` and recorded in each session. Prefer rootless Docker or Docker Desktop's VM-backed engine. Access to a rootful Linux Docker socket is root-equivalent host authority for the trusted Axl daemon, even though the tool container remains restricted. OCI sessions use separate state directories keyed by engine and image digest.
+
 ## Global and project configuration
 
 Axl reads global configuration from `~/.axl`:

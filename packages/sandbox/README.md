@@ -3,6 +3,8 @@
 
 # `@axl/sandbox`
 
-This package provides operating-system sandbox adapters. Linux uses Bubblewrap with a read-only root, writable workspace, masked user home and Axl state, isolated networking, and a cleared environment. macOS uses Seatbelt to restrict writes, network access, protected paths, and environment variables. In-process tools allow reads only from explicit readable roots and apply the same protected-path and workspace-write policy through the kernel's canonical path checks.
+This package provides operating-system and OCI sandbox adapters. Linux combines Bubblewrap namespaces with Landlock filesystem rules, a versioned seccomp denylist, dropped capabilities, private runtime directories, process supervision, and rlimits. macOS uses Seatbelt to restrict writes, network access, protected paths, and environment variables. In-process tools allow reads only from explicit readable roots and apply the same protected-path and workspace-write policy through the kernel's canonical path checks.
 
-A session that requires isolation will not start without a suitable provider. Each provider records the controls it actually enforces in `sandbox.configured`. Seatbelt reports that it cannot provide Linux-style namespaces. Landlock, seccomp, Windows support, and the OCI runtime remain Phase 7 work.
+The OCI backend supports Podman and Docker with digest-pinned local images. It applies a read-only root, workspace-only persistent writes, private temporary storage, no network, dropped capabilities, `no-new-privileges`, seccomp, cgroups v2 limits, rlimits, and verified container removal. Podman must be rootless. Docker reports whether it is rootless, VM-backed, or rootful.
+
+A session that requires isolation will not start without a suitable provider. Each provider records the controls, versions, image, privilege mode, and limits it actually enforces in `sandbox.configured.details`. Seatbelt reports that it cannot provide Linux-style namespaces. Windows native sandboxing remains future work.

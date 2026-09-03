@@ -5,11 +5,11 @@
 
 Axl, short for Axolotl, is an agent harness that works with existing tools, models, and client setups. A single daemon owns each session, while terminal and future clients render the same event stream.
 
-**Current status:** phases 0 through 4 of the [technical implementation roadmap](ROADMAP.md#technical-implementation-roadmap) are complete. The TUI, Agent Skills, and MCP support were brought forward from later phases. Other later-phase work has not started.
+**Current status:** phases 0 through 4 of the [technical implementation roadmap](ROADMAP.md#technical-implementation-roadmap) are complete. The TUI, Agent Skills, MCP support, native Linux hardening, and local OCI execution were brought forward from later phases. Other later-phase work has not started.
 
 ## Install
 
-Axl requires Node.js `^22.19.0` or `>=24`. Sandboxed command execution requires Bubblewrap on Linux. macOS uses Seatbelt.
+Axl requires Node.js `^22.19.0` or `>=24`. Native sandboxed execution requires Bubblewrap on Linux; Axl installs its pinned Landlock launcher dependency. macOS uses Seatbelt. Local OCI execution optionally uses rootless Podman or Docker with seccomp and cgroups v2.
 
 Install the package from npm:
 
@@ -45,11 +45,24 @@ The `axl` command connects to the local daemon and starts one in the background 
 axl <session-id>
 axl --cwd ~/code/project
 axl daemon
+axl doctor
 ```
 
 The TUI supports multiline editing, model and theme selection, queued prompts, compact tool output, session metrics, and terminal scrollback. Run `/help` for commands and keys. Run `/quit` to detach without stopping the session.
 
-Axl will not run shell tools when the required sandbox is unavailable. To opt out explicitly, start a separate unsafe daemon and session with:
+Axl will not run shell tools when the required sandbox is unavailable. On Linux, the native provider requires working Bubblewrap, Landlock, and the versioned Axl seccomp policy. `axl doctor` reports the controls available on the host.
+
+To use a local OCI sandbox, first pull an image and pass its immutable digest:
+
+```bash
+podman pull docker.io/library/bash:5.2.37
+axl --sandbox podman \
+  --image docker.io/library/bash@sha256:<64-hex-digest>
+```
+
+Replace `podman` with `docker` to use the Docker adapter. Axl never pulls implicitly and rejects mutable image tags.
+
+To opt out explicitly, start a separate unsafe daemon and session with:
 
 ```bash
 axl --unsafe
