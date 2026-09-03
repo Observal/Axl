@@ -603,6 +603,7 @@ export class AxlDaemon {
       case "session.shell":
         return this.sessions.shell(
           request.params.sessionId,
+          request.params.operationId,
           request.params.command,
           request.params.excluded,
         );

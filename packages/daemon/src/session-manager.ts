@@ -396,7 +396,10 @@ export class SessionManager {
         await this.resume(target);
         await this.managed(target).session.abortRecoveredTurn(affected);
       }
-      return { interrupted: affectedEvents.length > 0 };
+      return {
+        interrupted: affectedEvents.length > 0,
+        ...(affectedEvents.length === 0 ? {} : { operationId: affected }),
+      };
     }
     if (acceptance.method === "session.dispose") {
       return evidence.some((event) => event.type === "session.closed")
@@ -432,12 +435,13 @@ export class SessionManager {
           (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
           event.type === "session.error",
       );
-      if (terminal?.type === "assistant.message")
-        return { stopReason: terminal.payload.stopReason };
-      if (terminal?.type === "session.error") return { stopReason: "error" };
+      if (terminal?.type === "assistant.message") {
+        return { operationId, stopReason: terminal.payload.stopReason };
+      }
+      if (terminal?.type === "session.error") return { operationId, stopReason: "error" };
       if (evidence.some((event) => event.type === "user.message")) {
         const aborted = await this.managed(target).session.abortRecoveredTurn(operationId);
-        return { stopReason: aborted.payload.stopReason };
+        return { operationId, stopReason: aborted.payload.stopReason };
       }
       return undefined;
     }
@@ -761,7 +765,7 @@ export class SessionManager {
     sessionId: unknown,
     content: readonly UserContent[],
     operationId?: OperationId,
-  ): Promise<{ stopReason: string }> {
+  ): Promise<{ operationId: OperationId; stopReason: string }> {
     const managed = this.managed(sessionId);
     if (operationId !== undefined) {
       const prior = managed.events.filter((event) => event.operationId === operationId);
@@ -770,12 +774,13 @@ export class SessionManager {
           (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
           event.type === "session.error",
       );
-      if (terminal?.type === "assistant.message")
-        return { stopReason: terminal.payload.stopReason };
-      if (terminal?.type === "session.error") return { stopReason: "error" };
+      if (terminal?.type === "assistant.message") {
+        return { operationId, stopReason: terminal.payload.stopReason };
+      }
+      if (terminal?.type === "session.error") return { operationId, stopReason: "error" };
       if (prior.some((event) => event.type === "user.message")) {
         const aborted = await managed.session.abortRecoveredTurn(operationId);
-        return { stopReason: aborted.payload.stopReason };
+        return { operationId, stopReason: aborted.payload.stopReason };
       }
     }
     for (const item of content) {
@@ -794,7 +799,7 @@ export class SessionManager {
         active.controller.signal,
         active.operationId,
       );
-      return { stopReason: result.stopReason };
+      return { operationId: active.operationId, stopReason: result.stopReason };
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
@@ -803,14 +808,27 @@ export class SessionManager {
 
   async shell(
     sessionId: unknown,
+    operationId: OperationId,
     command: string,
     excluded: boolean,
-  ): Promise<{ isError: boolean }> {
+  ): Promise<{ operationId: OperationId; isError: boolean; resultEventId: EventId }> {
     const managed = this.managed(sessionId);
+    const recorded = managed.events.find(
+      (event) => event.type === "user.shell" && event.operationId === operationId,
+    );
+    if (recorded?.type === "user.shell") {
+      if (recorded.payload.command !== command || recorded.payload.excluded !== excluded) {
+        throw new DaemonError(
+          "idempotency_conflict",
+          "The shell operation ID is already bound to another command",
+        );
+      }
+      return { operationId, isError: recorded.payload.isError, resultEventId: recorded.id };
+    }
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn();
+    const active = deferredTurn(operationId);
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
@@ -820,7 +838,7 @@ export class SessionManager {
         active.controller.signal,
         active.operationId,
       );
-      return { isError: event.payload.isError };
+      return { operationId, isError: event.payload.isError, resultEventId: event.id };
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
@@ -928,11 +946,11 @@ export class SessionManager {
     }
   }
 
-  interrupt(sessionId: unknown): { interrupted: boolean } {
+  interrupt(sessionId: unknown): { interrupted: boolean; operationId?: OperationId } {
     const active = this.managed(sessionId).activeTurn;
     if (!active) return { interrupted: false };
     active.controller.abort();
-    return { interrupted: true };
+    return { interrupted: true, operationId: active.operationId };
   }
 
   subscribe(

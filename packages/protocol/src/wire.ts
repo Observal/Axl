@@ -271,19 +271,27 @@ export interface RpcMethodMap {
       readonly content: readonly UserContent[];
       readonly delivery: "prompt" | "steer" | "follow_up";
     };
-    readonly result: { readonly stopReason: AssistantStopReason };
+    readonly result: {
+      readonly operationId: OperationId;
+      readonly stopReason: AssistantStopReason;
+    };
   };
   readonly "session.shell": {
     readonly params: {
       readonly sessionId: SessionId;
+      readonly operationId: OperationId;
       readonly command: string;
       readonly excluded: boolean;
     };
-    readonly result: { readonly isError: boolean };
+    readonly result: {
+      readonly operationId: OperationId;
+      readonly isError: boolean;
+      readonly resultEventId: EventId;
+    };
   };
   readonly "session.interrupt": {
     readonly params: { readonly sessionId: SessionId };
-    readonly result: { readonly interrupted: boolean };
+    readonly result: { readonly interrupted: boolean; readonly operationId?: OperationId };
   };
   readonly "session.reload": {
     readonly params: { readonly sessionId: SessionId };
@@ -955,7 +963,7 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.shell") {
-    exact(params, "request.params", ["sessionId", "command", "excluded"]);
+    exact(params, "request.params", ["sessionId", "operationId", "command", "excluded"]);
     if (typeof params.excluded !== "boolean") {
       throw new ProtocolValidationError("request.params.excluded", "must be a boolean");
     }
@@ -964,6 +972,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       method,
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        operationId: parseOperationId(params.operationId, "request.params.operationId"),
         command: string(params.command, "request.params.command"),
         excluded: params.excluded,
       },
@@ -1338,7 +1347,7 @@ export function parseRpcResult<Method extends RpcMethod>(
     };
   } else if (method === "session.send") {
     const result = object(value, path);
-    exact(result, path, ["stopReason"]);
+    exact(result, path, ["operationId", "stopReason"]);
     const reasons: readonly AssistantStopReason[] = [
       "stop",
       "length",
@@ -1349,11 +1358,33 @@ export function parseRpcResult<Method extends RpcMethod>(
     if (!reasons.includes(result.stopReason as AssistantStopReason)) {
       throw new ProtocolValidationError(`${path}.stopReason`, "is not a valid stop reason");
     }
-    parsed = { stopReason: result.stopReason };
+    parsed = {
+      operationId: parseOperationId(result.operationId, `${path}.operationId`),
+      stopReason: result.stopReason,
+    };
   } else if (method === "session.shell") {
-    parsed = parseBooleanResult(value, path, "isError");
+    const result = object(value, path);
+    exact(result, path, ["operationId", "isError", "resultEventId"]);
+    if (typeof result.isError !== "boolean") {
+      throw new ProtocolValidationError(`${path}.isError`, "must be a boolean");
+    }
+    parsed = {
+      operationId: parseOperationId(result.operationId, `${path}.operationId`),
+      isError: result.isError,
+      resultEventId: parseEventId(result.resultEventId, `${path}.resultEventId`),
+    };
   } else if (method === "session.interrupt") {
-    parsed = parseBooleanResult(value, path, "interrupted");
+    const result = object(value, path);
+    exact(result, path, ["interrupted", "operationId"]);
+    if (typeof result.interrupted !== "boolean") {
+      throw new ProtocolValidationError(`${path}.interrupted`, "must be a boolean");
+    }
+    parsed = {
+      interrupted: result.interrupted,
+      ...(result.operationId === undefined
+        ? {}
+        : { operationId: parseOperationId(result.operationId, `${path}.operationId`) }),
+    };
   } else if (method === "session.reload" || method === "session.configure") {
     parsed = parseBoundaryResult(value, path);
   } else if (method === "session.interaction.respond") {

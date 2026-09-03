@@ -597,7 +597,7 @@ test("restart reconciliation aborts an accepted non-terminal send", async (conte
       },
       { idempotencyKey: sendKey },
     ),
-    { stopReason: "aborted" },
+    { operationId: sendKey, stopReason: "aborted" },
   );
   const recovered = await subscribeAll(reconnected, created.sessionId);
   const operationEvents = recovered.events.filter((event) => event.operationId === sendKey);

@@ -85,7 +85,12 @@ test("validates every request shape", () => {
       kind: "request",
       id: 4,
       method: "session.shell",
-      params: { sessionId, command: "pwd", excluded: false },
+      params: {
+        sessionId,
+        operationId: "00000000-0000-4000-8000-000000000010",
+        command: "pwd",
+        excluded: false,
+      },
     },
     { kind: "request", id: 5, method: "session.interrupt", params: { sessionId } },
     {
@@ -208,7 +213,12 @@ test("requires idempotency keys only for retryable mutations", () => {
       kind: "request",
       id: 1,
       method: "session.shell",
-      params: { sessionId, command: "pwd", excluded: false },
+      params: {
+        sessionId,
+        operationId: "00000000-0000-4000-8000-000000000010",
+        command: "pwd",
+        excluded: false,
+      },
     }),
   );
 });
@@ -477,6 +487,48 @@ test("validates server messages and newline framing", () => {
         result: { ...initialized.result, heartbeatIntervalMs: 60_000 },
       }),
     ProtocolValidationError,
+  );
+  assert.deepEqual(
+    parseServerMessage({
+      kind: "success",
+      id: 2,
+      method: "session.send",
+      result: {
+        operationId: "00000000-0000-4000-8000-000000000010",
+        stopReason: "stop",
+      },
+    }),
+    {
+      kind: "success",
+      id: 2,
+      method: "session.send",
+      result: {
+        operationId: "00000000-0000-4000-8000-000000000010",
+        stopReason: "stop",
+      },
+    },
+  );
+  assert.deepEqual(
+    parseServerMessage({
+      kind: "success",
+      id: 3,
+      method: "session.shell",
+      result: {
+        operationId: "00000000-0000-4000-8000-000000000010",
+        isError: false,
+        resultEventId: "00000000-0000-4000-8000-000000000011",
+      },
+    }),
+    {
+      kind: "success",
+      id: 3,
+      method: "session.shell",
+      result: {
+        operationId: "00000000-0000-4000-8000-000000000010",
+        isError: false,
+        resultEventId: "00000000-0000-4000-8000-000000000011",
+      },
+    },
   );
   assert.throws(
     () =>

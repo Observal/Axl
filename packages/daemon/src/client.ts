@@ -160,13 +160,17 @@ export class DaemonClient {
     const idempotencyKey = isRetryableMutationMethod(method)
       ? (suppliedIdempotencyKey ?? randomUUID())
       : suppliedIdempotencyKey;
+    const normalizedParams =
+      method === "session.shell" && !("operationId" in params)
+        ? { ...params, operationId: randomUUID() }
+        : params;
     let request: ReturnType<typeof parseWireRequest>;
     try {
       request = parseWireRequest({
         kind: "request",
         id,
         method,
-        params,
+        params: normalizedParams,
         ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
       });
     } catch (cause) {
