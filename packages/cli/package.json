@@ -29,7 +29,8 @@
     "@axl/extension-skills": "workspace:*",
     "@axl/protocol": "workspace:*",
     "@axl/runtime": "workspace:*",
-    "@axl/tui": "workspace:*"
+    "@axl/tui": "workspace:*",
+    "@axl/sdk": "workspace:*"
   },
   "devDependencies": {
     "@axl/kernel": "workspace:*"

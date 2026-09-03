@@ -9,7 +9,8 @@ import { join } from "node:path";
 
 import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
-import { DaemonClient, WireClientError } from "@axl/daemon/client";
+import { type AxlClient, AxlClientError } from "@axl/sdk";
+import { connectUnixClient } from "@axl/sdk/unix";
 import type { ThinkingLevel } from "@axl/protocol";
 import {
   diagnoseLocalSandboxes,
@@ -194,33 +195,31 @@ async function connectExpectedDaemon(
   unsafe: boolean,
   sandbox: SandboxChoice,
   image?: string,
-): Promise<DaemonClient> {
-  const client = await DaemonClient.connect(socketPath);
+): Promise<AxlClient> {
+  const client = await connectUnixClient(socketPath, {
+    identity: { kind: "tui", version: AXL_VERSION, instanceId: crypto.randomUUID() },
+  });
   try {
-    const info = (await client.request("daemon.info", {})) as {
-      securityMode?: string;
-      sandboxProvider?: string;
-      sandboxImage?: string;
-    };
+    const info = await client.request("daemon.info", {});
     const expectedMode = unsafe ? "unsafe" : "sandboxed";
     if (info.securityMode !== expectedMode) {
-      throw new SecurityModeMismatchError(expectedMode, info.securityMode ?? "unknown");
+      throw new SecurityModeMismatchError(expectedMode, info.securityMode);
     }
     const providers = unsafe
       ? ["none", "unknown"]
       : sandbox === "native"
         ? ["bubblewrap", "seatbelt", "unknown"]
         : [sandbox];
-    if (!providers.includes(info.sandboxProvider ?? "unknown")) {
+    if (!providers.includes(info.sandboxProvider)) {
       throw new SecurityModeMismatchError(
         `${expectedMode}/${sandbox}`,
-        `${info.securityMode ?? "unknown"}/${info.sandboxProvider ?? "unknown"}`,
+        `${info.securityMode}/${info.sandboxProvider}`,
       );
     }
     if (image !== undefined && info.sandboxImage !== image) {
       throw new SecurityModeMismatchError(
         `${expectedMode}/${sandbox}/${image}`,
-        `${info.securityMode ?? "unknown"}/${info.sandboxProvider ?? "unknown"}/${info.sandboxImage ?? "unknown"}`,
+        `${info.securityMode}/${info.sandboxProvider}/${info.sandboxImage ?? "unknown"}`,
       );
     }
     return client;
@@ -237,12 +236,12 @@ async function connectOrStartDaemon(input: {
   readonly unsafe: boolean;
   readonly sandbox: SandboxChoice;
   readonly image?: string;
-}): Promise<DaemonClient> {
+}): Promise<AxlClient> {
   try {
     return await connectExpectedDaemon(input.socketPath, input.unsafe, input.sandbox, input.image);
   } catch (error) {
     if (error instanceof SecurityModeMismatchError) throw error;
-    if (error instanceof WireClientError && error.code !== "connection_error") throw error;
+    if (error instanceof AxlClientError && error.code !== "connection_error") throw error;
     const entry = process.argv[1];
     if (entry === undefined) throw new Error("Cannot locate the Axl executable");
     const child = spawn(
@@ -430,7 +429,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  let client: DaemonClient;
+  let client: AxlClient;
   try {
     client = await connectExpectedDaemon(socketPath, cli.unsafe, cli.sandbox, cli.image);
     timing.mark("daemon connect");

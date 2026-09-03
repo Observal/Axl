@@ -9,7 +9,9 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { AxlDaemon, DaemonClient } from "@axl/daemon";
+import { AxlDaemon } from "@axl/daemon";
+import type { AxlClient } from "@axl/sdk";
+import { connectUnixClient } from "@axl/sdk/unix";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
 import { MAX_CANONICAL_EVENT_BYTES, type ModelStreamEvent } from "@axl/protocol";
 
@@ -31,13 +33,13 @@ async function temporaryDirectory(context: TestContext): Promise<string> {
   return directory;
 }
 
-async function connectEventually(socketPath: string, child: ChildProcess): Promise<DaemonClient> {
+async function connectEventually(socketPath: string, child: ChildProcess): Promise<AxlClient> {
   const deadline = Date.now() + 30_000;
   let lastError: unknown;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) throw new Error(`daemon exited with ${child.exitCode}`);
     try {
-      return await DaemonClient.connect(socketPath);
+      return await connectUnixClient(socketPath);
     } catch (error) {
       lastError = error;
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));

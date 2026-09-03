@@ -2,19 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { ApiKeyCredential, AuthContext, CredentialStore } from "@axl/ai";
 import { type ModelInfo, supportedThinkingLevels, THINKING_LEVELS } from "@axl/ai/models";
-import type { DaemonClient } from "@axl/daemon/client";
+import { loadSessionSnapshot, type AxlClient } from "@axl/sdk";
 import {
   type TerminalCommandContext,
   type TerminalExtension,
   TerminalExtensionHost,
   type TerminalLine,
 } from "@axl/extension-api";
+import { parseEventId, parseOperationId, parseSessionId } from "@axl/protocol";
 import type {
   BlobReference,
   CanonicalEvent,
@@ -22,7 +24,7 @@ import type {
   JsonObject,
   JsonValue,
   SessionActivityFrame,
-  SessionForkResult,
+  SessionId,
   SessionOpenResult,
   SessionSummary,
   ThinkingLevel,
@@ -95,45 +97,12 @@ const MAX_EXTENSION_SELECTOR_ITEMS = 1_000;
 const MAX_EXTENSION_TEXT_CHARACTERS = 512;
 
 async function resumeSessionMetadata(
-  client: DaemonClient,
+  client: AxlClient,
   sessionId: string,
 ): Promise<SessionOpenResult> {
-  const resumed = await client.request("session.resume", { sessionId });
+  const resumed = await client.request("session.resume", { sessionId: parseSessionId(sessionId) });
   if (resumed.sessionId !== sessionId) throw new Error("Daemon resumed the wrong session");
   return resumed;
-}
-
-async function loadSubscriptionSnapshot(
-  client: DaemonClient,
-  sessionId: string,
-  onSubscription: (subscriptionId: string) => void,
-  applyEvent: (event: CanonicalEvent) => void | Promise<void>,
-): Promise<void> {
-  const subscription = await client.request("session.subscribe", { sessionId });
-  onSubscription(subscription.subscriptionId);
-  const descriptor = subscription.snapshot;
-  if (descriptor === undefined) return;
-  let page = descriptor.page;
-  for (;;) {
-    for (const event of page.events) await applyEvent(event);
-    if (page.complete) break;
-    const pageCursor = page.nextPageCursor;
-    if (pageCursor === undefined) {
-      throw new Error("Daemon returned an incomplete snapshot page without a cursor");
-    }
-    const result = await client.request("session.history", {
-      snapshotId: descriptor.snapshotId,
-      pageCursor,
-    });
-    if (result.snapshotId !== descriptor.snapshotId) {
-      throw new Error("Daemon returned a page for the wrong snapshot");
-    }
-    page = result.page;
-  }
-  await client.request("session.ack", {
-    subscriptionId: subscription.subscriptionId,
-    cursor: descriptor.boundaryCursor,
-  });
 }
 
 function extensionSingleLine(value: string): string {
@@ -457,8 +426,8 @@ function themePreview(width: number, palette: Palette): readonly string[] {
 }
 
 export interface AxlAppOptions {
-  readonly client: DaemonClient;
-  readonly reconnectClient?: () => Promise<DaemonClient>;
+  readonly client: AxlClient;
+  readonly reconnectClient?: () => Promise<AxlClient>;
   readonly input: TerminalInput;
   readonly output: TerminalOutput;
   readonly cwd: string;
@@ -530,10 +499,10 @@ type TranscriptEntry =
 
 /** A terminal projection over one daemon-owned Axl session. */
 export class AxlApp {
-  sessionId: string;
+  sessionId: SessionId;
   private cwd: string;
   private readonly options: AxlAppOptions;
-  private client: DaemonClient;
+  private client: AxlClient;
   private readonly screen: DifferentialScreen;
   private view: SessionView;
   private readonly editor = new LineEditor();
@@ -611,7 +580,7 @@ export class AxlApp {
   private focused = true;
   private lastAttentionAt = 0;
   private subscriptionId: string | undefined;
-  private switchingSessionId: string | undefined;
+  private switchingSessionId: SessionId | undefined;
   private switchingSubscriptionId: string | undefined;
   private switchingEvents: WireEvent[] | undefined;
   private switchingActivityFrames: SessionActivityFrame[] | undefined;
@@ -630,7 +599,7 @@ export class AxlApp {
 
   private constructor(
     options: AxlAppOptions,
-    sessionId: string,
+    sessionId: SessionId,
     cwd: string,
     width: number,
     height: number,
@@ -743,7 +712,8 @@ export class AxlApp {
     this.bindClient(options.client);
   }
 
-  private bindClient(client: DaemonClient): void {
+  private bindClient(client: AxlClient): void {
+    if (this.client !== client) this.client.close();
     this.unsubscribeEvents();
     this.unsubscribeActivity();
     this.unsubscribeDisconnect();
@@ -810,7 +780,7 @@ export class AxlApp {
     let delay = 100;
     while (!this.stopped && generation === this.reconnectGeneration) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, delay));
-      let candidate: DaemonClient | undefined;
+      let candidate: AxlClient | undefined;
       try {
         candidate = await reconnectClient();
         if (this.stopped || generation !== this.reconnectGeneration) {
@@ -835,7 +805,7 @@ export class AxlApp {
               : "workspace review restoration failed";
           this.workspaceDiffError = workspaceReconnectError;
         }
-        await loadSubscriptionSnapshot(
+        await loadSessionSnapshot(
           candidate,
           this.sessionId,
           (subscriptionId) => {
@@ -921,7 +891,7 @@ export class AxlApp {
     }
     if (options.clearStartupLine) options.output.write("\r\x1b[2K");
     app.commitLines(app.welcomeLines(cwd, options.sessionId !== undefined), false);
-    await loadSubscriptionSnapshot(
+    await loadSessionSnapshot(
       options.client,
       opened.sessionId,
       (subscriptionId) => {
@@ -1503,6 +1473,7 @@ export class AxlApp {
     }
 
     if (event.type === "tool.call") {
+      this.view.apply(event);
       this.liveAssistant.clear();
       if (!this.hydrating) this.setWorking(true);
       this.toolTransactions.start(event, this.hydrating ? "pending" : "running");
@@ -3154,10 +3125,10 @@ export class AxlApp {
   private async forkSession(fromEventId: string | undefined): Promise<void> {
     if (fromEventId === undefined) return;
     try {
-      const forked = (await this.client.request("session.fork", {
+      const forked = await this.client.request("session.fork", {
         sessionId: this.sessionId,
-        fromEventId,
-      })) as SessionForkResult;
+        fromEventId: parseEventId(fromEventId),
+      });
       await this.switchSession(forked, forked.selectedText ?? "", "· forked to new session");
     } catch (error) {
       this.notice = this.view.palette.error(
@@ -3169,9 +3140,9 @@ export class AxlApp {
 
   private async cloneSession(): Promise<void> {
     try {
-      const cloned = (await this.client.request("session.clone", {
+      const cloned = await this.client.request("session.clone", {
         sessionId: this.sessionId,
-      })) as SessionForkResult;
+      });
       await this.switchSession(cloned, "", "· cloned to new session");
     } catch (error) {
       this.notice = this.view.palette.error(
@@ -3193,7 +3164,7 @@ export class AxlApp {
     const subscriptionEvents: CanonicalEvent[] = [];
     const previousSubscriptionId = this.subscriptionId;
     try {
-      await loadSubscriptionSnapshot(
+      await loadSessionSnapshot(
         this.client,
         opened.sessionId,
         (subscriptionId) => {
@@ -3677,11 +3648,16 @@ export class AxlApp {
     this.setWorking(true);
     this.redraw();
     try {
-      await this.client.request("session.shell", {
+      const outcome = await this.client.shell({
         sessionId: this.sessionId,
+        operationId: parseOperationId(randomUUID()),
         command,
         excluded,
       });
+      if (outcome.state === "uncertain") {
+        this.editor.setText(`${excluded ? "!!" : "!"}${command}`);
+        this.notice = this.view.palette.error("✖ shell delivery unknown · command restored");
+      }
     } catch (error) {
       if (this.isConnectionFailure(error)) {
         this.editor.setText(`${excluded ? "!!" : "!"}${command}`);

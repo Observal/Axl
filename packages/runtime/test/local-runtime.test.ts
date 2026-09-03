@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { FileCredentialStore } from "@axl/ai";
-import { DaemonClient } from "@axl/daemon";
+import { connectUnixClient } from "@axl/sdk/unix";
 
 import { localSandboxStateKey, startLocalDaemon } from "../src/index.ts";
 
@@ -59,7 +59,7 @@ test("assembles an authoritative local runtime without a presentation client", a
     unsafe: true,
   });
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
 
   assert.deepEqual(await client.request("daemon.info", {}), {

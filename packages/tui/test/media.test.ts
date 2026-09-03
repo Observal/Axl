@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { parseOperationId } from "@axl/protocol";
+import { parseOperationId, parseSessionId } from "@axl/protocol";
 
 import {
   detectImageMediaType,
@@ -30,7 +30,7 @@ function png(width = 2, height = 1): Buffer {
   return bytes;
 }
 
-const sessionId = "123e4567-e89b-42d3-a456-426614174000";
+const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
 
 const blob = {
   sha256: "a".repeat(64),
@@ -104,7 +104,7 @@ test("rejects a committed blob reference that does not match the upload", async 
 test("fullscreen suppresses inline image placement", () => {
   const cache = new MediaCache(
     () => ({}) as never,
-    "123e4567-e89b-42d3-a456-426614174000",
+    sessionId,
     { images: "kitty" },
     () => "auto",
     () => undefined,

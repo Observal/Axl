@@ -3,8 +3,13 @@
 
 import { createHash } from "node:crypto";
 
-import type { DaemonClient } from "@axl/daemon/client";
-import { type BlobReference, parseBlobReadResult, parseBlobReference } from "@axl/protocol";
+import type { AxlClient } from "@axl/sdk";
+import {
+  type BlobReference,
+  parseBlobReadResult,
+  parseBlobReference,
+  type SessionId,
+} from "@axl/protocol";
 
 import type { Component } from "./render.ts";
 import { sanitizeTerminalText, truncateToWidth } from "./render.ts";
@@ -199,18 +204,18 @@ export function renderInlineImage(
 }
 
 export async function uploadBlob(
-  client: DaemonClient,
-  sessionId: string,
+  client: AxlClient,
+  sessionId: SessionId,
   bytes: Uint8Array,
   mediaType: string,
   name?: string,
 ): Promise<BlobReference> {
-  const started = (await client.request("session.blob.start", {
+  const started = await client.request("session.blob.start", {
     sessionId,
     mediaType,
     sizeBytes: bytes.byteLength,
     ...(name === undefined ? {} : { name }),
-  })) as { uploadId: string; chunkBytes: number };
+  });
   const chunkBytes = Math.min(UPLOAD_CHUNK_BYTES, started.chunkBytes);
   if (!started.uploadId || !Number.isSafeInteger(chunkBytes) || chunkBytes <= 0) {
     throw new Error("Daemon returned an invalid blob upload contract");
@@ -218,12 +223,12 @@ export async function uploadBlob(
   try {
     for (let offset = 0; offset < bytes.byteLength; offset += chunkBytes) {
       const chunk = bytes.subarray(offset, Math.min(bytes.byteLength, offset + chunkBytes));
-      const response = (await client.request("session.blob.chunk", {
+      const response = await client.request("session.blob.chunk", {
         sessionId,
         uploadId: started.uploadId,
         offset,
         data: Buffer.from(chunk).toString("base64"),
-      })) as { nextOffset: number };
+      });
       if (response.nextOffset !== offset + chunk.byteLength) {
         throw new Error("Daemon returned an invalid blob upload offset");
       }
@@ -281,8 +286,8 @@ export class AttachmentBarComponent implements Component {
 }
 
 export class MediaCache {
-  private readonly client: () => DaemonClient;
-  private sessionId: string;
+  private readonly client: () => AxlClient;
+  private sessionId: SessionId;
   private readonly capabilities: TerminalMediaCapabilities;
   private readonly display: () => ImageDisplay;
   private readonly loaded: () => void;
@@ -294,8 +299,8 @@ export class MediaCache {
   private generation = 0;
 
   constructor(
-    client: () => DaemonClient,
-    sessionId: string,
+    client: () => AxlClient,
+    sessionId: SessionId,
     capabilities: TerminalMediaCapabilities,
     display: () => ImageDisplay,
     loaded: () => void,
@@ -307,7 +312,7 @@ export class MediaCache {
     this.loaded = loaded;
   }
 
-  setSession(sessionId: string): void {
+  setSession(sessionId: SessionId): void {
     if (sessionId === this.sessionId) return;
     this.sessionId = sessionId;
     this.generation += 1;
@@ -408,7 +413,10 @@ export class MediaCache {
     }
   }
 
-  private async read(reference: BlobReference, sessionId = this.sessionId): Promise<Uint8Array> {
+  private async read(
+    reference: BlobReference,
+    sessionId: SessionId = this.sessionId,
+  ): Promise<Uint8Array> {
     const chunks: Buffer[] = [];
     let offset = 0;
     while (offset < reference.sizeBytes) {

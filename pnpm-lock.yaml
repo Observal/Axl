@@ -47,6 +47,9 @@ importers:
       '@axl/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@axl/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@axl/tui':
         specifier: workspace:*
         version: link:../tui
@@ -63,6 +66,10 @@ importers:
       '@axl/protocol':
         specifier: workspace:*
         version: link:../protocol
+    devDependencies:
+      '@axl/sdk':
+        specifier: workspace:*
+        version: link:../sdk
 
   packages/extensions/api: {}
 
@@ -127,6 +134,10 @@ importers:
       '@axl/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+    devDependencies:
+      '@axl/sdk':
+        specifier: workspace:*
+        version: link:../sdk
 
   packages/sandbox:
     dependencies:
@@ -140,20 +151,26 @@ importers:
         specifier: 0.1.1
         version: 0.1.1
 
+  packages/sdk:
+    dependencies:
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/tui:
     dependencies:
       '@axl/ai':
         specifier: workspace:*
         version: link:../ai
-      '@axl/daemon':
-        specifier: workspace:*
-        version: link:../daemon
       '@axl/extension-api':
         specifier: workspace:*
         version: link:../extensions/api
       '@axl/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@axl/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       grok-mermaid:
         specifier: 0.2.2
         version: 0.2.2
@@ -161,6 +178,9 @@ importers:
         specifier: 18.0.11
         version: 18.0.11
     devDependencies:
+      '@axl/daemon':
+        specifier: workspace:*
+        version: link:../daemon
       '@axl/extension-mcp':
         specifier: workspace:*
         version: link:../extensions/mcp

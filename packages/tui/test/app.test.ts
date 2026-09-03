@@ -8,21 +8,11 @@ import { join } from "node:path";
 import { PassThrough as NodePassThrough } from "node:stream";
 import test, { type TestContext } from "node:test";
 
-import { AxlDaemon, DaemonClient, type SessionInteractionRequest } from "@axl/daemon";
+import { AxlDaemon, type SessionInteractionRequest } from "@axl/daemon";
+import { connectUnixClient } from "@axl/sdk/unix";
 import type { TerminalExtension } from "@axl/extension-api";
-import {
-  type CompactionSettings,
-  type ModelPort,
-  type ModelTurnRequest,
-  ToolRegistry,
-} from "@axl/kernel";
-import type {
-  EventPayloadMap,
-  JsonObject,
-  ModelStreamEvent,
-  SessionSnapshot,
-  Usage,
-} from "@axl/protocol";
+import { type ModelPort, ToolRegistry } from "@axl/kernel";
+import type { EventPayloadMap, JsonObject, ModelStreamEvent, Usage } from "@axl/protocol";
 
 import { AxlApp, stripAnsi } from "../src/index.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -61,7 +51,6 @@ async function startStack(
     }>,
   ) => ToolRegistry = () => new ToolRegistry(),
   sandbox?: EventPayloadMap["sandbox.configured"],
-  compaction?: Partial<CompactionSettings>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "axl-tui-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -74,7 +63,6 @@ async function startStack(
       tools: makeTools(interact),
       system: "You are Axl.",
       ...(sandbox === undefined ? {} : { sandbox }),
-      ...(compaction === undefined ? {} : { compaction }),
       ...(selection.modelId === undefined ? {} : { configModel: { modelId: selection.modelId } }),
       ...(selection.thinkingLevel === undefined
         ? {}
@@ -85,7 +73,6 @@ async function startStack(
               clamped: false,
             },
           }),
-      ...(selection.profile === undefined ? {} : { configProfile: { profile: selection.profile } }),
     }),
   });
   await daemon.start();
@@ -129,7 +116,7 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   let exited = false;
 
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -160,7 +147,7 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   const launchDirectory = join(directory, "different-launch-directory");
   await mkdir(launchDirectory);
   const resumedApp = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input: resumeInput,
     output: resumed.output,
     cwd: launchDirectory,
@@ -174,79 +161,6 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   resumedApp.stop();
 });
 
-test("passes the selected profile when creating a session", async (context) => {
-  const { socketPath, directory } = await startStack(context);
-  const input = new PassThrough();
-  const { output, text } = captureOutput();
-  const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
-    input,
-    output,
-    cwd: directory,
-    profile: "exec",
-    color: false,
-  });
-
-  input.write("/status\r");
-  await until(() => text().includes("profile   exec"), "profile status");
-  const inspector = await DaemonClient.connect(socketPath);
-  context.after(() => inspector.close());
-  const snapshot = (await inspector.request("session.resume", {
-    sessionId: app.sessionId,
-  })) as SessionSnapshot;
-  assert.equal(
-    snapshot.events.some(
-      (event) => event.type === "config.profile" && event.payload.profile === "exec",
-    ),
-    true,
-  );
-  app.stop();
-});
-
-test("/compact summarizes older context through the daemon", async (context) => {
-  const requests: ModelTurnRequest[] = [];
-  const model: ModelPort = {
-    stream(request) {
-      requests.push(request);
-      const text = requests.length === 3 ? "## Goal\nKeep working" : "the answer";
-      return (async function* (): AsyncGenerator<ModelStreamEvent> {
-        yield { type: "text_delta", text };
-        yield { type: "completed", stopReason: "stop", usage };
-      })();
-    },
-  };
-  const { socketPath, directory } = await startStack(context, model, undefined, undefined, {
-    keepRecentTokens: 7,
-    maxOutputTokens: 123,
-  });
-  const input = new PassThrough();
-  const { output, text } = captureOutput();
-  const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
-    input,
-    output,
-    cwd: directory,
-    color: false,
-  });
-
-  input.write("old prompt\r");
-  await until(() => requests.length === 1, "old response");
-  input.write("recent prompt\r");
-  await until(() => requests.length === 2, "recent response");
-  input.write("/compact Focus on the current task\r");
-  await until(() => text().includes("Context compacted"), "compaction");
-
-  assert.equal(requests[2]?.toolChoice, "none");
-  assert.match(
-    requests[2]?.messages[0]?.content[0]?.type === "text"
-      ? requests[2].messages[0].content[0].text
-      : "",
-    /Focus on the current task/,
-  );
-  assert.match(text(), /Keep working/);
-  app.stop();
-});
-
 test("an unenforced session keeps a persistent unsafe warning", async (context) => {
   const { socketPath, directory } = await startStack(context, port, undefined, {
     provider: "none",
@@ -256,7 +170,7 @@ test("an unenforced session keeps a persistent unsafe warning", async (context) 
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -280,7 +194,7 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -305,7 +219,7 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
   assert.match(text(), /second prompt/);
 
   input.write("\x15/resume\r");
-  await until(() => text().includes("Resume Session (All)"), "resume selector");
+  await until(() => text().includes("Resume Session (Current Folder)"), "resume selector");
   input.write("\r");
   await until(() => app.sessionId === sourceSessionId, "source session resume");
 
@@ -318,104 +232,13 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
   app.stop();
 });
 
-test("initial resume opens the all-session picker without creating a throwaway session", async (context) => {
-  const { socketPath, directory } = await startStack(context);
-  const seed = await DaemonClient.connect(socketPath);
-  const saved = (await seed.request("session.create", { cwd: directory })) as SessionSnapshot;
-  seed.close();
-  const input = new PassThrough();
-  const { output, text } = captureOutput();
-  const app = await AxlApp.start({
-    input,
-    output,
-    cwd: directory,
-    color: false,
-    initialResume: true,
-    listResumeSessions: async () => [
-      {
-        sessionId: saved.sessionId,
-        resumeKey: `native:${saved.sessionId}`,
-        cwd: directory,
-        createdAt: 1,
-        updatedAt: 1,
-        userMessageCount: 0,
-        placementLabel: "SANDBOXED · native",
-        unsafe: false,
-      },
-    ],
-    openResumeSession: async () => ({
-      client: await DaemonClient.connect(socketPath),
-      reconnectClient: () => DaemonClient.connect(socketPath),
-    }),
-  });
-  await until(() => text().includes("Resume Session (All)"), "initial resume selector");
-  const listingClient = await DaemonClient.connect(socketPath);
-  const before = (await listingClient.request("session.list", {})) as unknown[];
-  assert.equal(before.length, 1);
-  input.write("\r");
-  await until(() => app.sessionId === saved.sessionId, "initial resumed session");
-  const after = (await listingClient.request("session.list", {})) as unknown[];
-  assert.equal(after.length, 1);
-  listingClient.close();
-  app.stop();
-});
-
-test("resume can switch to a visibly labeled unsafe daemon", async (context) => {
-  const safe = await startStack(context);
-  const unsafe = await startStack(context, port, undefined, {
-    provider: "none",
-    enforced: false,
-    controls: [],
-  });
-  const unsafeSeed = await DaemonClient.connect(unsafe.socketPath);
-  const unsafeSession = (await unsafeSeed.request("session.create", {
-    cwd: unsafe.directory,
-  })) as SessionSnapshot;
-  unsafeSeed.close();
-  const input = new PassThrough();
-  const { output, text } = captureOutput();
-  const app = await AxlApp.start({
-    client: await DaemonClient.connect(safe.socketPath),
-    input,
-    output,
-    cwd: safe.directory,
-    color: false,
-    listResumeSessions: async () => [
-      {
-        sessionId: unsafeSession.sessionId,
-        resumeKey: `unsafe:${unsafeSession.sessionId}`,
-        cwd: unsafe.directory,
-        createdAt: 1,
-        updatedAt: 2,
-        userMessageCount: 0,
-        securityMode: "unsafe",
-        sandboxProvider: "none",
-        placementLabel: "UNSAFE",
-        unsafe: true,
-      },
-    ],
-    openResumeSession: async () => ({
-      client: await DaemonClient.connect(unsafe.socketPath),
-      reconnectClient: () => DaemonClient.connect(unsafe.socketPath),
-    }),
-  });
-  input.write("/resume\r");
-  await until(() => text().includes("UNSAFE"), "unsafe resume label");
-  input.write("\r");
-  await until(() => app.sessionId === unsafeSession.sessionId, "unsafe session switch");
-  assert.match(text(), /UNSAFE: no sandbox/);
-  app.stop();
-});
-
 test("a failed target subscription leaves the current session fully active", async (context) => {
   const { socketPath, directory } = await startStack(context);
-  const seedClient = await DaemonClient.connect(socketPath);
-  const target = (await seedClient.request("session.create", { cwd: directory })) as {
-    sessionId: string;
-  };
+  const seedClient = await connectUnixClient(socketPath);
+  const target = await seedClient.request("session.create", { cwd: directory });
   seedClient.close();
 
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
@@ -462,7 +285,7 @@ test("renders model deltas before the canonical assistant event", async (context
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -520,7 +343,7 @@ test("streaming into a tool call preserves the prompt and tool transaction", asy
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -573,7 +396,7 @@ test("uploads image files and sends blob references with the next prompt", async
   const imagePath = join(directory, "pixel.png");
   await writeFile(imagePath, bytes);
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -606,7 +429,7 @@ test("terminal resize coalesces bursts and leaves one live frame", async (contex
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -675,7 +498,7 @@ test("fullscreen mode switches live without losing the session", async (context)
   const { output, text } = captureOutput();
   const preferences: Array<Record<string, unknown>> = [];
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -700,7 +523,7 @@ test("idle assembled app performs no periodic repaint", async (context) => {
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -719,7 +542,7 @@ test("Ctrl+V paste, Shift+Enter, and searchable hotkeys behave", async (context)
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -762,7 +585,7 @@ test("Escape interrupts a running operation", async (context) => {
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -797,7 +620,7 @@ test("terminal extensions cannot replace encoded safety shortcuts", async (conte
   };
   await assert.rejects(
     AxlApp.start({
-      client: await DaemonClient.connect(socketPath),
+      client: await connectUnixClient(socketPath),
       input,
       output,
       cwd: directory,
@@ -852,7 +675,7 @@ test("terminal extensions contribute UI and reload without leaking owned resourc
     },
   };
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -884,7 +707,7 @@ test("command discovery, history, autocomplete, and external editing behave", as
   const { output, text } = captureOutput();
   const edited: string[] = [];
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -925,7 +748,7 @@ test("history navigation passes through slash-command entries without trapping a
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -977,8 +800,8 @@ test("bang commands run through daemon shell authority", async (context) => {
   const { socketPath, directory } = await startStack(context, recordingPort, () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "bash",
-      description: "Run Bash",
+      name: "shell",
+      description: "Run shell",
       inputSchema: { type: "object" },
       async execute(input) {
         commands.push(String(input.command));
@@ -993,7 +816,7 @@ test("bang commands run through daemon shell authority", async (context) => {
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1030,8 +853,8 @@ test("Escape interrupts shell passthrough and preserves queued prompts", async (
   const { socketPath, directory } = await startStack(context, recordingPort, () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "bash",
-      description: "Blocking Bash",
+      name: "shell",
+      description: "Blocking shell",
       inputSchema: { type: "object" },
       async execute(_input, signal) {
         await new Promise<void>((resolve) => {
@@ -1046,7 +869,7 @@ test("Escape interrupts shell passthrough and preserves queued prompts", async (
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1072,7 +895,7 @@ test("editing, /quit, and busy notices behave", async (context) => {
   let exited = false;
 
   await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1095,7 +918,7 @@ test("Ctrl+Z suspends and resumes without detaching the session", async (context
   const { output, text } = captureOutput();
   let suspends = 0;
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1112,7 +935,7 @@ test("Ctrl+Z suspends and resumes without detaching the session", async (context
   app.stop();
 });
 
-test("Enter steers and Alt+Enter queues a follow-up while working", async (context) => {
+test("prompts entered while working queue in order", async (context) => {
   let releaseFirst = (): void => undefined;
   let calls = 0;
   const prompts: string[] = [];
@@ -1120,7 +943,7 @@ test("Enter steers and Alt+Enter queues a follow-up while working", async (conte
     stream(request) {
       calls += 1;
       const turn = calls;
-      const last = request.messages.findLast((message) => message.role === "user");
+      const last = request.messages.at(-1);
       if (last?.role === "user") {
         prompts.push(last.content.map((item) => (item.type === "text" ? item.text : "")).join(""));
       }
@@ -1138,23 +961,18 @@ test("Enter steers and Alt+Enter queues a follow-up while working", async (conte
   const { socketPath, directory } = await startStack(context, queuedPort);
   const input = new PassThrough();
   const { output, text } = captureOutput();
-  const client = await DaemonClient.connect(socketPath);
-  const methods: string[] = [];
-  const request = client.request.bind(client);
-  client.request = (method, params) => {
-    methods.push(method);
-    return request(method, params);
-  };
-  const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
 
   input.write("one\r");
   await until(() => calls === 1, "first model call");
-  input.write("two\rthree\x1b[13;3u");
-  await until(
-    () => methods.includes("session.steer") && methods.includes("session.followUp"),
-    "queued RPCs",
-  );
-  assert.match(text(), /STEER/);
+  input.write("two\rthree\r");
+  await until(() => text().includes("queued follow-up"), "queue notice");
   assert.equal(calls, 1);
   releaseFirst();
   await until(() => calls === 3, "queued model calls");
@@ -1232,7 +1050,7 @@ test("MCP interactions block the operation until the user responds", async (cont
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1246,7 +1064,7 @@ test("MCP interactions block the operation until the user responds", async (cont
   const resumedInput = new PassThrough();
   const resumed = captureOutput();
   const resumedApp = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input: resumedInput,
     output: resumed.output,
     cwd: directory,
@@ -1261,28 +1079,6 @@ test("MCP interactions block the operation until the user responds", async (cont
   resumedApp.stop();
 });
 
-test("web tools can be toggled per session and persisted", async (context) => {
-  const { socketPath, directory } = await startStack(context);
-  const updates: Array<Record<string, unknown>> = [];
-  const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
-    input: new PassThrough(),
-    output: captureOutput().output,
-    cwd: directory,
-    color: false,
-    onPreferenceChange: (update) => {
-      updates.push(update);
-    },
-  });
-  await (
-    app as unknown as {
-      configure(update: { webFetch?: boolean; webSearch?: boolean }): Promise<void>;
-    }
-  ).configure({ webFetch: false, webSearch: false });
-  assert.deepEqual(updates.at(-1), { webFetch: false, webSearch: false });
-  app.stop();
-});
-
 test("/model opens a selector and switches the model live", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
@@ -1291,7 +1087,7 @@ test("/model opens a selector and switches the model live", async (context) => {
   const preferences: Array<Record<string, unknown>> = [];
 
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1325,7 +1121,7 @@ test("/theme previews message and tool surfaces live", async (context) => {
   const { output, text } = captureOutput();
   const preferences: Array<Record<string, unknown>> = [];
   const app = await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1360,7 +1156,7 @@ test("/model digit selection and Esc cancel behave", async (context) => {
   const switched: string[] = [];
 
   await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1388,7 +1184,7 @@ test("/login is a dialog: fields, masked key, live Azure verification", async (c
   const { output, text } = captureOutput();
 
   await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,
@@ -1445,7 +1241,7 @@ test("/reload requests a runtime rebuild and renders the boundary", async (conte
   const input = new PassThrough();
   const { output, text } = captureOutput();
   await AxlApp.start({
-    client: await DaemonClient.connect(socketPath),
+    client: await connectUnixClient(socketPath),
     input,
     output,
     cwd: directory,

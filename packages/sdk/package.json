@@ -1,14 +1,18 @@
 {
-  "name": "@axl/daemon",
+  "name": "@axl/sdk",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Authoritative session daemon for Axl",
+  "description": "Transport-independent TypeScript client SDK for Axl",
   "license": "Apache-2.0",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./unix": {
+      "types": "./dist/unix.d.ts",
+      "import": "./dist/unix.js"
     }
   },
   "files": [
@@ -16,14 +20,10 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.build.json --force",
-    "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/sdk build && node --test test/*.test.ts",
+    "test": "pnpm --filter @axl/protocol build && node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@axl/kernel": "workspace:*",
     "@axl/protocol": "workspace:*"
-  },
-  "devDependencies": {
-    "@axl/sdk": "workspace:*"
   }
 }

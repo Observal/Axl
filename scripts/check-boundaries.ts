@@ -78,10 +78,12 @@ export function checkWorkspace(root: string): string[] {
   );
   const kernel = packages.find(({ directory }) => directory === resolve(root, "packages/kernel"));
   const runtime = packages.find(({ directory }) => directory === resolve(root, "packages/runtime"));
+  const sdk = packages.find(({ directory }) => directory === resolve(root, "packages/sdk"));
   const tui = packages.find(({ directory }) => directory === resolve(root, "packages/tui"));
   const protocolName = protocol?.manifest.name ?? "@axl/protocol";
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
   const tuiName = tui?.manifest.name ?? "@axl/tui";
+  const sdkName = sdk?.manifest.name ?? "@axl/sdk";
 
   if (protocol) {
     for (const dependency of runtimeDependencies(protocol.manifest)) {
@@ -101,6 +103,16 @@ export function checkWorkspace(root: string): string[] {
     }
   }
 
+  if (sdk) {
+    for (const dependency of runtimeDependencies(sdk.manifest)) {
+      if (dependency !== protocolName) {
+        errors.push(
+          `${relative(root, sdk.directory)} may depend only on ${protocolName}, found ${dependency}`,
+        );
+      }
+    }
+  }
+
   if (runtime && runtimeDependencies(runtime.manifest).includes(tuiName)) {
     errors.push(
       `${relative(root, runtime.directory)} must not depend on presentation package ${tuiName}`,
@@ -110,8 +122,8 @@ export function checkWorkspace(root: string): string[] {
   if (tui) {
     const allowed = new Set([
       "@axl/ai",
-      "@axl/daemon",
       "@axl/extension-api",
+      sdkName,
       "grok-mermaid",
       "marked",
       protocolName,

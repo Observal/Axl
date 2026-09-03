@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.build.json --force",
-    "test": "pnpm --filter @axl/ai build && pnpm --filter @axl/daemon build && pnpm --filter @axl/extension-mcp build && pnpm --filter @axl/extension-skills build && pnpm --filter @axl/kernel build && pnpm --filter @axl/protocol build && pnpm --filter @axl/sandbox build && node --test test/*.test.ts",
+    "test": "pnpm --filter @axl/ai build && pnpm --filter @axl/daemon build && pnpm --filter @axl/extension-mcp build && pnpm --filter @axl/extension-skills build && pnpm --filter @axl/kernel build && pnpm --filter @axl/protocol build && pnpm --filter @axl/sandbox build && pnpm --filter @axl/sdk build && node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -27,5 +27,8 @@
     "@axl/kernel": "workspace:*",
     "@axl/protocol": "workspace:*",
     "@axl/sandbox": "workspace:*"
+  },
+  "devDependencies": {
+    "@axl/sdk": "workspace:*"
   }
 }

@@ -37,6 +37,7 @@ import type {
 import {
   encodeWireMessage,
   MAX_CANONICAL_EVENT_BYTES,
+  parseOperationId,
   parseServerMessage,
   parseSessionId,
   type ServerMessage,
@@ -44,13 +45,9 @@ import {
   type WireRequest,
 } from "@axl/protocol";
 
-import {
-  AxlDaemon,
-  DaemonClient,
-  DaemonError,
-  WireClientError,
-  type WireEvent,
-} from "../src/index.ts";
+import { AxlDaemon, DaemonError } from "../src/index.ts";
+import { type AxlClient, AxlClientError, type WireEvent } from "@axl/sdk";
+import { connectUnixClient } from "@axl/sdk/unix";
 import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -117,7 +114,7 @@ function types(events: readonly CanonicalEvent[]): readonly string[] {
 }
 
 async function subscribeAll(
-  client: DaemonClient,
+  client: AxlClient,
   sessionId: SessionId,
   after?: string,
 ): Promise<{
@@ -308,7 +305,7 @@ test("requires version-4 initialization before session access", async (context) 
 
 test("cancels attachment-owned read requests without cancelling session operations", async (context) => {
   const fixture = await startDaemon(context);
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: fixture.cwd });
 
@@ -330,7 +327,7 @@ test("cancels attachment-owned read requests without cancelling session operatio
   });
   await assert.rejects(
     pending,
-    (error) => error instanceof WireClientError && error.code === "cancelled",
+    (error) => error instanceof AxlClientError && error.code === "cancelled",
   );
   assert.deepEqual(await client.request("request.cancel", { requestId: 999 }), {
     cancellationRequested: false,
@@ -354,7 +351,7 @@ test("expires incomplete snapshots and requires a replacement boundary", async (
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: directory });
   const subscription = await client.request("session.subscribe", { sessionId: created.sessionId });
@@ -365,13 +362,13 @@ test("expires incomplete snapshots and requires a replacement boundary", async (
       subscriptionId: subscription.subscriptionId,
       cursor: subscription.snapshot.boundaryCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+    (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
 });
 
 test("publishes bounded attachment presence and subscription membership", async (context) => {
   const fixture = await startDaemon(context);
-  const first = await DaemonClient.connect(fixture.socketPath, {
+  const first = await connectUnixClient(fixture.socketPath, {
     identity: { kind: "tui", version: "1.0.0", instanceId: "presence-one" },
     requestedCapabilities: ["session.create", "session.subscribe", "session.presence"],
   });
@@ -387,7 +384,7 @@ test("publishes bounded attachment presence and subscription membership", async 
   const stopPresence = first.onPresence((message) => firstPresence.push(message.attachments));
   assert.equal(firstPresence.at(-1)?.length, 1);
 
-  const withoutPresence = await DaemonClient.connect(fixture.socketPath, {
+  const withoutPresence = await connectUnixClient(fixture.socketPath, {
     identity: { kind: "headless", version: "1.0.0", instanceId: "presence-disabled" },
     requestedCapabilities: [],
   });
@@ -397,7 +394,7 @@ test("publishes bounded attachment presence and subscription membership", async 
     unauthorizedPresence += 1;
   });
 
-  const second = await DaemonClient.connect(fixture.socketPath, {
+  const second = await connectUnixClient(fixture.socketPath, {
     identity: { kind: "future_client", version: "2.0.0", instanceId: "presence-two" },
     requestedCapabilities: ["session.presence"],
   });
@@ -450,7 +447,7 @@ test("publishes bounded attachment presence and subscription membership", async 
 
   const updatesBeforeDispose = firstPresence.length;
   stopPresence();
-  const third = await DaemonClient.connect(fixture.socketPath, {
+  const third = await connectUnixClient(fixture.socketPath, {
     identity: { kind: "ide", version: "1.0.0", instanceId: "presence-three" },
     requestedCapabilities: ["session.presence"],
   });
@@ -463,7 +460,7 @@ test("publishes bounded attachment presence and subscription membership", async 
 
 test("reports the daemon security mode", async (context) => {
   const sandboxed = await startDaemon(context);
-  const sandboxedClient = await DaemonClient.connect(sandboxed.socketPath, {
+  const sandboxedClient = await connectUnixClient(sandboxed.socketPath, {
     identity: { kind: "future_client", version: "1.0.0", instanceId: "future-client-1" },
     requestedCapabilities: ["session.create", "future.capability"],
   });
@@ -478,7 +475,7 @@ test("reports the daemon security mode", async (context) => {
       order: "recent",
       pageSize: 50,
     }),
-    (error) => error instanceof WireClientError && error.code === "unsupported_capability",
+    (error) => error instanceof AxlClientError && error.code === "unsupported_capability",
   );
   assert.deepEqual(await sandboxedClient.request("daemon.info", {}), {
     securityMode: "sandboxed",
@@ -486,7 +483,7 @@ test("reports the daemon security mode", async (context) => {
   });
 
   const unsafe = await startDaemon(context, replyPort(), "unsafe");
-  const unsafeClient = await DaemonClient.connect(unsafe.socketPath);
+  const unsafeClient = await connectUnixClient(unsafe.socketPath);
   context.after(() => unsafeClient.close());
   assert.deepEqual(await unsafeClient.request("daemon.info", {}), {
     securityMode: "unsafe",
@@ -495,7 +492,7 @@ test("reports the daemon security mode", async (context) => {
 
   const image = `example.invalid/image@sha256:${"a".repeat(64)}`;
   const oci = await startDaemon(context, replyPort(), "sandboxed", "podman", image);
-  const ociClient = await DaemonClient.connect(oci.socketPath);
+  const ociClient = await connectUnixClient(oci.socketPath);
   context.after(() => ociClient.close());
   assert.deepEqual(await ociClient.request("daemon.info", {}), {
     securityMode: "sandboxed",
@@ -506,7 +503,7 @@ test("reports the daemon security mode", async (context) => {
 
 test("durably deduplicates retryable mutations and rejects key conflicts", async (context) => {
   const fixture = await startDaemon(context);
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const createKey = "00000000-0000-4000-8000-000000000101";
   const sendKey = "00000000-0000-4000-8000-000000000102";
@@ -526,7 +523,7 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
   await mkdir(otherCwd);
   await assert.rejects(
     client.request("session.create", { cwd: otherCwd }, { idempotencyKey: createKey }),
-    (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
+    (error) => error instanceof AxlClientError && error.code === "idempotency_conflict",
   );
 
   const sent = await client.request(
@@ -607,7 +604,7 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
       true,
     );
   }
-  const reconnected = await DaemonClient.connect(fixture.socketPath);
+  const reconnected = await connectUnixClient(fixture.socketPath);
   context.after(() => reconnected.close());
   assert.deepEqual(
     await reconnected.request(
@@ -623,7 +620,7 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
       { sessionId: created.sessionId },
       { idempotencyKey: createKey },
     ),
-    (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
+    (error) => error instanceof AxlClientError && error.code === "idempotency_conflict",
   );
   assert.deepEqual(
     await reconnected.request(
@@ -670,7 +667,7 @@ test("durably deduplicates retryable mutations and rejects key conflicts", async
 
 test("restart reconciliation aborts an accepted non-terminal send", async (context) => {
   const fixture = await startDaemon(context);
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   const created = await client.request("session.create", { cwd: fixture.cwd });
   const sendKey = "00000000-0000-4000-8000-000000000107";
   await client.request(
@@ -707,7 +704,7 @@ test("restart reconciliation aborts an accepted non-terminal send", async (conte
   });
   await restarted.start();
   context.after(() => restarted.stop());
-  const reconnected = await DaemonClient.connect(fixture.socketPath);
+  const reconnected = await connectUnixClient(fixture.socketPath);
   context.after(() => reconnected.close());
   await reconnected.request("session.resume", { sessionId: created.sessionId });
   assert.deepEqual(
@@ -733,7 +730,7 @@ test("restart reconciliation aborts an accepted non-terminal send", async (conte
 
 test("creates a session, streams the live tail, and answers sends", async (context) => {
   const { socketPath, cwd } = await startDaemon(context);
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
 
   const created = await client.request("session.create", { cwd });
@@ -761,7 +758,7 @@ test("creates a session, streams the live tail, and answers sends", async (conte
       content: [{ type: "text", text: "steer" }],
       delivery: "steer",
     }),
-    (error) => error instanceof WireClientError && error.code === "unsupported_capability",
+    (error) => error instanceof AxlClientError && error.code === "unsupported_capability",
   );
 });
 
@@ -777,7 +774,7 @@ test("freezes paged snapshots and releases the buffered tail only after acknowle
     },
   };
   const { socketPath, cwd } = await startDaemon(context, largeReply);
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd });
   await client.request("session.send", {
@@ -801,14 +798,14 @@ test("freezes paged snapshots and releases the buffered tail only after acknowle
   assert.equal(descriptor.page.complete, false);
   const firstPageCursor = descriptor.page.nextPageCursor;
   assert.ok(firstPageCursor);
-  const other = await DaemonClient.connect(socketPath);
+  const other = await connectUnixClient(socketPath);
   context.after(() => other.close());
   await assert.rejects(
     other.request("session.history", {
       snapshotId: descriptor.snapshotId,
       pageCursor: firstPageCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+    (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
   const frozenEvents = [...descriptor.page.events];
   await assert.rejects(
@@ -816,7 +813,7 @@ test("freezes paged snapshots and releases the buffered tail only after acknowle
       subscriptionId: subscription.subscriptionId,
       cursor: descriptor.boundaryCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+    (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
 
   await client.request("session.send", {
@@ -879,8 +876,8 @@ test("freezes paged snapshots and releases the buffered tail only after acknowle
 
 test("events appended between resume and subscribe enter the frozen snapshot", async (context) => {
   const { socketPath, cwd } = await startDaemon(context);
-  const owner = await DaemonClient.connect(socketPath);
-  const attaching = await DaemonClient.connect(socketPath);
+  const owner = await connectUnixClient(socketPath);
+  const attaching = await connectUnixClient(socketPath);
   context.after(() => {
     owner.close();
     attaching.close();
@@ -914,8 +911,8 @@ test("streams transient deltas and resumes the latest accumulated activity", asy
     },
   };
   const { socketPath, cwd } = await startDaemon(context, streaming);
-  const first = await DaemonClient.connect(socketPath);
-  const second = await DaemonClient.connect(socketPath);
+  const first = await connectUnixClient(socketPath);
+  const second = await connectUnixClient(socketPath);
   context.after(() => {
     first.close();
     second.close();
@@ -960,7 +957,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   const orphan = join(orphanDirectory, "orphaned-upload");
   await mkdir(orphanDirectory, { recursive: true });
   await writeFile(orphan, "partial");
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd });
   const bytes = Buffer.alloc(32);
@@ -1011,7 +1008,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
       offset: 0,
       length: bytes.length,
     }),
-    (error) => error instanceof WireClientError && error.code === "blob_not_owned",
+    (error) => error instanceof AxlClientError && error.code === "blob_not_owned",
   );
 
   const invalid = Buffer.from("not an image");
@@ -1027,7 +1024,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
       offset: 1,
       data: invalid.toString("base64"),
     }),
-    (error) => error instanceof WireClientError && error.code === "blob_offset_mismatch",
+    (error) => error instanceof AxlClientError && error.code === "blob_offset_mismatch",
   );
   await client.request("session.blob.chunk", {
     sessionId: created.sessionId,
@@ -1040,7 +1037,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
       sessionId: created.sessionId,
       uploadId: rejected.uploadId,
     }),
-    (error) => error instanceof WireClientError && error.code === "invalid_image",
+    (error) => error instanceof AxlClientError && error.code === "invalid_image",
   );
 
   const concurrent = (await client.request("session.blob.start", {
@@ -1065,8 +1062,8 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   assert.equal(writes.filter((result) => result.status === "fulfilled").length, 1);
   const rejectedWrite = writes.find((result) => result.status === "rejected");
   assert.ok(rejectedWrite?.status === "rejected");
-  assert.equal(rejectedWrite.reason instanceof WireClientError, true);
-  assert.equal((rejectedWrite.reason as WireClientError).code, "blob_offset_mismatch");
+  assert.equal(rejectedWrite.reason instanceof AxlClientError, true);
+  assert.equal((rejectedWrite.reason as AxlClientError).code, "blob_offset_mismatch");
   await client.request("session.blob.chunk", {
     sessionId: created.sessionId,
     uploadId: concurrent.uploadId,
@@ -1090,8 +1087,8 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
   assert.equal(starts.filter((result) => result.status === "fulfilled").length, 16);
   const rejectedStart = starts.find((result) => result.status === "rejected");
   assert.ok(rejectedStart?.status === "rejected");
-  assert.equal(rejectedStart.reason instanceof WireClientError, true);
-  assert.equal((rejectedStart.reason as WireClientError).code, "too_many_uploads");
+  assert.equal(rejectedStart.reason instanceof AxlClientError, true);
+  assert.equal((rejectedStart.reason as AxlClientError).code, "too_many_uploads");
 
   const active = starts.find(
     (result): result is PromiseFulfilledResult<{ uploadId: string; chunkBytes: number }> =>
@@ -1121,7 +1118,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
 
 test("a session survives daemon termination and resumes with full history", async (context) => {
   const first = await startDaemon(context);
-  const client = await DaemonClient.connect(first.socketPath);
+  const client = await connectUnixClient(first.socketPath);
   const created = await client.request("session.create", { cwd: first.cwd });
   await client.request("session.send", {
     sessionId: created.sessionId,
@@ -1143,7 +1140,7 @@ test("a session survives daemon termination and resumes with full history", asyn
   await daemon.start();
   context.after(() => daemon.stop());
 
-  const reconnected = await DaemonClient.connect(first.socketPath);
+  const reconnected = await connectUnixClient(first.socketPath);
   context.after(() => reconnected.close());
   const resumed = await reconnected.request("session.resume", {
     sessionId: created.sessionId,
@@ -1174,7 +1171,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
   await symlink(fixture.cwd, join(workspace, "escape"));
   if (process.platform !== "win32") await execute("mkfifo", [join(workspace, "named-pipe")]);
 
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: workspace });
   const first = await client.request("session.workspace.list", {
@@ -1188,7 +1185,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
     first.entries.map((entry) => entry.name),
     [".axl", ".env"],
   );
-  const otherClient = await DaemonClient.connect(fixture.socketPath);
+  const otherClient = await connectUnixClient(fixture.socketPath);
   context.after(() => otherClient.close());
   await assert.rejects(
     otherClient.request("session.workspace.list", {
@@ -1197,7 +1194,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
       pageSize: 2,
       pageCursor: first.nextPageCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "workspace_changed",
+    (error) => error instanceof AxlClientError && error.code === "workspace_changed",
   );
   const complete = await client.request("session.workspace.list", {
     sessionId: created.sessionId,
@@ -1248,7 +1245,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
         maxLines: 20,
         maxBytes: 1024,
       }),
-      (error) => error instanceof WireClientError && error.code === code,
+      (error) => error instanceof AxlClientError && error.code === code,
     );
   }
 
@@ -1260,7 +1257,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
       pageSize: 2,
       pageCursor: first.nextPageCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "workspace_changed",
+    (error) => error instanceof AxlClientError && error.code === "workspace_changed",
   );
   await writeFile(join(workspace, "a.txt"), "changed\n");
   await assert.rejects(
@@ -1271,7 +1268,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
       maxBytes: 1024,
       ifFileRevision: read.fileRevision,
     }),
-    (error) => error instanceof WireClientError && error.code === "workspace_changed",
+    (error) => error instanceof AxlClientError && error.code === "workspace_changed",
   );
 });
 
@@ -1308,7 +1305,7 @@ test("represents staged, unstaged, rename, delete, binary, submodule, and branch
   await writeFile(join(workspace, "tab\tnewline\nname.txt"), "odd name\n");
   await writeFile(join(workspace, "日本語.txt"), "unicode\n");
 
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: workspace });
   const status = await client.request("session.workspace.status", {
@@ -1389,7 +1386,7 @@ test("represents staged, unstaged, rename, delete, binary, submodule, and branch
       repositoryGeneration: status.repositoryGeneration,
       maxBytes: 8,
     }),
-    (error) => error instanceof WireClientError && error.code === "git_output_too_large",
+    (error) => error instanceof AxlClientError && error.code === "git_output_too_large",
   );
 
   await execute("git", ["config", "core.sparseCheckout", "true"], { cwd: workspace });
@@ -1411,7 +1408,7 @@ test("represents staged, unstaged, rename, delete, binary, submodule, and branch
       repositoryGeneration: status.repositoryGeneration,
       maxBytes: 65_536,
     }),
-    (error) => error instanceof WireClientError && error.code === "repository_changed",
+    (error) => error instanceof AxlClientError && error.code === "repository_changed",
   );
 });
 
@@ -1465,7 +1462,7 @@ test("represents conflicts and unborn repositories and rejects invalid-byte file
   await execute("git", ["commit", "-qam", "main"], { cwd: conflict });
   await execute("git", ["merge", "other"], { cwd: conflict }).catch(() => undefined);
 
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const conflictedSession = await client.request("session.create", { cwd: conflict });
   const conflicted = await client.request("session.workspace.status", {
@@ -1505,7 +1502,7 @@ test("represents conflicts and unborn repositories and rejects invalid-byte file
           scope: "working",
         }),
         (error) =>
-          error instanceof WireClientError && error.code === "unsupported_filename_encoding",
+          error instanceof AxlClientError && error.code === "unsupported_filename_encoding",
       );
     }
   }
@@ -1536,7 +1533,7 @@ test("serves generation-checked working and last-turn workspace status and diffs
   await execute("git", ["config", "filter.axlfilter.smudge", hostileFilter], { cwd: workspace });
   await writeFile(join(workspace, ".gitattributes"), "tracked.txt diff=axl filter=axlfilter\n");
 
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: workspace });
   await assert.rejects(
@@ -1544,7 +1541,7 @@ test("serves generation-checked working and last-turn workspace status and diffs
       sessionId: created.sessionId,
       scope: "last-turn",
     }),
-    (error) => error instanceof WireClientError && error.code === "checkpoint_unavailable",
+    (error) => error instanceof AxlClientError && error.code === "checkpoint_unavailable",
   );
   const checkpoint = await client.request("session.workspace.checkpoint", {
     sessionId: created.sessionId,
@@ -1611,7 +1608,7 @@ test("serves generation-checked working and last-turn workspace status and diffs
       repositoryGeneration: working.repositoryGeneration,
       maxBytes: 65_536,
     }),
-    (error) => error instanceof WireClientError && error.code === "repository_changed",
+    (error) => error instanceof AxlClientError && error.code === "repository_changed",
   );
 
   const oversized = join(workspace, "too-large.bin");
@@ -1627,13 +1624,13 @@ test("serves generation-checked working and last-turn workspace status and diffs
       sessionId: created.sessionId,
       scope: "last-turn",
     }),
-    (error) => error instanceof WireClientError && error.code === "checkpoint_too_large",
+    (error) => error instanceof AxlClientError && error.code === "checkpoint_too_large",
   );
 });
 
 test("lists, forks, clones, and resumes sessions", async (context) => {
   const first = await startDaemon(context);
-  const client = await DaemonClient.connect(first.socketPath);
+  const client = await connectUnixClient(first.socketPath);
   const created = await client.request("session.create", { cwd: first.cwd });
   await client.request("session.send", {
     sessionId: created.sessionId,
@@ -1726,7 +1723,7 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
       pageSize: 1,
       pageCursor: firstPage.nextPageCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "unknown_cursor",
+    (error) => error instanceof AxlClientError && error.code === "unknown_cursor",
   );
 
   client.close();
@@ -1738,7 +1735,7 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const resumedClient = await DaemonClient.connect(first.socketPath);
+  const resumedClient = await connectUnixClient(first.socketPath);
   context.after(() => resumedClient.close());
   await resumedClient.request("session.resume", {
     sessionId: forked.sessionId,
@@ -1754,7 +1751,7 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
 
 test("pages and filters daemon-owned session summaries", async (context) => {
   const fixture = await startDaemon(context);
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   context.after(() => client.close());
   const canonicalCwd = await realpath(fixture.cwd);
   const first = await client.request("session.create", { cwd: fixture.cwd });
@@ -1795,14 +1792,14 @@ test("pages and filters daemon-owned session summaries", async (context) => {
       pageSize: 1,
       pageCursor: firstPage.nextPageCursor,
     }),
-    (error) => error instanceof WireClientError && error.code === "unknown_cursor",
+    (error) => error instanceof AxlClientError && error.code === "unknown_cursor",
   );
 });
 
 test("interrupt aborts the active operation from another connection", async (context) => {
   const { socketPath, cwd } = await startDaemon(context, hangingPort());
-  const sender = await DaemonClient.connect(socketPath);
-  const interrupter = await DaemonClient.connect(socketPath);
+  const sender = await connectUnixClient(socketPath);
+  const interrupter = await connectUnixClient(socketPath);
   context.after(() => {
     sender.close();
     interrupter.close();
@@ -1834,7 +1831,7 @@ test("interrupt aborts the active operation from another connection", async (con
 
 test("restart recovery preserves exact interrupt results", async (context) => {
   const fixture = await startDaemon(context, hangingPort());
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   const created = await client.request("session.create", { cwd: fixture.cwd });
   const sendKey = "00000000-0000-4000-8000-000000000122";
   const interruptKey = "00000000-0000-4000-8000-000000000123";
@@ -1871,7 +1868,7 @@ test("restart recovery preserves exact interrupt results", async (context) => {
     runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
   });
   await restarted.start();
-  const recoveredClient = await DaemonClient.connect(fixture.socketPath);
+  const recoveredClient = await connectUnixClient(fixture.socketPath);
   assert.deepEqual(
     await recoveredClient.request(
       "session.interrupt",
@@ -1899,7 +1896,7 @@ test("restart recovery preserves exact interrupt results", async (context) => {
   });
   await restartedAgain.start();
   context.after(() => restartedAgain.stop());
-  const finalClient = await DaemonClient.connect(fixture.socketPath);
+  const finalClient = await connectUnixClient(fixture.socketPath);
   context.after(() => finalClient.close());
   assert.deepEqual(
     await finalClient.request(
@@ -1951,9 +1948,9 @@ test("direct shell recovery returns canonical results without repeating effects"
   };
   const daemon = new AxlDaemon({ ...fixture, runtime });
   await daemon.start();
-  const client = await DaemonClient.connect(fixture.socketPath);
+  const client = await connectUnixClient(fixture.socketPath);
   const created = await client.request("session.create", { cwd: fixture.cwd });
-  const operationId = "00000000-0000-4000-8000-000000000126";
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000126");
   const command = "record effect";
   const result = await client.request("session.shell", {
     sessionId: created.sessionId,
@@ -1981,7 +1978,7 @@ test("direct shell recovery returns canonical results without repeating effects"
   });
   await restarted.start();
   context.after(() => restarted.stop());
-  const recoveredClient = await DaemonClient.connect(fixture.socketPath);
+  const recoveredClient = await connectUnixClient(fixture.socketPath);
   context.after(() => recoveredClient.close());
   await recoveredClient.request("session.resume", { sessionId: created.sessionId });
   assert.deepEqual(
@@ -2001,13 +1998,13 @@ test("direct shell recovery returns canonical results without repeating effects"
       command: "printf 'different effect\\n'",
       excluded: false,
     }),
-    (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
+    (error) => error instanceof AxlClientError && error.code === "idempotency_conflict",
   );
 });
 
 test("concurrent sends conflict loudly instead of interleaving", async (context) => {
   const { socketPath, cwd } = await startDaemon(context, hangingPort());
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
 
   const created = await client.request("session.create", { cwd });
@@ -2030,14 +2027,14 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
     );
   await assert.rejects(
     conflictingRequest(),
-    (error) => error instanceof WireClientError && error.code === "operation_active",
+    (error) => error instanceof AxlClientError && error.code === "operation_active",
   );
   await client.request("session.interrupt", { sessionId: created.sessionId });
   await first;
   await assert.rejects(
     conflictingRequest(),
     (error) =>
-      error instanceof WireClientError &&
+      error instanceof AxlClientError &&
       error.code === "operation_active" &&
       error.retryable === false,
   );
@@ -2047,8 +2044,8 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
 
 test("subscribe supports opaque acknowledged cursors and multiple attachments", async (context) => {
   const { socketPath, cwd } = await startDaemon(context);
-  const one = await DaemonClient.connect(socketPath);
-  const two = await DaemonClient.connect(socketPath);
+  const one = await connectUnixClient(socketPath);
+  const two = await connectUnixClient(socketPath);
   context.after(() => {
     one.close();
     two.close();
@@ -2073,7 +2070,7 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
   assert.ok(cursor);
   await assert.rejects(
     two.request("session.subscribe", { sessionId: created.sessionId, after: cursor }),
-    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+    (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
   await one.request("session.ack", {
     subscriptionId: oneDeliveries.at(-1)?.subscriptionId ?? "missing",
@@ -2108,7 +2105,7 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
     two.request("session.unsubscribe", {
       subscriptionId: resumed.subscription.subscriptionId,
     }),
-    (error) => error instanceof WireClientError && error.code === "unknown_subscription",
+    (error) => error instanceof AxlClientError && error.code === "unknown_subscription",
   );
 
   await assert.rejects(
@@ -2116,14 +2113,14 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
       sessionId: created.sessionId,
       after: "unknown-cursor",
     }),
-    (error) => error instanceof WireClientError && error.code === "snapshot_required",
+    (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
 });
 
 test("dispose removes the session and errors surface typed codes", async (context) => {
   const fixture = await startDaemon(context);
   const { socketPath, cwd, dataDirectory } = fixture;
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
 
   const created = await client.request("session.create", { cwd });
@@ -2152,7 +2149,7 @@ test("dispose removes the session and errors surface typed codes", async (contex
   });
   await restarted.start();
   context.after(() => restarted.stop());
-  const recoveredClient = await DaemonClient.connect(socketPath);
+  const recoveredClient = await connectUnixClient(socketPath);
   context.after(() => recoveredClient.close());
   assert.deepEqual(
     await recoveredClient.request(
@@ -2180,14 +2177,14 @@ test("dispose removes the session and errors surface typed codes", async (contex
       content: [],
       delivery: "prompt",
     }),
-    (error) => error instanceof WireClientError && error.code === "unknown_session",
+    (error) => error instanceof AxlClientError && error.code === "unknown_session",
   );
 
   await assert.rejects(
     recoveredClient.request("session.resume", {
       sessionId: parseSessionId("123e4567-e89b-42d3-a456-42661417ffff"),
     }),
-    (error) => error instanceof WireClientError && error.code === "unknown_session",
+    (error) => error instanceof AxlClientError && error.code === "unknown_session",
   );
 
   await assert.rejects(
@@ -2197,7 +2194,7 @@ test("dispose removes the session and errors surface typed codes", async (contex
         params: Record<string, unknown>,
       ) => Promise<unknown>
     )("bogus.method", {}),
-    (error) => error instanceof WireClientError && error.code === "bad_request",
+    (error) => error instanceof AxlClientError && error.code === "bad_request",
   );
 });
 
@@ -2268,7 +2265,7 @@ test("routes runtime interaction requests to an attached client", async (context
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: directory });
   const events: CanonicalEvent[] = [];
@@ -2304,7 +2301,7 @@ test("routes runtime interaction requests to an attached client", async (context
   });
   const response = await responseRequest;
   await assert.rejects(losingRequest, (error) => {
-    assert.ok(error instanceof WireClientError);
+    assert.ok(error instanceof AxlClientError);
     assert.equal(error.code, "interaction_already_resolved");
     assert.deepEqual(error.details, { resolutionEventId: response.resolutionEventId });
     return true;
@@ -2324,7 +2321,7 @@ test("routes runtime interaction requests to an attached client", async (context
       idempotencyKey: losingKey,
     }),
     (error) => {
-      assert.ok(error instanceof WireClientError);
+      assert.ok(error instanceof AxlClientError);
       assert.equal(error.code, "interaction_already_resolved");
       assert.deepEqual(error.details, { resolutionEventId: response.resolutionEventId });
       return true;
@@ -2342,7 +2339,7 @@ test("routes runtime interaction requests to an attached client", async (context
   });
   await restarted.start();
   context.after(() => restarted.stop());
-  const recoveredClient = await DaemonClient.connect(socketPath);
+  const recoveredClient = await connectUnixClient(socketPath);
   context.after(() => recoveredClient.close());
   assert.deepEqual(
     await recoveredClient.request("session.interaction.respond", responseParams, {
@@ -2355,7 +2352,7 @@ test("routes runtime interaction requests to an attached client", async (context
       idempotencyKey: losingKey,
     }),
     (error) =>
-      error instanceof WireClientError &&
+      error instanceof AxlClientError &&
       error.code === "interaction_already_resolved" &&
       error.details?.resolutionEventId === response.resolutionEventId,
   );
@@ -2381,7 +2378,7 @@ test("externalizes oversized schema-supported content before persistence", async
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: directory });
   const text = "é".repeat(393_100);
@@ -2436,11 +2433,11 @@ test("rejects oversized fields without schema-defined blob semantics", async (co
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
 
   await assert.rejects(client.request("session.create", { cwd: directory }), (error: unknown) => {
-    assert.ok(error instanceof WireClientError);
+    assert.ok(error instanceof AxlClientError);
     assert.equal(error.code, "content_too_large");
     assert.equal(error.details?.field, "canonicalEvent");
     assert.equal(error.details?.maximumBytes, MAX_CANONICAL_EVENT_BYTES);
@@ -2453,7 +2450,7 @@ test("quarantines oversized legacy events with safe recovery details", async (co
   context.after(() => rm(directory, { recursive: true, force: true }));
   const dataDirectory = join(directory, "data");
   const sessionsDirectory = join(dataDirectory, "sessions");
-  const sessionId = "00000000-0000-4000-8000-000000000201";
+  const sessionId = parseSessionId("00000000-0000-4000-8000-000000000201");
   const oversizedEventId = "00000000-0000-4000-8000-000000000203";
   const root = {
     version: 1,
@@ -2485,11 +2482,11 @@ test("quarantines oversized legacy events with safe recovery details", async (co
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(join(directory, "axl.sock"));
+  const client = await connectUnixClient(join(directory, "axl.sock"));
   context.after(() => client.close());
 
   await assert.rejects(client.request("session.resume", { sessionId }), (error: unknown) => {
-    assert.ok(error instanceof WireClientError);
+    assert.ok(error instanceof AxlClientError);
     assert.equal(error.code, "event_migration_required");
     assert.deepEqual(error.details, {
       sessionId,
@@ -2510,7 +2507,7 @@ test("ignores incomplete migration targets until their manifest is published", a
   const dataDirectory = join(directory, "data");
   const sessionsDirectory = join(dataDirectory, "sessions");
   const pendingDirectory = join(dataDirectory, "migrations", "pending");
-  const sessionId = "00000000-0000-4000-8000-000000000205";
+  const sessionId = parseSessionId("00000000-0000-4000-8000-000000000205");
   const root = {
     version: 1,
     id: "00000000-0000-4000-8000-000000000206",
@@ -2535,7 +2532,7 @@ test("ignores incomplete migration targets until their manifest is published", a
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  const client = await DaemonClient.connect(join(directory, "axl.sock"));
+  const client = await connectUnixClient(join(directory, "axl.sock"));
   context.after(() => client.close());
   assert.deepEqual(
     await client.request("session.list", {
@@ -2546,7 +2543,7 @@ test("ignores incomplete migration targets until their manifest is published", a
     { sessions: [] },
   );
   await assert.rejects(client.request("session.resume", { sessionId }), (error: unknown) => {
-    assert.ok(error instanceof WireClientError);
+    assert.ok(error instanceof AxlClientError);
     assert.equal(error.code, "unknown_session");
     return true;
   });
@@ -2585,7 +2582,7 @@ test("configuration changes rebuild and log the selected model and thinking", as
   await daemon.start();
   context.after(() => daemon.stop());
 
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", {
     cwd: directory,
@@ -2636,7 +2633,7 @@ test("configuration changes rebuild and log the selected model and thinking", as
   });
   await restarted.start();
   context.after(() => restarted.stop());
-  const recoveredClient = await DaemonClient.connect(socketPath);
+  const recoveredClient = await connectUnixClient(socketPath);
   context.after(() => recoveredClient.close());
   assert.deepEqual(
     await recoveredClient.request(
@@ -2685,7 +2682,7 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   await daemon.start();
   context.after(() => daemon.stop());
 
-  const client = await DaemonClient.connect(socketPath);
+  const client = await connectUnixClient(socketPath);
   context.after(() => client.close());
   const created = await client.request("session.create", { cwd: directory });
   const pushed: CanonicalEvent[] = [];
@@ -2732,7 +2729,7 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   });
   await restarted.start();
   context.after(() => restarted.stop());
-  const recoveredClient = await DaemonClient.connect(socketPath);
+  const recoveredClient = await connectUnixClient(socketPath);
   context.after(() => recoveredClient.close());
   assert.deepEqual(
     await recoveredClient.request(

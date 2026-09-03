@@ -15,6 +15,7 @@
     { "path": "../extensions/mcp/tsconfig.build.json" },
     { "path": "../extensions/skills/tsconfig.build.json" },
     { "path": "../runtime/tsconfig.build.json" },
-    { "path": "../tui/tsconfig.build.json" }
+    { "path": "../tui/tsconfig.build.json" },
+    { "path": "../sdk/tsconfig.build.json" }
   ]
 }

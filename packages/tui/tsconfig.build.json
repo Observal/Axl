@@ -16,10 +16,10 @@
       "path": "../ai/tsconfig.build.json"
     },
     {
-      "path": "../daemon/tsconfig.build.json"
+      "path": "../extensions/api/tsconfig.build.json"
     },
     {
-      "path": "../extensions/api/tsconfig.build.json"
+      "path": "../sdk/tsconfig.build.json"
     }
   ]
 }

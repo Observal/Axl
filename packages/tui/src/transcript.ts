@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ModelInfo } from "@axl/ai";
-import type { BlobReference, CanonicalEvent, Usage } from "@axl/protocol";
+import { ConversationProjector } from "@axl/sdk";
+import type { BlobReference, CanonicalEvent } from "@axl/protocol";
 
 import { renderMarkdown } from "./markdown.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapLine } from "./render.ts";
@@ -98,7 +99,6 @@ export class SessionView {
   private readonly renderBlob: BlobRenderer | undefined;
   model: string | undefined;
   thinking: string | undefined;
-  profile: string | undefined;
   sandbox: string | undefined;
   working = false;
   thinkingDisplay: ThinkingDisplay = "compact";
@@ -108,12 +108,13 @@ export class SessionView {
   outputTokens = 0;
   cacheReadTokens = 0;
   cacheWriteTokens = 0;
-  contextTokens: number | undefined = 0;
+  contextTokens = 0;
   cacheHitPercent: number | undefined;
   totalCostUsd = 0;
   tokensPerSecond: number | undefined;
   elapsedSeconds = 0;
   private responseStartedAt: number | undefined;
+  private readonly projection = new ConversationProjector();
 
   constructor(
     width: number,
@@ -156,24 +157,6 @@ export class SessionView {
     this.tokensPerSecond = undefined;
   }
 
-  private addUsage(usage: Usage): void {
-    this.inputTokens += usage.inputTokens;
-    this.outputTokens += usage.outputTokens;
-    this.cacheReadTokens += usage.cacheReadTokens;
-    this.cacheWriteTokens += usage.cacheWriteTokens;
-    this.totalTokens += usage.inputTokens + usage.outputTokens;
-    const cost = this.models.find((candidate) => candidate.modelId === this.model)?.cost;
-    this.totalCostUsd +=
-      usage.costUsd ??
-      (cost === undefined
-        ? 0
-        : (cost.inputUsdPerMTok * usage.inputTokens +
-            cost.outputUsdPerMTok * usage.outputTokens +
-            (cost.cacheReadUsdPerMTok ?? 0) * usage.cacheReadTokens +
-            (cost.cacheWriteUsdPerMTok ?? 0) * usage.cacheWriteTokens) /
-          1_000_000);
-  }
-
   frameBorder(text: string): string {
     return (
       this.palette.thinking?.(this.thinking ?? "off", text) ??
@@ -198,11 +181,9 @@ export class SessionView {
       if (parts.length === 0) parts.push("ready");
     } else {
       const percent =
-        this.contextTokens === undefined
-          ? "?"
-          : this.contextTokens === 0
-            ? "0.0%"
-            : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
+        this.contextTokens === 0
+          ? "0.0%"
+          : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
       parts.push(`${percent}/${compactNumber(model.contextWindow)} context`);
     }
     return parts.join(" ");
@@ -224,6 +205,25 @@ export class SessionView {
   }
 
   apply(event: CanonicalEvent): readonly string[] {
+    const previousModel = this.model;
+    const previousThinking = this.thinking;
+    const previousSandbox = this.sandbox;
+    this.projection.applyEvent(event);
+    const projected = this.projection.state;
+    this.model = projected.model;
+    this.thinking = projected.thinking;
+    this.sandbox =
+      projected.sandbox === undefined
+        ? undefined
+        : projected.sandbox.enforced
+          ? projected.sandbox.provider
+          : "unenforced";
+    this.inputTokens = projected.usage.inputTokens;
+    this.outputTokens = projected.usage.outputTokens;
+    this.cacheReadTokens = projected.usage.cacheReadTokens;
+    this.cacheWriteTokens = projected.usage.cacheWriteTokens;
+    this.totalTokens = projected.usage.inputTokens + projected.usage.outputTokens;
+    this.totalCostUsd = projected.usage.costUsd;
     const { dim, error } = this.palette;
     switch (event.type) {
       case "session.created":
@@ -249,11 +249,19 @@ export class SessionView {
       case "assistant.message": {
         const usage = event.payload.usage;
         if (usage !== undefined) {
-          this.addUsage(usage);
           const promptTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
           this.contextTokens = promptTokens;
           this.cacheHitPercent =
             promptTokens > 0 ? (usage.cacheReadTokens / promptTokens) * 100 : undefined;
+          const cost = this.models.find((candidate) => candidate.modelId === this.model)?.cost;
+          if (usage.costUsd === undefined && cost !== undefined) {
+            this.totalCostUsd +=
+              (cost.inputUsdPerMTok * usage.inputTokens +
+                cost.outputUsdPerMTok * usage.outputTokens +
+                (cost.cacheReadUsdPerMTok ?? 0) * usage.cacheReadTokens +
+                (cost.cacheWriteUsdPerMTok ?? 0) * usage.cacheWriteTokens) /
+              1_000_000;
+          }
           if (this.responseStartedAt !== undefined && usage.outputTokens > 0) {
             const elapsedMs = performance.now() - this.responseStartedAt;
             this.tokensPerSecond =
@@ -306,31 +314,21 @@ export class SessionView {
           sanitizeTerminalText(event.payload.message),
           sanitizeTerminalText(event.payload.code),
         );
-      case "config.model": {
-        const previous = this.model;
-        this.model = sanitizeTerminalText(event.payload.modelId);
-        return previous === undefined || previous === this.model
+      case "config.model":
+        return previousModel === undefined || previousModel === this.model
           ? []
-          : this.wrap(dim(`· model ${previous} → ${this.model}`));
-      }
+          : this.wrap(dim(`· model ${previousModel} → ${this.model}`));
       case "config.thinking": {
-        const previous = this.thinking;
         const { requested, effective, clamped } = event.payload;
-        this.thinking = effective;
         if (clamped) {
           return this.wrap(dim(`· thinking ${effective} (clamped from ${requested})`));
         }
-        return previous === undefined || previous === effective
+        return previousThinking === undefined || previousThinking === effective
           ? []
-          : this.wrap(dim(`· thinking ${previous} → ${effective}`));
+          : this.wrap(dim(`· thinking ${previousThinking} → ${effective}`));
       }
-      case "config.profile":
-        this.profile = event.payload.profile;
-        return EMPTY_ROWS;
-      case "config.tools":
-        return EMPTY_ROWS;
       case "config.dialect":
-        return event.payload.reason === "reload" || event.payload.reason === "tool_change"
+        return event.payload.reason === "reload"
           ? this.wrap(dim(`· tools reloaded · ${event.payload.dialectId}`))
           : [];
       case "permission.requested":
@@ -345,16 +343,13 @@ export class SessionView {
             `· permission ${event.payload.decision}${event.payload.reason ? ` · ${sanitizeTerminalText(event.payload.reason)}` : ""}`,
           ),
         );
-      case "sandbox.configured": {
-        const previous = this.sandbox;
-        this.sandbox = event.payload.enforced ? event.payload.provider : "unenforced";
+      case "sandbox.configured":
         if (!event.payload.enforced) {
           return this.wrap((this.palette.warning ?? error)("! sandbox is not enforced"));
         }
-        return previous === undefined || previous === this.sandbox
+        return previousSandbox === undefined || previousSandbox === this.sandbox
           ? []
-          : this.wrap(dim(`· sandbox ${previous} → ${this.sandbox}`));
-      }
+          : this.wrap(dim(`· sandbox ${previousSandbox} → ${this.sandbox}`));
       case "sandbox.violation":
         return this.wrap(
           (this.palette.warning ?? error)(
@@ -364,9 +359,6 @@ export class SessionView {
       case "context.injected":
         return this.wrap(dim(`+ context [${sanitizeTerminalText(event.payload.source)}]`));
       case "context.compacted":
-        if (event.payload.usage !== undefined) this.addUsage(event.payload.usage);
-        this.contextTokens = undefined;
-        this.cacheHitPercent = undefined;
         return [
           "",
           this.palette.accent("◇ Context compacted"),
@@ -389,7 +381,7 @@ export class SessionView {
       : queued
         ? `idle +${queued}`
         : "idle";
-    const full = `${activity} · session ${sessionId.slice(0, 8)} · profile ${this.profile ?? "?"} · model ${this.model ?? "?"} · thinking ${this.thinking ?? "?"} · sandbox ${this.sandbox ?? "none"}`;
+    const full = `${activity} · session ${sessionId.slice(0, 8)} · model ${this.model ?? "?"} · thinking ${this.thinking ?? "?"} · sandbox ${this.sandbox ?? "none"}`;
     return this.palette.dim(truncateToWidth(full, this.width, ""));
   }
 

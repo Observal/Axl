@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import type { DaemonClient, WireEvent } from "@axl/daemon";
+import type { AxlClient, WireEvent } from "@axl/sdk";
 import {
   type CanonicalEvent,
   EVENT_FORMAT_VERSION,
@@ -90,7 +90,7 @@ function client(
   events: readonly CanonicalEvent[],
   requests: unknown[] = [],
   sendError?: Error,
-): DaemonClient {
+): AxlClient {
   return {
     async request(method: string, params: unknown) {
       requests.push({ method, params });
@@ -159,11 +159,28 @@ function client(
       if (method === "session.interaction.respond") throw new Error("interaction response failed");
       throw new Error(`Unexpected request ${method}`);
     },
+    async shell(params: { operationId: string; command: string }) {
+      requests.push({ method: "session.shell", params });
+      if (sendError !== undefined) {
+        return { state: "uncertain", operationId: params.operationId } as const;
+      }
+      return {
+        state: "completed",
+        result: {
+          operationId: params.operationId,
+          isError: false,
+          resultEventId: "00000000-0000-4000-8000-000000000104",
+        },
+      } as const;
+    },
+    loadingSnapshot<Result>(load: () => Promise<Result>) {
+      return load();
+    },
     onEvent() {
       return () => undefined;
     },
     close() {},
-  } as unknown as DaemonClient;
+  } as unknown as AxlClient;
 }
 
 class ReconnectClient {
@@ -188,6 +205,10 @@ class ReconnectClient {
     }
     if (method === "session.workspace.checkpoint") return { enabled: false };
     throw new Error(`Unexpected request ${method}`);
+  }
+
+  loadingSnapshot<Result>(load: () => Promise<Result>): Promise<Result> {
+    return load();
   }
 
   onEvent(listener: (message: WireEvent) => void): () => void {
@@ -222,8 +243,8 @@ class ReconnectClient {
 
   close(): void {}
 
-  daemonClient(): DaemonClient {
-    return this as unknown as DaemonClient;
+  daemonClient(): AxlClient {
+    return this as unknown as AxlClient;
   }
 }
 
