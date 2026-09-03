@@ -13,10 +13,16 @@ import type {
 import { type AxlClient, AxlClientError, cursorStoreKey, type CursorStore } from "./client.ts";
 import { ConversationProjector, ProjectionError } from "./projector.ts";
 
+export type CursorPersistenceStatus =
+  | { readonly state: "not_configured" }
+  | { readonly state: "available" }
+  | { readonly state: "unavailable"; readonly reason: "cursor_store_failed" };
+
 export interface SessionSubscription {
   readonly subscriptionId: string;
   readonly projector: ConversationProjector;
   readonly resumable: boolean;
+  readonly cursorPersistence: CursorPersistenceStatus;
   /** Rebinds this view to a newly initialized attachment and resumes from its last ack. */
   reconnect(client: AxlClient): Promise<void>;
   /** Stops local delivery immediately. Closing the attachment releases daemon state. */
@@ -46,6 +52,7 @@ class ResumableSessionSubscription implements SessionSubscription {
   private sequence = 0;
   private closed = false;
   private resumableState: boolean;
+  private cursorStoreFailed = false;
   private generation = 0;
   private delivery: Promise<void> = Promise.resolve();
   private recovery: Promise<void> | undefined;
@@ -70,6 +77,13 @@ class ResumableSessionSubscription implements SessionSubscription {
 
   get resumable(): boolean {
     return this.resumableState;
+  }
+
+  get cursorPersistence(): CursorPersistenceStatus {
+    if (this.options.cursorStore === undefined) return { state: "not_configured" };
+    return this.cursorStoreFailed
+      ? { state: "unavailable", reason: "cursor_store_failed" }
+      : { state: "available" };
   }
 
   async start(): Promise<void> {
@@ -172,7 +186,7 @@ class ResumableSessionSubscription implements SessionSubscription {
       try {
         cursor = await this.options.cursorStore.load(nextStoreKey);
       } catch {
-        this.resumableState = false;
+        this.disableCursorStore();
       }
     }
     if (!sameLineage) {
@@ -350,7 +364,7 @@ class ResumableSessionSubscription implements SessionSubscription {
       try {
         await this.options.cursorStore.save(this.currentStoreKey, cursor);
       } catch {
-        this.resumableState = false;
+        this.disableCursorStore();
       }
     }
   }
@@ -360,8 +374,13 @@ class ResumableSessionSubscription implements SessionSubscription {
     try {
       await this.options.cursorStore.delete(key);
     } catch {
-      this.resumableState = false;
+      this.disableCursorStore();
     }
+  }
+
+  private disableCursorStore(): void {
+    this.resumableState = false;
+    this.cursorStoreFailed = true;
   }
 
   private handleDeliveryFailure(error: unknown): void {

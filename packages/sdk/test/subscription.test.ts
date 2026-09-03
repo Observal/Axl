@@ -141,6 +141,7 @@ test("reduces every frozen page before acknowledging and persists live cursors",
     "session.history",
     "session.ack",
   ]);
+  assert.deepEqual(subscription.cursorPersistence, { state: "available" });
   assert.deepEqual(
     subscription.projector.state.records.map((record) => record.event.id),
     [first.id, second.id],
@@ -184,6 +185,10 @@ test("cursor-store failure disables resumability without stopping delivery", asy
     },
   });
   assert.equal(subscription.resumable, false);
+  assert.deepEqual(subscription.cursorPersistence, {
+    state: "unavailable",
+    reason: "cursor_store_failed",
+  });
   assert.equal(subscription.projector.state.records.length, 2);
   const replacement = new FixtureClient();
   await subscription.reconnect(replacement as unknown as AxlClient);
@@ -191,6 +196,13 @@ test("cursor-store failure disables resumability without stopping delivery", asy
     method: "session.subscribe",
     params: { sessionId },
   });
+  await subscription.close();
+});
+
+test("reports when persistent cursor storage is not configured", async () => {
+  const fixture = new FixtureClient();
+  const subscription = await subscribeSession(fixture as unknown as AxlClient, sessionId);
+  assert.deepEqual(subscription.cursorPersistence, { state: "not_configured" });
   await subscription.close();
 });
 
