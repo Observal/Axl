@@ -641,6 +641,12 @@ function nonNegativeInteger(value: unknown, path: string): number {
   return value as number;
 }
 
+function positiveInteger(value: unknown, path: string): number {
+  const result = nonNegativeInteger(value, path);
+  if (result === 0) throw new ProtocolValidationError(path, "must be a positive integer");
+  return result;
+}
+
 function boundedString(value: unknown, path: string, maximum: number): string {
   const result = string(value, path);
   if (new TextEncoder().encode(result).byteLength > maximum) {
@@ -1242,20 +1248,31 @@ export function parseRpcResult<Method extends RpcMethod>(
     if (result.scope !== "local_control") {
       throw new ProtocolValidationError(`${path}.scope`, 'must be "local_control"');
     }
+    const heartbeatIntervalMs = positiveInteger(
+      result.heartbeatIntervalMs,
+      `${path}.heartbeatIntervalMs`,
+    );
+    const presenceTimeoutMs = positiveInteger(
+      result.presenceTimeoutMs,
+      `${path}.presenceTimeoutMs`,
+    );
+    if (heartbeatIntervalMs >= presenceTimeoutMs) {
+      throw new ProtocolValidationError(
+        `${path}.heartbeatIntervalMs`,
+        "must be less than presenceTimeoutMs",
+      );
+    }
     parsed = {
       attachmentId: boundedString(result.attachmentId, `${path}.attachmentId`, 128),
       daemonInstanceId: boundedString(result.daemonInstanceId, `${path}.daemonInstanceId`, 128),
-      wireVersion: nonNegativeInteger(result.wireVersion, `${path}.wireVersion`),
+      wireVersion: positiveInteger(result.wireVersion, `${path}.wireVersion`),
       grantedCapabilities: capabilityArray(
         result.grantedCapabilities,
         `${path}.grantedCapabilities`,
       ),
       scope: result.scope,
-      heartbeatIntervalMs: nonNegativeInteger(
-        result.heartbeatIntervalMs,
-        `${path}.heartbeatIntervalMs`,
-      ),
-      presenceTimeoutMs: nonNegativeInteger(result.presenceTimeoutMs, `${path}.presenceTimeoutMs`),
+      heartbeatIntervalMs,
+      presenceTimeoutMs,
     };
   } else if (method === "connection.ping") {
     const result = object(value, path);
@@ -1474,11 +1491,8 @@ export function parseServerMessage(value: unknown): ServerMessage {
       daemonInstanceId: boundedString(message.daemonInstanceId, "message.daemonInstanceId", 128),
       capabilities: capabilityArray(message.capabilities, "message.capabilities"),
       limits: {
-        maxMessageBytes: nonNegativeInteger(
-          limits.maxMessageBytes,
-          "message.limits.maxMessageBytes",
-        ),
-        maxPendingRequests: nonNegativeInteger(
+        maxMessageBytes: positiveInteger(limits.maxMessageBytes, "message.limits.maxMessageBytes"),
+        maxPendingRequests: positiveInteger(
           limits.maxPendingRequests,
           "message.limits.maxPendingRequests",
         ),
@@ -1532,59 +1546,62 @@ export function parseServerMessage(value: unknown): ServerMessage {
         "must contain at most 256 attachments",
       );
     }
-    return {
-      kind,
-      attachments: message.attachments.map((value, index): AttachmentPresence => {
-        const path = `message.attachments[${index}]`;
-        const attachment = object(value, path);
-        exact(attachment, path, [
-          "attachmentId",
-          "clientKind",
-          "connectedAt",
-          "lastSeenAt",
-          "subscribedSessionIds",
-          "scope",
-        ]);
-        if (attachment.scope !== "local_control") {
-          throw new ProtocolValidationError(`${path}.scope`, 'must be "local_control"');
-        }
-        const clientKind = boundedString(attachment.clientKind, `${path}.clientKind`, 64);
-        if (!/^[a-z][a-z0-9_-]*$/.test(clientKind)) {
-          throw new ProtocolValidationError(`${path}.clientKind`, "must be a protocol identifier");
-        }
-        if (
-          !Array.isArray(attachment.subscribedSessionIds) ||
-          attachment.subscribedSessionIds.length > 256
-        ) {
-          throw new ProtocolValidationError(
-            `${path}.subscribedSessionIds`,
-            "must contain at most 256 session IDs",
-          );
-        }
-        const subscribedSessionIds = attachment.subscribedSessionIds.map((sessionId, at) =>
-          parseSessionId(sessionId, `${path}.subscribedSessionIds[${at}]`),
+    const attachments = message.attachments.map((value, index): AttachmentPresence => {
+      const path = `message.attachments[${index}]`;
+      const attachment = object(value, path);
+      exact(attachment, path, [
+        "attachmentId",
+        "clientKind",
+        "connectedAt",
+        "lastSeenAt",
+        "subscribedSessionIds",
+        "scope",
+      ]);
+      if (attachment.scope !== "local_control") {
+        throw new ProtocolValidationError(`${path}.scope`, 'must be "local_control"');
+      }
+      const clientKind = boundedString(attachment.clientKind, `${path}.clientKind`, 64);
+      if (!/^[a-z][a-z0-9_-]*$/.test(clientKind)) {
+        throw new ProtocolValidationError(`${path}.clientKind`, "must be a protocol identifier");
+      }
+      if (
+        !Array.isArray(attachment.subscribedSessionIds) ||
+        attachment.subscribedSessionIds.length > 256
+      ) {
+        throw new ProtocolValidationError(
+          `${path}.subscribedSessionIds`,
+          "must contain at most 256 session IDs",
         );
-        if (new Set(subscribedSessionIds).size !== subscribedSessionIds.length) {
-          throw new ProtocolValidationError(
-            `${path}.subscribedSessionIds`,
-            "must not contain duplicates",
-          );
-        }
-        const connectedAt = nonNegativeInteger(attachment.connectedAt, `${path}.connectedAt`);
-        const lastSeenAt = nonNegativeInteger(attachment.lastSeenAt, `${path}.lastSeenAt`);
-        if (lastSeenAt < connectedAt) {
-          throw new ProtocolValidationError(`${path}.lastSeenAt`, "must not precede connectedAt");
-        }
-        return {
-          attachmentId: boundedString(attachment.attachmentId, `${path}.attachmentId`, 128),
-          clientKind,
-          connectedAt,
-          lastSeenAt,
-          subscribedSessionIds,
-          scope: attachment.scope,
-        };
-      }),
-    };
+      }
+      const subscribedSessionIds = attachment.subscribedSessionIds.map((sessionId, at) =>
+        parseSessionId(sessionId, `${path}.subscribedSessionIds[${at}]`),
+      );
+      if (new Set(subscribedSessionIds).size !== subscribedSessionIds.length) {
+        throw new ProtocolValidationError(
+          `${path}.subscribedSessionIds`,
+          "must not contain duplicates",
+        );
+      }
+      const connectedAt = nonNegativeInteger(attachment.connectedAt, `${path}.connectedAt`);
+      const lastSeenAt = nonNegativeInteger(attachment.lastSeenAt, `${path}.lastSeenAt`);
+      if (lastSeenAt < connectedAt) {
+        throw new ProtocolValidationError(`${path}.lastSeenAt`, "must not precede connectedAt");
+      }
+      return {
+        attachmentId: boundedString(attachment.attachmentId, `${path}.attachmentId`, 128),
+        clientKind,
+        connectedAt,
+        lastSeenAt,
+        subscribedSessionIds,
+        scope: attachment.scope,
+      };
+    });
+    if (
+      new Set(attachments.map((attachment) => attachment.attachmentId)).size !== attachments.length
+    ) {
+      throw new ProtocolValidationError("message.attachments", "must not contain duplicate IDs");
+    }
+    return { kind, attachments };
   }
   if (kind === "event") {
     exact(message, "message", [

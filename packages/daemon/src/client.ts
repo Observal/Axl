@@ -278,7 +278,9 @@ export class DaemonClient {
                 (capability) =>
                   !message.capabilities.includes(capability) ||
                   !requestedCapabilities.includes(capability),
-              )
+              ) ||
+              (this.latestPresence !== undefined &&
+                !initialized.grantedCapabilities.includes("session.presence"))
             ) {
               this.fail(
                 new WireClientError(
@@ -354,9 +356,29 @@ export class DaemonClient {
       for (const listener of this.eventListeners) listener(message);
     } else if (message.kind === "activity") {
       for (const listener of this.activityListeners) listener(message);
-    } else {
+    } else if (message.kind === "presence") {
+      if (
+        this.initialized !== undefined &&
+        !this.initialized.grantedCapabilities.includes("session.presence")
+      ) {
+        this.fail(
+          new WireClientError(
+            "protocol_error",
+            "Daemon sent presence without granting the capability",
+          ),
+        );
+        return;
+      }
       this.latestPresence = message;
       for (const listener of this.presenceListeners) listener(message);
+    } else {
+      const exhaustive: never = message;
+      this.fail(
+        new WireClientError(
+          "protocol_error",
+          `Daemon sent unsupported message ${String(exhaustive)}`,
+        ),
+      );
     }
   }
 

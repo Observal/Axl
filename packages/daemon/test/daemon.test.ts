@@ -243,14 +243,26 @@ test("publishes bounded attachment presence and subscription membership", async 
     requestedCapabilities: ["session.create", "session.subscribe", "session.presence"],
   });
   context.after(() => first.close());
+  let stopInitialPresence = (): void => undefined;
+  await new Promise<void>((resolvePromise) => {
+    stopInitialPresence = first.onPresence(() => resolvePromise());
+  });
+  stopInitialPresence();
   const firstPresence: Array<
     readonly { attachmentId: string; subscribedSessionIds: readonly string[] }[]
   > = [];
-  first.onPresence((message) => firstPresence.push(message.attachments));
-  for (let attempt = 0; firstPresence.length === 0 && attempt < 100; attempt += 1) {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
-  }
+  const stopPresence = first.onPresence((message) => firstPresence.push(message.attachments));
   assert.equal(firstPresence.at(-1)?.length, 1);
+
+  const withoutPresence = await DaemonClient.connect(fixture.socketPath, {
+    identity: { kind: "headless", version: "1.0.0", instanceId: "presence-disabled" },
+    requestedCapabilities: [],
+  });
+  context.after(() => withoutPresence.close());
+  let unauthorizedPresence = 0;
+  withoutPresence.onPresence(() => {
+    unauthorizedPresence += 1;
+  });
 
   const second = await DaemonClient.connect(fixture.socketPath, {
     identity: { kind: "future_client", version: "2.0.0", instanceId: "presence-two" },
@@ -258,17 +270,18 @@ test("publishes bounded attachment presence and subscription membership", async 
   });
   const secondPresence: Array<readonly { attachmentId: string; clientKind: string }[]> = [];
   second.onPresence((message) => secondPresence.push(message.attachments));
-  for (let attempt = 0; (firstPresence.at(-1)?.length ?? 0) < 2 && attempt < 100; attempt += 1) {
+  for (let attempt = 0; (firstPresence.at(-1)?.length ?? 0) < 3 && attempt < 100; attempt += 1) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
-  assert.equal(firstPresence.at(-1)?.length, 2);
+  assert.equal(firstPresence.at(-1)?.length, 3);
   assert.deepEqual(
     secondPresence
       .at(-1)
       ?.map((attachment) => attachment.clientKind)
       .sort(),
-    ["future_client", "tui"],
+    ["future_client", "headless", "tui"],
   );
+  assert.equal(unauthorizedPresence, 0);
 
   const created = await first.request("session.create", { cwd: fixture.cwd });
   const subscribed = await first.request("session.subscribe", { sessionId: created.sessionId });
@@ -296,10 +309,23 @@ test("publishes bounded attachment presence and subscription membership", async 
   );
 
   second.close();
+  withoutPresence.close();
   for (let attempt = 0; (firstPresence.at(-1)?.length ?? 0) !== 1 && attempt < 100; attempt += 1) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
   assert.equal(firstPresence.at(-1)?.length, 1);
+
+  const updatesBeforeDispose = firstPresence.length;
+  stopPresence();
+  const third = await DaemonClient.connect(fixture.socketPath, {
+    identity: { kind: "ide", version: "1.0.0", instanceId: "presence-three" },
+    requestedCapabilities: ["session.presence"],
+  });
+  context.after(() => third.close());
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  assert.equal(firstPresence.length, updatesBeforeDispose);
+  assert.equal(unauthorizedPresence, 0);
+  third.close();
 });
 
 test("reports the daemon security mode", async (context) => {

@@ -416,6 +416,22 @@ test("validates server messages and newline framing", () => {
   assert.throws(
     () =>
       parseServerMessage({
+        ...initialized,
+        result: { ...initialized.result, heartbeatIntervalMs: 0 },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseServerMessage({
+        ...initialized,
+        result: { ...initialized.result, heartbeatIntervalMs: 60_000 },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseServerMessage({
         kind: "success",
         id: 2,
         method: "session.interrupt",
@@ -467,6 +483,14 @@ test("validates server messages and newline framing", () => {
       parseServerMessage({
         ...presence,
         attachments: [{ ...presence.attachments[0], lastSeenAt: 9 }],
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseServerMessage({
+        ...presence,
+        attachments: [presence.attachments[0], presence.attachments[0]],
       }),
     ProtocolValidationError,
   );
