@@ -50,6 +50,7 @@ import {
 } from "@axl/protocol";
 
 import { AxlDaemon, DaemonError, normalizeDaemonRpcErrorCode } from "../src/index.ts";
+import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
 import {
   AxlClient,
   AxlClientError,
@@ -123,9 +124,11 @@ async function startDaemon(
   securityMode: "sandboxed" | "unsafe" = "sandboxed",
   sandboxProvider?: string,
   sandboxImage?: string,
+  deliveryOptions: { readonly cursorLifetimeMs?: number } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
+  const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
   const daemon = new AxlDaemon({
     socketPath,
@@ -133,11 +136,12 @@ async function startDaemon(
     securityMode,
     ...(sandboxProvider === undefined ? {} : { sandboxProvider }),
     ...(sandboxImage === undefined ? {} : { sandboxImage }),
+    ...deliveryOptions,
     runtime: () => ({ model: port, tools: new ToolRegistry(), system: "You are Axl." }),
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  return { daemon, socketPath, dataDirectory: join(directory, "data"), cwd: directory };
+  return { daemon, socketPath, dataDirectory: join(directory, "data"), cwd };
 }
 
 function types(events: readonly CanonicalEvent[]): readonly string[] {
@@ -282,6 +286,50 @@ function rawConnection(socketPath: string): {
   };
 }
 
+test("persisted command failures use the current code-defined retryability", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-command-journal-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const idempotencyKey = "00000000-0000-4000-8000-000000000001";
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "commands.jsonl"),
+    `${JSON.stringify({
+      version: 1,
+      type: "accepted",
+      idempotencyKey,
+      method: "session.interrupt",
+      requestHash: "a".repeat(64),
+      operationId: idempotencyKey,
+      acceptedAt: 1,
+    })}\n${JSON.stringify({
+      version: 1,
+      type: "failed",
+      idempotencyKey,
+      error: {
+        code: "checkpoint_unavailable",
+        message: "No checkpoint exists",
+        retryable: true,
+      },
+      completedAt: 2,
+    })}\n`,
+  );
+  const journal = await CommandJournal.open(directory);
+  await assert.rejects(
+    journal.execute(
+      {
+        idempotencyKey,
+        method: "session.interrupt",
+        requestHash: "a".repeat(64),
+      },
+      async () => ({ interrupted: false }),
+    ),
+    (error) =>
+      error instanceof CommandJournalError &&
+      error.code === "checkpoint_unavailable" &&
+      error.retryable === false,
+  );
+});
+
 test("the daemon response boundary enforces every method's allowed-error matrix", () => {
   for (const method of RPC_METHODS) {
     for (const code of RPC_ERROR_CODES) {
@@ -391,7 +439,55 @@ test("requires version-4 initialization before session access", async (context) 
   assert.equal(keyOnRead.kind, "error");
   if (keyOnRead.kind === "error") {
     assert.equal(keyOnRead.id, 6);
-    assert.equal(keyOnRead.error.code, "invalid_idempotency_key");
+    assert.equal(keyOnRead.method, "daemon.info");
+    assert.equal(keyOnRead.error.code, "internal_error");
+  }
+});
+
+test("correlates request overload without closing the attachment", async (context) => {
+  const fixture = await startDaemon(context);
+  const raw = rawConnection(fixture.socketPath);
+  context.after(() => raw.socket.destroy());
+  assert.equal((await raw.next()).kind, "hello");
+  raw.send({
+    kind: "request",
+    id: 1,
+    method: "connection.initialize",
+    params: {
+      client: { kind: "headless", version: "0.0.0", instanceId: "overload-client" },
+      requestedCapabilities: ["session.workspace.status"],
+    },
+  });
+  assert.equal((await raw.next()).kind, "success");
+
+  fixture.daemon.sessions.workspaceStatus = async (_sessionId, _params, signal) =>
+    new Promise((_, reject) => {
+      signal?.addEventListener(
+        "abort",
+        () => reject(new DaemonError("cancelled", "Workspace request was cancelled")),
+        { once: true },
+      );
+    });
+  const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+  for (let id = 2; id < 66; id += 1) {
+    raw.send({
+      kind: "request",
+      id,
+      method: "session.workspace.status",
+      params: { sessionId, scope: "working" },
+    });
+  }
+  raw.send({ kind: "request", id: 66, method: "daemon.info", params: {} });
+  const overloaded = await raw.next();
+  assert.equal(overloaded.kind, "error");
+  if (overloaded.kind === "error") {
+    assert.equal(overloaded.id, 66);
+    assert.equal(overloaded.method, "daemon.info");
+    assert.deepEqual(overloaded.error, {
+      code: "rate_limited",
+      message: "Too many pending requests",
+      retryable: true,
+    });
   }
 });
 
@@ -1300,6 +1396,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
   await writeFile(join(workspace, "binary.bin"), Buffer.from([1, 0, 2]));
   await writeFile(join(workspace, "invalid.txt"), Buffer.from([0xc3, 0x28]));
   await symlink(fixture.cwd, join(workspace, "escape"));
+  await symlink("src", join(workspace, "inside-link"));
   if (process.platform !== "win32") await execute("mkfifo", [join(workspace, "named-pipe")]);
 
   const client = await connectUnixClient(fixture.socketPath);
@@ -1363,6 +1460,7 @@ test("lists and reads only bounded policy-checked workspace paths", async (conte
   for (const [path, code] of [
     ["../outside", "bad_request"],
     ["escape/file", "symlink_escape"],
+    ["inside-link/b.txt", "unsupported_file_type"],
     [".env", "path_denied"],
     [".axl/credentials.json", "path_denied"],
     ["binary.bin", "binary_file"],
@@ -1672,7 +1770,10 @@ test("serves generation-checked working and last-turn workspace status and diffs
       sessionId: created.sessionId,
       scope: "last-turn",
     }),
-    (error) => error instanceof AxlClientError && error.code === "checkpoint_unavailable",
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "checkpoint_unavailable" &&
+      error.retryable === false,
   );
   const checkpoint = await client.request("session.workspace.checkpoint", {
     sessionId: created.sessionId,
@@ -1728,6 +1829,15 @@ test("serves generation-checked working and last-turn workspace status and diffs
     working.entries.map((entry) => entry.path),
     [".gitattributes", "new.txt", "tracked.txt"],
   );
+  await writeFile(join(workspace, ".env"), "SECRET=protected\n");
+  await assert.rejects(
+    client.request("session.workspace.status", {
+      sessionId: created.sessionId,
+      scope: "working",
+    }),
+    (error) => error instanceof AxlClientError && error.code === "path_denied",
+  );
+  await rm(join(workspace, ".env"));
   await assert.rejects(readFile(textconvMarker), { code: "ENOENT" });
   await assert.rejects(readFile(filterMarker), { code: "ENOENT" });
   await writeFile(join(workspace, "later.txt"), "changed generation\n");
@@ -2368,6 +2478,84 @@ test("subscribe supports opaque acknowledged cursors and multiple attachments", 
       sessionId: created.sessionId,
       after: "unknown-cursor",
     }),
+    (error) => error instanceof AxlClientError && error.code === "snapshot_required",
+  );
+});
+
+test("selected-node subscriptions remain bound to the selected lineage", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context);
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "first" }],
+  });
+  const initial = await subscribeAll(client, created.sessionId);
+  const selectedNodeId = initial.events.at(-1)?.id;
+  assert.ok(selectedNodeId);
+  await client.request("session.unsubscribe", {
+    subscriptionId: initial.subscription.subscriptionId,
+  });
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "outside selected lineage" }],
+  });
+
+  const deliveries: WireEvent[] = [];
+  client.onEvent((event) => deliveries.push(event));
+  const selected = await client.request("session.subscribe", {
+    sessionId: created.sessionId,
+    fromNodeId: selectedNodeId,
+  });
+  const descriptor = selected.snapshot;
+  assert.ok(descriptor);
+  assert.deepEqual(types(descriptor.page.events), [
+    "session.created",
+    "user.message",
+    "assistant.message",
+  ]);
+  await client.request("session.ack", {
+    subscriptionId: selected.subscriptionId,
+    cursor: descriptor.boundaryCursor,
+  });
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "still outside selected lineage" }],
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  assert.deepEqual(deliveries, []);
+});
+
+test("acknowledged event cursors expire and require a replacement snapshot", async (context) => {
+  const { socketPath, cwd } = await startDaemon(
+    context,
+    replyPort(),
+    "sandboxed",
+    undefined,
+    undefined,
+    { cursorLifetimeMs: 50 },
+  );
+  const first = await connectUnixClient(socketPath);
+  const second = await connectUnixClient(socketPath);
+  context.after(() => {
+    first.close();
+    second.close();
+  });
+  const created = await first.request("session.create", { cwd });
+  const subscribed = await first.request("session.subscribe", { sessionId: created.sessionId });
+  const cursor = subscribed.snapshot?.boundaryCursor;
+  assert.ok(cursor);
+  await first.request("session.ack", {
+    subscriptionId: subscribed.subscriptionId,
+    cursor,
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 75));
+  await assert.rejects(
+    second.request("session.subscribe", { sessionId: created.sessionId, after: cursor }),
     (error) => error instanceof AxlClientError && error.code === "snapshot_required",
   );
 });

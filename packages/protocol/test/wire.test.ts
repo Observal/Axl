@@ -697,8 +697,8 @@ test("validates server messages and newline framing", () => {
       id: 2,
       method: "session.interrupt",
       error: {
-        code: "operation_active",
-        message: "An operation is active",
+        code: "invalid_idempotency_key",
+        message: "An idempotency key is required",
         retryable: false,
         details: { sessionId },
       },
@@ -708,12 +708,26 @@ test("validates server messages and newline framing", () => {
       id: 2,
       method: "session.interrupt",
       error: {
-        code: "operation_active",
-        message: "An operation is active",
+        code: "invalid_idempotency_key",
+        message: "An idempotency key is required",
         retryable: false,
         details: { sessionId },
       },
     },
+  );
+  assert.throws(
+    () =>
+      parseServerMessage({
+        kind: "error",
+        id: 2,
+        method: "session.interrupt",
+        error: {
+          code: "operation_active",
+          message: "An operation is active",
+          retryable: false,
+        },
+      }),
+    ProtocolValidationError,
   );
 
   const presence = {

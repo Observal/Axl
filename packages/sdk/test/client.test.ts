@@ -172,6 +172,46 @@ test("preserves unknown future structured errors without crashing", async () => 
   client.close();
 });
 
+test("rejects request-correlated errors without the matching method", async () => {
+  for (const method of [undefined, "connection.ping"] as const) {
+    const { client, transport } = await connect();
+    const pending = client.request("daemon.info", {});
+    const request = transport.messages.at(-1) as { id: number };
+    transport.emit({
+      kind: "error",
+      id: request.id,
+      ...(method === undefined ? {} : { method }),
+      error: { code: "bad_request", message: "Invalid request", retryable: false },
+    });
+    await assert.rejects(
+      pending,
+      (error) => error instanceof AxlClientError && error.code === "protocol_error",
+    );
+    assert.equal(client.state, "disconnected");
+  }
+});
+
+test("rejects known errors outside the pending method's allowed matrix", async () => {
+  const { client, transport } = await connect();
+  const pending = client.request("daemon.info", {});
+  const request = transport.messages.at(-1) as { id: number };
+  transport.emit({
+    kind: "error",
+    id: request.id,
+    method: "daemon.info",
+    error: {
+      code: "invalid_idempotency_key",
+      message: "Unexpected idempotency key",
+      retryable: false,
+    },
+  });
+  await assert.rejects(
+    pending,
+    (error) => error instanceof AxlClientError && error.code === "protocol_error",
+  );
+  assert.equal(client.state, "disconnected");
+});
+
 test("fails capability checks before writing a request", async () => {
   const factory = new Factory();
   const client = await AxlClient.connect({

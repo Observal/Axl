@@ -761,7 +761,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 2,
+      "method": "connection.initialize",
       "error": {
         "code": "unsupported_version",
         "message": "Fixture error: unsupported_version",
@@ -770,7 +771,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 3,
+      "method": "daemon.info",
       "error": {
         "code": "unsupported_capability",
         "message": "Fixture error: unsupported_capability",
@@ -779,7 +781,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 4,
+      "method": "daemon.info",
       "error": {
         "code": "not_initialized",
         "message": "Fixture error: not_initialized",
@@ -788,7 +791,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 5,
+      "method": "connection.initialize",
       "error": {
         "code": "connection_already_initialized",
         "message": "Fixture error: connection_already_initialized",
@@ -797,7 +801,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 6,
+      "method": "connection.initialize",
       "error": {
         "code": "unauthorized",
         "message": "Fixture error: unauthorized",
@@ -806,7 +811,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 7,
+      "method": "connection.initialize",
       "error": {
         "code": "forbidden",
         "message": "Fixture error: forbidden",
@@ -815,7 +821,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 8,
+      "method": "daemon.info",
       "error": {
         "code": "rate_limited",
         "message": "Fixture error: rate_limited",
@@ -833,7 +840,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 10,
+      "method": "daemon.info",
       "error": {
         "code": "cancelled",
         "message": "Fixture error: cancelled",
@@ -842,7 +850,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 11,
+      "method": "daemon.info",
       "error": {
         "code": "internal_error",
         "message": "Fixture error: internal_error",
@@ -851,7 +860,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 12,
+      "method": "session.create",
       "error": {
         "code": "invalid_cwd",
         "message": "Fixture error: invalid_cwd",
@@ -860,7 +870,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 13,
+      "method": "session.create",
       "error": {
         "code": "invalid_idempotency_key",
         "message": "Fixture error: invalid_idempotency_key",
@@ -869,7 +880,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 14,
+      "method": "session.create",
       "error": {
         "code": "idempotency_conflict",
         "message": "Fixture error: idempotency_conflict",
@@ -878,7 +890,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 15,
+      "method": "session.resume",
       "error": {
         "code": "unknown_session",
         "message": "Fixture error: unknown_session",
@@ -887,7 +900,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 16,
+      "method": "session.create",
       "error": {
         "code": "corrupt_session",
         "message": "Fixture error: corrupt_session",
@@ -896,7 +910,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 17,
+      "method": "session.resume",
       "error": {
         "code": "event_migration_required",
         "message": "Fixture error: event_migration_required",
@@ -905,7 +920,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 18,
+      "method": "session.fork",
       "error": {
         "code": "operation_active",
         "message": "Fixture error: operation_active",
@@ -914,7 +930,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 19,
+      "method": "session.queue.requeue",
       "error": {
         "code": "unknown_queue_item",
         "message": "Fixture error: unknown_queue_item",
@@ -923,7 +940,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 20,
+      "method": "session.queue.requeue",
       "error": {
         "code": "queue_not_paused",
         "message": "Fixture error: queue_not_paused",
@@ -932,7 +950,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 21,
+      "method": "session.fork",
       "error": {
         "code": "invalid_fork_point",
         "message": "Fixture error: invalid_fork_point",
@@ -941,7 +960,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 22,
+      "method": "session.clone",
       "error": {
         "code": "empty_session",
         "message": "Fixture error: empty_session",
@@ -950,7 +970,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 23,
+      "method": "session.interaction.respond",
       "error": {
         "code": "unknown_interaction",
         "message": "Fixture error: unknown_interaction",
@@ -959,7 +980,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 24,
+      "method": "session.interaction.respond",
       "error": {
         "code": "interaction_already_resolved",
         "message": "Fixture error: interaction_already_resolved",
@@ -968,7 +990,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 25,
+      "method": "session.ack",
       "error": {
         "code": "unknown_subscription",
         "message": "Fixture error: unknown_subscription",
@@ -977,7 +1000,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 26,
+      "method": "session.list",
       "error": {
         "code": "unknown_cursor",
         "message": "Fixture error: unknown_cursor",
@@ -986,7 +1010,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 27,
+      "method": "session.history",
       "error": {
         "code": "snapshot_required",
         "message": "Fixture error: snapshot_required",
@@ -995,7 +1020,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 28,
+      "method": "session.workspace.list",
       "error": {
         "code": "workspace_unavailable",
         "message": "Fixture error: workspace_unavailable",
@@ -1004,7 +1030,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 29,
+      "method": "session.workspace.list",
       "error": {
         "code": "workspace_changed",
         "message": "Fixture error: workspace_changed",
@@ -1013,7 +1040,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 30,
+      "method": "session.workspace.list",
       "error": {
         "code": "invalid_path",
         "message": "Fixture error: invalid_path",
@@ -1022,7 +1050,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 31,
+      "method": "session.workspace.list",
       "error": {
         "code": "path_denied",
         "message": "Fixture error: path_denied",
@@ -1031,7 +1060,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 32,
+      "method": "session.workspace.list",
       "error": {
         "code": "symlink_escape",
         "message": "Fixture error: symlink_escape",
@@ -1040,7 +1070,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 33,
+      "method": "session.workspace.list",
       "error": {
         "code": "not_found",
         "message": "Fixture error: not_found",
@@ -1049,7 +1080,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 34,
+      "method": "session.workspace.read",
       "error": {
         "code": "not_a_file",
         "message": "Fixture error: not_a_file",
@@ -1058,7 +1090,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 35,
+      "method": "session.workspace.list",
       "error": {
         "code": "unsupported_file_type",
         "message": "Fixture error: unsupported_file_type",
@@ -1067,7 +1100,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 36,
+      "method": "session.workspace.list",
       "error": {
         "code": "unsupported_filename_encoding",
         "message": "Fixture error: unsupported_filename_encoding",
@@ -1076,7 +1110,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 37,
+      "method": "session.workspace.read",
       "error": {
         "code": "binary_file",
         "message": "Fixture error: binary_file",
@@ -1085,7 +1120,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 38,
+      "method": "session.workspace.read",
       "error": {
         "code": "invalid_encoding",
         "message": "Fixture error: invalid_encoding",
@@ -1094,7 +1130,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 39,
+      "method": "session.create",
       "error": {
         "code": "content_too_large",
         "message": "Fixture error: content_too_large",
@@ -1103,7 +1140,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 40,
+      "method": "session.workspace.status",
       "error": {
         "code": "not_git_repository",
         "message": "Fixture error: not_git_repository",
@@ -1112,7 +1150,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 41,
+      "method": "session.workspace.status",
       "error": {
         "code": "git_unavailable",
         "message": "Fixture error: git_unavailable",
@@ -1121,7 +1160,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 42,
+      "method": "session.workspace.status",
       "error": {
         "code": "git_timeout",
         "message": "Fixture error: git_timeout",
@@ -1130,7 +1170,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 43,
+      "method": "session.workspace.status",
       "error": {
         "code": "git_output_too_large",
         "message": "Fixture error: git_output_too_large",
@@ -1139,7 +1180,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 44,
+      "method": "session.workspace.status",
       "error": {
         "code": "unsupported_git_state",
         "message": "Fixture error: unsupported_git_state",
@@ -1148,7 +1190,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 45,
+      "method": "session.workspace.diff",
       "error": {
         "code": "repository_changed",
         "message": "Fixture error: repository_changed",
@@ -1157,16 +1200,18 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 46,
+      "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_unavailable",
         "message": "Fixture error: checkpoint_unavailable",
-        "retryable": true
+        "retryable": false
       }
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 47,
+      "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_too_large",
         "message": "Fixture error: checkpoint_too_large",
@@ -1175,7 +1220,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 48,
+      "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_corrupt",
         "message": "Fixture error: checkpoint_corrupt",
@@ -1184,7 +1230,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 49,
+      "method": "session.blob.start",
       "error": {
         "code": "invalid_media_type",
         "message": "Fixture error: invalid_media_type",
@@ -1193,7 +1240,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 50,
+      "method": "session.blob.start",
       "error": {
         "code": "invalid_blob_name",
         "message": "Fixture error: invalid_blob_name",
@@ -1202,7 +1250,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 51,
+      "method": "session.blob.chunk",
       "error": {
         "code": "invalid_blob_chunk",
         "message": "Fixture error: invalid_blob_chunk",
@@ -1211,7 +1260,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 52,
+      "method": "session.blob.start",
       "error": {
         "code": "blob_too_large",
         "message": "Fixture error: blob_too_large",
@@ -1220,7 +1270,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 53,
+      "method": "session.blob.start",
       "error": {
         "code": "too_many_uploads",
         "message": "Fixture error: too_many_uploads",
@@ -1229,7 +1280,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 54,
+      "method": "session.blob.chunk",
       "error": {
         "code": "unknown_blob_upload",
         "message": "Fixture error: unknown_blob_upload",
@@ -1238,7 +1290,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 55,
+      "method": "session.blob.chunk",
       "error": {
         "code": "blob_offset_mismatch",
         "message": "Fixture error: blob_offset_mismatch",
@@ -1247,7 +1300,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 56,
+      "method": "session.blob.chunk",
       "error": {
         "code": "blob_size_mismatch",
         "message": "Fixture error: blob_size_mismatch",
@@ -1256,7 +1310,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 57,
+      "method": "session.blob.chunk",
       "error": {
         "code": "blob_write_failed",
         "message": "Fixture error: blob_write_failed",
@@ -1265,7 +1320,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 58,
+      "method": "session.blob.commit",
       "error": {
         "code": "invalid_image",
         "message": "Fixture error: invalid_image",
@@ -1274,7 +1330,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 59,
+      "method": "session.send",
       "error": {
         "code": "blob_not_owned",
         "message": "Fixture error: blob_not_owned",
@@ -1283,7 +1340,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 60,
+      "method": "session.send",
       "error": {
         "code": "blob_missing",
         "message": "Fixture error: blob_missing",
@@ -1292,7 +1350,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 61,
+      "method": "session.send",
       "error": {
         "code": "blob_corrupt",
         "message": "Fixture error: blob_corrupt",
@@ -1301,7 +1360,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 62,
+      "method": "session.blob.read",
       "error": {
         "code": "invalid_blob_range",
         "message": "Fixture error: invalid_blob_range",
@@ -1310,7 +1370,8 @@
     },
     {
       "kind": "error",
-      "id": -1,
+      "id": 63,
+      "method": "session.blob.read",
       "error": {
         "code": "blob_read_failed",
         "message": "Fixture error: blob_read_failed",
@@ -4036,7 +4097,7 @@
       "error": {
         "code": "checkpoint_unavailable",
         "message": "Fixture session.workspace.status error: checkpoint_unavailable",
-        "retryable": true
+        "retryable": false
       }
     },
     {
@@ -4056,6 +4117,16 @@
       "error": {
         "code": "checkpoint_corrupt",
         "message": "Fixture session.workspace.status error: checkpoint_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2320,
+      "method": "session.workspace.status",
+      "error": {
+        "code": "path_denied",
+        "message": "Fixture session.workspace.status error: path_denied",
         "retryable": false
       }
     },
@@ -4226,7 +4297,7 @@
       "error": {
         "code": "checkpoint_unavailable",
         "message": "Fixture session.workspace.diff error: checkpoint_unavailable",
-        "retryable": true
+        "retryable": false
       }
     },
     {
@@ -4252,6 +4323,16 @@
     {
       "kind": "error",
       "id": 2420,
+      "method": "session.workspace.diff",
+      "error": {
+        "code": "path_denied",
+        "message": "Fixture session.workspace.diff error: path_denied",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2421,
       "method": "session.workspace.diff",
       "error": {
         "code": "repository_changed",
@@ -4416,7 +4497,7 @@
       "error": {
         "code": "checkpoint_unavailable",
         "message": "Fixture session.workspace.checkpoint error: checkpoint_unavailable",
-        "retryable": true
+        "retryable": false
       }
     },
     {

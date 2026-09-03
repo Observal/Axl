@@ -76,7 +76,15 @@ test("language-neutral fixtures cover every named structured error", () => {
   for (const message of errors) {
     assert.equal(message.kind, "error");
     assert.equal(message.error.retryable, isRpcErrorRetryable(message.error.code));
+    if (message.id === -1) {
+      assert.equal(message.method, undefined);
+      assert.equal(PRE_RPC_ERROR_CODES.includes(message.error.code as never), true);
+    } else {
+      assert.ok(message.method);
+      assert.equal(isRpcErrorAllowed(message.method, message.error.code), true);
+    }
   }
+  assert.equal(isRpcErrorRetryable("checkpoint_unavailable"), false);
 });
 
 test("every named error is classified as pre-RPC, universal, or method-specific", () => {

@@ -114,7 +114,9 @@ function parseFailure(value: unknown, path: string): CommandFailure {
   return {
     code: error.code,
     message: error.message,
-    retryable: error.retryable,
+    // Retryability is code-defined. Reclassify persisted failures when the
+    // protocol corrects a code's semantics instead of replaying stale metadata.
+    retryable: isRpcErrorRetryable(error.code),
     ...(error.details === undefined ? {} : { details: error.details as JsonObject }),
   };
 }

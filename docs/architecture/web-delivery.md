@@ -215,7 +215,7 @@ interface SessionSubscribeResult {
 }
 ```
 
-`fromNodeId` selects the tree node projected by the view. It is optional until branch navigation lands and never mutates history.
+`fromNodeId` selects the fixed tree lineage projected by the view. It is optional until branch navigation lands and never mutates history. A selected-node subscription does not receive later events from descendants, siblings, or the unrelated active tip; selecting a newer node creates a replacement subscription.
 
 A new subscription atomically fixes its boundary and returns a snapshot descriptor with the first history page. Create, resume, fork, and clone return bounded session metadata, after which the client subscribes. Additional frozen pages use `session.history`. Events appended between those calls are included in the snapshot or buffered tail. A valid reconnect cursor returns only the missing tail and live subscription.
 
@@ -232,7 +232,7 @@ It contains no authority credential and may be persisted.
 
 The SDK accepts an injected cursor store. The web client initially uses `sessionStorage`, keyed by daemon instance, session, and selected node. Cursor-store failure is visible in connection details and disables resumable reconnect for that subscription. Live delivery continues. Reconnect then requests a fresh snapshot.
 
-An unknown, expired, wrong-lineage, wrong-session, or wrong-node cursor returns `snapshot_required`. The client discards the affected derived projection and requests a replacement snapshot. It never combines incompatible state.
+An unknown, expired, evicted, wrong-lineage, wrong-session, or wrong-node cursor returns `snapshot_required`. Event cursors have a daemon-defined absolute lifetime, and the daemon enforces a hard global cursor count. Cumulative acknowledgement and subscription cleanup discard superseded and unacknowledged cursor records while retaining at most the latest acknowledged reconnect point until expiry. The client discards the affected derived projection and requests a replacement snapshot. It never combines incompatible state.
 
 ## Event delivery
 
@@ -290,7 +290,7 @@ interface SessionAckResult {
 }
 ```
 
-Acknowledgements are cumulative. The daemon may coalesce them and discard acknowledged delivery buffers. An acknowledgement changes no session behavior.
+Acknowledgements are cumulative. The daemon may coalesce them and discard acknowledged delivery buffers. An acknowledgement changes no session behavior. If expiry or bounded eviction removes a cursor before acknowledgement, `unknown_cursor` or `snapshot_required` triggers the same replacement-snapshot recovery as a failed reconnect cursor; the SDK does not leave the view silently unbound.
 
 ## Presence
 

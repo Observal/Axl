@@ -208,7 +208,7 @@ interface RpcError {
 
 ### Allowed-error matrix
 
-The universal method errors are `bad_request`, `not_initialized`, `unsupported_capability`, `rate_limited`, `internal_error`, and `cancelled`. `frame_too_large` is the sole pre-RPC error and may omit `method` because no valid RPC was established.
+The universal method errors are `bad_request`, `not_initialized`, `unsupported_capability`, `rate_limited`, `internal_error`, and `cancelled`. The pre-RPC errors are `bad_request` and `frame_too_large`; they use `id: -1` and omit `method` when malformed input prevents the daemon from establishing a valid RPC. `bad_request` is both pre-RPC-capable and universal because validation can fail before or after request correlation.
 
 The following table lists the additional errors each method may return. The exported `UNIVERSAL_RPC_ERROR_CODES` and `RPC_METHOD_ERROR_CODES` values are the machine-readable authority.
 
@@ -234,7 +234,7 @@ The following table lists the additional errors each method may return. The expo
 | `session.subscribe` | `unknown_session`, `event_migration_required`, `snapshot_required` |
 | `session.workspace.list` | `unknown_session`, `event_migration_required`, `workspace_unavailable`, `workspace_changed`, `invalid_path`, `path_denied`, `symlink_escape`, `not_found`, `unsupported_file_type`, `unsupported_filename_encoding` |
 | `session.workspace.read` | all `session.workspace.list` errors plus `not_a_file`, `binary_file`, `invalid_encoding`, `content_too_large` |
-| `session.workspace.status` | `unknown_session`, `event_migration_required`, `workspace_unavailable`, `workspace_changed`, `not_git_repository`, `git_unavailable`, `git_timeout`, `git_output_too_large`, `unsupported_git_state`, `unsupported_filename_encoding`, `checkpoint_unavailable`, `checkpoint_too_large`, `checkpoint_corrupt` |
+| `session.workspace.status` | `unknown_session`, `event_migration_required`, `workspace_unavailable`, `workspace_changed`, `not_git_repository`, `git_unavailable`, `git_timeout`, `git_output_too_large`, `unsupported_git_state`, `unsupported_filename_encoding`, `checkpoint_unavailable`, `checkpoint_too_large`, `checkpoint_corrupt`, `path_denied` |
 | `session.workspace.diff` | all `session.workspace.status` errors plus `repository_changed` |
 | `session.workspace.checkpoint` | `unknown_session`, `event_migration_required`, `operation_active`, `not_git_repository`, `git_unavailable`, `git_timeout`, `git_output_too_large`, `unsupported_git_state`, `unsupported_filename_encoding`, `checkpoint_unavailable`, `checkpoint_too_large`, `checkpoint_corrupt` |
 | `session.blob.start` | `unknown_session`, `event_migration_required`, `invalid_media_type`, `invalid_blob_name`, `blob_too_large`, `too_many_uploads` |
@@ -246,13 +246,13 @@ The following table lists the additional errors each method may return. The expo
 
 The daemon converts an unrecognized or disallowed implementation error to `internal_error`; it does not leak arbitrary subsystem codes. Model and provider failures during a turn are canonical `session.error` events, not `session.send` RPC failures.
 
-`retryable` is code-defined, not call-site-defined. It is `true` only for `rate_limited`, `git_timeout`, `checkpoint_unavailable`, `too_many_uploads`, `blob_write_failed`, and `blob_read_failed`. It is `false` for every other named code. A retryable mutation still reuses its original idempotency key.
+`retryable` is code-defined, not call-site-defined. It is `true` only for `rate_limited`, `git_timeout`, `too_many_uploads`, `blob_write_failed`, and `blob_read_failed`. It is `false` for every other named code. In particular, `checkpoint_unavailable` can mean that no checkpoint was created, so repeating the same request cannot repair it. A retryable mutation still reuses its original idempotency key.
 
 Clients must accept unknown future string codes. They display the safe `message`, retain the unknown code and bounded details for diagnostics, obey the supplied `retryable` value, and never crash or infer success.
 
 `event_migration_required` details contain only `sessionId`, `eventId`, `eventType`, `encodedBytes`, `maximumBytes`, and a safe recovery command. They contain no payload excerpt or absolute path. `content_too_large` identifies the bounded field and limit without echoing rejected content.
 
-A validation failure before a request ID can be trusted uses `id: -1`. The server closes the connection when framing or integrity is uncertain.
+A validation failure before a request ID can be trusted uses `id: -1`. Once a valid request ID and known method are decoded, validation and overload errors include both and pass through the method-specific allowed-error matrix. The server closes the connection when framing or integrity is uncertain.
 
 ## Session method shapes
 

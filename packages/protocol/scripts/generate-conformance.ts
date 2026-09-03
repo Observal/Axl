@@ -12,12 +12,14 @@ import {
   parseEvent,
   type EventType,
   isRetryableMutationMethod,
+  isRpcErrorAllowed,
   isRpcErrorRetryable,
   parseEventId,
   parseOperationId,
   parseServerMessage,
   parseSessionId,
   parseWireRequest,
+  PRE_RPC_ERROR_CODES,
   RPC_ERROR_CODES,
   RPC_METHOD_ERROR_CODES,
   type RpcMethod,
@@ -336,11 +338,23 @@ const successes = Object.entries(results).map(([method, result], index) => ({
   method,
   result,
 }));
-const errors = RPC_ERROR_CODES.map((code) => ({
-  kind: "error",
-  id: -1,
-  error: { code, message: `Fixture error: ${code}`, retryable: isRpcErrorRetryable(code) },
-}));
+const errors = RPC_ERROR_CODES.map((code, index) => {
+  if ((PRE_RPC_ERROR_CODES as readonly string[]).includes(code)) {
+    return {
+      kind: "error" as const,
+      id: -1,
+      error: { code, message: `Fixture error: ${code}`, retryable: isRpcErrorRetryable(code) },
+    };
+  }
+  const method = RPC_METHODS.find((candidate) => isRpcErrorAllowed(candidate, code));
+  if (method === undefined) throw new Error(`No RPC method allows ${code}`);
+  return {
+    kind: "error" as const,
+    id: index + 1,
+    method,
+    error: { code, message: `Fixture error: ${code}`, retryable: isRpcErrorRetryable(code) },
+  };
+});
 const allowedErrors = RPC_METHODS.flatMap((method, methodIndex) =>
   [...new Set([...UNIVERSAL_RPC_ERROR_CODES, ...RPC_METHOD_ERROR_CODES[method]])].map(
     (code, codeIndex) => ({

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough as NodePassThrough } from "node:stream";
@@ -77,7 +77,7 @@ async function startStack(
   });
   await daemon.start();
   context.after(() => daemon.stop());
-  return { socketPath, directory };
+  return { socketPath, directory: await realpath(directory) };
 }
 
 function captureOutput(): {

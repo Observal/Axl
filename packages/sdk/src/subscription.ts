@@ -30,6 +30,13 @@ export interface SessionSubscription {
   close(): Promise<void>;
 }
 
+function isCursorRecoveryError(error: unknown): error is AxlClientError {
+  return (
+    error instanceof AxlClientError &&
+    (error.code === "unknown_cursor" || error.code === "snapshot_required")
+  );
+}
+
 export interface SessionSubscriptionOptions {
   readonly fromNodeId?: EventId;
   readonly cursorStore?: CursorStore;
@@ -283,6 +290,13 @@ class ResumableSessionSubscription implements SessionSubscription {
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "Subscription loading and cleanup failed");
       }
+      if (!forceSnapshot && isCursorRecoveryError(error) && !this.closed) {
+        this.projector.reset(this.sessionId, this.options.fromNodeId);
+        this.acknowledgedCursor = undefined;
+        this.options.onChange?.(this.projector);
+        await this.deleteCursor(nextStoreKey);
+        return this.establish(client, true);
+      }
       throw error;
     }
   }
@@ -388,7 +402,10 @@ class ResumableSessionSubscription implements SessionSubscription {
     this.options.onResyncRequired?.(normalized);
     if (normalized instanceof ProjectionError && normalized.code === "event_sequence_gap") {
       this.scheduleRecovery(false);
-    } else if (normalized instanceof ProjectionError && normalized.code === "missing_parent") {
+    } else if (
+      (normalized instanceof ProjectionError && normalized.code === "missing_parent") ||
+      isCursorRecoveryError(normalized)
+    ) {
       this.scheduleRecovery(true);
     } else {
       this.unbind();

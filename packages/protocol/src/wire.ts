@@ -2335,6 +2335,7 @@ export const RPC_METHODS = [
 export type KnownRpcErrorCode = (typeof RPC_ERROR_CODES)[number];
 
 export const PRE_RPC_ERROR_CODES = [
+  "bad_request",
   "frame_too_large",
 ] as const satisfies readonly KnownRpcErrorCode[];
 
@@ -2474,11 +2475,17 @@ export const RPC_METHOD_ERROR_CODES = {
     "invalid_encoding",
     "content_too_large",
   ],
-  "session.workspace.status": [...WORKSPACE_BASE_ERRORS, ...GIT_ERRORS, ...CHECKPOINT_ERRORS],
+  "session.workspace.status": [
+    ...WORKSPACE_BASE_ERRORS,
+    ...GIT_ERRORS,
+    ...CHECKPOINT_ERRORS,
+    "path_denied",
+  ],
   "session.workspace.diff": [
     ...WORKSPACE_BASE_ERRORS,
     ...GIT_ERRORS,
     ...CHECKPOINT_ERRORS,
+    "path_denied",
     "repository_changed",
   ],
   "session.workspace.checkpoint": [
@@ -2529,7 +2536,6 @@ export type RpcMethodErrorCode<Method extends RpcMethod> =
 export const RETRYABLE_RPC_ERROR_CODES = [
   "rate_limited",
   "git_timeout",
-  "checkpoint_unavailable",
   "too_many_uploads",
   "blob_write_failed",
   "blob_read_failed",
@@ -2612,19 +2618,43 @@ export function parseServerMessage(value: unknown): ServerMessage {
     if (!Number.isSafeInteger(message.id) || (message.id as number) < -1) {
       throw new ProtocolValidationError("message.id", "must be a safe integer at least -1");
     }
+    const id = message.id as number;
+    const method =
+      message.method === undefined ? undefined : parseRpcMethod(message.method, "message.method");
     const error = object(message.error, "message.error");
     exact(error, "message.error", ["code", "message", "retryable", "details"]);
+    const code = boundedString(error.code, "message.error.code", 128);
     if (typeof error.retryable !== "boolean") {
       throw new ProtocolValidationError("message.error.retryable", "must be a boolean");
     }
+    if (id === -1 && method !== undefined) {
+      throw new ProtocolValidationError("message.method", "is not allowed on a pre-RPC error");
+    }
+    if (id !== -1 && method === undefined) {
+      throw new ProtocolValidationError("message.method", "is required on a correlated error");
+    }
+    if (
+      isKnownRpcErrorCode(code) &&
+      ((id === -1 && !(PRE_RPC_ERROR_CODES as readonly string[]).includes(code)) ||
+        (method !== undefined && !isRpcErrorAllowed(method, code)))
+    ) {
+      throw new ProtocolValidationError(
+        "message.error.code",
+        "is not allowed for this error correlation",
+      );
+    }
+    if (isKnownRpcErrorCode(code) && error.retryable !== isRpcErrorRetryable(code)) {
+      throw new ProtocolValidationError(
+        "message.error.retryable",
+        "does not match the code-defined retryability",
+      );
+    }
     return {
       kind,
-      id: message.id as number,
-      ...(message.method === undefined
-        ? {}
-        : { method: parseRpcMethod(message.method, "message.method") }),
+      id,
+      ...(method === undefined ? {} : { method }),
       error: {
-        code: boundedString(error.code, "message.error.code", 128),
+        code,
         message: boundedText(error.message, "message.error.message", 4096),
         retryable: error.retryable,
         ...(error.details === undefined

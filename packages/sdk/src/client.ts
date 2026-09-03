@@ -3,7 +3,9 @@
 
 import {
   encodeWireMessage,
+  isKnownRpcErrorCode,
   isRetryableMutationMethod,
+  isRpcErrorAllowed,
   parseServerMessage,
   parseWireRequest,
   requiredCapability,
@@ -459,9 +461,27 @@ export class AxlClient {
       pending.resolve(message.result);
     } else if (message.kind === "error") {
       const pending = this.pending.get(message.id);
-      if (message.id !== -1 && pending === undefined) {
-        this.fail(new AxlClientError("protocol_error", "Daemon rejected an unknown request"));
-        return;
+      if (message.id !== -1) {
+        if (pending === undefined) {
+          this.fail(new AxlClientError("protocol_error", "Daemon rejected an unknown request"));
+          return;
+        }
+        if (message.method !== pending.method) {
+          this.fail(new AxlClientError("protocol_error", "Daemon error did not match request"));
+          return;
+        }
+        if (
+          isKnownRpcErrorCode(message.error.code) &&
+          !isRpcErrorAllowed(pending.method, message.error.code)
+        ) {
+          this.fail(
+            new AxlClientError(
+              "protocol_error",
+              "Daemon returned an error that is not allowed for the request",
+            ),
+          );
+          return;
+        }
       }
       const error = new AxlClientError(message.error.code, message.error.message, {
         retryable: message.error.retryable,

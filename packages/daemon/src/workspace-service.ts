@@ -3,7 +3,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type Dirent, type Stats } from "node:fs";
-import { lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { type FileHandle, lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type {
@@ -45,6 +45,15 @@ interface WorkspaceIdentity {
   readonly root: string;
   readonly generation: string;
   readonly stats: Stats;
+}
+
+interface GuardedPath {
+  readonly handle: FileHandle;
+  readonly components: readonly {
+    readonly path: string;
+    readonly handle: FileHandle;
+    readonly stats: Stats;
+  }[];
 }
 
 interface DirectoryCursor {
@@ -261,68 +270,65 @@ export class WorkspaceService {
       offset = cursor.offset;
       this.cursors.delete(params.pageCursor);
     }
-    let rawEntries: Dirent<Buffer>[];
+    const guard = await this.guardExisting(identity, path, target.stats);
+    let named: Array<{ readonly entry: Dirent<Buffer>; readonly name: string }>;
+    let entries: WorkspaceEntry[];
     try {
-      rawEntries = await readdir(target.canonical, { withFileTypes: true, encoding: "buffer" });
-    } catch (cause) {
-      throw this.fileError(cause, "workspace_unavailable", "Cannot list workspace directory");
-    }
-    const [afterDirectoryPath, afterDirectoryStats] = await Promise.all([
-      realpath(path === "" ? identity.root : join(identity.root, ...path.split("/"))),
-      stat(target.canonical),
-    ]);
-    if (
-      afterDirectoryPath !== target.canonical ||
-      afterDirectoryStats.dev !== target.stats.dev ||
-      afterDirectoryStats.ino !== target.stats.ino ||
-      afterDirectoryStats.mtimeMs !== target.stats.mtimeMs
-    ) {
-      throw new WorkspaceError("workspace_changed", "Directory changed while it was listed");
-    }
-    const named = rawEntries.map((entry) => ({
-      entry,
-      name: fatalUtf8(entry.name, "unsupported_filename_encoding"),
-    }));
-    named.sort((left, right) => Buffer.compare(left.entry.name, right.entry.name));
-    const page = named.slice(offset, offset + params.pageSize);
-    const entries: WorkspaceEntry[] = [];
-    for (const { name } of page) {
-      this.assertActive(signal);
-      const childPath = path ? `${path}/${name}` : name;
-      const child = join(identity.root, ...childPath.split("/"));
-      let info: Stats;
+      let rawEntries: Dirent<Buffer>[];
       try {
-        info = await lstat(child);
+        rawEntries = await readdir(target.canonical, { withFileTypes: true, encoding: "buffer" });
       } catch (cause) {
-        throw this.fileError(cause, "workspace_changed", "Directory changed while it was listed");
+        throw this.fileError(cause, "workspace_unavailable", "Cannot list workspace directory");
       }
-      let type: WorkspaceEntry["type"] = "other";
-      if (info.isFile()) type = "file";
-      else if (info.isDirectory()) type = "directory";
-      else if (info.isSymbolicLink()) type = "symlink";
-      let linkTargetType: WorkspaceEntry["linkTargetType"];
-      if (type === "symlink") {
+      named = rawEntries.map((entry) => ({
+        entry,
+        name: fatalUtf8(entry.name, "unsupported_filename_encoding"),
+      }));
+      named.sort((left, right) => Buffer.compare(left.entry.name, right.entry.name));
+      const page = named.slice(offset, offset + params.pageSize);
+      entries = [];
+      for (const { name } of page) {
+        this.assertActive(signal);
+        const childPath = path ? `${path}/${name}` : name;
+        const child = join(identity.root, ...childPath.split("/"));
+        let info: Stats;
         try {
-          const targetPath = await realpath(child);
-          linkTargetType = isWithin(identity.root, targetPath)
-            ? "inside_workspace"
-            : "outside_workspace";
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") linkTargetType = "missing";
-          else throw error;
+          info = await lstat(child);
+        } catch (cause) {
+          throw this.fileError(cause, "workspace_changed", "Directory changed while it was listed");
         }
+        let type: WorkspaceEntry["type"] = "other";
+        if (info.isFile()) type = "file";
+        else if (info.isDirectory()) type = "directory";
+        else if (info.isSymbolicLink()) type = "symlink";
+        let linkTargetType: WorkspaceEntry["linkTargetType"];
+        if (type === "symlink") {
+          try {
+            const targetPath = await realpath(child);
+            linkTargetType = isWithin(identity.root, targetPath)
+              ? "inside_workspace"
+              : "outside_workspace";
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") linkTargetType = "missing";
+            else throw error;
+          }
+        }
+        entries.push({
+          path: childPath,
+          name,
+          type,
+          ...(type === "file" ? { sizeBytes: info.size } : {}),
+          mtimeMs: Math.max(0, Math.floor(info.mtimeMs)),
+          ...(linkTargetType === undefined ? {} : { linkTargetType }),
+        });
       }
-      entries.push({
-        path: childPath,
-        name,
-        type,
-        ...(type === "file" ? { sizeBytes: info.size } : {}),
-        mtimeMs: Math.max(0, Math.floor(info.mtimeMs)),
-        ...(linkTargetType === undefined ? {} : { linkTargetType }),
-      });
+      await this.assertGuardStable(guard);
+    } finally {
+      await this.closeGuard(guard);
     }
+    const pageLength = Math.min(params.pageSize, named.length - offset);
     let nextPageCursor: string | undefined;
-    if (offset + page.length < named.length) {
+    if (offset + pageLength < named.length) {
       nextPageCursor = randomUUID();
       this.cursors.set(nextPageCursor, {
         owner,
@@ -330,7 +336,7 @@ export class WorkspaceService {
         path,
         workspaceGeneration: identity.generation,
         directoryRevision,
-        offset: offset + page.length,
+        offset: offset + pageLength,
         expiresAt: Date.now() + CURSOR_LIFETIME_MS,
       });
     }
@@ -363,27 +369,24 @@ export class WorkspaceService {
     if (target.stats.size > READ_SCAN_LIMIT) {
       throw new WorkspaceError("content_too_large", "File exceeds the bounded read scan limit");
     }
+    const guard = await this.guardExisting(identity, path, target.stats);
     let bytes: Buffer;
     let after: Stats;
     try {
-      const handle = await open(target.canonical, constants.O_RDONLY | constants.O_NOFOLLOW);
-      try {
-        bytes = await handle.readFile();
-        after = await handle.stat();
-      } finally {
-        await handle.close();
-      }
+      await this.assertGuardStable(guard);
+      bytes = await guard.handle.readFile();
+      after = await guard.handle.stat();
+      await this.assertGuardStable(guard);
     } catch (cause) {
+      if (cause instanceof WorkspaceError) throw cause;
       throw this.fileError(cause, "workspace_changed", "File changed while it was read");
+    } finally {
+      await this.closeGuard(guard);
     }
     this.assertActive(signal);
-    const [afterIdentity, afterPath] = await Promise.all([
-      this.workspaceIdentity(cwd),
-      realpath(join(identity.root, ...path.split("/"))),
-    ]);
+    const afterIdentity = await this.workspaceIdentity(cwd);
     if (
       afterIdentity.generation !== identity.generation ||
-      afterPath !== target.canonical ||
       after.dev !== target.stats.dev ||
       after.ino !== target.stats.ino ||
       after.size !== target.stats.size ||
@@ -1078,6 +1081,109 @@ export class WorkspaceService {
     this.assertPathAllowed(identity.root, relative(identity.root, canonical).split(sep).join("/"));
     const stats = await stat(canonical);
     return { canonical, stats };
+  }
+
+  /**
+   * Bind every path component to an open descriptor. A rename or replacement
+   * changes the held object's ctime, so validation before and after the
+   * operation detects parent-directory swaps even if the pathname is restored.
+   */
+  private async guardExisting(
+    identity: WorkspaceIdentity,
+    path: string,
+    expectedTarget: Stats,
+  ): Promise<GuardedPath> {
+    const segments = path === "" ? [] : path.split("/");
+    const paths = [
+      identity.root,
+      ...segments.map((_, index) => join(identity.root, ...segments.slice(0, index + 1))),
+    ];
+    const components: Array<{ path: string; handle: FileHandle; stats: Stats }> = [];
+    try {
+      for (const [index, candidate] of paths.entries()) {
+        const info = await lstat(candidate).catch((cause: unknown) => {
+          throw this.fileError(cause, "workspace_changed", "Workspace path changed");
+        });
+        if (info.isSymbolicLink()) {
+          const target = await realpath(candidate).catch((cause: unknown) => {
+            throw this.fileError(cause, "workspace_changed", "Workspace path changed");
+          });
+          throw new WorkspaceError(
+            isWithin(identity.root, target) ? "unsupported_file_type" : "symlink_escape",
+            isWithin(identity.root, target)
+              ? "Traversing symbolic links is not supported"
+              : "Workspace path escapes the workspace",
+          );
+        }
+        const final = index === paths.length - 1;
+        if (!final && !info.isDirectory()) {
+          throw new WorkspaceError("workspace_changed", "Workspace parent is not a directory");
+        }
+        const flags =
+          constants.O_RDONLY |
+          constants.O_NOFOLLOW |
+          (info.isDirectory() ? constants.O_DIRECTORY : 0);
+        const handle = await open(candidate, flags).catch((cause: unknown) => {
+          throw this.fileError(cause, "workspace_changed", "Workspace path changed");
+        });
+        const opened = await handle.stat();
+        if (
+          opened.dev !== info.dev ||
+          opened.ino !== info.ino ||
+          opened.mode !== info.mode ||
+          opened.ctimeMs !== info.ctimeMs
+        ) {
+          await handle.close();
+          throw new WorkspaceError("workspace_changed", "Workspace path changed while opening");
+        }
+        components.push({ path: candidate, handle, stats: opened });
+      }
+      const handle = components.at(-1)?.handle;
+      const openedTarget = components.at(-1)?.stats;
+      if (
+        handle === undefined ||
+        openedTarget === undefined ||
+        openedTarget.dev !== expectedTarget.dev ||
+        openedTarget.ino !== expectedTarget.ino ||
+        openedTarget.mode !== expectedTarget.mode ||
+        openedTarget.ctimeMs !== expectedTarget.ctimeMs
+      ) {
+        throw new WorkspaceError("workspace_changed", "Workspace path changed while opening");
+      }
+      return { handle, components };
+    } catch (error) {
+      await Promise.allSettled(components.map((component) => component.handle.close()));
+      throw error;
+    }
+  }
+
+  private async assertGuardStable(guard: GuardedPath): Promise<void> {
+    for (const component of guard.components) {
+      const [opened, current] = await Promise.all([
+        component.handle.stat(),
+        lstat(component.path).catch((cause: unknown) => {
+          throw this.fileError(cause, "workspace_changed", "Workspace path changed");
+        }),
+      ]);
+      if (
+        opened.dev !== component.stats.dev ||
+        opened.ino !== component.stats.ino ||
+        opened.mode !== component.stats.mode ||
+        opened.mtimeMs !== component.stats.mtimeMs ||
+        opened.ctimeMs !== component.stats.ctimeMs ||
+        current.dev !== component.stats.dev ||
+        current.ino !== component.stats.ino ||
+        current.mode !== component.stats.mode ||
+        current.mtimeMs !== component.stats.mtimeMs ||
+        current.ctimeMs !== component.stats.ctimeMs
+      ) {
+        throw new WorkspaceError("workspace_changed", "Workspace path changed during access");
+      }
+    }
+  }
+
+  private async closeGuard(guard: GuardedPath): Promise<void> {
+    for (const component of [...guard.components].reverse()) await component.handle.close();
   }
 
   private async worktreeState(

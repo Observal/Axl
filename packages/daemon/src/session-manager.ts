@@ -1384,16 +1384,20 @@ export class SessionManager {
     unsubscribe: () => void;
   } {
     const managed = this.managed(sessionId);
-    const allEvents = [...managed.events];
-    const snapshot =
+    const sessionEvents = [...managed.events];
+    const selectedEvents =
       fromNodeId === undefined
-        ? allEvents
-        : SessionTree.fromEvents(managed.session.log.sessionId, allEvents).lineage(fromNodeId);
-    managed.listeners.add(listener);
-    if (activityListener !== undefined) managed.activityListeners.add(activityListener);
+        ? sessionEvents
+        : SessionTree.fromEvents(managed.session.log.sessionId, sessionEvents).lineage(fromNodeId);
+    if (fromNodeId === undefined) {
+      managed.listeners.add(listener);
+      if (activityListener !== undefined) managed.activityListeners.add(activityListener);
+    }
     const current = managed.activityState.current;
     const activity =
-      current === undefined || (current.type === "clear" && managed.activeTurn === undefined)
+      fromNodeId !== undefined ||
+      current === undefined ||
+      (current.type === "clear" && managed.activeTurn === undefined)
         ? undefined
         : {
             operationId: current.operationId,
@@ -1404,8 +1408,8 @@ export class SessionManager {
             toolCalls: [...managed.activityState.tools],
           };
     return {
-      snapshot,
-      allEvents,
+      snapshot: selectedEvents,
+      allEvents: selectedEvents,
       ...(activity === undefined ? {} : { activity }),
       unsubscribe: () => {
         managed.listeners.delete(listener);

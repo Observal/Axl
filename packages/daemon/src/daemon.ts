@@ -30,6 +30,7 @@ import {
   parseWireRequest,
   type RetryableMutationMethod,
   requiredCapability,
+  RPC_METHODS,
   type ServerMessage,
   type SessionActivityFrame,
   type SessionId,
@@ -54,6 +55,7 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly sandboxImage?: string;
   readonly snapshotIdleLifetimeMs?: number;
   readonly snapshotAbsoluteLifetimeMs?: number;
+  readonly cursorLifetimeMs?: number;
   readonly heartbeatIntervalMs?: number;
   readonly presenceTimeoutMs?: number;
 }
@@ -64,6 +66,7 @@ const MAX_SNAPSHOT_PAGE_BYTES = MAX_CANONICAL_EVENT_BYTES;
 const MAX_SNAPSHOT_PAGE_EVENTS = 5_000;
 const MAX_SNAPSHOT_TAIL_BYTES = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_TAIL_EVENTS = 1_024;
+const MAX_EVENT_CURSORS = 16_384;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PRESENCE_TIMEOUT_MS = 60_000;
 const SOCKET_PROBE_TIMEOUT_MS = 500;
@@ -73,10 +76,11 @@ export function normalizeDaemonRpcErrorCode(method: WireRequest["method"], code:
 }
 
 interface CursorRecord {
-  readonly subscriptionId: string;
+  subscriptionId: string;
   readonly sessionId: SessionId;
   readonly fromNodeId?: EventId;
   readonly position: number;
+  readonly expiresAt: number;
   acknowledged: boolean;
 }
 
@@ -184,6 +188,7 @@ export class AxlDaemon {
   private readonly dataDirectory: string;
   private readonly snapshotIdleLifetimeMs: number;
   private readonly snapshotAbsoluteLifetimeMs: number;
+  private readonly cursorLifetimeMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly presenceTimeoutMs: number;
   private readonly daemonInstanceId = randomUUID();
@@ -204,6 +209,7 @@ export class AxlDaemon {
     this.dataDirectory = options.dataDirectory;
     this.snapshotIdleLifetimeMs = options.snapshotIdleLifetimeMs ?? 30_000;
     this.snapshotAbsoluteLifetimeMs = options.snapshotAbsoluteLifetimeMs ?? 300_000;
+    this.cursorLifetimeMs = options.cursorLifetimeMs ?? 300_000;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.presenceTimeoutMs = options.presenceTimeoutMs ?? PRESENCE_TIMEOUT_MS;
     if (
@@ -213,6 +219,9 @@ export class AxlDaemon {
       this.snapshotAbsoluteLifetimeMs < this.snapshotIdleLifetimeMs
     ) {
       throw new TypeError("Snapshot lifetimes must be positive and absolute must cover idle");
+    }
+    if (!Number.isSafeInteger(this.cursorLifetimeMs) || this.cursorLifetimeMs <= 0) {
+      throw new TypeError("Cursor lifetime must be positive");
     }
     if (
       !Number.isSafeInteger(this.heartbeatIntervalMs) ||
@@ -284,6 +293,7 @@ export class AxlDaemon {
   async stop(): Promise<void> {
     for (const socket of this.connections) socket.destroy();
     this.connections.clear();
+    this.cursors.clear();
     const server = this.server;
     this.server = undefined;
     if (server?.listening) {
@@ -368,15 +378,7 @@ export class AxlDaemon {
         }
         if (line.trim()) {
           if (state.pendingRequests >= MAX_PENDING_REQUESTS) {
-            send({
-              kind: "error",
-              id: -1,
-              error: {
-                code: "rate_limited",
-                message: "Too many pending requests",
-                retryable: true,
-              },
-            });
+            this.rejectOverloadedLine(line, send);
             continue;
           }
           state.pendingRequests += 1;
@@ -389,6 +391,7 @@ export class AxlDaemon {
     const presenceTimer = setInterval(
       () => {
         const now = Date.now();
+        this.pruneCursors(now);
         if (state.lastSeenAt !== undefined && now - state.lastSeenAt > this.presenceTimeoutMs) {
           socket.destroy();
           return;
@@ -412,7 +415,10 @@ export class AxlDaemon {
       for (const controller of state.cancellableRequests.values()) controller.abort();
       state.cancellableRequests.clear();
       state.sessionListPages.clear();
-      for (const subscription of state.subscriptions.values()) subscription.unsubscribe();
+      for (const subscription of state.subscriptions.values()) {
+        this.releaseSubscriptionCursors(subscription, true);
+        subscription.unsubscribe();
+      }
       state.subscriptions.clear();
       this.connections.delete(socket);
       this.connectionStates.delete(state);
@@ -420,6 +426,77 @@ export class AxlDaemon {
     };
     socket.once("close", cleanup);
     socket.once("error", () => socket.destroy());
+  }
+
+  private rejectOverloadedLine(line: string, send: (message: ServerMessage) => void): void {
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(line) as unknown;
+    } catch (error) {
+      send({
+        kind: "error",
+        id: -1,
+        error: {
+          code: "bad_request",
+          message: error instanceof Error ? error.message : "Undecodable request",
+          retryable: false,
+        },
+      });
+      return;
+    }
+    try {
+      const request = parseWireRequest(decoded);
+      send({
+        kind: "error",
+        id: request.id,
+        method: request.method,
+        error: {
+          code: "rate_limited",
+          message: "Too many pending requests",
+          retryable: true,
+        },
+      });
+    } catch (error) {
+      const candidate =
+        typeof decoded === "object" && decoded !== null
+          ? (decoded as Record<string, unknown>)
+          : undefined;
+      const id =
+        Number.isSafeInteger(candidate?.id) && (candidate?.id as number) >= 0
+          ? (candidate?.id as number)
+          : -1;
+      this.rejectMalformedRequest(candidate, id, error, send);
+    }
+  }
+
+  private rejectMalformedRequest(
+    candidate: Record<string, unknown> | undefined,
+    id: number,
+    error: unknown,
+    send: (message: ServerMessage) => void,
+  ): void {
+    const method =
+      id !== -1 &&
+      typeof candidate?.method === "string" &&
+      (RPC_METHODS as readonly string[]).includes(candidate.method)
+        ? (candidate.method as WireRequest["method"])
+        : undefined;
+    const reportedCode =
+      error instanceof ProtocolValidationError && error.path === "request.idempotencyKey"
+        ? "invalid_idempotency_key"
+        : "bad_request";
+    const code =
+      method === undefined ? "bad_request" : normalizeDaemonRpcErrorCode(method, reportedCode);
+    send({
+      kind: "error",
+      id: method === undefined ? -1 : id,
+      ...(method === undefined ? {} : { method }),
+      error: {
+        code,
+        message: error instanceof Error ? error.message : "Invalid request",
+        retryable: isRpcErrorRetryable(code),
+      },
+    });
   }
 
   private async handleLine(
@@ -454,18 +531,7 @@ export class AxlDaemon {
         Number.isSafeInteger(candidate?.id) && (candidate?.id as number) >= 0
           ? (candidate?.id as number)
           : -1;
-      send({
-        kind: "error",
-        id,
-        error: {
-          code:
-            error instanceof ProtocolValidationError && error.path === "request.idempotencyKey"
-              ? "invalid_idempotency_key"
-              : "bad_request",
-          message: error instanceof Error ? error.message : "Invalid request",
-          retryable: false,
-        },
-      });
+      this.rejectMalformedRequest(candidate, id, error, send);
       return;
     }
     try {
@@ -1006,6 +1072,7 @@ export class AxlDaemon {
     const after = params.after;
     let resumedPosition: number | undefined;
     if (after !== undefined) {
+      this.pruneCursors();
       const cursor = this.cursors.get(after);
       if (
         cursor === undefined ||
@@ -1017,6 +1084,7 @@ export class AxlDaemon {
         throw new DaemonError("snapshot_required", "The event cursor cannot resume this view");
       }
       resumedPosition = cursor.position;
+      cursor.subscriptionId = subscriptionId;
     }
 
     const snapshotId = resumedPosition === undefined ? randomUUID() : undefined;
@@ -1123,6 +1191,7 @@ export class AxlDaemon {
     }
     this.assertSnapshotAvailable(subscription);
     subscription.lastAccessAt = Date.now();
+    this.pruneCursors();
     const record = this.cursors.get(cursor);
     if (record === undefined || record.subscriptionId !== subscriptionId) {
       throw new DaemonError("unknown_cursor", "The cursor does not belong to this subscription");
@@ -1142,6 +1211,15 @@ export class AxlDaemon {
     }
     subscription.acknowledgedPosition = record.position;
     subscription.acknowledgedCursor = cursor;
+    for (const [candidate, candidateRecord] of this.cursors) {
+      if (
+        candidate !== cursor &&
+        candidateRecord.subscriptionId === subscriptionId &&
+        candidateRecord.position <= record.position
+      ) {
+        this.cursors.delete(candidate);
+      }
+    }
     return { cursor };
   }
 
@@ -1153,6 +1231,7 @@ export class AxlDaemon {
     if (subscription === undefined) {
       throw new DaemonError("unknown_subscription", "The subscription is not attached here");
     }
+    this.releaseSubscriptionCursors(subscription, false);
     subscription.unsubscribe();
     state.subscriptions.delete(subscriptionId);
     return { unsubscribed: true };
@@ -1193,15 +1272,43 @@ export class AxlDaemon {
     fromNodeId: EventId | undefined,
     position: number,
   ): EventCursor {
+    this.pruneCursors();
+    while (this.cursors.size >= MAX_EVENT_CURSORS) {
+      const oldest = this.cursors.keys().next().value as EventCursor | undefined;
+      if (oldest === undefined) break;
+      this.cursors.delete(oldest);
+    }
     const cursor = randomUUID();
     this.cursors.set(cursor, {
       subscriptionId,
       sessionId,
       ...(fromNodeId === undefined ? {} : { fromNodeId }),
       position,
+      expiresAt: Date.now() + this.cursorLifetimeMs,
       acknowledged: false,
     });
     return cursor;
+  }
+
+  private pruneCursors(now = Date.now()): void {
+    for (const [cursor, record] of this.cursors) {
+      if (record.expiresAt <= now) this.cursors.delete(cursor);
+    }
+  }
+
+  private releaseSubscriptionCursors(
+    subscription: ConnectionSubscription,
+    preserveAcknowledged: boolean,
+  ): void {
+    this.pruneCursors();
+    for (const [cursor, record] of this.cursors) {
+      if (
+        record.subscriptionId === subscription.id &&
+        (!preserveAcknowledged || cursor !== subscription.acknowledgedCursor)
+      ) {
+        this.cursors.delete(cursor);
+      }
+    }
   }
 
   private bufferSnapshotActivity(
@@ -1254,6 +1361,7 @@ export class AxlDaemon {
 
   private invalidateSnapshot(subscription: ConnectionSubscription): void {
     subscription.invalidated = true;
+    this.releaseSubscriptionCursors(subscription, false);
     subscription.bufferedEvents.length = 0;
     subscription.bufferedActivity.length = 0;
     subscription.bufferedEventBytes = 0;

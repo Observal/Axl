@@ -11,6 +11,7 @@ import {
   parseSessionId,
   subscribeSession,
   type AxlClient,
+  AxlClientError,
   type CanonicalEvent,
   type WireActivity,
   type WireEvent,
@@ -102,6 +103,39 @@ class FixtureClient {
   }
 }
 
+class ExpiringAckClient extends FixtureClient {
+  private subscriptions = 0;
+  private acknowledgements = 0;
+
+  override async request(method: string, params?: unknown): Promise<unknown> {
+    this.calls.push(method);
+    this.requests.push({ method, params });
+    if (method === "session.subscribe") {
+      this.subscriptions += 1;
+      return {
+        subscriptionId: `subscription-${this.subscriptions}`,
+        sessionId,
+        snapshot: {
+          snapshotId: `snapshot-${this.subscriptions}`,
+          sessionId,
+          boundaryCursor: `boundary-${this.subscriptions}`,
+          eventCount: 2,
+          page: { events: [first, second], complete: true },
+        },
+      };
+    }
+    if (method === "session.ack") {
+      this.acknowledgements += 1;
+      if (this.acknowledgements === 1) {
+        throw new AxlClientError("unknown_cursor", "Cursor expired");
+      }
+      return { cursor: (params as { readonly cursor: string }).cursor };
+    }
+    if (method === "session.unsubscribe") return { unsubscribed: true };
+    throw new Error(`Unexpected ${method}`);
+  }
+}
+
 class ResumeFixtureClient extends FixtureClient {
   override async request(method: string, params?: unknown): Promise<unknown> {
     this.calls.push(method);
@@ -169,6 +203,30 @@ test("reduces every frozen page before acknowledging and persists live cursors",
   assert.equal(saved.at(-1)?.[1], "live-1");
   await subscription.close();
   assert.equal(subscription.projector.state.activity, undefined);
+});
+
+test("replaces a snapshot when its boundary cursor expires before acknowledgement", async () => {
+  const fixture = new ExpiringAckClient();
+  const resyncErrors: Error[] = [];
+  const subscription = await subscribeSession(fixture as unknown as AxlClient, sessionId, {
+    onResyncRequired(error) {
+      resyncErrors.push(error);
+    },
+  });
+  assert.equal(subscription.subscriptionId, "subscription-2");
+  assert.deepEqual(
+    subscription.projector.state.records.map((record) => record.event.id),
+    [first.id, second.id],
+  );
+  assert.deepEqual(fixture.calls, [
+    "session.subscribe",
+    "session.ack",
+    "session.unsubscribe",
+    "session.subscribe",
+    "session.ack",
+  ]);
+  assert.deepEqual(resyncErrors, []);
+  await subscription.close();
 });
 
 test("cursor-store failure disables resumability without stopping delivery", async () => {
