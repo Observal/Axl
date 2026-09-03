@@ -367,6 +367,101 @@ test("reports the daemon security mode", async (context) => {
   });
 });
 
+test("durably deduplicates retryable mutations and rejects key conflicts", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => client.close());
+  const createKey = "00000000-0000-4000-8000-000000000101";
+  const sendKey = "00000000-0000-4000-8000-000000000102";
+
+  const created = await client.request(
+    "session.create",
+    { cwd: fixture.cwd },
+    { idempotencyKey: createKey },
+  );
+  const retriedCreate = await client.request(
+    "session.create",
+    { cwd: fixture.cwd },
+    { idempotencyKey: createKey },
+  );
+  assert.deepEqual(retriedCreate, created);
+  await assert.rejects(
+    client.request(
+      "session.create",
+      { cwd: join(fixture.cwd, "other") },
+      { idempotencyKey: createKey },
+    ),
+    (error) => error instanceof WireClientError && error.code === "idempotency_conflict",
+  );
+
+  const sent = await client.request(
+    "session.send",
+    {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "exactly once" }],
+    },
+    { idempotencyKey: sendKey },
+  );
+  const retriedSend = await client.request(
+    "session.send",
+    {
+      content: [{ text: "exactly once", type: "text" }],
+      delivery: "prompt",
+      sessionId: created.sessionId,
+    },
+    { idempotencyKey: sendKey },
+  );
+  assert.deepEqual(retriedSend, sent);
+  const beforeRestart = await subscribeAll(client, created.sessionId);
+  assert.equal(beforeRestart.events.filter((event) => event.type === "user.message").length, 1);
+
+  client.close();
+  await fixture.daemon.stop();
+  const restarted = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const reconnected = await DaemonClient.connect(fixture.socketPath);
+  context.after(() => reconnected.close());
+  assert.deepEqual(
+    await reconnected.request(
+      "session.create",
+      { cwd: fixture.cwd },
+      { idempotencyKey: createKey },
+    ),
+    created,
+  );
+  assert.deepEqual(
+    await reconnected.request(
+      "session.send",
+      {
+        sessionId: created.sessionId,
+        delivery: "prompt",
+        content: [{ type: "text", text: "exactly once" }],
+      },
+      { idempotencyKey: sendKey },
+    ),
+    sent,
+  );
+  await reconnected.request("session.resume", { sessionId: created.sessionId });
+  const afterRestart = await subscribeAll(reconnected, created.sessionId);
+  assert.equal(afterRestart.events.filter((event) => event.type === "user.message").length, 1);
+
+  const journal = (await readFile(join(fixture.dataDirectory, "commands.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const acceptance = journal.find(
+    (record) => record.type === "accepted" && record.idempotencyKey === createKey,
+  );
+  assert.equal(acceptance?.operationId, createKey);
+  assert.equal(typeof acceptance?.intendedSessionId, "string");
+});
+
 test("creates a session, streams the live tail, and answers sends", async (context) => {
   const { socketPath, cwd } = await startDaemon(context);
   const client = await DaemonClient.connect(socketPath);

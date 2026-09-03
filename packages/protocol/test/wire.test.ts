@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   encodeWireMessage,
+  isRetryableMutationMethod,
   ProtocolValidationError,
   parseServerMessage,
   parseSnapshotPage,
@@ -161,7 +162,55 @@ test("validates every request shape", () => {
       params: { sessionId, sha256: "a".repeat(64), offset: 0, length: 4 },
     },
   ];
-  for (const request of requests) assert.deepEqual(parseWireRequest(request), request);
+  for (const request of requests) {
+    const keyed = isRetryableMutationMethod(request.method as never)
+      ? { ...request, idempotencyKey: "00000000-0000-4000-8000-000000000001" }
+      : request;
+    assert.deepEqual(parseWireRequest(keyed), keyed);
+  }
+});
+
+test("requires idempotency keys only for retryable mutations", () => {
+  assert.throws(
+    () =>
+      parseWireRequest({
+        kind: "request",
+        id: 1,
+        method: "session.create",
+        params: { cwd: "/repo" },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseWireRequest({
+        kind: "request",
+        id: 1,
+        method: "session.create",
+        params: { cwd: "/repo" },
+        idempotencyKey: "NOT-A-UUID",
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseWireRequest({
+        kind: "request",
+        id: 1,
+        method: "session.list",
+        params: {},
+        idempotencyKey: "00000000-0000-4000-8000-000000000001",
+      }),
+    ProtocolValidationError,
+  );
+  assert.doesNotThrow(() =>
+    parseWireRequest({
+      kind: "request",
+      id: 1,
+      method: "session.shell",
+      params: { sessionId, command: "pwd", excluded: false },
+    }),
+  );
 });
 
 test("rejects malformed requests at the wire boundary", () => {

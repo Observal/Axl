@@ -15,18 +15,24 @@ import {
   type EventCursor,
   type EventId,
   encodeWireMessage,
+  hashCanonicalRequest,
+  isRetryableMutationMethod,
+  parseOperationId,
   parseRpcResult,
+  parseSessionId,
   parseWireRequest,
   requiredCapability,
   type ServerMessage,
   type SessionActivityFrame,
   type SessionId,
   type SnapshotPage,
+  type RetryableMutationMethod,
   WIRE_CAPABILITIES,
   WIRE_PROTOCOL_VERSION,
   type WireRequest,
 } from "@axl/protocol";
 
+import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
 export type DaemonSecurityMode = "sandboxed" | "unsafe";
@@ -148,7 +154,9 @@ export class AxlDaemon {
   private readonly securityMode: DaemonSecurityMode;
   private readonly sandboxProvider: string;
   private readonly sandboxImage: string | undefined;
+  private readonly dataDirectory: string;
   private readonly daemonInstanceId = randomUUID();
+  private commandJournal: CommandJournal | undefined;
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
@@ -161,10 +169,12 @@ export class AxlDaemon {
     this.securityMode = options.securityMode ?? "sandboxed";
     this.sandboxProvider = options.sandboxProvider ?? "unknown";
     this.sandboxImage = options.sandboxImage;
+    this.dataDirectory = options.dataDirectory;
   }
 
   async start(): Promise<void> {
     if (this.server) throw new DaemonError("already_started", "Daemon already started");
+    this.commandJournal = await CommandJournal.open(this.dataDirectory);
     await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
     await removeStaleSocket(this.socketPath);
 
@@ -372,7 +382,10 @@ export class AxlDaemon {
           );
         }
       }
-      const result = parseRpcResult(request.method, await this.dispatch(request, send, state));
+      const result = parseRpcResult(
+        request.method,
+        await this.executeRequest(request, send, state),
+      );
       send({
         kind: "success",
         id: request.id,
@@ -394,18 +407,58 @@ export class AxlDaemon {
         id: request.id,
         method: request.method,
         error: {
-          code: error instanceof DaemonError ? error.code : "internal_error",
+          code:
+            error instanceof DaemonError || error instanceof CommandJournalError
+              ? error.code
+              : "internal_error",
           message: error instanceof Error ? error.message : "Request failed",
-          retryable: false,
+          retryable: error instanceof CommandJournalError ? error.retryable : false,
+          ...(error instanceof CommandJournalError && error.details !== undefined
+            ? { details: error.details }
+            : {}),
         },
       });
     }
+  }
+
+  private executeRequest(
+    request: WireRequest,
+    send: (message: ServerMessage) => void,
+    state: ConnectionState,
+  ): Promise<unknown> {
+    if (!isRetryableMutationMethod(request.method)) {
+      return this.dispatch(request, send, state);
+    }
+    const idempotencyKey = request.idempotencyKey;
+    if (idempotencyKey === undefined) {
+      throw new DaemonError("invalid_idempotency_key", "Retryable mutation requires a key");
+    }
+    const journal = this.commandJournal;
+    if (journal === undefined) throw new Error("Command journal is not open");
+    const params = request.params as { readonly sessionId?: SessionId };
+    const intendedSessionId =
+      request.method === "session.create" ||
+      request.method === "session.fork" ||
+      request.method === "session.clone"
+        ? (randomUUID() as SessionId)
+        : undefined;
+    return journal.execute(
+      {
+        idempotencyKey,
+        method: request.method as RetryableMutationMethod,
+        requestHash: hashCanonicalRequest(request.method, request.params as never),
+        ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
+        ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
+      },
+      (acceptance) => this.dispatch(request, send, state, acceptance) as never,
+    );
   }
 
   private async dispatch(
     request: WireRequest,
     send: (message: ServerMessage) => void,
     state: ConnectionState,
+    acceptance?: CommandAcceptance,
   ): Promise<unknown> {
     switch (request.method) {
       case "daemon.info":
@@ -429,10 +482,15 @@ export class AxlDaemon {
         return {};
       case "session.create": {
         const { cwd, modelId, thinkingLevel } = request.params;
-        const created = await this.sessions.create(cwd, {
-          ...(modelId === undefined ? {} : { modelId }),
-          ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-        });
+        const reservation = this.creationReservation(acceptance);
+        const created = await this.sessions.create(
+          cwd,
+          {
+            ...(modelId === undefined ? {} : { modelId }),
+            ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+          },
+          reservation,
+        );
         return this.sessions.describe(created.sessionId);
       }
       case "session.resume":
@@ -450,6 +508,7 @@ export class AxlDaemon {
         const forked = await this.sessions.fork(
           request.params.sessionId,
           request.params.fromEventId,
+          this.creationReservation(acceptance),
         );
         return {
           ...this.sessions.describe(forked.sessionId),
@@ -457,7 +516,10 @@ export class AxlDaemon {
         };
       }
       case "session.clone": {
-        const cloned = await this.sessions.clone(request.params.sessionId);
+        const cloned = await this.sessions.clone(
+          request.params.sessionId,
+          this.creationReservation(acceptance),
+        );
         return {
           ...this.sessions.describe(cloned.sessionId),
           ...(cloned.selectedText === undefined ? {} : { selectedText: cloned.selectedText }),
@@ -529,6 +591,18 @@ export class AxlDaemon {
         await this.sessions.dispose(request.params.sessionId);
         return { disposed: true };
     }
+  }
+
+  private creationReservation(
+    acceptance: CommandAcceptance | undefined,
+  ):
+    | { readonly sessionId: SessionId; readonly operationId: ReturnType<typeof parseOperationId> }
+    | undefined {
+    if (acceptance?.intendedSessionId === undefined) return undefined;
+    return {
+      sessionId: parseSessionId(acceptance.intendedSessionId, "intendedSessionId"),
+      operationId: parseOperationId(acceptance.operationId, "operationId"),
+    };
   }
 
   private subscribe(

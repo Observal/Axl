@@ -358,6 +358,24 @@ export interface RpcMethodMap {
 export type RpcMethod = keyof RpcMethodMap;
 export type RpcParams<Method extends RpcMethod> = RpcMethodMap[Method]["params"];
 
+export const RETRYABLE_MUTATION_METHODS = [
+  "session.create",
+  "session.fork",
+  "session.clone",
+  "session.send",
+  "session.interrupt",
+  "session.reload",
+  "session.configure",
+  "session.interaction.respond",
+  "session.dispose",
+] as const satisfies readonly RpcMethod[];
+
+export type RetryableMutationMethod = (typeof RETRYABLE_MUTATION_METHODS)[number];
+
+export function isRetryableMutationMethod(method: RpcMethod): method is RetryableMutationMethod {
+  return RETRYABLE_MUTATION_METHODS.includes(method as RetryableMutationMethod);
+}
+
 export function requiredCapability(method: RpcMethod): CapabilityId | undefined {
   if (
     method === "daemon.info" ||
@@ -380,6 +398,7 @@ export type RpcRequest = {
     readonly id: number;
     readonly method: Method;
     readonly params: RpcParams<Method>;
+    readonly idempotencyKey?: string;
   };
 }[RpcMethod];
 
@@ -787,15 +806,25 @@ function selection(params: Record<string, unknown>, path: string): SessionModelS
 
 export function parseWireRequest(value: unknown): WireRequest {
   const request = object(value, "request");
-  exact(request, "request", ["kind", "id", "method", "params"]);
+  exact(request, "request", ["kind", "id", "method", "params", "idempotencyKey"]);
   if (request.kind !== "request")
     throw new ProtocolValidationError("request.kind", 'must be "request"');
   if (!Number.isSafeInteger(request.id) || (request.id as number) < 0) {
     throw new ProtocolValidationError("request.id", "must be a non-negative safe integer");
   }
-  const method = string(request.method, "request.method");
+  const method = parseRpcMethod(request.method, "request.method");
   const params = object(request.params, "request.params");
-  const base = { kind: "request" as const, id: request.id as number };
+  let idempotencyKey: string | undefined;
+  if (isRetryableMutationMethod(method)) {
+    idempotencyKey = parseOperationId(request.idempotencyKey, "request.idempotencyKey");
+  } else if (request.idempotencyKey !== undefined) {
+    throw new ProtocolValidationError("request.idempotencyKey", `is not allowed for ${method}`);
+  }
+  const base = {
+    kind: "request" as const,
+    id: request.id as number,
+    ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+  };
 
   if (method === "connection.initialize") {
     exact(params, "request.params", ["client", "requestedCapabilities"]);

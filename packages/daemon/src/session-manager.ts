@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, open as openFile, readdir, realpath, rename, rm, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
 import {
@@ -25,6 +25,7 @@ import {
   type InteractionAction,
   type JsonObject,
   type JsonValue,
+  type OperationId,
   parseEvent,
   parseEventId,
   parseSessionId,
@@ -279,12 +280,39 @@ export class SessionManager {
   async create(
     cwd: string,
     selection: SessionModelSelection = {},
+    reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
       throw new DaemonError("invalid_cwd", `Cannot open working directory ${cwd}`, { cause });
     });
     await mkdir(join(this.options.dataDirectory, "sessions"), { recursive: true, mode: 0o700 });
-    const sessionId = parseSessionId(randomUUID(), "sessionId");
+    const sessionId = reservation?.sessionId ?? parseSessionId(randomUUID(), "sessionId");
+    if (reservation !== undefined) {
+      const opened = await JsonlEventLog.open(this.logPath(sessionId), sessionId);
+      const root = opened.events[0];
+      if (root === undefined) {
+        await opened.log.append({
+          version: EVENT_FORMAT_VERSION,
+          id: randomUUID(),
+          sessionId,
+          operationId: reservation.operationId,
+          parentId: null,
+          timestamp: Date.now(),
+          type: "session.created",
+          payload: { cwd: canonicalCwd },
+        });
+        await opened.log.drain();
+      } else if (
+        root.type !== "session.created" ||
+        root.operationId !== reservation.operationId ||
+        root.payload.cwd !== canonicalCwd
+      ) {
+        throw new DaemonError(
+          "corrupt_session",
+          `Reserved session ${sessionId} has conflicting history`,
+        );
+      }
+    }
     const managed = await this.open(sessionId, canonicalCwd, selection);
     return { sessionId, events: [...managed.events] };
   }
@@ -333,6 +361,7 @@ export class SessionManager {
   async fork(
     sessionId: unknown,
     fromEventId: unknown,
+    reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
   ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
@@ -349,10 +378,13 @@ export class SessionManager {
     if (event.type !== "user.message") {
       throw new DaemonError("invalid_fork_point", "A fork must start from a user message");
     }
-    return this.copySession(sourceId, eventId, false, userMessageText(event));
+    return this.copySession(sourceId, eventId, false, userMessageText(event), reservation);
   }
 
-  async clone(sessionId: unknown): Promise<{
+  async clone(
+    sessionId: unknown,
+    reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+  ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
     readonly selectedText?: string;
@@ -366,7 +398,7 @@ export class SessionManager {
     const tip = source.events.at(-1)?.id;
     if (tip === undefined)
       throw new DaemonError("empty_session", "Session has no history to clone");
-    return this.copySession(sourceId, tip, true);
+    return this.copySession(sourceId, tip, true, undefined, reservation);
   }
 
   async resume(
@@ -396,6 +428,7 @@ export class SessionManager {
     targetId: EventId,
     includeTarget: boolean,
     selectedText?: string,
+    reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
   ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
@@ -405,8 +438,16 @@ export class SessionManager {
     const tree = SessionTree.fromEvents(sourceId, source.events);
     const lineage = tree.lineage(targetId);
     const copied = includeTarget ? lineage.slice(1) : lineage.slice(1, -1);
-    const sessionId = parseSessionId(randomUUID(), "sessionId");
+    const sessionId = reservation?.sessionId ?? parseSessionId(randomUUID(), "sessionId");
     const path = this.logPath(sessionId);
+    const stagingPath =
+      reservation === undefined
+        ? path
+        : join(
+            this.options.dataDirectory,
+            "sessions",
+            `.staging-${sessionId}-${reservation.operationId}.jsonl`,
+          );
     const startedAt = Date.now();
     const eventIds = new Map<string, string>();
     const operationIds = new Map<string, string>();
@@ -414,13 +455,37 @@ export class SessionManager {
     if (sourceRoot === undefined || sourceRoot.type !== "session.created") {
       throw new DaemonError("corrupt_session", `Session ${sourceId} has no creation event`);
     }
+    if (reservation !== undefined) {
+      const existing = await JsonlEventLog.open(path, sessionId);
+      const root = existing.events[0];
+      if (root !== undefined) {
+        if (
+          root.type !== "session.created" ||
+          root.operationId !== reservation.operationId ||
+          root.payload.parentSessionId !== sourceId
+        ) {
+          throw new DaemonError(
+            "corrupt_session",
+            `Reserved session ${sessionId} has conflicting history`,
+          );
+        }
+        const managed = await this.open(sessionId, source.cwd, source.selection);
+        return {
+          sessionId,
+          events: [...managed.events],
+          ...(selectedText === undefined ? {} : { selectedText }),
+        };
+      }
+    }
 
     try {
-      const { log } = await JsonlEventLog.open(path, sessionId);
+      if (reservation !== undefined) await rm(stagingPath, { force: true });
+      const { log } = await JsonlEventLog.open(stagingPath, sessionId);
       const root = await log.append({
         version: EVENT_FORMAT_VERSION,
         id: randomUUID(),
         sessionId,
+        ...(reservation === undefined ? {} : { operationId: reservation.operationId }),
         parentId: null,
         timestamp: startedAt,
         type: "session.created",
@@ -464,6 +529,15 @@ export class SessionManager {
         parentId = clone.id;
       }
       await log.drain();
+      if (reservation !== undefined) {
+        await rename(stagingPath, path);
+        const directory = await openFile(join(this.options.dataDirectory, "sessions"), "r");
+        try {
+          await directory.sync();
+        } finally {
+          await directory.close();
+        }
+      }
       const managed = await this.open(sessionId, source.cwd, source.selection);
       return {
         sessionId,
@@ -471,7 +545,8 @@ export class SessionManager {
         ...(selectedText === undefined ? {} : { selectedText }),
       };
     } catch (error) {
-      await rm(path, { force: true });
+      await rm(stagingPath, { force: true });
+      if (reservation === undefined) await rm(path, { force: true });
       throw error;
     }
   }

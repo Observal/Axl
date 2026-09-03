@@ -7,6 +7,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   encodeWireMessage,
+  isRetryableMutationMethod,
   parseServerMessage,
   parseWireRequest,
   requiredCapability,
@@ -131,28 +132,43 @@ export class DaemonClient {
   request<Method extends RpcMethod>(
     method: Method,
     params: RpcParams<Method>,
+    options?: { readonly idempotencyKey?: string },
   ): Promise<RpcResult<Method>>;
   request<Method extends RpcMethod>(
     method: Method,
     params: Record<string, unknown>,
+    options?: { readonly idempotencyKey?: string },
   ): Promise<RpcResult<Method>>;
   request<Method extends RpcMethod>(
     method: Method,
     params: RpcParams<Method> | Record<string, unknown>,
+    options: { readonly idempotencyKey?: string } = {},
   ): Promise<RpcResult<Method>> {
-    return this.ready.then(() => this.sendRequest(method, params as RpcParams<Method>));
+    return this.ready.then(() =>
+      this.sendRequest(method, params as RpcParams<Method>, options.idempotencyKey),
+    );
   }
 
   private sendRequest<Method extends RpcMethod>(
     method: Method,
     params: RpcParams<Method>,
+    suppliedIdempotencyKey?: string,
   ): Promise<RpcResult<Method>> {
     if (this.closed)
       return Promise.reject(new WireClientError("disconnected", "Daemon connection is closed"));
     const id = this.nextId++;
+    const idempotencyKey = isRetryableMutationMethod(method)
+      ? (suppliedIdempotencyKey ?? randomUUID())
+      : suppliedIdempotencyKey;
     let request: ReturnType<typeof parseWireRequest>;
     try {
-      request = parseWireRequest({ kind: "request", id, method, params });
+      request = parseWireRequest({
+        kind: "request",
+        id,
+        method,
+        params,
+        ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      });
     } catch (cause) {
       return Promise.reject(new WireClientError("bad_request", "Invalid request", { cause }));
     }

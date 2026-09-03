@@ -31,6 +31,7 @@ for (const fixture of fixtureDocument.cases) {
       id: 7,
       method: fixture.method,
       params: fixture.params,
+      idempotencyKey: "00000000-0000-4000-8000-000000000001",
     });
     const encoded = encodeCanonicalRequest(request.method, request.params);
     assert.equal(new TextDecoder().decode(encoded), fixture.canonical);
@@ -44,12 +45,14 @@ test("canonical request hashes ignore input object ordering and delivery metadat
     id: 1,
     method: "session.create",
     params: { cwd: "/repo", modelId: "openai/gpt-5", thinkingLevel: "high" },
+    idempotencyKey: "00000000-0000-4000-8000-000000000001",
   });
   const second = parseWireRequest({
     params: { thinkingLevel: "high", modelId: "openai/gpt-5", cwd: "/repo" },
     method: "session.create",
     id: 999,
     kind: "request",
+    idempotencyKey: "00000000-0000-4000-8000-000000000002",
   });
   assert.equal(
     hashCanonicalRequest(first.method, first.params),
