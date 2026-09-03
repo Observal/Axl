@@ -68,6 +68,8 @@ async function startDaemon(
   context: TestContext,
   port: ModelPort = replyPort(),
   securityMode: "sandboxed" | "unsafe" = "sandboxed",
+  sandboxProvider?: string,
+  sandboxImage?: string,
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -76,6 +78,8 @@ async function startDaemon(
     socketPath,
     dataDirectory: join(directory, "data"),
     securityMode,
+    ...(sandboxProvider === undefined ? {} : { sandboxProvider }),
+    ...(sandboxImage === undefined ? {} : { sandboxImage }),
     runtime: () => ({ model: port, tools: new ToolRegistry(), system: "You are Axl." }),
   });
   await daemon.start();
@@ -93,12 +97,26 @@ test("reports the daemon security mode", async (context) => {
   context.after(() => sandboxedClient.close());
   assert.deepEqual(await sandboxedClient.request("daemon.info", {}), {
     securityMode: "sandboxed",
+    sandboxProvider: "unknown",
   });
 
   const unsafe = await startDaemon(context, replyPort(), "unsafe");
   const unsafeClient = await DaemonClient.connect(unsafe.socketPath);
   context.after(() => unsafeClient.close());
-  assert.deepEqual(await unsafeClient.request("daemon.info", {}), { securityMode: "unsafe" });
+  assert.deepEqual(await unsafeClient.request("daemon.info", {}), {
+    securityMode: "unsafe",
+    sandboxProvider: "unknown",
+  });
+
+  const image = `example.invalid/image@sha256:${"a".repeat(64)}`;
+  const oci = await startDaemon(context, replyPort(), "sandboxed", "podman", image);
+  const ociClient = await DaemonClient.connect(oci.socketPath);
+  context.after(() => ociClient.close());
+  assert.deepEqual(await ociClient.request("daemon.info", {}), {
+    securityMode: "sandboxed",
+    sandboxProvider: "podman",
+    sandboxImage: image,
+  });
 });
 
 test("creates a session, streams the live tail, and answers sends", async (context) => {

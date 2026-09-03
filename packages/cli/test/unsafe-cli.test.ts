@@ -52,6 +52,58 @@ async function stopChild(child: ChildProcess): Promise<void> {
   await new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
 }
 
+async function runCli(args: readonly string[]): Promise<{ code: number | null; stderr: string }> {
+  let stderr = "";
+  const child = spawn(process.execPath, [entry, ...args], {
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const code = await new Promise<number | null>((resolvePromise) =>
+    child.once("exit", (value) => resolvePromise(value)),
+  );
+  return { code, stderr };
+}
+
+test("OCI CLI arguments fail closed", async () => {
+  const missingImage = await runCli(["--sandbox", "podman"]);
+  assert.equal(missingImage.code, 1);
+  assert.match(missingImage.stderr, /requires --image with a sha256 digest/);
+  const unsafeOci = await runCli([
+    "--unsafe",
+    "--sandbox",
+    "docker",
+    "--image",
+    "example.invalid/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  ]);
+  assert.equal(unsafeOci.code, 1);
+  assert.match(unsafeOci.stderr, /--unsafe cannot be combined/);
+});
+
+test("doctor reports native, Podman, and Docker capabilities without credentials", async () => {
+  let stdout = "";
+  let stderr = "";
+  const child = spawn(process.execPath, [entry, "doctor"], {
+    env: { ...process.env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString("utf8");
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const exitCode = await new Promise<number | null>((resolvePromise) =>
+    child.once("exit", (code) => resolvePromise(code)),
+  );
+  assert.equal(exitCode, 0, stderr);
+  const report = JSON.parse(stdout) as Record<string, unknown>;
+  assert.equal(typeof report.native, "object");
+  assert.equal(typeof report.podman, "object");
+  assert.equal(typeof report.docker, "object");
+});
+
 test("--unsafe starts a separate unenforced daemon and records the warning state", async (context) => {
   const home = await temporaryDirectory(context);
   const workspace = join(home, "workspace");
@@ -75,7 +127,10 @@ test("--unsafe starts a separate unenforced daemon and records the warning state
   const socketPath = join(stateDirectory, "axl.sock");
   const client = await connectEventually(socketPath, child);
   context.after(() => client.close());
-  assert.deepEqual(await client.request("daemon.info", {}), { securityMode: "unsafe" });
+  assert.deepEqual(await client.request("daemon.info", {}), {
+    securityMode: "unsafe",
+    sandboxProvider: "none",
+  });
 
   const created = (await client.request("session.create", { cwd: workspace })) as SessionSnapshot;
   const sandbox = created.events.find((event) => event.type === "sandbox.configured");
@@ -157,4 +212,30 @@ test("clients refuse a daemon with the opposite security mode", async (context) 
     false,
     /Daemon security mode is unsafe; sandboxed was requested/,
   );
+});
+
+test("clients refuse a different OCI engine or image", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const socketPath = join(directory, "axl.sock");
+  const firstImage = `example.invalid/image@sha256:${"a".repeat(64)}`;
+  const secondImage = `example.invalid/image@sha256:${"b".repeat(64)}`;
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    securityMode: "sandboxed",
+    sandboxProvider: "podman",
+    sandboxImage: firstImage,
+    runtime: () => ({ model: idleModel, tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+
+  for (const args of [
+    ["--sandbox", "docker", "--image", firstImage],
+    ["--sandbox", "podman", "--image", secondImage],
+  ]) {
+    const result = await runCli([...args, "--socket", socketPath]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Daemon security mode is sandboxed\/podman/);
+  }
 });

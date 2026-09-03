@@ -10,7 +10,27 @@ import test from "node:test";
 import { FileCredentialStore } from "@axl/ai";
 import { DaemonClient, type SessionSnapshot } from "@axl/daemon";
 
-import { startLocalDaemon } from "../src/index.ts";
+import { localSandboxStateKey, startLocalDaemon } from "../src/index.ts";
+
+test("OCI state keys require a digest and cannot traverse directories", () => {
+  assert.equal(
+    localSandboxStateKey({
+      type: "oci",
+      engine: "podman",
+      image: `example.invalid/image@sha256:${"a".repeat(64)}`,
+    }),
+    join("oci", "podman", "a".repeat(64)),
+  );
+  assert.throws(
+    () =>
+      localSandboxStateKey({
+        type: "oci",
+        engine: "docker",
+        image: "example.invalid/image@sha256:../../outside",
+      }),
+    /must be pinned/,
+  );
+});
 
 test("assembles an authoritative local runtime without a presentation client", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-runtime-"));
@@ -42,7 +62,10 @@ test("assembles an authoritative local runtime without a presentation client", a
   const client = await DaemonClient.connect(socketPath);
   context.after(() => client.close());
 
-  assert.deepEqual(await client.request("daemon.info", {}), { securityMode: "unsafe" });
+  assert.deepEqual(await client.request("daemon.info", {}), {
+    securityMode: "unsafe",
+    sandboxProvider: "none",
+  });
   const snapshot = (await client.request("session.create", { cwd: workspace })) as SessionSnapshot;
   const sandbox = snapshot.events.find((event) => event.type === "sandbox.configured");
   assert.deepEqual(sandbox?.type === "sandbox.configured" ? sandbox.payload : undefined, {

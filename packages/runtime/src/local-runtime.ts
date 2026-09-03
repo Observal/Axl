@@ -13,6 +13,64 @@ export interface LocalRuntimeDefaults {
   readonly thinkingLevel: ThinkingLevel;
 }
 
+export type LocalSandboxSelection =
+  | { readonly type: "native" }
+  | { readonly type: "oci"; readonly engine: "podman" | "docker"; readonly image: string };
+
+export function localSandboxStateKey(selection: LocalSandboxSelection): string | undefined {
+  if (selection.type === "native") return undefined;
+  const separatorText = "@sha256:";
+  const separator = selection.image.lastIndexOf(separatorText);
+  const name = separator < 1 ? "" : selection.image.slice(0, separator);
+  const digest = separator < 0 ? "" : selection.image.slice(separator + separatorText.length);
+  let digestValid = digest.length === 64;
+  for (const character of digest) {
+    const code = character.charCodeAt(0);
+    if (!((code >= 48 && code <= 57) || (code >= 97 && code <= 102))) digestValid = false;
+  }
+  const nameValid =
+    name.length > 0 &&
+    !name.includes("@") &&
+    ![...name].some((character) => character.trim() === "");
+  if (!nameValid || !digestValid) {
+    throw new Error(
+      `OCI image must be pinned to a sha256 digest, received ${JSON.stringify(selection.image)}`,
+    );
+  }
+  return join("oci", selection.engine, digest);
+}
+
+export async function diagnoseLocalSandboxes(): Promise<{
+  readonly native: {
+    readonly provider: string;
+    readonly available: boolean;
+    readonly reason?: string;
+    readonly controls: readonly string[];
+    readonly details?: Readonly<Record<string, unknown>>;
+  };
+  readonly podman: Awaited<ReturnType<typeof import("@axl/sandbox")["detectOciEngine"]>>;
+  readonly docker: Awaited<ReturnType<typeof import("@axl/sandbox")["detectOciEngine"]>>;
+}> {
+  const sandboxPackage = await import("@axl/sandbox");
+  const [native, podman, docker] = await Promise.all([
+    sandboxPackage.detectPlatformSandbox(),
+    sandboxPackage.detectOciEngine("podman"),
+    sandboxPackage.detectOciEngine("docker"),
+  ]);
+  const nativePayload = native.configuredPayload();
+  return {
+    native: {
+      provider: native.provider,
+      available: native.available,
+      ...(native.reason === undefined ? {} : { reason: native.reason }),
+      controls: nativePayload.controls,
+      ...(nativePayload.details === undefined ? {} : { details: nativePayload.details }),
+    },
+    podman,
+    docker,
+  };
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -30,6 +88,7 @@ export interface LocalDaemonOptions {
   readonly defaults: LocalRuntimeDefaults;
   readonly store: CredentialStore;
   readonly unsafe: boolean;
+  readonly sandbox?: LocalSandboxSelection;
 }
 
 /**
@@ -38,11 +97,12 @@ export interface LocalDaemonOptions {
  */
 export async function startLocalDaemon(options: LocalDaemonOptions): Promise<AxlDaemon> {
   const { axlHome, stateDirectory, socketPath, defaults, store, unsafe } = options;
+  const sandboxSelection = options.sandbox ?? { type: "native" as const };
   let assemblyPromise:
     | Promise<{
         ai: typeof import("@axl/ai");
         kernel: typeof import("@axl/kernel");
-        sandbox: Awaited<ReturnType<typeof import("@axl/sandbox")["detectPlatformSandbox"]>>;
+        sandbox: import("@axl/sandbox").PlatformSandbox;
         provider: ReturnType<typeof import("@axl/ai")["createAzureOpenAiProvider"]>;
       }>
     | undefined;
@@ -54,7 +114,12 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     ]).then(async ([ai, kernel, sandboxPackage]) => {
       const sandbox = unsafe
         ? sandboxPackage.createUnsafePlatformExecution()
-        : await sandboxPackage.detectPlatformSandbox();
+        : sandboxSelection.type === "native"
+          ? await sandboxPackage.detectPlatformSandbox()
+          : await sandboxPackage.prepareOciPlatformExecution({
+              engine: sandboxSelection.engine,
+              image: sandboxSelection.image,
+            });
       if (!sandbox.available) {
         throw new sandboxPackage.SandboxUnavailableError(sandbox.reason ?? "unknown");
       }
@@ -70,12 +135,14 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
 
   // Sandboxed startup fails closed before listening. Unsafe startup may listen
   // first because its lack of isolation is already explicit and logged.
-  if (!unsafe) await loadAssembly();
+  const initialAssembly = unsafe ? undefined : await loadAssembly();
   const { AxlDaemon } = await import("@axl/daemon");
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: stateDirectory,
     securityMode: unsafe ? "unsafe" : "sandboxed",
+    sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
+    ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
       const { ai, kernel, sandbox, provider } = await loadAssembly();
       const [hasMcpConfig, hasSkills] = await Promise.all([

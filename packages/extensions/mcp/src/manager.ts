@@ -72,6 +72,7 @@ interface Connection {
   readonly client: AnyClient;
   readonly transport: McpTransport;
   readonly oauth?: OAuthSession;
+  readonly cleanup?: () => Promise<void>;
   readonly taskStore: TaskStore;
   readonly logs: JsonValue[];
 }
@@ -675,6 +676,7 @@ export class McpManager implements ExtensionHost {
       },
     );
     let oauthForClose: OAuthSession | undefined;
+    let cleanupForClose: (() => Promise<void>) | undefined;
     client.onerror = (error) => this.pushLog(logs, { level: "error", data: error.message });
     client.onclose = () => {
       this.pushLog(logs, { level: "info", data: "connection closed" });
@@ -682,6 +684,9 @@ export class McpManager implements ExtensionHost {
       void oauthForClose
         ?.close()
         .catch((error: unknown) => this.pushLog(logs, { level: "error", data: String(error) }));
+      void cleanupForClose?.().catch((error: unknown) =>
+        this.pushLog(logs, { level: "error", data: String(error) }),
+      );
     };
     client.setRequestHandler(ListRootsRequestSchema, async () => ({
       roots: await this.roots(server.config),
@@ -710,6 +715,7 @@ export class McpManager implements ExtensionHost {
 
     const opened = await this.transport(server, signal);
     oauthForClose = opened.oauth;
+    cleanupForClose = opened.cleanup;
     try {
       await client.connect(
         opened.transport as unknown as Transport,
@@ -718,6 +724,7 @@ export class McpManager implements ExtensionHost {
     } catch (error) {
       if (!(error instanceof UnauthorizedError) || !opened.oauth) {
         await opened.oauth?.close();
+        await opened.cleanup?.();
         throw error;
       }
       const code = opened.oauth.provider.takeAuthorizationCode();
@@ -734,12 +741,20 @@ export class McpManager implements ExtensionHost {
         retried.transport as unknown as Transport,
         this.requestOptions(server.config, signal, logs),
       );
-      return { client, transport: retried.transport, oauth: opened.oauth, taskStore, logs };
+      return {
+        client,
+        transport: retried.transport,
+        oauth: opened.oauth,
+        ...(retried.cleanup === undefined ? {} : { cleanup: retried.cleanup }),
+        taskStore,
+        logs,
+      };
     }
     return {
       client,
       transport: opened.transport,
       ...(opened.oauth ? { oauth: opened.oauth } : {}),
+      ...(opened.cleanup === undefined ? {} : { cleanup: opened.cleanup }),
       taskStore,
       logs,
     };
@@ -749,7 +764,11 @@ export class McpManager implements ExtensionHost {
     server: NamedMcpServerConfig,
     signal: AbortSignal,
     existingOAuth?: OAuthSession,
-  ): Promise<{ transport: McpTransport; oauth?: OAuthSession }> {
+  ): Promise<{
+    transport: McpTransport;
+    oauth?: OAuthSession;
+    cleanup?: () => Promise<void>;
+  }> {
     const env = this.options.env ?? process.env;
     if (server.config.transport === "stdio") {
       const wrapped = this.options.wrapStdio({
@@ -758,6 +777,15 @@ export class McpManager implements ExtensionHost {
         cwd: server.config.cwd ?? this.options.cwd,
         env: safeEnvironment(server.config.env, env),
       });
+      let cleanupPromise: Promise<void> | undefined;
+      const cleanupOperation = wrapped.cleanup;
+      const cleanup =
+        cleanupOperation === undefined
+          ? undefined
+          : () => {
+              cleanupPromise ??= cleanupOperation();
+              return cleanupPromise;
+            };
       return {
         transport: new StdioClientTransport({
           command: wrapped.command,
@@ -767,6 +795,7 @@ export class McpManager implements ExtensionHost {
           stderr: "ignore",
           maxBufferSize: MAX_BLOB_BYTES * 2,
         }),
+        ...(cleanup === undefined ? {} : { cleanup }),
       };
     }
 
@@ -1025,6 +1054,11 @@ export class McpManager implements ExtensionHost {
     }
     try {
       await connection.oauth?.close();
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await connection.cleanup?.();
     } catch (error) {
       errors.push(error);
     }

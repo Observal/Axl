@@ -55,6 +55,7 @@ function managerFor(input: {
   config: ConstructorParameters<typeof McpManager>[0]["servers"][number];
   env?: Readonly<Record<string, string | undefined>>;
   secretValues?: readonly string[];
+  cleanup?: () => Promise<void>;
 }): McpManager {
   return new McpManager({
     servers: [input.config],
@@ -73,6 +74,7 @@ function managerFor(input: {
           (entry): entry is [string, string] => entry[1] !== undefined,
         ),
       ),
+      ...(input.cleanup === undefined ? {} : { cleanup: input.cleanup }),
     }),
     env: input.env ?? { PATH: process.env.PATH },
   });
@@ -85,10 +87,15 @@ async function execute(manager: McpManager, input: JsonObject) {
 test("stdio MCP supports discovery, tools, resources, prompts, roots, sampling, and elicitation", async (context) => {
   const cwd = await workspace(context);
   const seen: McpInteractionRequest[] = [];
+  let cleanupCalls = 0;
   const manager = managerFor({
     cwd,
     interactions: seen,
     secretValues: ["top-secret"],
+    cleanup: () => {
+      cleanupCalls += 1;
+      return Promise.resolve();
+    },
     config: {
       name: "fixture",
       source: "test",
@@ -180,6 +187,8 @@ test("stdio MCP supports discovery, tools, resources, prompts, roots, sampling, 
   ) as { roots: { roots: Array<{ uri: string }> }; sampled: { content: { text: string } } };
   assert.equal(payload.roots.roots[0]?.uri, pathToFileURL(cwd).href);
   assert.equal(payload.sampled.content.text, "fixture sample");
+  await manager.dispose();
+  assert.equal(cleanupCalls, 1);
 });
 
 test("Streamable HTTP completes OAuth discovery, PKCE, registration, and token use", async (context) => {

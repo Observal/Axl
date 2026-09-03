@@ -24,6 +24,8 @@ export type DaemonSecurityMode = "sandboxed" | "unsafe";
 export interface DaemonOptions extends SessionManagerOptions {
   readonly socketPath: string;
   readonly securityMode?: DaemonSecurityMode;
+  readonly sandboxProvider?: string;
+  readonly sandboxImage?: string;
 }
 
 const MAX_REQUEST_BYTES = 1_048_576;
@@ -83,6 +85,8 @@ export class AxlDaemon {
   readonly sessions: SessionManager;
   private readonly socketPath: string;
   private readonly securityMode: DaemonSecurityMode;
+  private readonly sandboxProvider: string;
+  private readonly sandboxImage: string | undefined;
   private server: Server | undefined;
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
@@ -91,6 +95,8 @@ export class AxlDaemon {
     this.sessions = new SessionManager(options);
     this.socketPath = options.socketPath;
     this.securityMode = options.securityMode ?? "sandboxed";
+    this.sandboxProvider = options.sandboxProvider ?? "unknown";
+    this.sandboxImage = options.sandboxImage;
   }
 
   async start(): Promise<void> {
@@ -226,7 +232,11 @@ export class AxlDaemon {
   ): Promise<unknown> {
     switch (request.method) {
       case "daemon.info":
-        return { securityMode: this.securityMode };
+        return {
+          securityMode: this.securityMode,
+          sandboxProvider: this.sandboxProvider,
+          ...(this.sandboxImage === undefined ? {} : { sandboxImage: this.sandboxImage }),
+        };
       case "session.create": {
         const { cwd, modelId, thinkingLevel } = request.params;
         return this.sessions.create(cwd, {

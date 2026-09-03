@@ -17,6 +17,12 @@ import {
   requiredString,
 } from "./validate.ts";
 
+export interface WrappedShellCommand {
+  readonly argv: readonly string[];
+  /** Idempotent cleanup and absence verification after the process exits. */
+  readonly cleanup?: () => Promise<void>;
+}
+
 export interface ShellToolOptions {
   /** Default working directory for commands. */
   readonly cwd: string;
@@ -29,7 +35,7 @@ export interface ShellToolOptions {
    * default runs `bash -c` directly; a sandbox provider substitutes its own
    * confinement wrapper. Overflow preservation stays harness-side either way.
    */
-  readonly wrapCommand?: (command: string, cwd: string) => readonly string[];
+  readonly wrapCommand?: (command: string, cwd: string) => readonly string[] | WrappedShellCommand;
   /** Bytes of output the model sees before truncation. */
   readonly maxOutputBytes?: number;
   readonly defaultTimeoutMs?: number;
@@ -163,9 +169,17 @@ export function makeShellTool(options: ShellToolOptions): KernelTool {
         options.defaultTimeoutMs ??
         DEFAULT_TIMEOUT_MS;
 
-      const argv = options.wrapCommand?.(command, cwd) ?? ["bash", "-c", command];
+      const wrapped = options.wrapCommand?.(command, cwd) ?? ["bash", "-c", command];
+      const invocation: WrappedShellCommand = Array.isArray(wrapped)
+        ? { argv: wrapped }
+        : (wrapped as WrappedShellCommand);
       const started = Date.now();
-      const capture = await runCommand(argv, cwd, timeoutMs, signal);
+      let capture: CommandCapture;
+      try {
+        capture = await runCommand(invocation.argv, cwd, timeoutMs, signal);
+      } finally {
+        await invocation.cleanup?.();
+      }
       const durationMs = Date.now() - started;
 
       let visible = capture.output.toString("utf8");

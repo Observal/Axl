@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Native sandbox providers for Axl tool execution",
+  "description": "Native and OCI sandbox providers for Axl tool execution",
   "license": "Apache-2.0",
   "exports": {
     ".": {

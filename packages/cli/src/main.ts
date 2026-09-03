@@ -11,7 +11,12 @@ import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
 import { DaemonClient, WireClientError } from "@axl/daemon/client";
 import type { ThinkingLevel } from "@axl/protocol";
-import { startLocalDaemon } from "@axl/runtime";
+import {
+  diagnoseLocalSandboxes,
+  type LocalSandboxSelection,
+  localSandboxStateKey,
+  startLocalDaemon,
+} from "@axl/runtime";
 
 import { loadTuiSettings, saveTuiSettings, type TuiSettings } from "./settings.ts";
 
@@ -19,6 +24,7 @@ const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
 
 const HELP = `Usage: axl [session-id] [options]
        axl login
+       axl doctor
        axl daemon [options]
 
 Options:
@@ -28,19 +34,25 @@ Options:
   --theme <name>     Select the terminal theme
   --tui-mode <mode>  Use regular or fullscreen terminal mode
   --socket <path>    Use a custom daemon socket
+  --sandbox <kind>   Use native, podman, or docker isolation
+  --image <digest>   Use a locally available digest-pinned OCI image
   --unsafe           Disable operating-system isolation
   --help             Show this help
   --version          Show the installed version
 `;
 
+type SandboxChoice = "native" | "podman" | "docker";
+
 interface CliArguments {
-  command?: "login" | "daemon";
+  command?: "login" | "daemon" | "doctor";
   sessionId?: string;
   socket?: string;
   model?: string;
   thinking?: ThinkingLevel;
   theme?: string;
   tuiMode?: "regular" | "fullscreen";
+  image?: string;
+  sandbox: SandboxChoice;
   cwd: string;
   unsafe: boolean;
   showHelp: boolean;
@@ -50,6 +62,7 @@ interface CliArguments {
 function parseArguments(argv: readonly string[]): CliArguments {
   const parsed: CliArguments = {
     cwd: process.cwd(),
+    sandbox: "native",
     unsafe: false,
     showHelp: false,
     showVersion: false,
@@ -73,12 +86,29 @@ function parseArguments(argv: readonly string[]): CliArguments {
         throw new Error("--tui-mode requires regular or fullscreen");
       }
       parsed.tuiMode = mode;
+    } else if (argument === "--image") parsed.image = next();
+    else if (argument === "--sandbox") {
+      const sandbox = next();
+      if (!(["native", "podman", "docker"] as const).includes(sandbox as SandboxChoice)) {
+        throw new Error(`Unknown sandbox ${sandbox}; expected native, podman, or docker`);
+      }
+      parsed.sandbox = sandbox as SandboxChoice;
     } else if (argument === "--unsafe") parsed.unsafe = true;
     else if (argument === "--help" || argument === "-h") parsed.showHelp = true;
     else if (argument === "--version" || argument === "-v") parsed.showVersion = true;
-    else if (argument === "login" || argument === "daemon") parsed.command = argument;
-    else if (!argument.startsWith("-")) parsed.sessionId = argument;
+    else if (argument === "login" || argument === "daemon" || argument === "doctor") {
+      parsed.command = argument;
+    } else if (!argument.startsWith("-")) parsed.sessionId = argument;
     else throw new Error(`Unknown argument ${argument}`);
+  }
+  if (parsed.unsafe && parsed.sandbox !== "native") {
+    throw new Error("--unsafe cannot be combined with --sandbox podman or docker");
+  }
+  if (parsed.sandbox === "native" && parsed.image !== undefined) {
+    throw new Error("--image requires --sandbox podman or docker");
+  }
+  if (parsed.sandbox !== "native" && parsed.image === undefined && parsed.command !== "doctor") {
+    throw new Error(`--sandbox ${parsed.sandbox} requires --image with a sha256 digest`);
   }
   return parsed;
 }
@@ -114,19 +144,45 @@ interface ActiveConfig {
 }
 
 class SecurityModeMismatchError extends Error {
-  constructor(requested: "sandboxed" | "unsafe", actual: string) {
+  constructor(requested: string, actual: string) {
     super(`Daemon security mode is ${actual}; ${requested} was requested`);
     this.name = "SecurityModeMismatchError";
   }
 }
 
-async function connectExpectedDaemon(socketPath: string, unsafe: boolean): Promise<DaemonClient> {
+async function connectExpectedDaemon(
+  socketPath: string,
+  unsafe: boolean,
+  sandbox: SandboxChoice,
+  image?: string,
+): Promise<DaemonClient> {
   const client = await DaemonClient.connect(socketPath);
   try {
-    const info = (await client.request("daemon.info", {})) as { securityMode?: string };
-    const expected = unsafe ? "unsafe" : "sandboxed";
-    if (info.securityMode !== expected) {
-      throw new SecurityModeMismatchError(expected, info.securityMode ?? "unknown");
+    const info = (await client.request("daemon.info", {})) as {
+      securityMode?: string;
+      sandboxProvider?: string;
+      sandboxImage?: string;
+    };
+    const expectedMode = unsafe ? "unsafe" : "sandboxed";
+    if (info.securityMode !== expectedMode) {
+      throw new SecurityModeMismatchError(expectedMode, info.securityMode ?? "unknown");
+    }
+    const providers = unsafe
+      ? ["none", "unknown"]
+      : sandbox === "native"
+        ? ["bubblewrap", "seatbelt", "unknown"]
+        : [sandbox];
+    if (!providers.includes(info.sandboxProvider ?? "unknown")) {
+      throw new SecurityModeMismatchError(
+        `${expectedMode}/${sandbox}`,
+        `${info.securityMode ?? "unknown"}/${info.sandboxProvider ?? "unknown"}`,
+      );
+    }
+    if (image !== undefined && info.sandboxImage !== image) {
+      throw new SecurityModeMismatchError(
+        `${expectedMode}/${sandbox}/${image}`,
+        `${info.securityMode ?? "unknown"}/${info.sandboxProvider ?? "unknown"}/${info.sandboxImage ?? "unknown"}`,
+      );
     }
     return client;
   } catch (error) {
@@ -140,9 +196,11 @@ async function connectOrStartDaemon(input: {
   readonly model: string;
   readonly thinking: ThinkingLevel;
   readonly unsafe: boolean;
+  readonly sandbox: SandboxChoice;
+  readonly image?: string;
 }): Promise<DaemonClient> {
   try {
-    return await connectExpectedDaemon(input.socketPath, input.unsafe);
+    return await connectExpectedDaemon(input.socketPath, input.unsafe, input.sandbox, input.image);
   } catch (error) {
     if (error instanceof SecurityModeMismatchError) throw error;
     if (error instanceof WireClientError && error.code !== "connection_error") throw error;
@@ -161,6 +219,8 @@ async function connectOrStartDaemon(input: {
         "--thinking",
         input.thinking,
         ...(input.unsafe ? ["--unsafe"] : []),
+        ...(input.sandbox === "native" ? [] : ["--sandbox", input.sandbox]),
+        ...(input.image === undefined ? [] : ["--image", input.image]),
       ],
       { detached: true, stdio: "ignore" },
     );
@@ -181,7 +241,12 @@ async function connectOrStartDaemon(input: {
     while (Date.now() < deadline) {
       if (childFailure !== undefined) throw childFailure;
       try {
-        return await connectExpectedDaemon(input.socketPath, input.unsafe);
+        return await connectExpectedDaemon(
+          input.socketPath,
+          input.unsafe,
+          input.sandbox,
+          input.image,
+        );
       } catch (retryError) {
         if (retryError instanceof SecurityModeMismatchError) throw retryError;
         lastError = retryError;
@@ -234,7 +299,20 @@ async function main(): Promise<void> {
   const startupIndicator = cli.command === undefined && showStartupIndicator("starting…");
   const tuiModule = cli.command === undefined ? import("@axl/tui") : undefined;
   const axlHome = join(homedir(), ".axl");
-  const stateDirectory = cli.unsafe ? join(axlHome, "unsafe") : axlHome;
+  if (cli.command === "doctor") {
+    process.stdout.write(`${JSON.stringify(await diagnoseLocalSandboxes(), null, 2)}\n`);
+    return;
+  }
+  const sandbox: LocalSandboxSelection =
+    cli.sandbox === "native"
+      ? { type: "native" }
+      : { type: "oci", engine: cli.sandbox, image: cli.image as string };
+  const sandboxStateKey = localSandboxStateKey(sandbox);
+  const stateDirectory = cli.unsafe
+    ? join(axlHome, "unsafe")
+    : sandboxStateKey === undefined
+      ? axlHome
+      : join(axlHome, sandboxStateKey);
   await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
   const socketPath = cli.socket ?? join(stateDirectory, "axl.sock");
   const settingsPath = join(axlHome, "settings.json");
@@ -280,6 +358,7 @@ async function main(): Promise<void> {
       defaults: active,
       store,
       unsafe: cli.unsafe,
+      sandbox,
     });
     const stop = (): void => {
       void daemon.stop().finally(() => process.exit(0));
@@ -292,7 +371,7 @@ async function main(): Promise<void> {
 
   let client: DaemonClient;
   try {
-    client = await connectExpectedDaemon(socketPath, cli.unsafe);
+    client = await connectExpectedDaemon(socketPath, cli.unsafe, cli.sandbox, cli.image);
     timing.mark("daemon connect");
   } catch (error) {
     if (error instanceof SecurityModeMismatchError) throw error;
@@ -304,6 +383,8 @@ async function main(): Promise<void> {
       model: active.modelId,
       thinking: active.thinkingLevel,
       unsafe: cli.unsafe,
+      sandbox: cli.sandbox,
+      ...(cli.image === undefined ? {} : { image: cli.image }),
     });
     timing.mark("daemon start");
   }
@@ -356,6 +437,8 @@ async function main(): Promise<void> {
         model: active.modelId,
         thinking: active.thinkingLevel,
         unsafe: cli.unsafe,
+        sandbox: cli.sandbox,
+        ...(cli.image === undefined ? {} : { image: cli.image }),
       }),
     onPreferenceChange: persistSettings,
     models: AZURE_OPENAI_MODELS.map((model) => model.modelId),

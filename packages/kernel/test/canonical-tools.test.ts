@@ -143,6 +143,31 @@ test("shell abort terminates descendant processes and never starts with a spent 
   assert.equal(state === undefined || state === "Z", true);
 });
 
+test("shell runs backend cleanup after success and failure", async (context) => {
+  const cwd = await workspace(context);
+  let cleanups = 0;
+  const shell = shellIn(cwd, {
+    wrapCommand: (command) => ({
+      argv: ["bash", "-c", command],
+      cleanup: () => {
+        cleanups += 1;
+        return Promise.resolve();
+      },
+    }),
+  });
+  await shell.execute({ command: "true" }, noSignal);
+  await shell.execute({ command: "exit 7" }, noSignal);
+  assert.equal(cleanups, 2);
+
+  const brokenCleanup = shellIn(cwd, {
+    wrapCommand: (command) => ({
+      argv: ["bash", "-c", command],
+      cleanup: () => Promise.reject(new Error("cleanup failed")),
+    }),
+  });
+  await assert.rejects(brokenCleanup.execute({ command: "true" }, noSignal), /cleanup failed/);
+});
+
 test("shell truncates the model surface but preserves the complete output", async (context) => {
   const cwd = await workspace(context);
   const shell = shellIn(cwd, { maxOutputBytes: 1_000 });

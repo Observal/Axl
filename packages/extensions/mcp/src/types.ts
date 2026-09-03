@@ -23,6 +23,8 @@ export interface WrappedMcpProcess {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
+  /** Idempotent process-backend cleanup and termination verification. */
+  readonly cleanup?: () => Promise<void>;
 }
 
 export interface McpManagerOptions {
