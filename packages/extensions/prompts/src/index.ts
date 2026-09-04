@@ -13,7 +13,7 @@ const MAX_TEMPLATE_BYTES = 256_000;
 const MAX_TEMPLATES_PER_DIRECTORY = 256;
 const MAX_ARGUMENT_CHARACTERS = 32_000;
 const MAX_EXPANDED_BYTES = 512_000;
-const PLACEHOLDER = /\{\{\s*(all|[1-9]\d?)(?:\s*=\s*([^{}]*))?\s*\}\}/gu;
+const PLACEHOLDER = /\{\{(all|[1-9]\d?)(?:=([^{}\r\n]*))?\}\}/gu;
 
 export interface PromptTemplate {
   readonly name: string;
