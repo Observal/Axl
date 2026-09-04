@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,6 +83,7 @@ export function checkWorkspace(root: string): string[] {
   const runtime = packages.find(({ directory }) => directory === resolve(root, "packages/runtime"));
   const sdk = packages.find(({ directory }) => directory === resolve(root, "packages/sdk"));
   const tui = packages.find(({ directory }) => directory === resolve(root, "packages/tui"));
+  const web = packages.find(({ directory }) => directory === resolve(root, "packages/web"));
   const protocolName = protocol?.manifest.name ?? "@axl/protocol";
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
   const tuiName = tui?.manifest.name ?? "@axl/tui";
@@ -94,6 +95,7 @@ export function checkWorkspace(root: string): string[] {
     "marked",
     protocolName,
   ]);
+  const webRuntimeAllowed = new Set([sdkName, "react", "react-dom"]);
 
   if (protocol) {
     for (const dependency of runtimeDependencies(protocol.manifest)) {
@@ -139,6 +141,16 @@ export function checkWorkspace(root: string): string[] {
     }
   }
 
+  if (web) {
+    for (const dependency of runtimeDependencies(web.manifest)) {
+      if (!webRuntimeAllowed.has(dependency)) {
+        errors.push(
+          `${relative(root, web.directory)} may depend only on the SDK and React, found ${dependency}`,
+        );
+      }
+    }
+  }
+
   for (const { directory } of packages) {
     walk(resolve(directory, "src"), (path) => {
       const extension = path.slice(path.lastIndexOf("."));
@@ -167,6 +179,16 @@ export function checkWorkspace(root: string): string[] {
         ) {
           errors.push(
             `${relative(root, path)} imports ${specifier}; TUI source may import only client-facing packages`,
+          );
+        }
+        if (
+          directory === web?.directory &&
+          !specifier.startsWith(".") &&
+          !webRuntimeAllowed.has(specifier) &&
+          ![...webRuntimeAllowed].some((dependency) => specifier.startsWith(`${dependency}/`))
+        ) {
+          errors.push(
+            `${relative(root, path)} imports ${specifier}; web source may import only public SDK and React exports`,
           );
         }
         if (isInside(directory, resolve(root, "packages/extensions"))) {

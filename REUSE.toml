@@ -50,6 +50,15 @@ SPDX-FileCopyrightText = [
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = [
+  "packages/web/package.json",
+  "packages/web/tsconfig.build.json",
+  "packages/web/tsconfig.json",
+]
+SPDX-FileCopyrightText = "2026 VishnuM449"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = ["NOTICE"]
 SPDX-FileCopyrightText = [
   "2026 Hari Srinivasan",

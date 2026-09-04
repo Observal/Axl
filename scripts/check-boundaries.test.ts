@@ -1,10 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,7 +24,7 @@ function writePackage(
   writeFileSync(join(directory, "src/index.ts"), source);
 }
 
-test("enforces protocol, kernel, runtime, TUI, and extension dependency boundaries", () => {
+test("enforces protocol, kernel, runtime, presentation, and extension boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "axl-boundaries-"));
   writePackage(root, "protocol", { name: "@axl/protocol", dependencies: { typebox: "1.0.0" } });
   writePackage(root, "kernel", {
@@ -50,6 +51,15 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
   );
   writePackage(
     root,
+    "web",
+    {
+      name: "@axl/web",
+      dependencies: { "@axl/sdk": "workspace:*", "@axl/daemon": "workspace:*" },
+    },
+    'import "@axl/kernel";\n',
+  );
+  writePackage(
+    root,
     "extensions/example",
     { name: "@axl/example" },
     'import "@axl/kernel/private";\n',
@@ -62,8 +72,10 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
     "packages/kernel may depend only on @axl/protocol, found yaml",
     "packages/runtime must not depend on presentation package @axl/tui",
     "packages/tui may depend only on client-facing packages, found @axl/runtime",
+    "packages/web may depend only on the SDK and React, found @axl/daemon",
     "packages/extensions/example/src/index.ts imports private kernel path @axl/kernel/private",
     "packages/tui/src/index.ts imports @axl/ai; TUI source may import only client-facing packages",
+    "packages/web/src/index.ts imports @axl/kernel; web source may import only public SDK and React exports",
     "apps/example/index.ts imports @axl/kernel; apps may import only @axl/sdk",
   ]);
 });

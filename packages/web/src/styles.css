@@ -1,0 +1,251 @@
+/* SPDX-FileCopyrightText: 2026 VishnuM449
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+:root {
+  color: #e8edf3;
+  background: #101419;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button,
+input,
+textarea,
+select {
+  color: inherit;
+  background: #171d24;
+  border: 1px solid #3b4654;
+  border-radius: 0.35rem;
+  padding: 0.55rem 0.7rem;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 3px solid #65b8ff;
+  outline-offset: 2px;
+}
+
+button:disabled {
+  opacity: 0.5;
+}
+
+.topbar,
+.session-heading,
+.actions,
+.search > div,
+.queue li {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.topbar,
+.session-heading {
+  justify-content: space-between;
+}
+
+.topbar {
+  min-height: 3.5rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #2a333e;
+}
+
+.connection {
+  margin-left: 0.8rem;
+  color: #9fb0c3;
+}
+
+.connection-connected {
+  color: #78d69a;
+}
+
+.connection-incompatible,
+.error {
+  color: #ff9b9b;
+}
+
+.warning {
+  color: #ffd17a;
+}
+
+.error,
+.warning {
+  margin: 0;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid currentColor;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+  min-height: calc(100vh - 3.5rem);
+}
+
+.sessions {
+  padding: 1rem;
+  border-right: 1px solid #2a333e;
+}
+
+.search,
+.create-session,
+.configuration,
+.composer {
+  display: grid;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.search > div {
+  align-items: stretch;
+}
+
+.search input {
+  min-width: 0;
+  flex: 1;
+}
+
+.session-list,
+.queue ul,
+.records {
+  list-style: none;
+  padding: 0;
+}
+
+.session-list button {
+  width: 100%;
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+  text-align: left;
+}
+
+.session-list span,
+.session-list small,
+.session-heading p {
+  color: #9fb0c3;
+  overflow-wrap: anywhere;
+}
+
+.session-list .selected {
+  border-color: #65b8ff;
+  background: #1d3040;
+}
+
+.conversation {
+  min-width: 0;
+  padding: 1.25rem;
+}
+
+.session-heading h1 {
+  margin-bottom: 0.2rem;
+  overflow-wrap: anywhere;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem;
+  padding: 0.8rem;
+  background: #171d24;
+  border-radius: 0.4rem;
+}
+
+.configuration {
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  margin-top: 1rem;
+}
+
+.configuration label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.records {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.record,
+.activity,
+.interaction,
+.queue {
+  padding: 0.9rem;
+  background: #171d24;
+  border: 1px solid #2a333e;
+  border-radius: 0.4rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.record-user-message {
+  margin-left: 12%;
+  border-color: #416d92;
+}
+
+.record small {
+  color: #9fb0c3;
+}
+
+.activity pre {
+  white-space: pre-wrap;
+}
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  padding-top: 1rem;
+  background: #101419;
+}
+
+.composer textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+@media (max-width: 720px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .sessions {
+    border-right: 0;
+    border-bottom: 1px solid #2a333e;
+  }
+
+  .topbar,
+  .session-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition: none !important;
+  }
+}
