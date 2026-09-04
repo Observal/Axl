@@ -11,3 +11,16 @@ Use `axl -r` or `axl --resume` to open the all-placement session picker. Native,
 Use `axl doctor` to inspect native, Podman, and Docker enforcement. Select local OCI execution with `--sandbox podman|docker --image <digest-pinned-reference>`. The CLI keeps each engine and image on a separate daemon socket and rejects attachment when the requested sandbox identity differs.
 
 Web fetch and search are enabled by default. Use `--no-web-fetch`, `--no-web-search`, or `--no-web` to remove them from a new session's tool roster.
+
+## RPC mode
+
+`axl rpc` connects to the matching local daemon, starting it when needed, then bridges stdin and stdout directly to Axl's newline-delimited JSON wire protocol. It does not translate method names, events, errors, request IDs, or capability checks. Host startup and connection failures go to stderr.
+
+The daemon sends `hello` first. The caller must send `connection.initialize`, request the capabilities it needs, and send `connection.ping` at the advertised heartbeat interval. Requests, responses, canonical events, transient activity, and presence use the schemas exported by `@axl/protocol`.
+
+```json
+{"kind":"request","id":1,"method":"connection.initialize","params":{"client":{"kind":"rpc","version":"1","instanceId":"<unique-id>"},"requestedCapabilities":["session.list"]}}
+{"kind":"request","id":2,"method":"session.list","params":{"scope":"all_local","order":"recent","pageSize":20}}
+```
+
+Keep stdin open while waiting for responses or subscribed events. Closing stdin closes the RPC attachment without interrupting daemon-owned session work.

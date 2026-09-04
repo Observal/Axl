@@ -6,7 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,10 +14,10 @@ import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { AxlDaemon } from "@axl/daemon";
-import type { AxlClient } from "@axl/sdk";
-import { connectUnixClient } from "@axl/sdk/unix";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
 import { MAX_CANONICAL_EVENT_BYTES, type ModelStreamEvent } from "@axl/protocol";
+import type { AxlClient } from "@axl/sdk";
+import { connectUnixClient } from "@axl/sdk/unix";
 
 const entry = fileURLToPath(new URL("../dist/main.js", import.meta.url));
 
@@ -28,6 +28,7 @@ test("--help and --version do not require credentials", () => {
   assert.match(help.stdout, /-r, --resume/);
   assert.match(help.stdout, /--profile/);
   assert.match(help.stdout, /--no-web-search/);
+  assert.match(help.stdout, /axl rpc/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
@@ -277,6 +278,76 @@ const idleModel: ModelPort = {
     })();
   },
 };
+
+test("rpc bridges the native daemon protocol over stdio", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const socketPath = join(directory, "axl.sock");
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    securityMode: "sandboxed",
+    runtime: () => ({ model: idleModel, tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+
+  let stderr = "";
+  let buffer = "";
+  const messages: Array<Record<string, unknown>> = [];
+  const child = spawn(process.execPath, [entry, "rpc", "--socket", socketPath], {
+    env: { ...process.env, HOME: directory },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  context.after(() => stopChild(child));
+  child.stdout?.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    for (let newline = buffer.indexOf("\n"); newline !== -1; newline = buffer.indexOf("\n")) {
+      messages.push(JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>);
+      buffer = buffer.slice(newline + 1);
+    }
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString("utf8");
+  });
+  const next = async (predicate: (message: Record<string, unknown>) => boolean) => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const index = messages.findIndex(predicate);
+      if (index !== -1) return messages.splice(index, 1)[0] as Record<string, unknown>;
+      if (child.exitCode !== null) throw new Error(`rpc exited with ${child.exitCode}: ${stderr}`);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+    }
+    throw new Error(`timed out waiting for rpc output: ${JSON.stringify(messages)}`);
+  };
+  const send = (message: unknown): void => {
+    child.stdin?.write(`${JSON.stringify(message)}\n`);
+  };
+
+  assert.equal((await next((message) => message.kind === "hello")).kind, "hello");
+  send({
+    kind: "request",
+    id: 1,
+    method: "connection.initialize",
+    params: {
+      client: { kind: "rpc", version: "test", instanceId: "rpc-test" },
+      requestedCapabilities: ["session.presence"],
+    },
+  });
+  assert.equal((await next((message) => message.id === 1)).kind, "success");
+  assert.equal((await next((message) => message.kind === "presence")).kind, "presence");
+
+  child.stdin?.write("{\n");
+  const invalid = await next((message) => message.kind === "error" && message.id === -1);
+  assert.equal((invalid.error as { code: string }).code, "bad_request");
+  send({ kind: "request", id: 2, method: "daemon.info", params: {} });
+  assert.equal((await next((message) => message.id === 2)).kind, "success");
+
+  child.stdin?.end();
+  const exitCode = await new Promise<number | null>((resolvePromise) =>
+    child.once("exit", (code) => resolvePromise(code)),
+  );
+  assert.equal(exitCode, 0, stderr);
+  assert.equal(stderr, "");
+});
 
 async function expectModeMismatch(
   context: TestContext,

@@ -32,6 +32,7 @@ Axl is not yet a hosted service, remote collaboration product, browser applicati
 | Sessions | Create, list, resume, fork, clone, interrupt, detach, reconnect, compact, configure, and dispose |
 | Durability | Append-only canonical JSONL, operation IDs, crash-safe mutation journal, restart reconciliation, and deterministic replay |
 | Multi-client behavior | Independent attachments, paged snapshots, acknowledged cursors, presence, reconnect recovery, and shared deterministic projection |
+| Automation | Native daemon RPC and event streaming over JSONL stdin and stdout with `axl rpc` |
 | Model interaction | Azure OpenAI model catalog, model selection, thinking levels, streaming text and reasoning, tool calls, steering, and follow-ups |
 | Built-in tools | `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search` |
 | Extensions | Public extension API, Agent Skills, and MCP 2025-11-25 over stdio and Streamable HTTP |
@@ -177,6 +178,7 @@ axl --no-web-search
 axl --no-web                    # disable both web tools
 axl doctor                      # inspect local sandbox support
 axl daemon                      # run the daemon in the foreground
+axl rpc                         # bridge JSONL RPC over stdin and stdout
 ```
 
 The CLI connects to the matching local daemon and starts one in the background when necessary. Native, OCI, and unsafe placements use separate state and are labeled in the resume picker.

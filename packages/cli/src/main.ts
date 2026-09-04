@@ -7,13 +7,12 @@
 
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
-import { type AxlClient, AxlClientError } from "@axl/sdk";
-import { connectUnixClient } from "@axl/sdk/unix";
 import type { SessionProfile, ThinkingLevel } from "@axl/protocol";
 import {
   diagnoseLocalSandboxes,
@@ -24,6 +23,8 @@ import {
   localSandboxStateKey,
   startLocalDaemon,
 } from "@axl/runtime";
+import { type AxlClient, AxlClientError } from "@axl/sdk";
+import { connectUnixClient } from "@axl/sdk/unix";
 
 import { azureLoginDialog, runAzureSetup } from "./azure-auth-ui.ts";
 import { loadTuiSettings, saveTuiSettings, type TuiSettings } from "./settings.ts";
@@ -34,6 +35,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl login
        axl doctor
        axl daemon [options]
+       axl rpc [options]
        axl session export <session-id> --raw [--output <directory>]
        axl session migrate-events <session-id> [--confirm-prefix]
 
@@ -64,7 +66,7 @@ Options:
 type SandboxChoice = "native" | "podman" | "docker";
 
 interface CliArguments {
-  command?: "login" | "daemon" | "doctor" | "session-export" | "session-migrate-events";
+  command?: "login" | "daemon" | "doctor" | "rpc" | "session-export" | "session-migrate-events";
   sessionId?: string;
   output?: string;
   raw: boolean;
@@ -160,7 +162,12 @@ function parseArguments(argv: readonly string[]): CliArguments {
     } else if (argument === "--unsafe") parsed.unsafe = true;
     else if (argument === "--help" || argument === "-h") parsed.showHelp = true;
     else if (argument === "--version" || argument === "-v") parsed.showVersion = true;
-    else if (argument === "login" || argument === "daemon" || argument === "doctor") {
+    else if (
+      argument === "login" ||
+      argument === "daemon" ||
+      argument === "doctor" ||
+      argument === "rpc"
+    ) {
       parsed.command = argument;
     } else if (!argument.startsWith("-") && !parsed.command?.startsWith("session-")) {
       parsed.sessionId = argument;
@@ -171,6 +178,9 @@ function parseArguments(argv: readonly string[]): CliArguments {
   }
   if (parsed.resume && parsed.command !== undefined) {
     throw new Error("--resume cannot be combined with a command");
+  }
+  if (parsed.command === "rpc" && parsed.sessionId !== undefined) {
+    throw new Error("rpc does not accept a session ID; use session RPC methods instead");
   }
   if (parsed.command === "session-export" && !parsed.raw) {
     throw new Error("session export requires --raw");
@@ -241,7 +251,10 @@ function samePlacement(left: LocalSessionPlacement, right: LocalSessionPlacement
   return left.engine === right.engine && left.image === right.image;
 }
 
-async function ensureCredentials(store: CredentialStore): Promise<void> {
+async function ensureCredentials(
+  store: CredentialStore,
+  allowInteractiveSetup = true,
+): Promise<void> {
   const {
     AuthError,
     AZURE_OPENAI_PROVIDER_ID,
@@ -257,7 +270,12 @@ async function ensureCredentials(store: CredentialStore): Promise<void> {
       nodeAuthContext,
     );
   } catch (error) {
-    if (error instanceof AuthError && error.code === "not_configured" && process.stdin.isTTY) {
+    if (
+      error instanceof AuthError &&
+      error.code === "not_configured" &&
+      allowInteractiveSetup &&
+      process.stdin.isTTY
+    ) {
       await runAzureSetup(process.stdin, process.stdout, store, nodeAuthContext);
       return;
     }
@@ -414,6 +432,41 @@ function showStartupIndicator(message: string): boolean {
   return true;
 }
 
+function bridgeRpc(socketPath: string): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    const socket = createConnection(socketPath);
+    let failure: Error | undefined;
+    let inputEnded = process.stdin.readableEnded;
+    const fail = (error: Error): void => {
+      failure ??= error;
+      socket.destroy();
+    };
+    const markInputEnded = (): void => {
+      inputEnded = true;
+    };
+    socket.on("error", (error) => {
+      failure ??= error;
+    });
+    process.stdin.once("end", markInputEnded);
+    process.stdin.once("error", fail);
+    process.stdout.once("error", fail);
+    socket.once("connect", () => {
+      process.stdin.pipe(socket);
+      socket.pipe(process.stdout, { end: false });
+    });
+    socket.once("close", () => {
+      process.stdin.unpipe(socket);
+      socket.unpipe(process.stdout);
+      process.stdin.off("end", markInputEnded);
+      process.stdin.off("error", fail);
+      process.stdout.off("error", fail);
+      if (failure !== undefined) reject(failure);
+      else if (!inputEnded) reject(new Error("Daemon RPC connection closed unexpectedly"));
+      else resolvePromise();
+    });
+  });
+}
+
 async function main(): Promise<void> {
   const timing = new StartupTimer();
   timing.mark("module load");
@@ -426,8 +479,10 @@ async function main(): Promise<void> {
     process.stdout.write(`axl ${AXL_VERSION}\n`);
     return;
   }
-  if (cli.profile !== undefined && cli.command === "daemon") {
-    throw new Error("--profile selects a session and cannot be used with the daemon command");
+  if (cli.profile !== undefined && (cli.command === "daemon" || cli.command === "rpc")) {
+    throw new Error(
+      `--profile selects a session and cannot be used with the ${cli.command} command`,
+    );
   }
   if (cli.profile !== undefined && cli.sessionId !== undefined) {
     throw new Error("--profile cannot replace the recorded profile of a resumed session");
@@ -545,7 +600,7 @@ async function main(): Promise<void> {
     } catch (error) {
       if (error instanceof SecurityModeMismatchError) throw error;
       const { store } = await credentials();
-      await ensureCredentials(store);
+      await ensureCredentials(store, cli.command !== "rpc");
       return connectOrStartDaemon({
         socketPath: target.socketPath,
         model: active.modelId,
@@ -572,6 +627,11 @@ async function main(): Promise<void> {
   };
   const client = await connectTarget(currentTarget);
   timing.mark("daemon connect");
+  if (cli.command === "rpc") {
+    client.close();
+    await bridgeRpc(socketPath);
+    return;
+  }
 
   let resumeCatalog = new Map<string, LocalSessionDescriptor>();
   const loadResumeSessions = async () => {
