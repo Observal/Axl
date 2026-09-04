@@ -1,9 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# RFC 0001: Native and OCI local sandbox backends
+# Native and OCI local sandbox backends
 
-Status: implemented
+Status: implemented architecture
 
 ## Problem
 

@@ -1,9 +1,9 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# RFC: Local web client foundation
+# Local web client architecture
 
-Status: accepted 2026-09-02
+Status: planned; protocol and SDK foundation implemented
 
 Scope: web client delivery slice 1 only
 
@@ -85,7 +85,7 @@ The SDK remains unpublished until an external consumer exists.
 
 Future native Android and iOS SDKs implement or generate the same protocol and must pass shared JSON conformance fixtures. No mobile package or generator is added in this slice.
 
-Mobile has two product modes. Chat uses a tool-free daemon-owned session through an authenticated remote service. Code mode requires remote control of an authoritative coding session and never runs workspace, tool, or agent authority on the phone. Pairing, remote credentials, relay trust, revocation, push delivery, and mobile protocol compatibility require a separate RFC.
+Mobile has two product modes. Chat uses a tool-free daemon-owned session through an authenticated remote service. Code mode requires remote control of an authoritative coding session and never runs workspace, tool, or agent authority on the phone. Pairing, remote credentials, relay trust, revocation, push delivery, and mobile protocol compatibility require a separate reviewed specification.
 
 Transport and authentication are adapters. RPC typing, canonical projection, cursors, idempotency, and capability behavior do not depend on Unix sockets, browser cookies, Tauri, Swift, or Kotlin. Client identity is diagnostic and extensible; authenticated scope alone grants authority.
 
@@ -224,7 +224,7 @@ Missing, corrupt, or incompatible assets fail startup. Production never falls ba
 
 ## Compatibility impact
 
-Merged protocol version 7 is the compatibility baseline. This RFC advances the shared protocol to version 8 because it changes request and response envelopes, hello and initialization, errors, subscriptions, cursors, acknowledgements, and retryable mutations incompatibly. Before 1.0, clients and daemons accept only an exact version, and mismatches fail before session access.
+Merged protocol version 7 is the compatibility baseline. This specification advances the shared protocol to version 8 because it changes request and response envelopes, hello and initialization, errors, subscriptions, cursors, acknowledgements, and retryable mutations incompatibly. Before 1.0, clients and daemons accept only an exact version, and mismatches fail before session access.
 
 The browser transport does not replace Unix sockets. Existing canonical JSONL remains authoritative. New profile or shell events require explicit event-catalog review and tests rather than client-local state.
 
@@ -270,6 +270,6 @@ No gate may silently substitute an unavailable later feature.
 - [Workspace and Git RPC](workspace-rpc.md)
 - [Web build and packaging](web-packaging.md)
 
-## Decision
+## Change control
 
-Approved with the linked specifications as normative implementation contracts. Frozen snapshot boundaries, activity reset, exact UTF-8 event-size measurement, schema-defined blob externalization, and non-destructive `event_migration_required` recovery are required acceptance criteria. Changes to those guarantees require a new protocol review.
+The linked specifications are normative implementation contracts. Frozen snapshot boundaries, activity reset, exact UTF-8 event-size measurement, schema-defined blob externalization, and non-destructive `event_migration_required` recovery are required acceptance criteria. Changes to those guarantees require a new protocol review.

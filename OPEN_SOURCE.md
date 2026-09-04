@@ -74,7 +74,7 @@ The public message is simple: users keep their existing setup and gain another r
 
 - Keep the kernel, protocol, clients, compiler, providers, and apps in one monorepo. [CODE_STRUCTURE.md](CODE_STRUCTURE.md) explains the boundaries and CI layout.
 - Keep plans in the repository so changes go through normal review.
-- Use issues, RFCs, and public chat for decisions. Summarize any private discussion in the public record.
+- Use issues, versioned architecture specifications, and public chat for decisions. Summarize any private discussion in the public record.
 - Follow semantic versioning. Before 1.0, minor releases may break compatibility, and the changelog must say so clearly.
 - Treat CI as part of the product. Automated review can help, but it does not replace a human approval.
 

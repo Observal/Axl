@@ -27,8 +27,8 @@ Event, session, and operation IDs are opaque lowercase RFC 9562 UUIDs. Their own
 
 ## Versioning
 
-- The first JSONL event format version is `1`.
-- The first local wire protocol version is `1`.
+- The JSONL event format remains version `1`.
+- The current local wire protocol is version `8`; version `1` was the initial protocol.
 - Before the first stable release, readers and clients accept only an exact supported version. Later client-protocol work may introduce compatibility ranges.
 
 ## Event-log durability and redaction

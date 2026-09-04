@@ -52,7 +52,7 @@ axl/
     android/           # Gradle project using the generated Kotlin SDK
     ios/               # Xcode project using the generated Swift SDK
   fuzz/                # fuzz targets and oracles (OS §7.3)
-  docs/                # user docs, security material, and RFCs
+  docs/                # user docs, security material, and architecture specifications
   ROADMAP.md           # product vision and technical implementation roadmap
   .github/             # workflows, templates, and CODEOWNERS (OS §8)
 ```

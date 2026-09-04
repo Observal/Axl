@@ -3,7 +3,7 @@
 
 # Web mutation and event delivery specification
 
-Status: supporting specification for [the local web client RFC](web-client-rfc.md)
+Status: delivery specification supporting [the local web client architecture](web-client.md)
 
 ## Scope
 

@@ -3,7 +3,7 @@
 
 # Web client protocol and SDK specification
 
-Status: supporting specification for [the local web client RFC](web-client-rfc.md)
+Status: protocol specification supporting [the local web client architecture](web-client.md)
 
 ## Scope
 
@@ -11,13 +11,13 @@ This document specifies typed RPC, negotiation, errors, package ownership, and t
 
 ## Current baseline
 
-Merged wire version 7 uses newline-delimited JSON over a Unix socket. It includes daemon security reporting, bounded `session.history` pages, direct shell events, transient activity, session-bound blob upload/read/abort, daemon-owned workspace checkpoint diffs, session profiles, web-tool selection, manual compaction, steering, and follow-ups.
+Wire version 8 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool selection, manual compaction, steering, and follow-ups.
 
-Version 7 still returns `result: unknown`, uses untyped string errors, has a version-only hello, and has no initialization, capabilities, idempotency keys, subscription identity, acknowledgement, presence, or opaque cursor contract. The TUI casts results and reduces canonical state locally.
+The TUI consumes these contracts through `packages/sdk`. Version 8 preserves the required version-7 behavior while replacing untyped results, version-only negotiation, unbounded resume assumptions, and client-local projection.
 
 ## Versioning
 
-Implement this RFC as wire version 8. Its typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence are incompatible with version 7. Compatible capability additions after version 8 do not require a bump. Pre-1.0 clients require an exact wire-version match.
+The current wire version is 8. Its typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence are incompatible with version 7. Compatible capability additions after version 8 do not require a bump. Pre-1.0 clients require an exact wire-version match.
 
 The daemon sends `hello` first:
 

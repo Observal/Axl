@@ -3,7 +3,7 @@
 
 # Web build and packaging specification
 
-Status: supporting specification for [the local web client RFC](web-client-rfc.md)
+Status: packaging specification supporting [the local web client architecture](web-client.md)
 
 ## Scope
 

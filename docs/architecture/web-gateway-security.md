@@ -3,7 +3,7 @@
 
 # Web gateway security specification
 
-Status: supporting specification for [the local web client RFC](web-client-rfc.md)
+Status: security specification supporting [the local web client architecture](web-client.md)
 
 ## Scope
 
