@@ -21,6 +21,14 @@ axl print "Summarize this repository"
 printf 'extra context\n' | axl -p "Use this input"
 ```
 
+## JSON mode
+
+`axl json <prompt>` or `axl --json <prompt>` runs the same durable headless turn and writes every canonical event as one JSON line. The stream includes session configuration, prompt sections, tool lifecycle, user messages, and assistant messages in canonical order. Transient activity is excluded because it is not part of the authoritative session log. Diagnostics and failures go to stderr.
+
+```bash
+axl json "Inspect this repository" > events.jsonl
+```
+
 ## RPC mode
 
 `axl rpc` connects to the matching local daemon, starting it when needed, then bridges stdin and stdout directly to Axl's newline-delimited JSON wire protocol. It does not translate method names, events, errors, request IDs, or capability checks. Host startup and connection failures go to stderr.

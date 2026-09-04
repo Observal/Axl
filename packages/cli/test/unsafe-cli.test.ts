@@ -29,6 +29,7 @@ test("--help and --version do not require credentials", () => {
   assert.match(help.stdout, /--profile/);
   assert.match(help.stdout, /--no-web-search/);
   assert.match(help.stdout, /axl print/);
+  assert.match(help.stdout, /axl json/);
   assert.match(help.stdout, /axl rpc/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
@@ -282,7 +283,7 @@ const idleModel: ModelPort = {
   },
 };
 
-test("print runs one headless turn and writes only the final answer", async (context) => {
+test("print and JSON run one headless turn", async (context) => {
   const directory = await temporaryDirectory(context);
   const empty = await runCli(["-p"], { ...process.env, HOME: directory }, "");
   assert.equal(empty.code, 1);
@@ -328,6 +329,31 @@ test("print runs one headless turn and writes only the final answer", async (con
   );
   assert.deepEqual(result, { code: 0, stdout: "printed response\n", stderr: "" });
   assert.equal(prompt, "Summarize this\n\npiped input\n");
+
+  const json = await runCli(
+    ["json", "Emit", "events", "--cwd", workspace, "--socket", socketPath],
+    { ...process.env, HOME: directory },
+  );
+  assert.equal(json.code, 0, json.stderr);
+  assert.equal(json.stderr, "");
+  const events = json.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { sessionId: string; type: string });
+  assert.equal(new Set(events.map((event) => event.sessionId)).size, 1);
+  assert.equal(
+    events.some((event) => event.type === "session.created"),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.type === "user.message"),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.type === "assistant.message"),
+    true,
+  );
+  assert.equal(prompt, "Emit events");
 });
 
 test("rpc bridges the native daemon protocol over stdio", async (context) => {

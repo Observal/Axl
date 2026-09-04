@@ -16,6 +16,7 @@ import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
 import {
   type CanonicalEvent,
+  encodeCanonicalEvent,
   MAX_WIRE_MESSAGE_BYTES,
   type SessionProfile,
   type ThinkingLevel,
@@ -42,6 +43,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl doctor
        axl daemon [options]
        axl print [prompt] [options]
+       axl json [prompt] [options]
        axl rpc [options]
        axl session export <session-id> --raw [--output <directory>]
        axl session migrate-events <session-id> [--confirm-prefix]
@@ -56,6 +58,7 @@ Options:
   --socket <path>    Use a custom daemon socket
   --sandbox <kind>   Use native, podman, or docker isolation
   -p, --print        Print one response and exit
+  --json              Emit canonical events as JSONL and exit
   -r, --resume       Open the all-session resume picker
   --image <digest>   Use a locally available digest-pinned OCI image
   --unsafe           Disable operating-system isolation
@@ -78,6 +81,7 @@ interface CliArguments {
     | "login"
     | "daemon"
     | "doctor"
+    | "json"
     | "print"
     | "rpc"
     | "session-export"
@@ -138,7 +142,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
       if (value === undefined) throw new Error(`${argument} requires a value`);
       return value;
     };
-    if (argument === "--" && parsed.command === "print") {
+    if (argument === "--" && (parsed.command === "print" || parsed.command === "json")) {
       parsed.prompt.push(...argv.slice(index + 1));
       break;
     }
@@ -185,7 +189,12 @@ function parseArguments(argv: readonly string[]): CliArguments {
     else if (argument === "--version" || argument === "-v") parsed.showVersion = true;
     else if (argument === "print" || argument === "--print" || argument === "-p") {
       parsed.command = "print";
-    } else if (parsed.command === "print" && !argument.startsWith("-")) {
+    } else if (argument === "json" || argument === "--json") {
+      parsed.command = "json";
+    } else if (
+      (parsed.command === "print" || parsed.command === "json") &&
+      !argument.startsWith("-")
+    ) {
       parsed.prompt.push(argument);
     } else if (
       argument === "login" ||
@@ -204,7 +213,10 @@ function parseArguments(argv: readonly string[]): CliArguments {
   if (parsed.resume && parsed.command !== undefined) {
     throw new Error("--resume cannot be combined with a command");
   }
-  if ((parsed.command === "print" || parsed.command === "rpc") && parsed.sessionId !== undefined) {
+  if (
+    (parsed.command === "json" || parsed.command === "print" || parsed.command === "rpc") &&
+    parsed.sessionId !== undefined
+  ) {
     throw new Error(`${parsed.command} does not accept a session ID`);
   }
   if (parsed.command === "session-export" && !parsed.raw) {
@@ -466,7 +478,10 @@ function showStartupIndicator(message: string): boolean {
   return true;
 }
 
-async function readPrintPrompt(parts: readonly string[]): Promise<string> {
+async function readHeadlessPrompt(
+  parts: readonly string[],
+  mode: "json" | "print",
+): Promise<string> {
   const argument = parts.join(" ");
   const chunks: Buffer[] = [];
   let bytes = Buffer.byteLength(argument);
@@ -475,7 +490,7 @@ async function readPrintPrompt(parts: readonly string[]): Promise<string> {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
       bytes += buffer.byteLength;
       if (bytes > MAX_WIRE_MESSAGE_BYTES) {
-        throw new Error(`Print prompt exceeds ${MAX_WIRE_MESSAGE_BYTES} bytes`);
+        throw new Error(`${mode} prompt exceeds ${MAX_WIRE_MESSAGE_BYTES} bytes`);
       }
       chunks.push(buffer);
     }
@@ -484,27 +499,30 @@ async function readPrintPrompt(parts: readonly string[]): Promise<string> {
   try {
     piped = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
   } catch (cause) {
-    throw new Error("Print input must be valid UTF-8", { cause });
+    throw new Error(`${mode} input must be valid UTF-8`, { cause });
   }
   const prompt = [argument, piped].filter((part) => part.trim().length > 0).join("\n\n");
-  if (prompt.length === 0) throw new Error("print requires a prompt argument or piped stdin");
+  if (prompt.length === 0) throw new Error(`${mode} requires a prompt argument or piped stdin`);
   if (Buffer.byteLength(prompt) > MAX_WIRE_MESSAGE_BYTES) {
-    throw new Error(`Print prompt exceeds ${MAX_WIRE_MESSAGE_BYTES} bytes`);
+    throw new Error(`${mode} prompt exceeds ${MAX_WIRE_MESSAGE_BYTES} bytes`);
   }
   return prompt;
 }
 
 type AssistantMessageEvent = Extract<CanonicalEvent, { readonly type: "assistant.message" }>;
 
-async function runPrint(
+type HeadlessInput = {
+  readonly cwd: string;
+  readonly prompt: string;
+  readonly active: ActiveConfig;
+  readonly profile?: SessionProfile;
+};
+
+async function runHeadless(
   client: AxlClient,
-  input: {
-    readonly cwd: string;
-    readonly prompt: string;
-    readonly active: ActiveConfig;
-    readonly profile?: SessionProfile;
-  },
-): Promise<void> {
+  input: HeadlessInput,
+  onEvent: (event: CanonicalEvent) => void | Promise<void> = () => undefined,
+): Promise<AssistantMessageEvent> {
   const opened = await client.request("session.create", {
     cwd: input.cwd,
     modelId: input.active.modelId,
@@ -513,19 +531,22 @@ async function runPrint(
     webSearch: input.active.webSearch,
     ...(input.profile === undefined ? {} : { profile: input.profile }),
   });
-  const subscription = await subscribeSession(client, opened.sessionId);
   let terminal: AssistantMessageEvent | undefined;
+  let finishDelivery: (event: AssistantMessageEvent | undefined) => void = () => undefined;
+  const terminalDelivery = new Promise<AssistantMessageEvent | undefined>((resolvePromise) => {
+    finishDelivery = resolvePromise;
+  });
   let interaction: string | undefined;
   let interactionError: Error | undefined;
-  let interactionResponse = Promise.resolve();
-  const removeEvent = client.onEvent((delivery) => {
-    if (delivery.subscriptionId !== subscription.subscriptionId) return;
-    const event = delivery.event;
-    if (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") {
-      terminal = event;
-    } else if (event.type === "interaction.requested") {
-      interaction ??= event.payload.message;
-      interactionResponse = interactionResponse.then(async () => {
+  let deliveryError: Error | undefined;
+  const subscription = await subscribeSession(client, opened.sessionId, {
+    onEvent: async (event) => {
+      await onEvent(event);
+      if (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") {
+        terminal = event;
+        finishDelivery(event);
+      } else if (event.type === "interaction.requested") {
+        interaction ??= event.payload.message;
         try {
           await client.request("session.interaction.respond", {
             sessionId: opened.sessionId,
@@ -536,8 +557,12 @@ async function runPrint(
           interactionError = error instanceof Error ? error : new Error(String(error));
           await client.request("session.interrupt", { sessionId: opened.sessionId });
         }
-      });
-    }
+      }
+    },
+    onResyncRequired: (error) => {
+      deliveryError = error;
+      finishDelivery(undefined);
+    },
   });
   try {
     const result = await client.request("session.send", {
@@ -545,31 +570,59 @@ async function runPrint(
       content: [{ type: "text", text: input.prompt }],
       delivery: "prompt",
     });
-    await interactionResponse;
+    if (terminal === undefined) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      terminal = await Promise.race([
+        terminalDelivery,
+        new Promise<undefined>((resolvePromise) => {
+          timer = setTimeout(resolvePromise, 5_000, undefined);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (deliveryError !== undefined) throw deliveryError;
     if (interactionError !== undefined) throw interactionError;
     if (interaction !== undefined) {
-      throw new Error(`Print mode cannot answer interaction: ${interaction}`);
+      throw new Error(`Headless mode cannot answer interaction: ${interaction}`);
     }
     if (
       terminal === undefined ||
       terminal.operationId !== result.operationId ||
       terminal.payload.stopReason !== result.stopReason
     ) {
-      throw new Error("Print response completed without a matching canonical assistant event");
+      throw new Error("Headless response completed without a matching canonical assistant event");
     }
     if (terminal.payload.stopReason === "error") {
       throw new Error(terminal.payload.errorMessage ?? "The model request failed");
     }
     if (terminal.payload.stopReason === "aborted") throw new Error("The model request was aborted");
-    const text = terminal.payload.content
-      .filter((content) => content.type === "text")
-      .map((content) => content.text)
-      .join("");
-    process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+    return terminal;
   } finally {
-    removeEvent();
     await subscription.close();
   }
+}
+
+async function runPrint(client: AxlClient, input: HeadlessInput): Promise<void> {
+  const terminal = await runHeadless(client, input);
+  const text = terminal.payload.content
+    .filter((content) => content.type === "text")
+    .map((content) => content.text)
+    .join("");
+  process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+async function writeJsonEvent(event: CanonicalEvent): Promise<void> {
+  const encoded = encodeCanonicalEvent(event);
+  const line = Buffer.allocUnsafe(encoded.byteLength + 1);
+  line.set(encoded);
+  line[encoded.byteLength] = 0x0a;
+  await new Promise<void>((resolvePromise, reject) => {
+    process.stdout.write(line, (error) => (error ? reject(error) : resolvePromise()));
+  });
+}
+
+async function runJson(client: AxlClient, input: HeadlessInput): Promise<void> {
+  await runHeadless(client, input, writeJsonEvent);
 }
 
 function bridgeRpc(socketPath: string): Promise<void> {
@@ -631,7 +684,9 @@ async function main(): Promise<void> {
     throw new Error("--profile cannot be combined with --resume");
   }
 
-  const printPrompt = cli.command === "print" ? await readPrintPrompt(cli.prompt) : undefined;
+  const headlessMode = cli.command === "json" || cli.command === "print" ? cli.command : undefined;
+  const headlessPrompt =
+    headlessMode === undefined ? undefined : await readHeadlessPrompt(cli.prompt, headlessMode);
   const startupIndicator = cli.command === undefined && showStartupIndicator("starting…");
   const tuiModule = cli.command === undefined ? import("@axl/tui") : undefined;
   const axlHome = join(homedir(), ".axl");
@@ -703,7 +758,7 @@ async function main(): Promise<void> {
     webSearch: cli.webSearch ?? settings.webSearch ?? true,
   };
 
-  if (cli.unsafe && ["daemon", "print", "rpc"].includes(cli.command ?? "")) {
+  if (cli.unsafe && ["daemon", "json", "print", "rpc"].includes(cli.command ?? "")) {
     process.stderr.write(
       "WARNING: --unsafe disables operating-system isolation and gives tools full host access.\n",
     );
@@ -730,7 +785,11 @@ async function main(): Promise<void> {
   }
 
   const clientKind =
-    cli.command === "print" ? "print" : cli.command === "rpc" ? "rpc_probe" : "tui";
+    cli.command === "json" || cli.command === "print"
+      ? cli.command
+      : cli.command === "rpc"
+        ? "rpc_probe"
+        : "tui";
   const connectTarget = async (target: LocalDaemonTarget): Promise<AxlClient> => {
     await mkdir(target.stateDirectory, { recursive: true, mode: 0o700 });
     try {
@@ -777,15 +836,17 @@ async function main(): Promise<void> {
     await bridgeRpc(socketPath);
     return;
   }
-  if (cli.command === "print") {
-    if (printPrompt === undefined) throw new Error("Print prompt was not loaded");
+  if (cli.command === "json" || cli.command === "print") {
+    if (headlessPrompt === undefined) throw new Error("Headless prompt was not loaded");
+    const input = {
+      cwd: cli.cwd,
+      prompt: headlessPrompt,
+      active,
+      ...(cli.profile === undefined ? {} : { profile: cli.profile }),
+    };
     try {
-      await runPrint(client, {
-        cwd: cli.cwd,
-        prompt: printPrompt,
-        active,
-        ...(cli.profile === undefined ? {} : { profile: cli.profile }),
-      });
+      if (cli.command === "json") await runJson(client, input);
+      else await runPrint(client, input);
     } finally {
       client.close();
     }

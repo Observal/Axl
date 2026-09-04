@@ -32,7 +32,7 @@ Axl is not yet a hosted service, remote collaboration product, browser applicati
 | Sessions | Create, list, resume, fork, clone, interrupt, detach, reconnect, compact, configure, and dispose |
 | Durability | Append-only canonical JSONL, operation IDs, crash-safe mutation journal, restart reconciliation, and deterministic replay |
 | Multi-client behavior | Independent attachments, paged snapshots, acknowledged cursors, presence, reconnect recovery, and shared deterministic projection |
-| Automation | One-shot text output with `axl print` and native daemon RPC over JSONL with `axl rpc` |
+| Automation | One-shot text and canonical JSONL output with `axl print` and `axl json`, plus native daemon RPC with `axl rpc` |
 | Model interaction | Azure OpenAI model catalog, model selection, thinking levels, streaming text and reasoning, tool calls, steering, and follow-ups |
 | Built-in tools | `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search` |
 | Extensions | Public extension API, Agent Skills, and MCP 2025-11-25 over stdio and Streamable HTTP |
@@ -178,7 +178,8 @@ axl --no-web-search
 axl --no-web                    # disable both web tools
 axl doctor                      # inspect local sandbox support
 axl daemon                      # run the daemon in the foreground
-axl print "describe this repo"  # run one headless turn
+axl print "describe this repo"  # print one headless response
+axl json "describe this repo"   # stream canonical events as JSONL
 axl rpc                         # bridge JSONL RPC over stdin and stdout
 ```
 
