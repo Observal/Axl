@@ -1249,6 +1249,14 @@ test("Enter steers and Alt+Enter queues a follow-up while working", async (conte
   releaseFirst();
   await until(() => calls === 3, "queued model calls");
   assert.deepEqual(prompts, ["one", "two", "three"]);
+  const terminal = new VirtualTerminal(100, 24);
+  terminal.write(text());
+  assert.equal(
+    terminal
+      .rows()
+      .some((row) => row.includes("steering queued") || row.includes("follow-up queued")),
+    false,
+  );
   app.stop();
 });
 

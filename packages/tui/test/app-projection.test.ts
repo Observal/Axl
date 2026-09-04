@@ -324,6 +324,7 @@ test("projects a call and result as one settled transaction", async () => {
   assert.equal(output.text.split("pnpm test").length - 1, 1);
   assert.equal(output.text.split("passed").length - 1, 1);
   assert.match(output.text, /✓ done · 1\.0s/);
+  assert.doesNotThrow(() => (app as unknown as { rebuildTranscript(): void }).rebuildTranscript());
   app.stop();
 });
 

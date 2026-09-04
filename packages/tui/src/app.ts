@@ -551,6 +551,10 @@ export class AxlApp {
     readonly text: string;
     readonly attachments: readonly BlobReference[];
   }> = [];
+  private readonly pendingTurnInputs: Array<{
+    readonly mode: "steer" | "followUp";
+    readonly contentKey: string;
+  }> = [];
   private sending = false;
   private activeRequest: "turn" | "shell" | "compaction" | undefined;
   private configuring = false;
@@ -1470,6 +1474,7 @@ export class AxlApp {
       this.webFetchEnabled = event.payload.webFetch;
       this.webSearchEnabled = event.payload.webSearch;
     }
+    if (event.type === "user.message") this.consumePendingTurnInput(event);
 
     if (event.type === "tool.call") {
       this.view.apply(event);
@@ -2282,6 +2287,7 @@ export class AxlApp {
       }
       const event = entry.event;
       if (event.type === "tool.call") {
+        next.apply(event);
         pending.start(event, "pending");
         continue;
       }
@@ -3319,6 +3325,7 @@ export class AxlApp {
       ),
     );
     this.interactionQueue.length = 0;
+    this.pendingTurnInputs.length = 0;
     this.activeInteractionId = undefined;
     this.interactionError = undefined;
     this.workspaceDiff = undefined;
@@ -3772,20 +3779,50 @@ export class AxlApp {
         ...queued.attachments.map((blob) => ({ type: "blob" as const, blob })),
       ],
     };
+    const pending = { mode, contentKey: JSON.stringify(params.content) };
+    this.pendingTurnInputs.push(pending);
     try {
       if (mode === "steer") await this.client.request("session.steer", params);
       else await this.client.request("session.followUp", params);
-      this.notice = this.view.palette.dim(
-        mode === "steer" ? "· steering queued" : "· follow-up queued",
-      );
+      this.updateTurnInputNotice();
     } catch (error) {
-      this.pendingAttachments.unshift(...queued.attachments);
-      this.editor.setText([queued.text, this.editor.text].filter(Boolean).join("\n\n"));
-      this.notice = this.view.palette.error(
-        `✖ ${error instanceof Error ? error.message : `${mode} failed`} · prompt restored`,
-      );
+      const pendingIndex = this.pendingTurnInputs.indexOf(pending);
+      if (pendingIndex >= 0) {
+        this.pendingTurnInputs.splice(pendingIndex, 1);
+        this.pendingAttachments.unshift(...queued.attachments);
+        this.editor.setText([queued.text, this.editor.text].filter(Boolean).join("\n\n"));
+        this.notice = this.view.palette.error(
+          `✖ ${error instanceof Error ? error.message : `${mode} failed`} · prompt restored`,
+        );
+      }
     }
     this.redraw();
+  }
+
+  private consumePendingTurnInput(event: CanonicalEvent<"user.message">): void {
+    const contentKey = JSON.stringify(event.payload.content);
+    const index = this.pendingTurnInputs.findIndex((pending) => pending.contentKey === contentKey);
+    if (index < 0) return;
+    this.pendingTurnInputs.splice(index, 1);
+    this.updateTurnInputNotice();
+  }
+
+  private updateTurnInputNotice(): void {
+    const steering = this.pendingTurnInputs.filter((pending) => pending.mode === "steer").length;
+    const followUps = this.pendingTurnInputs.length - steering;
+    if (steering === 0 && followUps === 0) {
+      if (this.notice?.includes("steering queued") || this.notice?.includes("follow-up queued")) {
+        this.notice = undefined;
+      }
+      return;
+    }
+    const parts = [
+      ...(steering === 0 ? [] : [`${steering === 1 ? "steering" : `${steering} steering`} queued`]),
+      ...(followUps === 0
+        ? []
+        : [`${followUps === 1 ? "follow-up" : `${followUps} follow-ups`} queued`]),
+    ];
+    this.notice = this.view.palette.dim(`· ${parts.join(" · ")}`);
   }
 
   private async enqueuePrompt(
