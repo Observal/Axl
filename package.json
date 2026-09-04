@@ -21,7 +21,7 @@
     "release": "node scripts/release.ts",
     "release:preview": "node scripts/release.ts --preview",
     "test": "pnpm build && node --test packages/*/test/*.test.ts packages/extensions/*/test/*.test.ts scripts/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && pnpm --filter @axl/web typecheck"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.5",
