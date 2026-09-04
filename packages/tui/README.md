@@ -28,9 +28,45 @@ The TUI includes:
 - MCP approval, browser authorization, and structured-input dialogs
 - Capability-scoped terminal extensions with commands, shortcuts, status, working labels, bounded widgets, lifecycle listeners, and safe tool renderers
 - Global and project prompt templates that expand into an editable draft through `/prompt`
+- Global and project JSON themes with bounded validation and live reload
 - Sequenced live text and thinking output that reconciles to canonical history across reconnects
 - Dropped-file and explicit-path image attachments through daemon-owned chunked blob transport
 - Bounded Kitty and iTerm2 images in regular mode, with safe metadata in fullscreen and unsupported terminals
+
+## User themes
+
+Theme files live in `~/.axl/themes/*.json` or `.axl/themes/*.json`. The project file wins when both locations define the same ID. The ID must match the lowercase, hyphenated filename and cannot replace a built-in theme. Each theme inherits one built-in palette and overrides only the roles it needs:
+
+```json
+{
+  "version": 1,
+  "id": "violet-dusk",
+  "label": "Violet Dusk",
+  "appearance": "dark",
+  "inherits": "axl-dark",
+  "foregrounds": {
+    "accent": "#a78bfa",
+    "mdHeading": 141
+  },
+  "backgrounds": {
+    "userMessage": "#211b2e",
+    "toolBackground": "#17131f"
+  },
+  "pairs": {
+    "selection": {
+      "foreground": "#ffffff",
+      "background": "#6d28d9"
+    }
+  },
+  "thinking": {
+    "high": "#f0abfc"
+  }
+}
+```
+
+A color is `"default"`, a `#RRGGBB` value, or an xterm 256-color integer from 0 through 255. `foregrounds` accepts `dim`, `accent`, `error`, `border`, `success`, `warning`, `text`, `diffAdded`, `diffRemoved`, `diffContext`, `mdHeading`, `mdCode`, `mdCodeBlockBorder`, `mdQuote`, `mdQuoteBorder`, `mdListBullet`, `syntaxComment`, `syntaxKeyword`, `syntaxFunction`, `syntaxVariable`, `syntaxString`, `syntaxNumber`, `syntaxType`, `syntaxOperator`, `syntaxPunctuation`, `keyword`, and `literal`. `backgrounds` accepts `userMessage`, `searchMatch`, `toolBackground`, `toolPendingBackground`, `toolSuccessBackground`, `toolErrorBackground`, `toolDeniedBackground`, `diffAddedBackground`, and `diffRemovedBackground`. `pairs` accepts `userMessage`, `selection`, and `searchCurrent`. `thinking` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+
+Select a theme with `/theme <id>` or the `/theme` picker. Changes in existing theme directories reload automatically. An invalid edit leaves the active palette intact and displays the validation error. Use `/reload` after creating a theme directory while Axl is already running.
 
 The TUI attaches to an injected daemon client. It does not construct providers, tools, extensions, sandboxing, the model loop, or canonical session state. The `@axl/cli` executable handles process startup, while `@axl/runtime` assembles the local backend. Startup displays an immediate progress line. Set `AXL_STARTUP_TIMING=1` to add a local phase breakdown after first paint when diagnosing a slow launch.
 

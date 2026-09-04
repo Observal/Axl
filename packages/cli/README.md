@@ -14,6 +14,8 @@ Web fetch and search are enabled by default. Use `--no-web-fetch`, `--no-web-sea
 
 Interactive sessions load global prompt templates from `~/.axl/prompts/*.md` and project overrides from `.axl/prompts/*.md`. Use `/prompt` to browse templates or `/prompt <name> [arguments]` to expand one into an editable draft.
 
+User themes load from `~/.axl/themes/*.json` and project overrides from `.axl/themes/*.json`. Select one with `/theme <id>`. Existing theme directories are watched for live changes, and `/reload` rescans them.
+
 ## Print mode
 
 `axl print <prompt>` or `axl -p <prompt>` creates a durable session, runs one headless turn, writes only the final assistant text to stdout, and exits. Piped UTF-8 stdin is appended to the argument prompt after a blank line. Diagnostics and failures go to stderr, and a request for interactive input makes the command fail instead of waiting indefinitely.

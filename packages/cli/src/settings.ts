@@ -14,17 +14,7 @@ type ImageDisplay = "auto" | "inline" | "metadata";
 type ThinkingDisplay = "show" | "compact" | "hide";
 type ToolOutputDisplay = "compact" | "full" | "focus";
 
-const TUI_THEME_NAMES = [
-  "axl-dark",
-  "axl-light",
-  "system",
-  "high-contrast",
-  "axl",
-  "ember",
-  "ocean",
-  "grove",
-  "plain",
-] as const;
+const THEME_NAME = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
 export interface AxlSettings {
   readonly model?: string;
@@ -131,7 +121,7 @@ function parseSettings(value: unknown, path: string): TuiSettings {
   }
   if (
     input.theme !== undefined &&
-    !TUI_THEME_NAMES.includes(input.theme as (typeof TUI_THEME_NAMES)[number])
+    (typeof input.theme !== "string" || !THEME_NAME.test(input.theme))
   ) {
     throw new Error(`${path}: invalid theme`);
   }

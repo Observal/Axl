@@ -67,7 +67,9 @@ test("uses empty defaults only for a missing file and rejects invalid settings",
   const path = join(directory, "tui.json");
 
   assert.deepEqual(await loadTuiSettings(path), { version: 1 });
-  await writeFile(path, '{"version":1,"theme":"missing"}\n');
+  await writeFile(path, '{"version":1,"theme":"my-theme"}\n');
+  assert.equal((await loadTuiSettings(path)).theme, "my-theme");
+  await writeFile(path, '{"version":1,"theme":"Bad Theme"}\n');
   await assert.rejects(loadTuiSettings(path), /invalid theme/);
   await writeFile(path, '{"version":1,"surprise":true}\n');
   await assert.rejects(loadTuiSettings(path), /unknown setting surprise/);

@@ -928,6 +928,7 @@ async function main(): Promise<void> {
     diffLayout: settings.diffLayout ?? "unified",
     workspaceReview: settings.workspaceReview ?? false,
     imageDisplay: settings.imageDisplay ?? "auto",
+    globalThemeDirectory: join(axlHome, "themes"),
     extensions: [
       mcpTerminalExtension,
       promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),

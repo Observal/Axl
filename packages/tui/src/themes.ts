@@ -357,6 +357,7 @@ export interface ThemeDefinition {
   readonly label: string;
   readonly appearance: "dark" | "light" | "system" | "accessible" | "plain";
   readonly palette: Palette;
+  readonly origin?: "global" | "project";
 }
 
 export const THEME_DEFINITIONS: readonly ThemeDefinition[] = [
@@ -383,6 +384,6 @@ export const THEMES: Readonly<Record<string, Palette>> = Object.fromEntries(
 
 export const DEFAULT_THEME = "axl-dark";
 
-export function themeNames(): readonly string[] {
-  return THEME_DEFINITIONS.map((theme) => theme.id);
+export function themeNames(definitions = THEME_DEFINITIONS): readonly string[] {
+  return definitions.map((theme) => theme.id);
 }

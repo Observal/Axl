@@ -1583,6 +1583,48 @@ test("/theme previews message and tool surfaces live", async (context) => {
   app.stop();
 });
 
+test("active user themes hot-reload from disk", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const themes = join(directory, "themes");
+  const path = join(themes, "custom.json");
+  await mkdir(themes);
+  const theme = (accent: string) =>
+    `${JSON.stringify({
+      version: 1,
+      id: "custom",
+      label: "Custom",
+      appearance: "dark",
+      inherits: "axl-dark",
+      foregrounds: { accent },
+    })}\n`;
+  await writeFile(path, theme("#123456"));
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    theme: "custom",
+    globalThemeDirectory: themes,
+  });
+
+  assert.equal(text().includes("\x1b[38;2;18;52;86m"), true);
+  await writeFile(path, theme("#abcdef"));
+  await until(() => text().includes("theme custom reloaded"), "custom theme reload");
+  assert.equal(text().includes("\x1b[38;2;171;205;239m"), true);
+
+  await writeFile(path, "{\n");
+  await until(() => text().includes("theme reload failed"), "invalid theme warning");
+  await writeFile(path, theme("#fedcba"));
+  await until(
+    () => (text().match(/theme custom reloaded/g) ?? []).length === 2,
+    "theme watcher recovery",
+  );
+  assert.equal(text().includes("\x1b[38;2;254;220;186m"), true);
+  app.stop();
+});
+
 test("/model digit selection and Esc cancel behave", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();

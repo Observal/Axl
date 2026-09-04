@@ -42,6 +42,7 @@ import {
 import { ActivityComponent } from "./activity.ts";
 import { droppedImages, type LocalAttachment, readImageFile } from "./attachments.ts";
 import { readClipboardText, writeClipboardText } from "./clipboard.ts";
+import { loadThemeCatalog, type ThemeCatalog, watchThemeDirectories } from "./custom-themes.ts";
 import { DeveloperPanelComponent } from "./developer-panel.ts";
 import { renderDialog } from "./dialog.ts";
 import {
@@ -88,7 +89,13 @@ import {
   type TerminalOutput,
   TerminalSession,
 } from "./terminal.ts";
-import { DEFAULT_THEME, THEME_DEFINITIONS, THEMES, themeNames } from "./themes.ts";
+import {
+  DEFAULT_THEME,
+  THEME_DEFINITIONS,
+  THEMES,
+  type ThemeDefinition,
+  themeNames,
+} from "./themes.ts";
 import { ToolTransactionStore } from "./tool-transaction.ts";
 import { type Palette, PLAIN_PALETTE, SessionView, type ToolOutputDisplay } from "./transcript.ts";
 import {
@@ -436,6 +443,7 @@ export interface AxlAppOptions {
   readonly sessionId?: string;
   readonly color?: boolean;
   readonly theme?: string;
+  readonly globalThemeDirectory?: string;
   readonly models?: readonly string[];
   readonly modelCatalog?: readonly ClientModelInfo[];
   readonly currentModel?: string;
@@ -569,6 +577,10 @@ export class AxlApp {
   private lastInterrupt = 0;
   private branch: string | undefined;
   private currentTheme: string;
+  private themeDefinitions: readonly ThemeDefinition[];
+  private themes: Readonly<Record<string, Palette>>;
+  private stopThemeWatcher: (() => void) | undefined;
+  private themeReloadGeneration = 0;
   private readonly seenEventIds = new Set<string>();
   private hydrating = true;
   private readonly interactionQueue: EventPayloadMap["interaction.requested"][] = [];
@@ -603,6 +615,7 @@ export class AxlApp {
     width: number,
     height: number,
     branch: string | undefined,
+    themeCatalog: ThemeCatalog,
   ) {
     this.options = options;
     this.client = options.client;
@@ -654,10 +667,10 @@ export class AxlApp {
     );
     this.branch = branch;
     this.currentTheme = options.color === false ? "plain" : (options.theme ?? DEFAULT_THEME);
-    const palette =
-      options.color === false
-        ? PLAIN_PALETTE
-        : (THEMES[this.currentTheme] ?? (THEMES[DEFAULT_THEME] as never));
+    this.themeDefinitions = themeCatalog.definitions;
+    this.themes = themeCatalog.palettes;
+    const palette = options.color === false ? PLAIN_PALETTE : this.themes[this.currentTheme];
+    if (palette === undefined) throw new Error(`Unknown theme ${this.currentTheme}`);
     this.view = new SessionView(
       width,
       palette,
@@ -877,6 +890,18 @@ export class AxlApp {
     const width =
       options.output.columns && options.output.columns > 0 ? options.output.columns : 80;
     const height = options.output.rows && options.output.rows > 0 ? options.output.rows : 24;
+    const themeCatalog =
+      options.color === false
+        ? {
+            definitions: THEME_DEFINITIONS,
+            palettes: THEMES,
+          }
+        : await loadThemeCatalog({
+            cwd,
+            ...(options.globalThemeDirectory === undefined
+              ? {}
+              : { globalDirectory: options.globalThemeDirectory }),
+          });
     const app = new AxlApp(
       options,
       opened?.sessionId ?? parseSessionId("00000000-0000-4000-8000-000000000000"),
@@ -884,6 +909,7 @@ export class AxlApp {
       width,
       height,
       await readGitBranch(cwd),
+      themeCatalog,
     );
     try {
       await app.extensionHost.activate();
@@ -932,6 +958,7 @@ export class AxlApp {
     app.openNextInteraction();
 
     try {
+      await app.restartThemeWatcher(false);
       app.terminal.start();
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
       app.redraw();
@@ -961,6 +988,8 @@ export class AxlApp {
     this.setWorking(false);
     this.cancelResize();
     this.cancelActivityRender();
+    this.stopThemeWatcher?.();
+    this.stopThemeWatcher = undefined;
     for (const controller of this.extensionCommandControllers) controller.abort();
     this.extensionCommandControllers.clear();
 
@@ -1279,7 +1308,7 @@ export class AxlApp {
               return model === undefined ? THINKING_LEVELS : supportedThinkingLevels(model);
             })()
           : command === "/theme"
-            ? themeNames()
+            ? themeNames(this.themeDefinitions)
             : command === "/favorite"
               ? (this.options.models ?? [])
               : command === "/developer"
@@ -2874,9 +2903,67 @@ export class AxlApp {
     });
   }
 
+  private async refreshThemeCatalog(announce: boolean): Promise<void> {
+    if (this.options.color === false) return;
+    const generation = ++this.themeReloadGeneration;
+    try {
+      const catalog = await loadThemeCatalog({
+        cwd: this.cwd,
+        ...(this.options.globalThemeDirectory === undefined
+          ? {}
+          : { globalDirectory: this.options.globalThemeDirectory }),
+      });
+      if (this.stopped || generation !== this.themeReloadGeneration) return;
+      const palette = catalog.palettes[this.currentTheme];
+      if (palette === undefined)
+        throw new Error(`Active theme ${this.currentTheme} is unavailable`);
+      this.themeDefinitions = catalog.definitions;
+      this.themes = catalog.palettes;
+      if (THEMES[this.currentTheme] === undefined) {
+        this.view.palette = palette;
+        if (announce) {
+          this.notice = this.view.palette.accent(`· theme ${this.currentTheme} reloaded`);
+        }
+        this.rebuildTranscript();
+      }
+    } catch (error) {
+      if (this.stopped || generation !== this.themeReloadGeneration) return;
+      this.notice = this.view.palette.error(
+        `✖ theme reload failed · ${sanitizeTerminalText(
+          error instanceof Error ? error.message : "unknown theme error",
+        )}`,
+      );
+      this.redraw();
+    }
+  }
+
+  private async restartThemeWatcher(reload: boolean): Promise<void> {
+    this.stopThemeWatcher?.();
+    this.stopThemeWatcher = undefined;
+    if (this.options.color === false) return;
+    if (reload) await this.refreshThemeCatalog(false);
+    this.stopThemeWatcher = await watchThemeDirectories(
+      {
+        cwd: this.cwd,
+        ...(this.options.globalThemeDirectory === undefined
+          ? {}
+          : { globalDirectory: this.options.globalThemeDirectory }),
+      },
+      (error) => {
+        if (this.stopped) return;
+        if (error !== undefined) {
+          this.notice = this.view.palette.error(
+            `✖ theme watcher failed · ${sanitizeTerminalText(error.message)}`,
+          );
+          this.redraw();
+        } else void this.refreshThemeCatalog(true);
+      },
+    );
+  }
+
   private selectTheme(name: string): void {
     if (name) {
-      const palette = THEMES[name];
+      const palette = this.themes[name];
       if (!palette) {
         this.notice = this.view.palette.error(`✖ unknown theme ${name}`);
         return;
@@ -2892,14 +2979,14 @@ export class AxlApp {
     const originalPalette = this.view.palette;
     this.openPicker({
       title: "Select theme",
-      items: THEME_DEFINITIONS.map((theme) => ({
+      items: this.themeDefinitions.map((theme) => ({
         value: theme.id,
         label: theme.label,
-        description: theme.appearance,
+        description: [theme.appearance, theme.origin].filter(Boolean).join(" · "),
       })),
       current: this.currentTheme,
       onHighlight: (value) => {
-        const palette = THEMES[value];
+        const palette = this.themes[value];
         if (palette !== undefined) this.view.palette = palette;
       },
       preview: (width) => themePreview(width, this.view.palette),
@@ -3428,6 +3515,7 @@ export class AxlApp {
       this.workspaceDiffError =
         error instanceof Error ? error.message : "Workspace checkpoints unavailable";
     }
+    await this.restartThemeWatcher(true);
   }
 
   private openPicker(input: {
@@ -4015,6 +4103,7 @@ export class AxlApp {
       this.extensionCommandControllers.clear();
       this.overlays.clear();
       await this.extensionHost.reload();
+      await this.restartThemeWatcher(true);
       this.rebuildTranscript();
       await this.refreshBranch();
     } catch (error) {

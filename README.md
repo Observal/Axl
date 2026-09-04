@@ -55,6 +55,10 @@ Review {{1}}. Focus on {{2=correctness}}.
 
 Use `{{1}}` through `{{99}}` for quoted positional arguments, `{{all}}` for every argument, and `{{1=default}}` or `{{all=default}}` for defaults.
 
+## User themes
+
+Put Axl theme JSON files in `~/.axl/themes/` or `.axl/themes/`. Project themes override global themes with the same ID. Select one with `/theme <id>`. Axl reloads changed theme files while the TUI is running, retains the last valid palette after an invalid edit, and reports the validation error. Use `/reload` after creating a theme directory during an active session. See [`packages/tui/README.md`](packages/tui/README.md) for the format and color roles.
+
 ## Architecture
 
 ```mermaid
