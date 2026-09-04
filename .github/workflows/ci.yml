@@ -50,6 +50,7 @@ jobs:
   quality:
     name: Build and test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: changes
     steps:
       - name: No code changes

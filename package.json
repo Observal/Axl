@@ -20,7 +20,7 @@
     "lint": "biome lint --error-on-warnings .",
     "release": "node scripts/release.ts",
     "release:preview": "node scripts/release.ts --preview",
-    "test": "pnpm build && node --test packages/*/test/*.test.ts packages/extensions/*/test/*.test.ts scripts/*.test.ts",
+    "test": "pnpm build && node --test --test-timeout=30000 packages/*/test/*.test.ts packages/extensions/*/test/*.test.ts scripts/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
