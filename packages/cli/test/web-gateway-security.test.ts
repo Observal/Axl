@@ -413,6 +413,11 @@ test("10. bootstrap navigation and development traffic remain authenticated on t
     await request(gateway, auth.path, { cookie: auth.cookie }),
     await request(gateway, auth.path, { cookie: auth.cookie, fetchSite: "cross-site" }),
     await request(gateway, auth.path, {
+      method: "POST",
+      cookie: auth.cookie,
+      fetchSite: "same-origin",
+    }),
+    await request(gateway, auth.path, {
       cookie: auth.cookie,
       origin: "http://attacker.invalid",
       fetchSite: "same-origin",

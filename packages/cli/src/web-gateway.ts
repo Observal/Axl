@@ -174,6 +174,7 @@ function exactOrigin(request: IncomingMessage, expected: string): boolean {
 function sameOriginHttpRequest(request: IncomingMessage, expected: string): boolean {
   const suppliedOrigin = request.headers.origin;
   if (suppliedOrigin !== undefined) return suppliedOrigin === expected;
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
   return request.headers["sec-fetch-site"] === "same-origin";
 }
 

@@ -17,6 +17,8 @@ import { type ModelPort, ToolRegistry } from "@axl/kernel";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const enabled = process.env.AXL_REAL_BROWSER === "1" && existsSync(CHROME);
+const CDP_COMMAND_TIMEOUT_MS = 3_000;
+const CHILD_SHUTDOWN_TIMEOUT_MS = 2_000;
 const model: ModelPort = {
   stream() {
     return (async function* () {
@@ -58,59 +60,171 @@ async function waitFor<Value>(
 
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  let resolveExit: () => void = () => undefined;
+  const exited = new Promise<void>((resolve) => {
+    resolveExit = resolve;
+    child.once("exit", resolve);
+  });
   child.kill("SIGTERM");
-  await exited;
+  await Promise.race([
+    exited,
+    new Promise<void>((resolve) => setTimeout(resolve, CHILD_SHUTDOWN_TIMEOUT_MS)),
+  ]);
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await Promise.race([
+      exited,
+      new Promise<void>((resolve) => setTimeout(resolve, CHILD_SHUTDOWN_TIMEOUT_MS)),
+    ]);
+  }
+  child.removeListener("exit", resolveExit);
 }
 
-async function evaluatePage(port: number): Promise<string> {
+class CdpCommandError extends Error {
+  readonly code: number;
+
+  constructor(method: string, code: number, message: string) {
+    super(`CDP ${method} failed (${code}): ${message}`);
+    this.name = "CdpCommandError";
+    this.code = code;
+  }
+}
+
+type PendingCommand = {
+  readonly method: string;
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+};
+
+function isAuthenticatedDevTarget(value: string | undefined, origin: string): boolean {
+  if (value === undefined) return false;
+  try {
+    const url = new URL(value);
+    return url.origin === origin && /^\/_axl\/[0-9a-f]{32}\/dev\//.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isNavigationTransition(error: unknown): boolean {
+  return (
+    error instanceof CdpCommandError &&
+    (error.code === -32000 || /context|navigat|target/i.test(error.message))
+  );
+}
+
+async function evaluatePage(port: number, origin: string): Promise<string> {
   const debuggerUrl = await waitFor(async () => {
     const targets = (await fetch(`http://127.0.0.1:${port}/json/list`).then((response) =>
       response.json(),
     )) as Array<{ readonly url?: string; readonly webSocketDebuggerUrl?: string }>;
-    return targets.find((target) => target.url?.startsWith("http://127.0.0.1:"))
+    return targets.find((target) => isAuthenticatedDevTarget(target.url, origin))
       ?.webSocketDebuggerUrl;
-  }, "Axl browser target");
+  }, "final authenticated Axl browser target");
   const socket = new WebSocket(debuggerUrl);
   await new Promise<void>((resolve, reject) => {
-    socket.addEventListener("open", () => resolve(), { once: true });
-    socket.addEventListener("error", () => reject(new Error("Chrome debugger failed")), {
-      once: true,
-    });
+    const timer = setTimeout(
+      () => reject(new Error("Timed out opening the Chrome debugger")),
+      CDP_COMMAND_TIMEOUT_MS,
+    );
+    socket.addEventListener(
+      "open",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+    socket.addEventListener(
+      "error",
+      () => {
+        clearTimeout(timer);
+        reject(new Error("Chrome debugger failed"));
+      },
+      { once: true },
+    );
   });
   let nextId = 0;
-  const pending = new Map<number, (value: unknown) => void>();
+  const pending = new Map<number, PendingCommand>();
+  const rejectPending = (error: Error): void => {
+    for (const command of pending.values()) {
+      clearTimeout(command.timer);
+      command.reject(error);
+    }
+    pending.clear();
+  };
+  socket.addEventListener("close", () => rejectPending(new Error("Chrome debugger closed")));
   socket.addEventListener("message", (event) => {
-    const message = JSON.parse(String(event.data)) as {
+    let message: {
       readonly id?: number;
       readonly result?: unknown;
+      readonly error?: { readonly code?: unknown; readonly message?: unknown };
     };
-    if (message.id !== undefined) {
-      pending.get(message.id)?.(message.result);
-      pending.delete(message.id);
+    try {
+      message = JSON.parse(String(event.data)) as typeof message;
+    } catch {
+      rejectPending(new Error("Chrome debugger returned invalid JSON"));
+      return;
+    }
+    if (message.id === undefined) return;
+    const command = pending.get(message.id);
+    if (command === undefined) return;
+    clearTimeout(command.timer);
+    pending.delete(message.id);
+    if (message.error !== undefined) {
+      command.reject(
+        new CdpCommandError(
+          command.method,
+          typeof message.error.code === "number" ? message.error.code : -1,
+          typeof message.error.message === "string" ? message.error.message : "unknown error",
+        ),
+      );
+    } else if (!("result" in message)) {
+      command.reject(new Error(`CDP ${command.method} returned neither result nor error`));
+    } else {
+      command.resolve(message.result);
     }
   });
   const command = (method: string, params: Record<string, unknown> = {}) =>
-    new Promise<unknown>((resolve) => {
+    new Promise<unknown>((resolve, reject) => {
       const id = ++nextId;
-      pending.set(id, resolve);
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(`Timed out waiting for CDP ${method}`));
+      }, CDP_COMMAND_TIMEOUT_MS);
+      pending.set(id, { method, resolve, reject, timer });
       socket.send(JSON.stringify({ id, method, params }));
     });
-  const body = await waitFor(async () => {
-    const result = (await command("Runtime.evaluate", {
-      expression: "document.body?.innerText ?? ''",
-      returnByValue: true,
-    })) as { readonly result?: { readonly value?: unknown } };
-    const value = result.result?.value;
-    return typeof value === "string" &&
-      value.includes("Select or create") &&
-      value.includes("Sessions") &&
-      value.includes("Connected")
-      ? value
-      : undefined;
-  }, "Axl application shell");
-  socket.close();
-  return body;
+  try {
+    await command("Runtime.enable");
+    const body = await waitFor(async () => {
+      try {
+        const response = await command("Runtime.evaluate", {
+          expression: "document.body?.innerText ?? ''",
+          returnByValue: true,
+        });
+        if (typeof response !== "object" || response === null || !("result" in response)) {
+          throw new Error("CDP Runtime.evaluate returned an invalid result");
+        }
+        const remote = (response as { readonly result: { readonly value?: unknown } }).result;
+        const value = remote.value;
+        return typeof value === "string" &&
+          value.includes("Select or create") &&
+          value.includes("Sessions") &&
+          value.includes("Connected")
+          ? value
+          : undefined;
+      } catch (error) {
+        if (isNavigationTransition(error)) return undefined;
+        throw error;
+      }
+    }, "stable Axl application execution context");
+    return body;
+  } finally {
+    rejectPending(new Error("Chrome debugger test completed"));
+    socket.close();
+  }
 }
 
 test(
@@ -175,7 +289,7 @@ test(
           return undefined;
         }
       }, "Chrome debugger");
-      const body = await evaluatePage(debuggerPort);
+      const body = await evaluatePage(debuggerPort, gateway.origin);
       assert.match(body, /Axl\s*Connected/);
       assert.match(body, /Sessions/);
     } finally {
