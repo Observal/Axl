@@ -275,11 +275,14 @@ export class ApplicationShell {
     this.removePresence = undefined;
     this.client?.close();
     this.client = undefined;
+    const { activity, ...conversation } = this.stateValue.conversation;
+    void activity;
     this.update({
       connection: "disconnected",
       detached: true,
       presence: [],
       busy: false,
+      conversation,
     });
   }
 
