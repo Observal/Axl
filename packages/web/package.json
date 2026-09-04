@@ -8,7 +8,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite --host 127.0.0.1",
-    "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/daemon build && pnpm --filter @axl/sdk build && node --test test/*.test.ts",
+    "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/daemon build && pnpm --filter @axl/sdk build && tsc -b tsconfig.build.json --force && node --test test/*.test.ts",
     "test:browser": "AXL_REAL_BROWSER=1 node --test test/real-browser-smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },

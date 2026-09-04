@@ -3,8 +3,9 @@
 
 import type { FormEvent, ReactNode } from "react";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import type { CapabilityId, ConversationRecord, SessionProfile, ThinkingLevel } from "@axl/sdk";
+import type { CapabilityId, SessionProfile, ThinkingLevel } from "@axl/sdk";
 
+import { ConversationPresentation } from "./conversation.tsx";
 import type { ApplicationShell } from "./shell.ts";
 
 const CONNECTION_LABELS = {
@@ -16,20 +17,6 @@ const CONNECTION_LABELS = {
   disconnected: "Disconnected",
   incompatible: "Incompatible daemon",
 } as const;
-
-function eventText(record: ConversationRecord): ReactNode {
-  if (record.kind === "unknown_event") return `Unknown event: ${record.event.type}`;
-  const event = record.event;
-  if (event.type === "user.message" || event.type === "assistant.message") {
-    return event.payload.content
-      .map((part) => (part.type === "text" ? part.text : `[${part.type}]`))
-      .join("\n");
-  }
-  if (event.type === "session.error") return event.payload.message;
-  if (event.type === "context.compacted") return "Context compacted";
-  if (event.type === "user.shell") return `Shell: ${event.payload.command}`;
-  return event.type;
-}
 
 function CapabilityButton({
   shell,
@@ -285,50 +272,19 @@ export function App({ shell }: { readonly shell: ApplicationShell }) {
                 </label>
               </section>
 
-              <ol className="records" aria-label="Conversation events">
-                {projection.records.map((record) => (
-                  <li key={record.event.id} className={`record record-${record.event.type.replaceAll(".", "-")}`}>
-                    <small>{record.event.type}</small>
-                    <div>{eventText(record)}</div>
-                  </li>
-                ))}
-              </ol>
-
-              {projection.activity === undefined ? null : (
-                <section className="activity" role="status" aria-live="polite">
-                  <strong>Working</strong>
-                  {projection.activity.thinking === "" ? null : <pre>{projection.activity.thinking}</pre>}
-                  {projection.activity.text === "" ? null : <pre>{projection.activity.text}</pre>}
-                </section>
-              )}
-
-              {projection.interactions.filter((item) => item.resolution === undefined).map((interaction) => (
-                <section className="interaction" key={interaction.interactionId}>
-                  <h2>Response needed</h2>
-                  <p>{interaction.request.payload.message}</p>
-                  <div className="actions">
-                    {(["accept", "decline", "cancel"] as const).map((action) => (
-                      <CapabilityButton key={action} shell={shell} capability="session.interaction.respond" onClick={() => void shell.respondToInteraction(interaction.interactionId, action).catch(() => undefined)}>{action}</CapabilityButton>
-                    ))}
-                  </div>
-                </section>
-              ))}
-
-              {projection.queue.length === 0 ? null : (
-                <section aria-label="Prompt queue" className="queue">
-                  <h2>Queue</h2>
-                  <ul>
-                    {projection.queue.map((item) => (
-                      <li key={item.queueItemId}>
-                        <span>{item.status} · {item.content.map((part) => part.type === "text" ? part.text : `[${part.type}]`).join(" ")}</span>
-                        {item.status === "paused" ? (
-                          <CapabilityButton shell={shell} capability="session.queue.requeue" disabled={state.busy} onClick={() => void shell.requeue(item.queueItemId, "back").catch(() => undefined)}>Requeue</CapabilityButton>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
+              <ConversationPresentation
+                state={projection}
+                interactionDisabled={!shell.supports("session.interaction.respond") || state.busy}
+                queueDisabled={!shell.supports("session.queue.requeue") || state.busy}
+                onRespond={(interactionId, action, content) => {
+                  void shell.respondToInteraction(interactionId, action, content).catch(() => undefined);
+                }}
+                onRequeue={(queueItemId) => {
+                  if (shell.supports("session.queue.requeue") && !state.busy) {
+                    void shell.requeue(queueItemId, "back").catch(() => undefined);
+                  }
+                }}
+              />
 
               <form className="composer" onSubmit={(event) => { event.preventDefault(); void shell.send().catch(() => undefined); }}>
                 <label htmlFor="prompt">Message</label>

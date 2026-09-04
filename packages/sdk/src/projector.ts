@@ -35,11 +35,13 @@ export interface ProjectedToolCall {
   readonly name: string;
   readonly input: JsonObject;
   readonly callEventId: EventId;
+  readonly startedAt: number;
   readonly operationId?: OperationId;
   readonly result?: {
     readonly eventId: EventId;
     readonly content: CanonicalEvent<"tool.result">["payload"]["content"];
     readonly isError: boolean;
+    readonly latencyMs: number;
     readonly details?: JsonValue;
   };
   readonly renderIntent:
@@ -57,6 +59,11 @@ export interface ProjectedInteraction {
   readonly interactionId: string;
   readonly request: CanonicalEvent<"interaction.requested">;
   readonly resolution?: CanonicalEvent<"interaction.resolved">;
+}
+
+export interface ProjectedPermission {
+  readonly request: CanonicalEvent<"permission.requested">;
+  readonly resolution?: CanonicalEvent<"permission.resolved">;
 }
 
 export interface ProjectedActivity {
@@ -96,6 +103,7 @@ export interface ConversationState {
   readonly records: readonly ConversationRecord[];
   readonly tools: readonly ProjectedToolCall[];
   readonly interactions: readonly ProjectedInteraction[];
+  readonly permissions: readonly ProjectedPermission[];
   readonly operations: readonly ProjectedOperation[];
   readonly activeOperationId?: OperationId;
   readonly uncertainShellOperations: readonly UncertainShellOperation[];
@@ -139,13 +147,22 @@ export class ProjectionError extends Error {
 
 function renderIntent(name: string): ProjectedToolCall["renderIntent"] {
   const normalized = name.toLowerCase();
-  if (normalized === "shell" || normalized.includes("terminal")) return "shell";
+  if (normalized === "bash" || normalized === "shell" || normalized.includes("terminal")) {
+    return "shell";
+  }
   if (normalized === "read" || normalized.includes("read_file")) return "read";
   if (normalized === "edit" || normalized.includes("write") || normalized.includes("diff")) {
     return "edit";
   }
-  if (normalized.includes("search") || normalized.includes("grep")) return "search";
   if (normalized.includes("web") || normalized.includes("fetch")) return "web";
+  if (
+    normalized === "find" ||
+    normalized === "ls" ||
+    normalized.includes("search") ||
+    normalized.includes("grep")
+  ) {
+    return "search";
+  }
   if (normalized.startsWith("mcp") || normalized.includes("__")) return "mcp";
   if (normalized.includes("workflow")) return "workflow";
   return "generic";
@@ -178,6 +195,7 @@ export class ConversationProjector {
   private readonly events = new Map<string, string>();
   private readonly tools = new Map<string, ProjectedToolCall>();
   private readonly interactions = new Map<string, ProjectedInteraction>();
+  private readonly permissions = new Map<EventId, ProjectedPermission>();
   private readonly operations = new Map<OperationId, ProjectedOperation>();
   private readonly uncertainShellOperations = new Map<OperationId, UncertainShellOperation>();
   private readonly queue = new Map<EventId, ProjectedQueueItem>();
@@ -211,6 +229,7 @@ export class ConversationProjector {
       records: Object.freeze([...this.records]),
       tools: Object.freeze([...this.tools.values()]),
       interactions: Object.freeze([...this.interactions.values()]),
+      permissions: Object.freeze([...this.permissions.values()]),
       operations: Object.freeze([...this.operations.values()]),
       ...(this.activeOperationId === undefined
         ? {}
@@ -251,6 +270,7 @@ export class ConversationProjector {
     this.events.clear();
     this.tools.clear();
     this.interactions.clear();
+    this.permissions.clear();
     this.operations.clear();
     this.activeOperationId = undefined;
     if (!keepUncertainShells) this.uncertainShellOperations.clear();
@@ -336,6 +356,7 @@ export class ConversationProjector {
           name: event.payload.name,
           input: event.payload.input,
           callEventId: event.id,
+          startedAt: event.timestamp,
           ...(event.operationId === undefined ? {} : { operationId: event.operationId }),
           renderIntent: renderIntent(event.payload.name),
         });
@@ -362,9 +383,20 @@ export class ConversationProjector {
             eventId: event.id,
             content: event.payload.content,
             isError: event.payload.isError,
+            latencyMs: Math.max(0, event.timestamp - call.startedAt),
             ...(event.payload.details === undefined ? {} : { details: event.payload.details }),
           },
         });
+        break;
+      }
+      case "permission.requested":
+        this.permissions.set(event.id, { request: event });
+        break;
+      case "permission.resolved": {
+        const permission = this.permissions.get(event.payload.requestId);
+        if (permission !== undefined && permission.resolution === undefined) {
+          this.permissions.set(event.payload.requestId, { ...permission, resolution: event });
+        }
         break;
       }
       case "interaction.requested":

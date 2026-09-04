@@ -199,17 +199,100 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.records > li:empty {
+  display: none;
+}
+
 .record-user-message {
   margin-left: 12%;
   border-color: #416d92;
 }
 
-.record small {
+.record-error,
+.error-text {
+  color: #ffb0b0;
+}
+
+.record-warning,
+.interrupted {
+  color: #ffd17a;
+}
+
+.record small,
+.interaction small {
   color: #9fb0c3;
 }
 
-.activity pre {
+.content-text {
+  display: block;
+}
+
+.tool-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tool-shell {
+  border-left: 3px solid #78d69a;
+}
+
+.tool-edit {
+  border-left: 3px solid #c89cff;
+}
+
+.tool-web,
+.tool-mcp,
+.tool-workflow {
+  border-left: 3px solid #65b8ff;
+}
+
+.record-details {
+  margin-top: 0.65rem;
+}
+
+.record-details summary {
+  cursor: pointer;
+  color: #b9c8d8;
+}
+
+.record-details dl {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.record-details dl > div {
+  display: grid;
+  grid-template-columns: minmax(6rem, 9rem) minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.record-details dt {
+  color: #9fb0c3;
+}
+
+.record-details dd {
+  margin: 0;
+}
+
+.record-details pre,
+.activity pre,
+.thinking pre {
+  max-height: 24rem;
+  overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.interaction-form {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.interaction-form label {
+  display: grid;
+  gap: 0.3rem;
 }
 
 .composer {

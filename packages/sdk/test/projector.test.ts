@@ -14,6 +14,7 @@ import {
   parseOperationId,
   parseSessionId,
   type CanonicalEvent,
+  type EventId,
   type EventPayloadMap,
   type EventType,
 } from "../src/index.ts";
@@ -58,6 +59,15 @@ test("projects messages, configuration, usage, interactions, and generic tools d
       content: [{ type: "text", text: "done" }],
       isError: false,
     }),
+    event("permission.requested", {
+      capability: "workspace.write",
+      description: "Write a file",
+    }),
+    event("permission.resolved", {
+      requestId: "00000000-0000-4000-8000-000000000007" as EventId,
+      decision: "deny",
+      reason: "Outside the workspace",
+    }),
     event("interaction.requested", {
       interactionId: "question-1",
       kind: "mcp_tool",
@@ -86,7 +96,10 @@ test("projects messages, configuration, usage, interactions, and generic tools d
   }
   assert.deepEqual(one.state, two.state);
   assert.equal(one.state.tools[0]?.renderIntent, "generic");
+  assert.equal(one.state.tools[0]?.startedAt, 5);
+  assert.equal(one.state.tools[0]?.result?.latencyMs, 1);
   assert.equal(one.state.tools[0]?.result?.content[0]?.type, "text");
+  assert.equal(one.state.permissions[0]?.resolution?.payload.reason, "Outside the workspace");
   assert.equal(one.state.interactions[0]?.resolution?.payload.action, "accept");
   assert.deepEqual(one.state.usage, {
     inputTokens: 10,
