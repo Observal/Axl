@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import {
   connect as connectNet,
   createServer as createNetServer,
   type Server as NetServer,
 } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -378,7 +378,12 @@ test("9. every HTTP response carries the required security headers", async (cont
 });
 
 test("10. development traffic is authenticated and remains on the gateway origin", async (context) => {
-  const vite = createHttpServer((_request, response) => response.end("vite fixture"));
+  const vitePaths: string[] = [];
+  const vite = createHttpServer((request, response) => {
+    vitePaths.push(request.url ?? "");
+    response.setHeader("Content-Type", "text/javascript");
+    response.end('import "/__axl_dev__/@vite/client";');
+  });
   await new Promise<void>((resolve) => vite.listen(0, "127.0.0.1", resolve));
   context.after(() => new Promise<void>((resolve) => vite.close(() => resolve())));
   const address = vite.address();
@@ -390,8 +395,9 @@ test("10. development traffic is authenticated and remains on the gateway origin
   assert.equal(auth.path, `${gateway.pathPrefix}/dev/`);
   assert.equal(
     (await request(gateway, auth.path, { origin: gateway.origin, cookie: auth.cookie })).body,
-    "vite fixture",
+    `import "${gateway.pathPrefix}/dev/@vite/client";`,
   );
+  assert.deepEqual(vitePaths, ["/__axl_dev__/"]);
   assert.throws(() => validateLoopbackViteUrl("http://example.com:5173"));
 });
 

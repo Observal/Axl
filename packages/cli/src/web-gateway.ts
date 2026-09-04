@@ -2,10 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { connect, isIP, type Socket } from "node:net";
-import type { Duplex } from "node:stream";
-import { request as httpRequest } from "node:http";
+import { type Duplex, Transform } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 
 import {
@@ -69,6 +74,7 @@ export interface WebGateway {
 }
 
 const LOOPBACK_HOST = "127.0.0.1";
+const VITE_INTERNAL_BASE = "/__axl_dev__/";
 const SECURITY_HEADERS: Readonly<Record<string, string>> = {
   "Content-Security-Policy":
     "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -251,6 +257,7 @@ function proxyHttp(
   response: ServerResponse,
   target: URL,
   targetPath: string,
+  browserBase: string,
 ): void {
   const upstream = httpRequest(
     target,
@@ -268,7 +275,32 @@ function proxyHttp(
       response.statusCode = upstreamResponse.statusCode ?? 502;
       const contentType = upstreamResponse.headers["content-type"];
       if (typeof contentType === "string") response.setHeader("Content-Type", contentType);
-      upstreamResponse.pipe(response);
+      if (typeof contentType === "string" && /(?:text\/|javascript|json)/i.test(contentType)) {
+        const decoder = new StringDecoder("utf8");
+        let pending = "";
+        const rewrite = new Transform({
+          transform(chunk: Buffer, _encoding, callback) {
+            pending += decoder.write(chunk);
+            let output = "";
+            for (let match = pending.indexOf(VITE_INTERNAL_BASE); match !== -1; ) {
+              output += `${pending.slice(0, match)}${browserBase}`;
+              pending = pending.slice(match + VITE_INTERNAL_BASE.length);
+              match = pending.indexOf(VITE_INTERNAL_BASE);
+            }
+            const boundary = Math.max(0, pending.length - VITE_INTERNAL_BASE.length + 1);
+            output += pending.slice(0, boundary);
+            pending = pending.slice(boundary);
+            callback(null, output);
+          },
+          flush(callback) {
+            pending += decoder.end();
+            callback(null, pending.replaceAll(VITE_INTERNAL_BASE, browserBase));
+          },
+        });
+        upstreamResponse.pipe(rewrite).pipe(response);
+      } else {
+        upstreamResponse.pipe(response);
+      }
     },
   );
   upstream.setTimeout(WEB_GATEWAY_LIMITS.handshakeTimeoutMs, () => upstream.destroy());
@@ -564,8 +596,8 @@ export async function startWebGateway(options: StartWebGatewayOptions): Promise<
         (request.method === "GET" || request.method === "HEAD") &&
         requestUrl.pathname.startsWith(`${pathPrefix}/dev/`)
       ) {
-        const targetPath = `/${requestUrl.pathname.slice(`${pathPrefix}/dev/`.length)}${requestUrl.search}`;
-        proxyHttp(request, response, viteTarget, targetPath);
+        const targetPath = `${VITE_INTERNAL_BASE}${requestUrl.pathname.slice(`${pathPrefix}/dev/`.length)}${requestUrl.search}`;
+        proxyHttp(request, response, viteTarget, targetPath, `${pathPrefix}/dev/`);
         return;
       }
       fixedResponse(response, 404, "Not found\n", undefined, viteTarget !== undefined);
@@ -594,7 +626,7 @@ export async function startWebGateway(options: StartWebGatewayOptions): Promise<
       return;
     }
     if (viteTarget !== undefined && requestUrl.pathname.startsWith(`${pathPrefix}/dev/`)) {
-      const targetPath = `/${requestUrl.pathname.slice(`${pathPrefix}/dev/`.length)}${requestUrl.search}`;
+      const targetPath = `${VITE_INTERNAL_BASE}${requestUrl.pathname.slice(`${pathPrefix}/dev/`.length)}${requestUrl.search}`;
       viteServer.handleUpgrade(request, socket, head, (browser) => {
         webSockets.add(browser);
         browser.once("close", () => webSockets.delete(browser));
