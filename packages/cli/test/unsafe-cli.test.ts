@@ -28,6 +28,8 @@ test("--help and --version do not require credentials", () => {
   assert.match(help.stdout, /-r, --resume/);
   assert.match(help.stdout, /--profile/);
   assert.match(help.stdout, /--no-web-search/);
+  assert.match(help.stdout, /axl web \[--no-open\]/);
+  assert.match(help.stdout, /--print-launch-url/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
@@ -82,6 +84,16 @@ async function runCli(
   );
   return { code, stdout, stderr };
 }
+
+test("web development options fail closed unless supplied together", async () => {
+  const missingVite = await runCli(["web", "--dev"]);
+  assert.equal(missingVite.code, 1);
+  assert.match(missingVite.stderr, /requires --vite-url/);
+
+  const missingDev = await runCli(["web", "--vite-url", "http://127.0.0.1:5173"]);
+  assert.equal(missingDev.code, 1);
+  assert.match(missingDev.stderr, /requires --dev/);
+});
 
 test("resume mode rejects an explicit session ID", async () => {
   const result = await runCli(["--resume", "123e4567-e89b-42d3-a456-426614174000"]);
@@ -277,6 +289,56 @@ const idleModel: ModelPort = {
     })();
   },
 };
+
+test("axl web prints a token-free origin unless launch URL output is explicit", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const socketPath = join(directory, "axl.sock");
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: () => ({ model: idleModel, tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+
+  for (const printLaunchUrl of [false, true]) {
+    let stdout = "";
+    let stderr = "";
+    const child = spawn(
+      process.execPath,
+      [
+        entry,
+        "web",
+        "--no-open",
+        ...(printLaunchUrl ? ["--print-launch-url"] : []),
+        "--socket",
+        socketPath,
+      ],
+      { env: { ...process.env, HOME: directory }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    const expectedLines = printLaunchUrl ? 2 : 1;
+    const deadline = Date.now() + 5_000;
+    while (
+      (stdout.trim() === "" ? 0 : stdout.trim().split("\n").length) < expectedLines &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    await stopChild(child);
+    assert.equal(stderr, "");
+    const lines = stdout.trim().split("\n");
+    assert.match(lines[0] ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+    if (printLaunchUrl)
+      assert.match(lines[1] ?? "", /^http:\/\/127\.0\.0\.1:\d+\/#[-_A-Za-z0-9]+$/);
+    else assert.doesNotMatch(stdout, /#/);
+  }
+});
 
 async function expectModeMismatch(
   context: TestContext,

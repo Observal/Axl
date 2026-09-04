@@ -34,6 +34,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl login
        axl doctor
        axl daemon [options]
+       axl web [--no-open] [--print-launch-url] [--dev --vite-url <loopback-url>]
        axl session export <session-id> --raw [--output <directory>]
        axl session migrate-events <session-id> [--confirm-prefix]
 
@@ -45,6 +46,10 @@ Options:
   --theme <name>     Select the terminal theme
   --tui-mode <mode>  Use regular or fullscreen terminal mode
   --socket <path>    Use a custom daemon socket
+  --no-open          Do not open a browser for axl web
+  --print-launch-url Print the sensitive one-use browser launch URL
+  --dev              Proxy an external Vite development server
+  --vite-url <url>   Use the explicit IP-literal loopback Vite origin
   --sandbox <kind>   Use native, podman, or docker isolation
   -r, --resume       Open the all-session resume picker
   --image <digest>   Use a locally available digest-pinned OCI image
@@ -64,7 +69,7 @@ Options:
 type SandboxChoice = "native" | "podman" | "docker";
 
 interface CliArguments {
-  command?: "login" | "daemon" | "doctor" | "session-export" | "session-migrate-events";
+  command?: "login" | "daemon" | "doctor" | "web" | "session-export" | "session-migrate-events";
   sessionId?: string;
   output?: string;
   raw: boolean;
@@ -82,6 +87,10 @@ interface CliArguments {
   cwd: string;
   unsafe: boolean;
   resume: boolean;
+  openBrowser: boolean;
+  printLaunchUrl: boolean;
+  development: boolean;
+  viteUrl?: string;
   showHelp: boolean;
   showVersion: boolean;
 }
@@ -92,13 +101,19 @@ function parseArguments(argv: readonly string[]): CliArguments {
     sandbox: "native",
     unsafe: false,
     resume: false,
+    openBrowser: true,
+    printLaunchUrl: false,
+    development: false,
     raw: false,
     confirmPrefix: false,
     showHelp: false,
     showVersion: false,
   };
   let startIndex = 0;
-  if (argv[0] === "session") {
+  if (argv[0] === "web") {
+    parsed.command = "web";
+    startIndex = 1;
+  } else if (argv[0] === "session") {
     const operation = argv[1];
     if (operation !== "export" && operation !== "migrate-events") {
       throw new Error("session requires export or migrate-events");
@@ -120,6 +135,10 @@ function parseArguments(argv: readonly string[]): CliArguments {
       return value;
     };
     if (argument === "--socket") parsed.socket = next();
+    else if (argument === "--no-open") parsed.openBrowser = false;
+    else if (argument === "--print-launch-url") parsed.printLaunchUrl = true;
+    else if (argument === "--dev") parsed.development = true;
+    else if (argument === "--vite-url") parsed.viteUrl = next();
     else if (argument === "--output") parsed.output = next();
     else if (argument === "--raw") parsed.raw = true;
     else if (argument === "--confirm-prefix") parsed.confirmPrefix = true;
@@ -183,6 +202,23 @@ function parseArguments(argv: readonly string[]): CliArguments {
   }
   if (parsed.command !== "session-export" && parsed.output !== undefined) {
     throw new Error("--output is only valid with session export");
+  }
+  if (parsed.command === "web" && parsed.sessionId !== undefined) {
+    throw new Error("axl web does not accept a session ID");
+  }
+  if (parsed.command === "web" && parsed.development !== (parsed.viteUrl !== undefined)) {
+    throw new Error("axl web --dev requires --vite-url, and --vite-url requires --dev");
+  }
+  if (
+    parsed.command !== "web" &&
+    (!parsed.openBrowser ||
+      parsed.printLaunchUrl ||
+      parsed.development ||
+      parsed.viteUrl !== undefined)
+  ) {
+    throw new Error(
+      "--no-open, --print-launch-url, --dev, and --vite-url are only valid with axl web",
+    );
   }
   if (parsed.unsafe && parsed.sandbox !== "native") {
     throw new Error("--unsafe cannot be combined with --sandbox podman or docker");
@@ -414,6 +450,23 @@ function showStartupIndicator(message: string): boolean {
   return true;
 }
 
+async function openBrowser(url: string): Promise<void> {
+  const command =
+    process.platform === "darwin"
+      ? { file: "open", args: [url] }
+      : process.platform === "win32"
+        ? { file: "cmd", args: ["/c", "start", "", url] }
+        : { file: "xdg-open", args: [url] };
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command.file, command.args, { detached: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 async function main(): Promise<void> {
   const timing = new StartupTimer();
   timing.mark("module load");
@@ -572,6 +625,29 @@ async function main(): Promise<void> {
   };
   const client = await connectTarget(currentTarget);
   timing.mark("daemon connect");
+
+  if (cli.command === "web") {
+    client.close();
+    const { startWebGateway } = await import("./web-gateway.ts");
+    const gateway = await startWebGateway({
+      socketPath,
+      ...(cli.viteUrl === undefined ? {} : { viteUrl: cli.viteUrl }),
+    });
+    process.stdout.write(`${gateway.origin}\n`);
+    if (cli.printLaunchUrl) process.stdout.write(`${gateway.launchUrl}\n`);
+    if (cli.development)
+      process.stderr.write("WARNING: proxying an external Vite development server.\n");
+    if (cli.openBrowser && process.stdin.isTTY === true && process.stdout.isTTY === true) {
+      await openBrowser(gateway.launchUrl);
+    }
+    const stop = (): void => {
+      void gateway.close().finally(() => process.exit(0));
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    await new Promise(() => undefined);
+    return;
+  }
 
   let resumeCatalog = new Map<string, LocalSessionDescriptor>();
   const loadResumeSessions = async () => {
