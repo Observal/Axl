@@ -220,6 +220,110 @@ test("/export writes a portable session artifact", async (context) => {
   app.stop();
 });
 
+test("/import restores an artifact under fresh session and event IDs", async (context) => {
+  const source = await startStack(context);
+  const sourceInput = new PassThrough();
+  const sourceOutput = captureOutput();
+  const image = Buffer.alloc(32);
+  image.set([0x89, 0x50, 0x4e, 0x47], 0);
+  image.set(Buffer.from("IHDR"), 12);
+  image.writeUInt32BE(1, 16);
+  image.writeUInt32BE(1, 20);
+  const imagePath = join(source.directory, "portable.png");
+  await writeFile(imagePath, image);
+  const sourceApp = await AxlApp.start({
+    client: await connectUnixClient(source.socketPath),
+    input: sourceInput,
+    output: sourceOutput.output,
+    cwd: source.directory,
+    color: false,
+    imageDisplay: "metadata",
+    mediaCapabilities: { images: null },
+  });
+  const sourceSessionId = sourceApp.sessionId;
+  const artifactDirectory = join(source.directory, "round-trip-session");
+
+  sourceInput.write(`/attach ${imagePath}\r`);
+  await until(
+    () => sourceOutput.text().includes("attached portable.png"),
+    "portable image attachment",
+  );
+  sourceInput.write("portable prompt\r");
+  await until(() => sourceOutput.text().includes("↑1 ↓1"), "completed session reply before export");
+  sourceInput.write(`/export ${artifactDirectory}\r`);
+  await until(() => sourceOutput.text().includes("exported"), "session export before import");
+  sourceApp.stop();
+
+  const destination = await startStack(context);
+  const importInput = new PassThrough();
+  const importOutput = captureOutput();
+  const importedApp = await AxlApp.start({
+    client: await connectUnixClient(destination.socketPath),
+    input: importInput,
+    output: importOutput.output,
+    cwd: destination.directory,
+    color: false,
+    imageDisplay: "metadata",
+    mediaCapabilities: { images: null },
+  });
+  const initialSessionId = importedApp.sessionId;
+  importInput.write(`/import ${artifactDirectory}\r`);
+  await until(() => importedApp.sessionId !== initialSessionId, "imported session switch");
+
+  const manifest = JSON.parse(await readFile(join(artifactDirectory, "manifest.json"), "utf8")) as {
+    blobDigests: string[];
+  };
+  const sourceEvents = (await readFile(join(artifactDirectory, "events.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent);
+  const importedEvents = (
+    await readFile(
+      join(destination.directory, "data", "sessions", `${importedApp.sessionId}.jsonl`),
+      "utf8",
+    )
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent);
+  assert.notEqual(importedApp.sessionId, sourceSessionId);
+  assert.equal(manifest.blobDigests.length, 1);
+  assert.deepEqual(
+    await readFile(join(destination.directory, "data", "blobs", manifest.blobDigests[0] as string)),
+    image,
+  );
+  const importedPrefix = importedEvents.slice(0, sourceEvents.length);
+  assert.deepEqual(
+    importedPrefix.map((event) => event.type),
+    sourceEvents.map((event) => event.type),
+  );
+  assert.equal(importedEvents[0]?.type, "session.created");
+  assert.equal(importedEvents[0]?.payload.cwd, destination.directory);
+  const sourceIndexes = new Map(sourceEvents.map((event, index) => [event.id, index]));
+  for (const [index, event] of sourceEvents.entries()) {
+    const imported = importedPrefix[index];
+    assert.ok(imported);
+    const parentIndex = event.parentId === null ? undefined : sourceIndexes.get(event.parentId);
+    assert.equal(
+      imported.parentId,
+      parentIndex === undefined ? null : importedPrefix[parentIndex]?.id,
+    );
+  }
+  const sourceEventIds = new Set(sourceEvents.map((event) => event.id));
+  const sourceOperationIds = new Set(sourceEvents.flatMap((event) => event.operationId ?? []));
+  assert.equal(
+    importedPrefix.some((event) => sourceEventIds.has(event.id)),
+    false,
+  );
+  assert.equal(
+    importedPrefix.some(
+      (event) => event.operationId !== undefined && sourceOperationIds.has(event.operationId),
+    ),
+    false,
+  );
+  importedApp.stop();
+});
+
 test("detach leaves an accepted turn running for later resume", async (context) => {
   let markStarted!: () => void;
   let finish!: () => void;

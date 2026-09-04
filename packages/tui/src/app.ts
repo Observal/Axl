@@ -309,6 +309,7 @@ const COMMANDS: readonly { readonly name: string; readonly summary: string }[] =
   { name: "/resume", summary: "open another saved session" },
   { name: "/fork", summary: "fork from an earlier user message" },
   { name: "/clone", summary: "clone the complete current session" },
+  { name: "/import", summary: "import and open a session artifact" },
   { name: "/export", summary: "export the current session artifact" },
   { name: "/stash", summary: "stash, restore, swap, or clear the prompt" },
   { name: "/favorite", summary: "toggle a model in the favorites list" },
@@ -2045,6 +2046,18 @@ export class AxlApp {
       else void this.cloneSession();
       return;
     }
+    if (command === "/import") {
+      if (!argument) {
+        this.notice = this.view.palette.dim("· use /import <artifact directory>");
+      } else if (this.view.working) {
+        this.notice = this.view.palette.dim("· finish or interrupt the turn before importing");
+      } else if (this.pendingAttachments.length > 0) {
+        this.notice = this.view.palette.dim("· send or clear attachments before changing sessions");
+      } else {
+        void this.importSession(argument);
+      }
+      return;
+    }
     if (command === "/export") {
       if (this.view.working) {
         this.notice = this.view.palette.dim("· finish or interrupt the turn before exporting");
@@ -3270,6 +3283,23 @@ export class AxlApp {
     } catch (error) {
       this.notice = this.view.palette.error(
         `✖ ${error instanceof Error ? error.message : "could not clone session"}`,
+      );
+      this.redraw();
+    }
+  }
+
+  private async importSession(path: string): Promise<void> {
+    this.notice = this.view.palette.dim("· importing session…");
+    this.redraw();
+    try {
+      const imported = await this.client.request("session.import", {
+        inputDirectory: resolve(this.cwd, path),
+        cwd: this.cwd,
+      });
+      await this.switchSession(imported, "", "· imported session artifact");
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "could not import session"}`,
       );
       this.redraw();
     }

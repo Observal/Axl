@@ -665,15 +665,22 @@ export class AxlDaemon {
         throw new DaemonError(
           "invalid_cwd",
           `Cannot open working directory ${request.params.cwd}`,
-          {
-            cause,
-          },
+          { cause },
         );
       });
       normalized = {
         ...request,
         params: { ...request.params, cwd, profile: request.params.profile ?? "standard" },
       };
+    } else if (request.method === "session.import") {
+      const cwd = await realpath(request.params.cwd).catch((cause: unknown) => {
+        throw new DaemonError(
+          "invalid_cwd",
+          `Cannot open working directory ${request.params.cwd}`,
+          { cause },
+        );
+      });
+      normalized = { ...request, params: { ...request.params, cwd } };
     } else if (request.method === "session.list" && request.params.cwd !== undefined) {
       const cwd = await realpath(request.params.cwd).catch((cause: unknown) => {
         throw new DaemonError(
@@ -699,7 +706,8 @@ export class AxlDaemon {
     const intendedSessionId =
       normalized.method === "session.create" ||
       normalized.method === "session.fork" ||
-      normalized.method === "session.clone"
+      normalized.method === "session.clone" ||
+      normalized.method === "session.import"
         ? parseSessionId(randomUUID(), "intendedSessionId")
         : undefined;
     const affectedOperationId =
@@ -809,6 +817,18 @@ export class AxlDaemon {
           request.params.sessionId,
           request.params.outputDirectory,
         );
+      case "session.import": {
+        const reservation = this.creationReservation(acceptance);
+        if (reservation === undefined) {
+          throw new DaemonError("invalid_idempotency_key", "Session import requires a reservation");
+        }
+        const imported = await this.sessions.importArtifact(
+          request.params.inputDirectory,
+          request.params.cwd,
+          reservation,
+        );
+        return this.sessions.describe(imported.sessionId);
+      }
       case "session.send":
         if (request.params.delivery !== "prompt") {
           throw new DaemonError(

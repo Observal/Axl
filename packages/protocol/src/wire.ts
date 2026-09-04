@@ -609,6 +609,7 @@ export const WIRE_CAPABILITIES = [
   "session.fork",
   "session.clone",
   "session.export",
+  "session.import",
   "session.send.prompt",
   "session.steer",
   "session.follow_up",
@@ -728,6 +729,10 @@ export interface RpcMethodMap {
       readonly eventCount: number;
       readonly blobCount: number;
     };
+  };
+  readonly "session.import": {
+    readonly params: { readonly inputDirectory: string; readonly cwd: string };
+    readonly result: SessionOpenResult;
   };
   readonly "session.send": {
     readonly params: {
@@ -882,6 +887,7 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.create",
   "session.fork",
   "session.clone",
+  "session.import",
   "session.send",
   "session.queue.enqueue",
   "session.queue.requeue",
@@ -950,6 +956,7 @@ export const RPC_ERROR_CODES = [
   "invalid_cwd",
   "invalid_idempotency_key",
   "artifact_exists",
+  "invalid_artifact",
   "idempotency_conflict",
   "unknown_session",
   "corrupt_session",
@@ -1560,6 +1567,17 @@ export function parseWireRequest(value: unknown): WireRequest {
           "request.params.outputDirectory",
           4096,
         ),
+      },
+    };
+  }
+  if (method === "session.import") {
+    exact(params, "request.params", ["inputDirectory", "cwd"]);
+    return {
+      ...base,
+      method,
+      params: {
+        inputDirectory: boundedString(params.inputDirectory, "request.params.inputDirectory", 4096),
+        cwd: boundedString(params.cwd, "request.params.cwd", 4096),
       },
     };
   }
@@ -2204,6 +2222,8 @@ export function parseRpcResult<Method extends RpcMethod>(
       eventCount: nonNegativeInteger(result.eventCount, `${path}.eventCount`),
       blobCount: nonNegativeInteger(result.blobCount, `${path}.blobCount`),
     };
+  } else if (method === "session.import") {
+    parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.send") {
     const result = object(value, path);
     exact(result, path, ["operationId", "stopReason"]);
@@ -2468,6 +2488,7 @@ export const RPC_METHODS = [
   "session.fork",
   "session.clone",
   "session.export",
+  "session.import",
   "session.send",
   "session.steer",
   "session.followUp",
@@ -2569,6 +2590,17 @@ export const RPC_METHOD_ERROR_CODES = {
     "artifact_exists",
     "blob_missing",
     "blob_corrupt",
+  ],
+  "session.import": [
+    "invalid_cwd",
+    "invalid_path",
+    "not_found",
+    "invalid_artifact",
+    "corrupt_session",
+    "blob_missing",
+    "blob_corrupt",
+    "content_too_large",
+    ...MUTATION_ERRORS,
   ],
   "session.send": [
     ...SESSION_BASE_ERRORS,

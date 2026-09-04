@@ -61,7 +61,11 @@ import {
 } from "@axl/protocol";
 
 import { BlobStore, BlobStoreError } from "./blob-store.ts";
-import { exportSessionArtifact, SessionArtifactError } from "./session-artifact.ts";
+import {
+  exportSessionArtifact,
+  importSessionArtifact,
+  SessionArtifactError,
+} from "./session-artifact.ts";
 import { WorkspaceCheckpointError, WorkspaceCheckpointStore } from "./workspace-checkpoint.ts";
 import { WorkspaceError, WorkspaceService } from "./workspace-service.ts";
 
@@ -531,7 +535,8 @@ export class SessionManager {
     if (
       acceptance.method === "session.create" ||
       acceptance.method === "session.fork" ||
-      acceptance.method === "session.clone"
+      acceptance.method === "session.clone" ||
+      acceptance.method === "session.import"
     ) {
       const intended = acceptance.intendedSessionId;
       if (intended === undefined)
@@ -774,6 +779,49 @@ export class SessionManager {
       }
       throw error;
     }
+  }
+
+  async importArtifact(
+    inputDirectory: string,
+    cwd: string,
+    reservation: { readonly sessionId: SessionId; readonly operationId: OperationId },
+  ): Promise<{ readonly sessionId: SessionId; readonly events: readonly CanonicalEvent[] }> {
+    const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
+      throw new DaemonError("invalid_cwd", `Cannot open working directory ${cwd}`, { cause });
+    });
+    const path = this.logPath(reservation.sessionId);
+    try {
+      await stat(path);
+      const existing = (await JsonlEventLog.open(path, reservation.sessionId)).events[0];
+      if (
+        existing?.type !== "session.created" ||
+        existing.operationId !== reservation.operationId
+      ) {
+        throw new DaemonError(
+          "corrupt_session",
+          `Reserved session ${reservation.sessionId} has conflicting history`,
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        await importSessionArtifact({
+          dataDirectory: this.options.dataDirectory,
+          inputDirectory,
+          targetSessionId: reservation.sessionId,
+          cwd: canonicalCwd,
+          creationOperationId: reservation.operationId,
+        });
+      } catch (artifactError) {
+        if (artifactError instanceof SessionArtifactError) {
+          throw new DaemonError(artifactError.code, artifactError.message, {
+            cause: artifactError,
+          });
+        }
+        throw artifactError;
+      }
+    }
+    return this.resume(reservation.sessionId);
   }
 
   async fork(
