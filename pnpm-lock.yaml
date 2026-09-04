@@ -159,9 +159,6 @@ importers:
 
   packages/tui:
     dependencies:
-      '@axl/ai':
-        specifier: workspace:*
-        version: link:../ai
       '@axl/extension-api':
         specifier: workspace:*
         version: link:../extensions/api

@@ -13,9 +13,6 @@
       "path": "../protocol/tsconfig.build.json"
     },
     {
-      "path": "../ai/tsconfig.build.json"
-    },
-    {
       "path": "../extensions/api/tsconfig.build.json"
     },
     {

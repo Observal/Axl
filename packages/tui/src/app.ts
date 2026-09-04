@@ -7,21 +7,12 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import type { ApiKeyCredential, AuthContext, CredentialStore } from "@axl/ai";
-import { type ModelInfo, supportedThinkingLevels, THINKING_LEVELS } from "@axl/ai/models";
-import {
-  type AxlClient,
-  ConversationProjector,
-  type SessionSubscription,
-  subscribeSession,
-} from "@axl/sdk";
 import {
   type TerminalCommandContext,
   type TerminalExtension,
   TerminalExtensionHost,
   type TerminalLine,
 } from "@axl/extension-api";
-import { parseEventId, parseOperationId, parseSessionId } from "@axl/protocol";
 import type {
   BlobReference,
   CanonicalEvent,
@@ -34,6 +25,16 @@ import type {
   SessionSummary,
   ThinkingLevel,
 } from "@axl/protocol";
+import { parseEventId, parseOperationId, parseSessionId } from "@axl/protocol";
+import {
+  type AxlClient,
+  type ClientModelInfo,
+  ConversationProjector,
+  type SessionSubscription,
+  subscribeSession,
+  supportedThinkingLevels,
+  THINKING_LEVELS,
+} from "@axl/sdk";
 
 import { ActivityComponent } from "./activity.ts";
 import { droppedImages, type LocalAttachment, readImageFile } from "./attachments.ts";
@@ -52,6 +53,7 @@ import { ExtensionWidgetsComponent } from "./extension-ui.ts";
 import { editPromptExternally } from "./external-editor.ts";
 import { type FullscreenMouse, FullscreenScreen } from "./fullscreen.ts";
 import { isMouseReport } from "./fullscreen-input.ts";
+import type { LoginDialogDefinition } from "./login-dialog.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
 import {
   AttachmentBarComponent,
@@ -141,34 +143,8 @@ function messageText(event: CanonicalEvent): string | undefined {
   return text || undefined;
 }
 
-function orderSessions<T extends SessionSummary>(
-  sessions: readonly T[],
-  mode: "threaded" | "recent",
-): T[] {
-  const recent = [...sessions].sort((left, right) => right.updatedAt - left.updatedAt);
-  if (mode === "recent") return recent;
-  const ids = new Set(recent.map((session) => session.sessionId));
-  const children = new Map<string, T[]>();
-  for (const session of recent) {
-    const parent = session.parentSessionId;
-    if (parent === undefined || !ids.has(parent)) continue;
-    const siblings = children.get(parent) ?? [];
-    siblings.push(session);
-    children.set(parent, siblings);
-  }
-  const ordered: T[] = [];
-  const visited = new Set<string>();
-  const visit = (session: T): void => {
-    if (visited.has(session.sessionId)) return;
-    visited.add(session.sessionId);
-    ordered.push(session);
-    for (const child of children.get(session.sessionId) ?? []) visit(child);
-  };
-  for (const session of recent) {
-    if (session.parentSessionId === undefined || !ids.has(session.parentSessionId)) visit(session);
-  }
-  for (const session of recent) visit(session);
-  return ordered;
+function orderSessions<T extends SessionSummary>(sessions: readonly T[]): T[] {
+  return [...sessions].sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 function formatPath(cwd: string): string {
@@ -322,7 +298,7 @@ const COMMANDS: readonly { readonly name: string; readonly summary: string }[] =
   { name: "/details", summary: "set transcript detail: compact, full, or focus" },
   { name: "/fullscreen", summary: "switch to fullscreen transcript mode" },
   { name: "/regular", summary: "return to terminal scrollback mode" },
-  { name: "/login", summary: "configure Azure OpenAI credentials" },
+  { name: "/login", summary: "configure provider credentials" },
   { name: "/reload", summary: "reload AGENTS.md, prompt, and tools" },
   { name: "/compact", summary: "summarize older context, optionally with instructions" },
   { name: "/status", summary: "show session, display, and queue state" },
@@ -341,7 +317,8 @@ const COMMANDS: readonly { readonly name: string; readonly summary: string }[] =
   { name: "/edit", summary: "open the prompt in VISUAL or EDITOR" },
   { name: "/hotkeys", summary: "browse and search keyboard shortcuts" },
   { name: "/help", summary: "show commands and keys" },
-  { name: "/quit", summary: "detach from the daemon" },
+  { name: "/detach", summary: "leave the session running in the daemon" },
+  { name: "/quit", summary: "alias for /detach" },
 ];
 
 const RESERVED_EXTENSION_INPUTS = new Set(["\r", "\n", "\x1b", "\x03", "\x04", "\x0f", "\x1a"]);
@@ -455,7 +432,7 @@ export interface AxlAppOptions {
   readonly color?: boolean;
   readonly theme?: string;
   readonly models?: readonly string[];
-  readonly modelCatalog?: readonly ModelInfo[];
+  readonly modelCatalog?: readonly ClientModelInfo[];
   readonly currentModel?: string;
   readonly currentThinking?: ThinkingLevel;
   readonly profile?: SessionProfile;
@@ -501,16 +478,7 @@ export interface AxlAppOptions {
   /** Compatibility hook called after the daemon accepts a model switch. */
   readonly onModelChange?: (modelId: string) => void;
   readonly suspendProcess?: () => void;
-  readonly credentials?: {
-    readonly store: CredentialStore;
-    readonly context: AuthContext;
-    readonly fetch?: typeof fetch;
-  };
-  readonly loadCredentials?: () => Promise<{
-    readonly store: CredentialStore;
-    readonly context: AuthContext;
-    readonly fetch?: typeof fetch;
-  }>;
+  readonly loadLogin?: () => Promise<LoginDialogDefinition>;
   readonly onExit?: () => void;
   readonly clearStartupLine?: boolean;
   readonly readClipboard?: () => Promise<string>;
@@ -739,12 +707,13 @@ export class AxlApp {
   }
 
   private bindClient(client: AxlClient): void {
-    if (this.client !== client) this.client.close();
+    const previous = this.client;
     this.unsubscribeDisconnect();
     this.client = client;
     this.unsubscribeDisconnect = client.onDisconnect((error) => {
       if (!this.stopped) void this.reconnect(error);
     });
+    if (previous !== client) previous.close();
   }
 
   private subscriptionOptions(projector?: ConversationProjector) {
@@ -767,16 +736,8 @@ export class AxlApp {
 
   private async reconnect(error: Error): Promise<void> {
     if (this.connectionState === "reconnecting" || this.stopped) return;
+    const disconnectedClient = this.client;
     const reconnectClient = this.reconnectClient;
-    if (reconnectClient === undefined) {
-      this.connectionState = "detached";
-      this.notice = this.view.palette.error(`✖ disconnected: ${error.message}`);
-      this.attend();
-      this.invalidateScreens();
-      this.redraw();
-      return;
-    }
-
     this.connectionState = "reconnecting";
     this.liveAssistant.reset();
     this.cancelActivityRender();
@@ -791,10 +752,48 @@ export class AxlApp {
     this.redraw();
 
     let delay = 100;
+    let reconnectExisting = true;
     while (!this.stopped && generation === this.reconnectGeneration) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, delay));
       let candidate: AxlClient | undefined;
       try {
+        if (reconnectExisting) {
+          reconnectExisting = false;
+          if (disconnectedClient.state !== "connected") await disconnectedClient.reconnect();
+          if (this.stopped || generation !== this.reconnectGeneration) return;
+          let workspaceReconnectError: string | undefined;
+          try {
+            await disconnectedClient.request("session.workspace.checkpoint", {
+              sessionId: this.sessionId,
+              enabled: this.workspaceReviewEnabled,
+            });
+          } catch (workspaceError) {
+            workspaceReconnectError =
+              workspaceError instanceof Error
+                ? workspaceError.message
+                : "workspace review restoration failed";
+            this.workspaceDiffError = workspaceReconnectError;
+          }
+          this.connectionState = "connected";
+          this.notice =
+            workspaceReconnectError === undefined
+              ? this.view.palette.dim("· daemon reconnected")
+              : (this.view.palette.warning ?? this.view.palette.accent)(
+                  `· daemon reconnected · workspace review unavailable: ${sanitizeTerminalText(workspaceReconnectError)}`,
+                );
+          this.invalidateFullscreenRows();
+          this.invalidateScreens();
+          this.redraw();
+          return;
+        }
+        if (reconnectClient === undefined) {
+          this.connectionState = "detached";
+          this.notice = this.view.palette.error(`✖ disconnected: ${error.message}`);
+          this.attend();
+          this.invalidateScreens();
+          this.redraw();
+          return;
+        }
         candidate = await reconnectClient();
         if (this.stopped || generation !== this.reconnectGeneration) {
           candidate.close();
@@ -920,6 +919,7 @@ export class AxlApp {
       if (app.developerPanelEnabled) void app.refreshWorkspaceDiff();
     }
     app.hydrating = false;
+    app.setWorking(app.sessionSubscription?.projector.state.activeOperationId !== undefined);
     app.openNextInteraction();
 
     try {
@@ -3001,7 +3001,6 @@ export class AxlApp {
         return;
       }
       let scope: "current" | "all" = this.initialResumePending ? "all" : "current";
-      let sort: "threaded" | "recent" = "threaded";
       let filter = "";
       let index = 0;
       const visibleSessions = (): ResumeSessionEntry[] => {
@@ -3016,7 +3015,6 @@ export class AxlApp {
                 session.firstUserMessage?.toLowerCase().includes(query) ||
                 session.lastUserMessage?.toLowerCase().includes(query)),
           ),
-          sort,
         );
       };
       const overlay: Overlay = {
@@ -3033,12 +3031,12 @@ export class AxlApp {
           const shown = filtered.slice(start, start + SESSION_SELECTOR_WINDOW);
           const scopeLabel = `${scope === "current" ? "●" : "○"} Current Folder  |  ${
             scope === "all" ? "●" : "○"
-          } All  ·  Sort: ${sort === "threaded" ? "Threaded" : "Recent"}`;
+          } All  ·  Most Recently Updated`;
           return renderDialog({
             title: `Resume Session (${scope === "current" ? "Current Folder" : "All"})`,
             rows: [
               this.view.palette.dim(scopeLabel),
-              this.view.palette.dim("Tab scope · Ctrl+S sort · Enter resume · Esc close"),
+              this.view.palette.dim("Tab scope · Enter resume · Esc close"),
               `> ${filter}`,
               "",
               ...shown.flatMap((session, position) => {
@@ -3085,9 +3083,6 @@ export class AxlApp {
             const filtered = visibleSessions();
             if (key.kind === "tab") {
               scope = scope === "current" ? "all" : "current";
-              index = 0;
-            } else if (key.kind === "ctrl" && key.char === "s") {
-              sort = sort === "threaded" ? "recent" : "threaded";
               index = 0;
             } else if (key.kind === "up" && filtered.length > 0) {
               index = (index - 1 + filtered.length) % filtered.length;
@@ -3208,17 +3203,22 @@ export class AxlApp {
       candidate =
         typeof session === "string" ? undefined : await this.options.openResumeSession?.(session);
       const client = candidate?.client ?? this.client;
+      if (candidate !== undefined) this.reconnectClient = candidate.reconnectClient;
       await this.switchSession(
         await resumeSessionMetadata(client, entry.sessionId),
         "",
         `· resumed session · ${entry.placementLabel}`,
         client,
       );
-      if (candidate !== undefined) this.reconnectClient = candidate.reconnectClient;
       this.initialResumePending = false;
     } catch (error) {
-      candidate?.client.close();
-      this.reconnectClient = previousReconnect;
+      const adoptedCandidate = candidate?.client === this.client;
+      if (!adoptedCandidate) {
+        candidate?.client.close();
+        this.reconnectClient = previousReconnect;
+      } else {
+        this.initialResumePending = false;
+      }
       this.notice = this.view.palette.error(
         `✖ ${error instanceof Error ? error.message : "could not resume session"}`,
       );
@@ -3296,9 +3296,10 @@ export class AxlApp {
       await nextSubscription.close().catch(() => undefined);
       throw error;
     }
-    if (client !== this.client) this.bindClient(client);
-    if (this.tuiMode === "regular") this.options.output.write(this.screen.clear());
     this.reconnectGeneration += 1;
+    if (client !== this.client) this.bindClient(client);
+    this.connectionState = "connected";
+    if (this.tuiMode === "regular") this.options.output.write(this.screen.clear());
     this.liveAssistant.reset();
     this.cancelActivityRender();
     this.cwd = opened.cwd;
@@ -3344,6 +3345,7 @@ export class AxlApp {
     activated = true;
     this.liveAssistant.replace(projection.state.activity);
     this.hydrating = false;
+    this.setWorking(projection.state.activeOperationId !== undefined);
     this.editor.setText(draft);
     this.notice = this.view.palette.dim(notice);
     this.openNextInteraction();
@@ -3630,9 +3632,9 @@ export class AxlApp {
   }
 
   private async openLogin(): Promise<void> {
-    let credentials = this.options.credentials;
+    let definition: LoginDialogDefinition | undefined;
     try {
-      credentials ??= await this.options.loadCredentials?.();
+      definition = await this.options.loadLogin?.();
     } catch (error) {
       this.notice = this.view.palette.error(
         `✖ ${error instanceof Error ? error.message : "login initialization failed"}`,
@@ -3640,29 +3642,15 @@ export class AxlApp {
       this.redraw();
       return;
     }
-    if (!credentials) {
+    if (definition === undefined) {
       this.notice = this.view.palette.dim("· login is unavailable over this attachment");
-      this.redraw();
-      return;
-    }
-    let currentCredential: ApiKeyCredential | undefined;
-    try {
-      const stored = await credentials.store.read("azure-openai");
-      currentCredential = stored?.type === "api_key" ? stored : undefined;
-    } catch (error) {
-      this.notice = this.view.palette.error(
-        `✖ ${error instanceof Error ? error.message : "could not read stored credentials"}`,
-      );
       this.redraw();
       return;
     }
     const { LoginDialog } = await import("./login-dialog.ts");
     this.overlays.replace(
       new LoginDialog({
-        store: credentials.store,
-        context: credentials.context,
-        ...(credentials.fetch === undefined ? {} : { fetch: credentials.fetch }),
-        ...(currentCredential === undefined ? {} : { currentCredential }),
+        definition,
         palette: this.view.palette,
         width: this.width,
         refresh: () => this.redraw(),

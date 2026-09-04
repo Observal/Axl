@@ -208,13 +208,16 @@ function client(
 class ReconnectClient {
   readonly connection = { daemonInstanceId: "fixture-daemon" };
   private readonly disconnectListeners = new Set<(error: Error) => void>();
+  private readonly reconnectListeners = new Set<() => void | Promise<void>>();
   private eventListener: ((message: WireEvent) => void) | undefined;
   readonly requests: string[] = [];
   private eventSequence = 0;
   private readonly events: readonly CanonicalEvent[];
+  private readonly reconnectFails: boolean;
 
-  constructor(events: readonly CanonicalEvent[]) {
+  constructor(events: readonly CanonicalEvent[], reconnectFails = false) {
     this.events = events;
+    this.reconnectFails = reconnectFails;
   }
 
   async request(method: string): Promise<unknown> {
@@ -253,8 +256,15 @@ class ReconnectClient {
     };
   }
 
-  onReconnect(): () => void {
-    return () => undefined;
+  onReconnect(listener: () => void | Promise<void>): () => void {
+    this.reconnectListeners.add(listener);
+    return () => this.reconnectListeners.delete(listener);
+  }
+
+  async reconnect(): Promise<void> {
+    this.requests.push("connection.reconnect");
+    if (this.reconnectFails) throw new Error("fixture daemon unavailable");
+    for (const listener of [...this.reconnectListeners]) await listener();
   }
 
   disconnect(): void {
@@ -426,7 +436,7 @@ test("keeps an interaction recoverable when its daemon response fails", async ()
 
 test("reconnects, resumes, and resubscribes after daemon loss", async () => {
   const events = [event("session.created", { cwd: process.cwd() })];
-  const initial = new ReconnectClient(events);
+  const initial = new ReconnectClient(events, true);
   const replacement = new ReconnectClient(events);
   const input = new Input();
   const output = new Output();
@@ -449,7 +459,7 @@ test("reconnects, resumes, and resubscribes after daemon loss", async () => {
     true,
     `reconnecting cursor row ${reconnectingTerminal.cursorRow}`,
   );
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  await new Promise((resolve) => setTimeout(resolve, 400));
   assert.deepEqual(replacement.requests, [
     "session.resume",
     "session.workspace.checkpoint",
@@ -464,6 +474,34 @@ test("reconnects, resumes, and resubscribes after daemon loss", async () => {
     true,
     `connected cursor row ${connectedTerminal.cursorRow}`,
   );
+  app.stop();
+});
+
+test("coalesces TUI recovery through the SDK client before replacing it", async (context) => {
+  const events = [event("session.created", { cwd: process.cwd() })];
+  const daemon = new ReconnectClient(events);
+  const input = new Input();
+  const output = new Output();
+  const app = await AxlApp.start({
+    client: daemon.daemonClient(),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+  });
+  context.after(() => app.stop());
+  daemon.requests.length = 0;
+
+  daemon.disconnect();
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.deepEqual(daemon.requests, [
+    "connection.reconnect",
+    "session.subscribe",
+    "session.ack",
+    "session.workspace.checkpoint",
+  ]);
+  assert.match(output.text, /daemon reconnected/);
   app.stop();
 });
 

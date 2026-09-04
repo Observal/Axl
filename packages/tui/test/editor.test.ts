@@ -40,6 +40,12 @@ test("decodes characters, controls, and CSI sequences", () => {
   assert.deepEqual(decodeKeys("\x1b"), [{ kind: "escape" }]);
 });
 
+test("Kitty release events do not duplicate characters", () => {
+  const editor = new LineEditor();
+  type(editor, "\x1b[97;1:1u\x1b[97;1:3u");
+  assert.equal(editor.text, "a");
+});
+
 test("cursor editing: insert mid-line, delete, home and end", () => {
   const editor = new LineEditor();
   type(editor, "helo");

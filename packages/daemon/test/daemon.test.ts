@@ -49,9 +49,6 @@ import {
   WIRE_PROTOCOL_VERSION,
   type WireRequest,
 } from "@axl/protocol";
-
-import { AxlDaemon, DaemonError, normalizeDaemonRpcErrorCode } from "../src/index.ts";
-import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
 import {
   AxlClient,
   AxlClientError,
@@ -61,6 +58,8 @@ import {
   type WireEvent,
 } from "@axl/sdk";
 import { connectUnixClient, nodeIdempotencyKeys, UnixSocketTransportFactory } from "@axl/sdk/unix";
+import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
+import { AxlDaemon, DaemonError, normalizeDaemonRpcErrorCode } from "../src/index.ts";
 import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -84,15 +83,25 @@ function replyPort(): ModelPort {
   };
 }
 
-function pausedActivityPort(): { readonly port: ModelPort; readonly finish: () => void } {
+function pausedActivityPort(): {
+  readonly port: ModelPort;
+  readonly started: Promise<void>;
+  readonly finish: () => void;
+} {
+  let start!: () => void;
   let finish!: () => void;
+  const started = new Promise<void>((resolvePromise) => {
+    start = resolvePromise;
+  });
   const pause = new Promise<void>((resolvePromise) => {
     finish = resolvePromise;
   });
   return {
+    started,
     finish,
     port: {
       stream() {
+        start();
         return (async function* (): AsyncGenerator<ModelStreamEvent> {
           yield { type: "text_delta", text: "first " };
           yield { type: "text_delta", text: "second" };
@@ -2317,6 +2326,89 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
   );
   const snapshot = await subscribeAll(client, created.sessionId);
   assert.equal(snapshot.events.filter((event) => event.type === "user.message").length, 1);
+});
+
+test("an accepted turn continues after its submitting attachment disconnects", async (context) => {
+  const paused = pausedActivityPort();
+  const { socketPath, cwd } = await startDaemon(context, paused.port);
+  const sender = await connectUnixClient(socketPath);
+  context.after(() => {
+    sender.close();
+    paused.finish();
+  });
+
+  const created = await sender.request("session.create", { cwd });
+  const sending = sender.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "keep running after detach" }],
+  });
+  await paused.started;
+  sender.close();
+  await assert.rejects(sending, (error) => {
+    assert.ok(error instanceof AxlClientError);
+    assert.equal(error.code, "disconnected");
+    return true;
+  });
+
+  paused.finish();
+  const reattached = await connectUnixClient(socketPath);
+  context.after(() => reattached.close());
+  await reattached.request("session.resume", { sessionId: created.sessionId });
+  const subscription = await subscribeSession(reattached, created.sessionId);
+  context.after(() => subscription.close());
+
+  await waitFor(
+    () =>
+      subscription.projector.state.records.some(
+        (record) =>
+          record.kind === "event" &&
+          record.event.type === "assistant.message" &&
+          record.event.payload.stopReason === "stop",
+      ),
+    "detached turn completion",
+  );
+  assert.equal(
+    subscription.projector.state.records.some(
+      (record) =>
+        record.kind === "event" &&
+        record.event.type === "user.message" &&
+        record.event.payload.content.some(
+          (item) => item.type === "text" && item.text === "keep running after detach",
+        ),
+    ),
+    true,
+  );
+  assert.equal(
+    (await reattached.request("session.resume", { sessionId: created.sessionId })).runtime.state,
+    "idle",
+  );
+  await reattached.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "prompt after reattach" }],
+  });
+  await waitFor(
+    () =>
+      subscription.projector.state.records.filter(
+        (record) =>
+          record.kind === "event" &&
+          record.event.type === "assistant.message" &&
+          record.event.payload.stopReason === "stop",
+      ).length === 2,
+    "reattached turn completion",
+  );
+  assert.equal(
+    subscription.projector.state.records.some(
+      (record) =>
+        record.kind === "event" &&
+        record.event.type === "user.message" &&
+        record.event.payload.content.some(
+          (item) => item.type === "text" && item.text === "prompt after reattach",
+        ),
+    ),
+    true,
+  );
 });
 
 test("steering and follow-ups cross clients through the daemon", async (context) => {

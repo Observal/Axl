@@ -40,7 +40,8 @@ function packageDirectories(root: string): string[] {
 
 function importsIn(source: string): string[] {
   const imports: string[] = [];
-  const pattern = /\bfrom\s*["']([^"']+)["']|\bimport\s*(?:\(\s*)?["']([^"']+)["']/g;
+  const pattern =
+    /\bfrom\s*["']([#@A-Za-z0-9][#@A-Za-z0-9._:/-]*)["']|\bimport\s*(?:\(\s*)?["']([#@A-Za-z0-9][#@A-Za-z0-9._:/-]*)["']/g;
   for (const match of source.matchAll(pattern)) {
     const specifier = match[1] ?? match[2];
     if (specifier) imports.push(specifier);
@@ -84,6 +85,13 @@ export function checkWorkspace(root: string): string[] {
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
   const tuiName = tui?.manifest.name ?? "@axl/tui";
   const sdkName = sdk?.manifest.name ?? "@axl/sdk";
+  const tuiRuntimeAllowed = new Set([
+    "@axl/extension-api",
+    sdkName,
+    "grok-mermaid",
+    "marked",
+    protocolName,
+  ]);
 
   if (protocol) {
     for (const dependency of runtimeDependencies(protocol.manifest)) {
@@ -120,16 +128,8 @@ export function checkWorkspace(root: string): string[] {
   }
 
   if (tui) {
-    const allowed = new Set([
-      "@axl/ai",
-      "@axl/extension-api",
-      sdkName,
-      "grok-mermaid",
-      "marked",
-      protocolName,
-    ]);
     for (const dependency of runtimeDependencies(tui.manifest)) {
-      if (!allowed.has(dependency)) {
+      if (!tuiRuntimeAllowed.has(dependency)) {
         errors.push(
           `${relative(root, tui.directory)} may depend only on client-facing packages, found ${dependency}`,
         );
@@ -155,6 +155,16 @@ export function checkWorkspace(root: string): string[] {
         ) {
           errors.push(
             `${relative(root, path)} imports ${specifier}; kernel may import only Node.js and ${protocolName}`,
+          );
+        }
+        if (
+          directory === tui?.directory &&
+          !specifier.startsWith(".") &&
+          !specifier.startsWith("node:") &&
+          !tuiRuntimeAllowed.has(specifier)
+        ) {
+          errors.push(
+            `${relative(root, path)} imports ${specifier}; TUI source may import only client-facing packages`,
           );
         }
         if (isInside(directory, resolve(root, "packages/extensions"))) {

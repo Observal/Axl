@@ -18,6 +18,7 @@ Read these documents before changing architecture or sequencing work:
 - `ROADMAP.md`: product behavior, invariants, and ordered implementation plan
 - `CODE_STRUCTURE.md`: repository and package boundaries
 - `OPEN_SOURCE.md`: licensing, governance, security, and release requirements
+- `docs/architecture/client-boundaries.md`: daemon, SDK, client, and platform-adapter ownership
 
 When documents conflict, stop and surface the conflict instead of silently choosing one.
 
@@ -35,6 +36,8 @@ Study their behavior, contracts, tests, and architecture. Write independent Axl 
 - JSONL is the authoritative append-only session record. Derived caches and indexes are disposable.
 - Append to the canonical log before updating derived state.
 - One daemon owns the loop. Terminal, web, mobile, IDE, headless, and SDK consumers must not implement separate loops.
+- Follow `docs/architecture/client-boundaries.md`. Core runtime behavior and business logic belong in the kernel and daemon. Capability contracts belong in the protocol, enforcement belongs in the daemon, and reusable client behavior belongs in `packages/sdk`. Individual clients only render state and submit user intent. They must not define capabilities or reimplement shared behavior.
+- Every daemon capability must have typed public SDK support. Every first-party client must support every capability granted to it through the SDK. Platform and authorization limits narrow daemon grants; clients must not silently omit, simulate, or reimplement granted capabilities.
 - First-party features use the same public extension API as third-party features. No private imports across that boundary.
 - Disabled features contribute no prompt content, UI, or background work.
 - Ordinary sessions have no model-visible subagent capability by default.
@@ -63,6 +66,7 @@ Write plainly and directly. Prefer short sentences and concrete verbs. Do not us
 - Fail loudly. Do not add silent fallbacks, compatibility shims, or no-op implementations.
 - Preserve prompt-cache prefixes by appending dynamic context instead of rewriting prior content.
 - Keep provider, tool-dialect, policy, transport, and presentation concerns separate.
+- New presentation packages must consume the daemon through `packages/sdk`. They must not depend at runtime on the kernel, daemon, runtime, AI, or sandbox packages. Process-host packages may compose and launch the daemon but must keep that authority out of presentation code.
 - Do not edit generated files. Change the source schema or generator and regenerate.
 - Do not add a generic `utils` package.
 - Do not add another model-provider abstraction, skill format, MCP replacement, or workflow language.

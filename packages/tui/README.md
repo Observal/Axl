@@ -22,7 +22,7 @@ The TUI includes:
 - Prompt stash and optional Vim insert or normal editing
 - Favorite-first model selection and an optional wide developer panel
 - Daemon-owned, checkpoint-backed working-tree and last-turn diff review with unified and split layouts
-- Interactive Azure OpenAI setup that preserves stored credentials when editing configuration
+- Provider-neutral login dialogs supplied by the process host
 - MCP approval, browser authorization, and structured-input dialogs
 - Capability-scoped terminal extensions with commands, shortcuts, status, working labels, bounded widgets, lifecycle listeners, and safe tool renderers
 - Sequenced live text and thinking output that reconciles to canonical history across reconnects

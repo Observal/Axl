@@ -32,15 +32,20 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
     name: "@axl/runtime",
     dependencies: { "@axl/tui": "workspace:*" },
   });
-  writePackage(root, "tui", {
-    name: "@axl/tui",
-    dependencies: {
-      "@axl/extension-api": "workspace:*",
-      "@axl/runtime": "workspace:*",
-      "grok-mermaid": "0.2.2",
-      marked: "18.0.11",
+  writePackage(
+    root,
+    "tui",
+    {
+      name: "@axl/tui",
+      dependencies: {
+        "@axl/extension-api": "workspace:*",
+        "@axl/runtime": "workspace:*",
+        "grok-mermaid": "0.2.2",
+        marked: "18.0.11",
+      },
     },
-  });
+    'import "@axl/ai";\n',
+  );
   writePackage(
     root,
     "extensions/example",
@@ -56,6 +61,7 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
     "packages/runtime must not depend on presentation package @axl/tui",
     "packages/tui may depend only on client-facing packages, found @axl/runtime",
     "packages/extensions/example/src/index.ts imports private kernel path @axl/kernel/private",
+    "packages/tui/src/index.ts imports @axl/ai; TUI source may import only client-facing packages",
     "apps/example/index.ts imports @axl/kernel; apps may import only @axl/sdk",
   ]);
 });

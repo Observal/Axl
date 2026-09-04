@@ -300,7 +300,7 @@ Do not commit secrets. Configuration entries reference environment variable name
 | `/reload` | Rebuild instructions, prompt, tools, skills, and extensions |
 | `/status` | Show session, model, thinking, sandbox, usage, speed, and queue state |
 | `/help` | Show commands and keyboard controls |
-| `/quit` | Detach from the daemon without deleting the session |
+| `/quit` | Detach without deleting the session or stopping active daemon-owned work |
 | `/detach` | Alias for `/quit` |
 
 Session switching, forking, cloning, login, and reload wait until the active turn is finished or interrupted.

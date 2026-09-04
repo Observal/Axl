@@ -1,22 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-// First-run credential setup: interactive prompts instead of environment
-// exports. Input is decoded like the editor's — bracketed-paste markers and
-// escape sequences never leak into typed values — and "verified" means Azure
-// actually accepted the key, checked with a token-free request.
-
-import {
-  AZURE_OPENAI_PROVIDER_ID,
-  azureOpenAiAuthMethod,
-  type AuthContext,
-  type CredentialStore,
-  login,
-  normalizeAzureBaseUrl,
-  parseDeploymentMap,
-  resolveProviderAuth,
-  verifyAzureOpenAiAuth,
-} from "@axl/ai";
+// Shared terminal line input for process-host setup workflows.
 
 import { decodeOneKey } from "./editor.ts";
 import { TerminalInputBuffer } from "./input-buffer.ts";
@@ -110,84 +95,4 @@ export function promptLine(
     });
     input.on("data", listener);
   });
-}
-
-const VERIFY_ATTEMPTS = 3;
-
-/**
- * Interactive Azure OpenAI setup. Prompts for the API key (masked, whitespace
- * stripped), the endpoint (normalized, with retries), and an optional
- * model→deployment map, then stores the credential and verifies it against
- * the live endpoint. A rejected key re-prompts instead of pretending success.
- */
-export async function runAzureSetup(
-  input: SetupInput,
-  output: SetupOutput,
-  store: CredentialStore,
-  context: AuthContext,
-  fetchImpl: typeof fetch = fetch,
-): Promise<void> {
-  output.write(
-    "\nAzure OpenAI setup — saved to ~/.axl/credentials.json (0600), redacted from logs.\n\n",
-  );
-
-  for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt += 1) {
-    const key = (await promptLine(input, output, "  API key: ", { mask: true })).replace(
-      /\s+/g,
-      "",
-    );
-
-    let baseUrl: string | undefined;
-    while (baseUrl === undefined) {
-      const raw = await promptLine(
-        input,
-        output,
-        "  Endpoint (e.g. https://your-resource.openai.azure.com/ or your Foundry URL): ",
-      );
-      try {
-        baseUrl = normalizeAzureBaseUrl(raw);
-      } catch {
-        output.write("  That is not a valid URL; try again.\n");
-      }
-    }
-
-    const map = await promptLine(
-      input,
-      output,
-      "  Model→deployment map, optional (e.g. gpt-5=my-deployment, Enter to skip): ",
-      { allowEmpty: true },
-    );
-    const mapValid = map.length > 0 && Object.keys(parseDeploymentMap(map)).length > 0;
-    if (map.length > 0 && !mapValid) {
-      output.write("  Ignoring unparseable map; use model=deployment[,model=deployment].\n");
-    }
-
-    await login(store, AZURE_OPENAI_PROVIDER_ID, {
-      type: "api_key",
-      key,
-      env: {
-        AZURE_OPENAI_BASE_URL: baseUrl,
-        ...(mapValid ? { AZURE_OPENAI_DEPLOYMENT_NAME_MAP: map } : {}),
-      },
-    });
-
-    const resolved = await resolveProviderAuth(
-      AZURE_OPENAI_PROVIDER_ID,
-      { apiKey: azureOpenAiAuthMethod },
-      store,
-      context,
-    );
-    output.write("  Checking the key against Azure…\n");
-    const verification = await verifyAzureOpenAiAuth(resolved, fetchImpl);
-    if (verification.ok) {
-      output.write("\n  ✓ Credentials verified with Azure.\n\n");
-      return;
-    }
-    const status = verification.status === undefined ? "" : ` (HTTP ${verification.status})`;
-    output.write(
-      `\n  ✖ Azure rejected the credentials${status}: ${verification.detail ?? "no detail"}\n`,
-    );
-    if (attempt < VERIFY_ATTEMPTS) output.write("  Let's try again.\n\n");
-  }
-  output.write("\n  Credentials saved but NOT verified — fix them with /login or `axl login`.\n\n");
 }

@@ -16,7 +16,14 @@ import {
   type ModelTurnRequest,
   ToolRegistry,
 } from "@axl/kernel";
-import type { EventPayloadMap, JsonObject, ModelStreamEvent, Usage } from "@axl/protocol";
+import type {
+  EventPayloadMap,
+  JsonObject,
+  ModelStreamEvent,
+  SessionId,
+  Usage,
+} from "@axl/protocol";
+import { subscribeSession } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
 
 import { AxlApp, stripAnsi } from "../src/index.ts";
@@ -165,6 +172,102 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   assert.equal((resumedApp as unknown as { cwd: string }).cwd, directory);
   assert.match(resumed.text(), /│ hello axl/);
   assert.match(resumed.text(), /the answer/);
+  const resumedReplyCount = (resumed.text().match(/the answer/g) ?? []).length;
+  resumeInput.write("prompt after resume\r");
+  await until(
+    () => (resumed.text().match(/the answer/g) ?? []).length > resumedReplyCount,
+    "reply after completed-session resume",
+  );
+  assert.match(resumed.text(), /prompt after resume/);
+  resumedApp.stop();
+});
+
+test("detach leaves an accepted turn running for later resume", async (context) => {
+  let markStarted!: () => void;
+  let finish!: () => void;
+  const started = new Promise<void>((resolvePromise) => {
+    markStarted = resolvePromise;
+  });
+  const pause = new Promise<void>((resolvePromise) => {
+    finish = resolvePromise;
+  });
+  context.after(() => finish());
+  let calls = 0;
+  const model: ModelPort = {
+    stream() {
+      calls += 1;
+      const call = calls;
+      if (call === 1) markStarted();
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) await pause;
+        yield {
+          type: "text_delta",
+          text: call === 1 ? "finished while detached" : "received resumed prompt",
+        };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model);
+  const input = new PassThrough();
+  const first = captureOutput();
+  let exited = false;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output: first.output,
+    cwd: directory,
+    color: false,
+    onExit: () => {
+      exited = true;
+    },
+  });
+
+  input.write("background task\r");
+  await started;
+  input.write("/detach\r");
+  await until(() => exited, "active-session detach");
+
+  const resumedInput = new PassThrough();
+  const resumed = captureOutput();
+  const resumedApp = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input: resumedInput,
+    output: resumed.output,
+    cwd: directory,
+    color: false,
+    initialResume: true,
+    listResumeSessions: () =>
+      Promise.resolve([
+        {
+          sessionId: app.sessionId,
+          resumeKey: `native:${app.sessionId}`,
+          cwd: directory,
+          createdAt: 1,
+          updatedAt: 2,
+          userMessageCount: 1,
+          runtime: { state: "running" },
+          attachmentCount: 0,
+          placementLabel: "SANDBOXED · native",
+          unsafe: false,
+        },
+      ]),
+    openResumeSession: async () => ({
+      client: await connectUnixClient(socketPath),
+      reconnectClient: () => connectUnixClient(socketPath),
+    }),
+  });
+  await until(() => resumed.text().includes("Resume Session (All)"), "resume selector");
+  resumedInput.write("\r");
+  await until(() => resumedApp.sessionId === app.sessionId, "active session resume");
+  await until(() => resumed.text().includes("Working"), "resumed working state");
+  finish();
+  await until(() => resumed.text().includes("finished while detached"), "detached turn result");
+  resumedInput.write("continue after reconnect\r");
+  await until(() => resumed.text().includes("received resumed prompt"), "resumed prompt result");
+  assert.match(resumed.text(), /finished while detached/);
+  assert.match(resumed.text(), /background task/);
+  assert.match(resumed.text(), /continue after reconnect/);
   resumedApp.stop();
 });
 
@@ -221,6 +324,52 @@ test("initial resume opens the all-session picker without creating a throwaway s
   app.stop();
 });
 
+test("resume selects the most recently updated session first", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const seed = await connectUnixClient(socketPath);
+  const older = await seed.request("session.create", { cwd: directory });
+  const recent = await seed.request("session.create", { cwd: directory });
+  seed.close();
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const entry = (sessionId: SessionId, updatedAt: number, message: string) => ({
+    sessionId,
+    resumeKey: `native:${sessionId}`,
+    cwd: directory,
+    createdAt: 1,
+    updatedAt,
+    userMessageCount: 1,
+    firstUserMessage: message,
+    lastUserMessage: message,
+    runtime: { state: "inactive" as const },
+    attachmentCount: 0,
+    placementLabel: "SANDBOXED · native",
+    unsafe: false,
+  });
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    initialResume: true,
+    listResumeSessions: () =>
+      Promise.resolve([
+        entry(older.sessionId, 1, "older session"),
+        entry(recent.sessionId, 2, "recent session"),
+      ]),
+    openResumeSession: async () => ({
+      client: await connectUnixClient(socketPath),
+      reconnectClient: () => connectUnixClient(socketPath),
+    }),
+  });
+
+  await until(() => text().includes("Most Recently Updated"), "recent resume selector");
+  input.write("\r");
+  await until(() => app.sessionId === recent.sessionId, "most recent session resume");
+  app.stop();
+});
+
 test("/compact summarizes older context through the daemon", async (context) => {
   const requests: ModelTurnRequest[] = [];
   const model: ModelPort = {
@@ -251,11 +400,24 @@ test("/compact summarizes older context through the daemon", async (context) => 
     cwd: directory,
     color: false,
   });
+  const observer = await connectUnixClient(socketPath);
+  const subscription = await subscribeSession(observer, app.sessionId);
+  context.after(async () => {
+    await subscription.close();
+    observer.close();
+  });
+  const completedResponses = () =>
+    subscription.projector.state.records.filter(
+      (record) =>
+        record.kind === "event" &&
+        record.event.type === "assistant.message" &&
+        record.event.payload.stopReason !== "tool_use",
+    ).length;
 
   input.write("old prompt\r");
-  await until(() => text().includes("old answer"), "old response");
+  await until(() => completedResponses() === 1, "old response");
   input.write("recent prompt\r");
-  await until(() => text().includes("recent answer"), "recent response");
+  await until(() => completedResponses() === 2, "recent response");
   input.write("/compact Focus on the current task\r");
   await until(() => text().includes("Context compacted"), "compaction");
 
@@ -329,7 +491,7 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
 
   input.write("\x15/resume\r");
   await until(() => text().includes("Resume Session (Current Folder)"), "resume selector");
-  input.write("\r");
+  input.write("\x1b[B\r");
   await until(() => app.sessionId === sourceSessionId, "source session resume");
 
   input.write("/clone\r");
@@ -847,8 +1009,8 @@ test("command discovery, history, autocomplete, and external editing behave", as
   await until(() => text().includes("/model gpt-5"), "argument completion");
   input.write("\x15/commands\r");
   await until(() => text().includes("Commands"), "command palette");
-  input.write("history");
-  await until(() => text().includes("/history"), "history command search");
+  input.write("detach");
+  await until(() => text().includes("/detach"), "detach command search");
   app.stop();
 });
 
@@ -1286,12 +1448,11 @@ test("/model digit selection and Esc cancel behave", async (context) => {
   assert.deepEqual(switched, ["gpt-4o-mini"]);
 });
 
-test("/login is a dialog: fields, masked key, live Azure verification", async (context) => {
+test("/login renders a provider-neutral injected dialog", async (context) => {
   const { socketPath, directory } = await startStack(context);
-  const { FileCredentialStore } = await import("@axl/ai");
-  const store = new FileCredentialStore(join(directory, "credentials.json"));
   const input = new PassThrough();
   const { output, text } = captureOutput();
+  let submitted: Readonly<Record<string, string>> | undefined;
 
   await AxlApp.start({
     client: await connectUnixClient(socketPath),
@@ -1299,29 +1460,44 @@ test("/login is a dialog: fields, masked key, live Azure verification", async (c
     output,
     cwd: directory,
     color: false,
-    credentials: {
-      store,
-      context: { env: () => undefined, fileExists: () => Promise.resolve(false) },
-      fetch: (async () => new Response("{}", { status: 200 })) as typeof fetch,
-    },
+    loadLogin: () =>
+      Promise.resolve({
+        title: "Login to test provider",
+        fields: [
+          {
+            id: "key",
+            label: "API key",
+            prompt: "Enter API key",
+            mask: true,
+          },
+          {
+            id: "endpoint",
+            label: "Endpoint",
+            prompt: "Enter endpoint",
+          },
+        ],
+        submit: (values) => {
+          submitted = values;
+          return Promise.resolve({ ok: true, summary: "credentials verified" });
+        },
+      }),
   });
 
   await until(() => text().includes("\x1b[>4;2m"), "keyboard negotiation");
   input.write("/login\r");
-  await until(() => text().includes("Login to Azure OpenAI"), "login dialog");
-  assert.match(text(), /API key/);
+  await until(() => text().includes("Login to test provider"), "login dialog");
   input.write("dialog-test-key");
   await until(() => /\*{5,}/.test(text()), "masked key");
   input.write("\r");
-  await until(() => text().includes("Enter Azure OpenAI endpoint"), "endpoint field");
-  input.write("https://myres.openai.azure.com/\r");
-  input.write("\r"); // skip the optional map
-  await until(() => text().includes("credentials verified with Azure"), "verified");
+  await until(() => text().includes("Enter endpoint"), "endpoint field");
+  input.write("https://example.invalid/\r");
+  await until(() => text().includes("credentials verified"), "verified");
 
-  assert.equal(text().includes("dialog-test-key"), false); // masked
-  assert.match(text(), /\*{5,}/);
-  const stored = await store.read("azure-openai");
-  assert.equal(stored?.type === "api_key" && stored.key, "dialog-test-key");
+  assert.equal(text().includes("dialog-test-key"), false);
+  assert.deepEqual(submitted, {
+    key: "dialog-test-key",
+    endpoint: "https://example.invalid/",
+  });
 });
 
 test("/reload requests a runtime rebuild and renders the boundary", async (context) => {

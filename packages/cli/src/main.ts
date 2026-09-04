@@ -22,6 +22,7 @@ import {
   startLocalDaemon,
 } from "@axl/runtime";
 
+import { azureLoginDialog, runAzureSetup } from "./azure-auth-ui.ts";
 import { loadTuiSettings, saveTuiSettings, type TuiSettings } from "./settings.ts";
 
 const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
@@ -254,7 +255,6 @@ async function ensureCredentials(store: CredentialStore): Promise<void> {
     );
   } catch (error) {
     if (error instanceof AuthError && error.code === "not_configured" && process.stdin.isTTY) {
-      const { runAzureSetup } = await import("@axl/tui");
       await runAzureSetup(process.stdin, process.stdout, store, nodeAuthContext);
       return;
     }
@@ -488,7 +488,7 @@ async function main(): Promise<void> {
   };
 
   if (cli.command === "login") {
-    const [{ store, context }, { assertInteractiveTerminal, runAzureSetup }] = await Promise.all([
+    const [{ store, context }, { assertInteractiveTerminal }] = await Promise.all([
       credentials(),
       import("@axl/tui"),
     ]);
@@ -650,7 +650,10 @@ async function main(): Promise<void> {
     ...(cli.profile === undefined ? {} : { profile: cli.profile }),
     webFetch: active.webFetch,
     webSearch: active.webSearch,
-    loadCredentials: credentials,
+    loadLogin: async () => {
+      const { store, context } = await credentials();
+      return azureLoginDialog(store, context);
+    },
     ...(cli.sessionId === undefined ? {} : { sessionId: cli.sessionId }),
     onExit: () => {
       void settingsWrite.finally(() => process.exit(0));

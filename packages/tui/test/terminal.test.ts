@@ -67,6 +67,8 @@ test("owns terminal modes and listeners for one idempotent lifecycle", () => {
   assert.equal(state.output.writes.length, 1);
   assert.equal((state.output.writes[0] ?? "").includes("\x1b[?2004h"), true);
   assert.equal((state.output.writes[0] ?? "").includes("\x1b[?1004h"), true);
+  assert.equal((state.output.writes[0] ?? "").includes("\x1b[>1u"), true);
+  assert.equal((state.output.writes[0] ?? "").includes("\x1b[>7u"), false);
 
   state.input.emit("data", "hello");
   state.output.emit("resize");

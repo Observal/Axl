@@ -9,8 +9,9 @@ import { PassThrough } from "node:stream";
 import test, { type TestContext } from "node:test";
 
 import { FileCredentialStore, type AuthContext } from "@axl/ai";
+import { promptLine, SetupAbortedError } from "@axl/tui";
 
-import { promptLine, runAzureSetup, SetupAbortedError } from "../src/index.ts";
+import { azureLoginDialog, runAzureSetup } from "../src/azure-auth-ui.ts";
 
 const context: AuthContext = { env: () => undefined, fileExists: () => Promise.resolve(false) };
 const okFetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
@@ -58,6 +59,25 @@ test("empty input is refused unless allowed, and Ctrl+C aborts", async () => {
   const optional = makeIo();
   type(optional.input, "\r");
   assert.equal(await promptLine(optional.input, optional.output, "> ", { allowEmpty: true }), "");
+});
+
+test("Azure login dialog definition verifies and stores credentials", async (testContext) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-login-dialog-"));
+  testContext.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new FileCredentialStore(join(directory, "credentials.json"));
+  const definition = await azureLoginDialog(store, context, okFetch);
+
+  assert.equal(definition.title, "Login to Azure OpenAI");
+  assert.deepEqual(
+    await definition.submit({
+      key: "dialog-key",
+      endpoint: "https://myres.openai.azure.com/",
+      deploymentMap: "gpt-5=my-deploy",
+    }),
+    { ok: true, summary: "✓ credentials verified with Azure" },
+  );
+  const stored = await store.read("azure-openai");
+  assert.equal(stored?.type === "api_key" && stored.key, "dialog-key");
 });
 
 test("full setup stores a verified credential without leaking the key", async (testContext: TestContext) => {

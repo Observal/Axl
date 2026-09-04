@@ -55,11 +55,15 @@ export function decodeOneKey(data: string, index: number): { key: EditorKey; nex
     if (rest.startsWith("\x1bf")) return { key: { kind: "word-right" }, next: index + 2 };
     if (rest.startsWith("\x1bd")) return { key: { kind: "alt", char: "d" }, next: index + 2 };
     // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal protocol parsing requires ESC
-    const kitty = /^\x1b\[(\d+)(?:;(\d+)(?::\d+)?)?u/.exec(rest);
+    const kitty = /^\x1b\[(\d+)(?::\d+){0,2}(?:;(\d+)(?::(\d+))?)?(?:;[\d:]+)?u/.exec(rest);
     if (kitty) {
       const sequence = kitty[0];
+      const eventType = Number(kitty[3] ?? 1);
       return {
-        key: kittyKey(Number(kitty[1]), Number(kitty[2] ?? 1)),
+        key:
+          eventType === 1 || eventType === 2
+            ? kittyKey(Number(kitty[1]), Number(kitty[2] ?? 1))
+            : { kind: "unknown" },
         next: index + sequence.length,
       };
     }

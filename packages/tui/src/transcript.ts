@@ -1,8 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ModelInfo } from "@axl/ai";
-import { ConversationProjector } from "@axl/sdk";
+import { type ClientModelInfo, ConversationProjector } from "@axl/sdk";
 import type { BlobReference, CanonicalEvent } from "@axl/protocol";
 
 import { renderMarkdown } from "./markdown.ts";
@@ -95,7 +94,7 @@ export type BlobRenderer = (
 export class SessionView {
   palette: Palette;
   private width: number;
-  private readonly models: readonly ModelInfo[];
+  private readonly models: readonly ClientModelInfo[];
   private readonly renderBlob: BlobRenderer | undefined;
   model: string | undefined;
   thinking: string | undefined;
@@ -120,7 +119,7 @@ export class SessionView {
   constructor(
     width: number,
     palette: Palette = PLAIN_PALETTE,
-    models: readonly ModelInfo[] = [],
+    models: readonly ClientModelInfo[] = [],
     renderBlob?: BlobRenderer,
     projection: ConversationProjector = new ConversationProjector(),
   ) {
@@ -410,13 +409,11 @@ export class SessionView {
     if (message.includes("DeploymentNotFound")) {
       return [
         ...this.wrap(
-          this.palette.error(
-            `✖ Azure deployment not found for ${this.model ?? "the selected model"}`,
-          ),
+          this.palette.error(`✖ deployment not found for ${this.model ?? "the selected model"}`),
         ),
         ...this.wrap(
           this.palette.dim(
-            `  Use /login to map ${this.model ?? "the model"} to its Azure deployment name, or choose another model with /model.`,
+            `  Use /login to update provider configuration, or choose another model with /model.`,
           ),
         ),
       ];

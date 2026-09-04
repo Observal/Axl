@@ -2,7 +2,38 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { JsonObject } from "./event-envelope.ts";
-import type { AssistantContent, AssistantStopReason, Usage, UserContent } from "./events.ts";
+import type {
+  AssistantContent,
+  AssistantStopReason,
+  ThinkingLevel,
+  Usage,
+  UserContent,
+} from "./events.ts";
+
+export interface ModelThinkingSupport {
+  readonly reasoning: boolean;
+  readonly thinkingLevelMap?: Readonly<Partial<Record<ThinkingLevel, string | null>>>;
+}
+
+export const THINKING_LEVELS: readonly ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+export function supportedThinkingLevels(model: ModelThinkingSupport): readonly ThinkingLevel[] {
+  if (!model.reasoning) return ["off"];
+  return THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
+}
 
 export interface ToolCallRequest {
   readonly callId: string;

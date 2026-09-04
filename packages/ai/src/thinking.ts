@@ -3,35 +3,11 @@
 
 // Axl-native thinking-level selection, clamping, and token-budget policy.
 
-import type { ThinkingLevel } from "@axl/protocol";
+import { supportedThinkingLevels, THINKING_LEVELS, type ThinkingLevel } from "@axl/protocol";
 
 import type { ModelInfo } from "./model.ts";
 
-/** Canonical thinking levels, weakest to strongest. */
-export const THINKING_LEVELS: readonly ThinkingLevel[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
-
-/**
- * The levels a model supports. Non-reasoning models support only `off`.
- * `xhigh` and `max` require an explicit thinkingLevelMap entry; other levels
- * are supported unless mapped to `null`.
- */
-export function supportedThinkingLevels(model: ModelInfo): readonly ThinkingLevel[] {
-  if (!model.reasoning) return ["off"];
-  return THINKING_LEVELS.filter((level) => {
-    const mapped = model.thinkingLevelMap?.[level];
-    if (mapped === null) return false;
-    if (level === "xhigh" || level === "max") return mapped !== undefined;
-    return true;
-  });
-}
+export { supportedThinkingLevels, THINKING_LEVELS };
 
 /** Exactly the payload of a `config.thinking` event, so clamping is always loggable. */
 export interface ThinkingClamp {

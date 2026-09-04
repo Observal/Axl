@@ -17,11 +17,10 @@
   "scripts": {
     "build": "tsc -b tsconfig.build.json --force",
     "benchmark": "node benchmark/long-session.ts",
-    "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/ai build && pnpm --filter @axl/daemon build && pnpm --filter @axl/sdk build && node --test test/*.test.ts",
+    "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/daemon build && pnpm --filter @axl/sdk build && node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@axl/ai": "workspace:*",
     "@axl/extension-api": "workspace:*",
     "@axl/protocol": "workspace:*",
     "grok-mermaid": "0.2.2",
