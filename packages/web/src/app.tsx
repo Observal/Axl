@@ -63,11 +63,16 @@ export function App({ shell }: { readonly shell: ApplicationShell }) {
     () => shell.state,
   );
   const [newCwd, setNewCwd] = useState("");
+  const [modelDraft, setModelDraft] = useState("");
 
   useEffect(() => {
     void shell.start();
     return () => shell.detach();
   }, [shell]);
+
+  useEffect(() => {
+    setModelDraft(state.conversation.model ?? "");
+  }, [state.conversation.model, state.selected?.sessionId]);
 
   const create = (event: FormEvent) => {
     event.preventDefault();
@@ -200,6 +205,39 @@ export function App({ shell }: { readonly shell: ApplicationShell }) {
               </section>
 
               <section aria-label="Session configuration" className="configuration">
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const modelId = modelDraft.trim();
+                    if (modelId !== "") void shell.configure({ modelId }).catch(() => undefined);
+                  }}
+                >
+                  <label htmlFor="model-id">Model ID</label>
+                  <input
+                    id="model-id"
+                    name="model-id"
+                    list="known-models"
+                    value={modelDraft}
+                    disabled={!shell.supports("session.configure") || state.busy}
+                    onChange={(event) => setModelDraft(event.currentTarget.value)}
+                  />
+                  <datalist id="known-models">
+                    {projection.model === undefined ? null : (
+                      <option value={projection.model}>{projection.model}</option>
+                    )}
+                  </datalist>
+                  <button
+                    type="submit"
+                    disabled={
+                      !shell.supports("session.configure") ||
+                      state.busy ||
+                      modelDraft.trim() === "" ||
+                      modelDraft.trim() === projection.model
+                    }
+                  >
+                    Select model
+                  </button>
+                </form>
                 <label>
                   Profile
                   <select
@@ -270,7 +308,7 @@ export function App({ shell }: { readonly shell: ApplicationShell }) {
                   <p>{interaction.request.payload.message}</p>
                   <div className="actions">
                     {(["accept", "decline", "cancel"] as const).map((action) => (
-                      <CapabilityButton key={action} shell={shell} capability="session.interaction.respond" disabled={state.busy} onClick={() => void shell.respondToInteraction(interaction.interactionId, action).catch(() => undefined)}>{action}</CapabilityButton>
+                      <CapabilityButton key={action} shell={shell} capability="session.interaction.respond" onClick={() => void shell.respondToInteraction(interaction.interactionId, action).catch(() => undefined)}>{action}</CapabilityButton>
                     ))}
                   </div>
                 </section>
@@ -297,7 +335,7 @@ export function App({ shell }: { readonly shell: ApplicationShell }) {
                 <textarea id="prompt" rows={4} value={state.draft} onChange={(event) => shell.setDraft(event.currentTarget.value)} />
                 <div className="actions">
                   <button type="submit" disabled={!shell.supports("session.send.prompt") || state.busy || state.draft.trim() === ""}>Send</button>
-                  <CapabilityButton shell={shell} capability="session.queue.enqueue" disabled={state.busy || state.draft.trim() === ""} onClick={() => void shell.send("back").catch(() => undefined)}>Queue</CapabilityButton>
+                  <CapabilityButton shell={shell} capability="session.queue.enqueue" disabled={state.draft.trim() === ""} onClick={() => void shell.send("back").catch(() => undefined)}>Queue</CapabilityButton>
                   <CapabilityButton shell={shell} capability="session.interrupt" disabled={!active} onClick={() => void shell.interrupt().catch(() => undefined)}>Interrupt</CapabilityButton>
                 </div>
               </form>

@@ -94,6 +94,7 @@ export class ApplicationShell {
   private subscription: SessionSubscription | undefined;
   private removePresence: (() => void) | undefined;
   private selectionGeneration = 0;
+  private pendingOperations = 0;
 
   private readonly connector: WebClientConnector;
   private readonly cursorStore: CursorStore;
@@ -165,10 +166,9 @@ export class ApplicationShell {
 
   async fork(fromEventId?: EventId): Promise<void> {
     const selected = this.requireSelected();
-    const fallback = this.latestEventId();
-    const eventId = fromEventId ?? fallback;
-    if (eventId === undefined) throw new Error("This session has no event to fork from");
     await this.run(async (client) => {
+      const eventId = this.forkPoint(fromEventId);
+      if (eventId === undefined) throw new Error("This session has no user message to fork from");
       const opened = await client.request("session.fork", {
         sessionId: selected.sessionId,
         fromEventId: eventId,
@@ -208,8 +208,10 @@ export class ApplicationShell {
           delivery: "prompt",
         });
       }
-      this.drafts.delete(selected.sessionId);
-      this.update({ draft: "" });
+      if (this.drafts.get(selected.sessionId) === draft) {
+        this.drafts.delete(selected.sessionId);
+        if (this.stateValue.selected?.sessionId === selected.sessionId) this.update({ draft: "" });
+      }
     });
   }
 
@@ -232,6 +234,7 @@ export class ApplicationShell {
   }
 
   async configure(update: {
+    readonly modelId?: string;
     readonly thinkingLevel?: ThinkingLevel;
     readonly profile?: SessionProfile;
     readonly webFetch?: boolean;
@@ -288,20 +291,29 @@ export class ApplicationShell {
 
   async reconnect(): Promise<void> {
     const selectedSessionId = this.stateValue.selected?.sessionId;
+    this.selectionGeneration += 1;
+    this.subscription?.detach();
+    this.subscription = undefined;
+    this.removePresence?.();
+    this.removePresence = undefined;
+    this.client?.close();
+    this.client = undefined;
+    this.update({
+      selected: undefined,
+      conversation: emptyConversation(),
+      draft: "",
+      cursorPersistence: { state: "not_configured" },
+      presence: [],
+    });
     try {
-      if (this.client === undefined || this.stateValue.detached) {
-        await this.connect();
-        if (selectedSessionId !== undefined) {
-          await this.clearSelection();
-          const opened = await this.requireClient().request("session.resume", {
-            sessionId: selectedSessionId,
-          });
-          await this.selectOpened(opened);
-        }
-        await this.loadSessions(true);
-      } else {
-        await this.client.reconnect();
+      await this.connect();
+      if (selectedSessionId !== undefined) {
+        const opened = await this.requireClient().request("session.resume", {
+          sessionId: selectedSessionId,
+        });
+        await this.selectOpened(opened);
       }
+      await this.loadSessions(true);
     } catch (error) {
       this.update({ error: safeMessage(error, "Could not reconnect") });
       throw error;
@@ -404,9 +416,17 @@ export class ApplicationShell {
     });
   }
 
-  private latestEventId(): EventId | undefined {
-    const record = this.stateValue.conversation.records.at(-1);
-    return record?.event.id as EventId | undefined;
+  private forkPoint(requested?: EventId): EventId | undefined {
+    const records = this.stateValue.conversation.records;
+    if (requested !== undefined) {
+      const selected = records.find((record) => record.event.id === requested);
+      return selected?.kind === "event" && selected.event.type === "user.message"
+        ? requested
+        : undefined;
+    }
+    return records.findLast(
+      (record) => record.kind === "event" && record.event.type === "user.message",
+    )?.event.id as EventId | undefined;
   }
 
   private requireClient(): AxlClient {
@@ -420,6 +440,7 @@ export class ApplicationShell {
   }
 
   private async run<Result>(operation: (client: AxlClient) => Promise<Result>): Promise<Result> {
+    this.pendingOperations += 1;
     this.update({ busy: true, error: undefined });
     try {
       return await operation(this.requireClient());
@@ -427,7 +448,8 @@ export class ApplicationShell {
       this.update({ error: safeMessage(error, "Operation failed") });
       throw error;
     } finally {
-      this.update({ busy: false });
+      this.pendingOperations -= 1;
+      this.update({ busy: this.pendingOperations > 0 });
     }
   }
 
