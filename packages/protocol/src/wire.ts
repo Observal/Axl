@@ -608,6 +608,7 @@ export const WIRE_CAPABILITIES = [
   "session.resume",
   "session.fork",
   "session.clone",
+  "session.export",
   "session.send.prompt",
   "session.steer",
   "session.follow_up",
@@ -718,6 +719,15 @@ export interface RpcMethodMap {
   readonly "session.clone": {
     readonly params: { readonly sessionId: SessionId };
     readonly result: SessionForkResult;
+  };
+  readonly "session.export": {
+    readonly params: { readonly sessionId: SessionId; readonly outputDirectory: string };
+    readonly result: {
+      readonly outputDirectory: string;
+      readonly sourceSha256: string;
+      readonly eventCount: number;
+      readonly blobCount: number;
+    };
   };
   readonly "session.send": {
     readonly params: {
@@ -939,6 +949,7 @@ export const RPC_ERROR_CODES = [
   "internal_error",
   "invalid_cwd",
   "invalid_idempotency_key",
+  "artifact_exists",
   "idempotency_conflict",
   "unknown_session",
   "corrupt_session",
@@ -1535,6 +1546,21 @@ export function parseWireRequest(value: unknown): WireRequest {
       ...base,
       method,
       params: { sessionId: parseSessionId(params.sessionId, "request.params.sessionId") },
+    };
+  }
+  if (method === "session.export") {
+    exact(params, "request.params", ["sessionId", "outputDirectory"]);
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        outputDirectory: boundedString(
+          params.outputDirectory,
+          "request.params.outputDirectory",
+          4096,
+        ),
+      },
     };
   }
   if (method === "session.send") {
@@ -2169,6 +2195,15 @@ export function parseRpcResult<Method extends RpcMethod>(
         ? {}
         : { selectedText: boundedText(result.selectedText, `${path}.selectedText`, 262_144) }),
     };
+  } else if (method === "session.export") {
+    const result = object(value, path);
+    exact(result, path, ["outputDirectory", "sourceSha256", "eventCount", "blobCount"]);
+    parsed = {
+      outputDirectory: boundedString(result.outputDirectory, `${path}.outputDirectory`, 4096),
+      sourceSha256: sha256(result.sourceSha256, `${path}.sourceSha256`),
+      eventCount: nonNegativeInteger(result.eventCount, `${path}.eventCount`),
+      blobCount: nonNegativeInteger(result.blobCount, `${path}.blobCount`),
+    };
   } else if (method === "session.send") {
     const result = object(value, path);
     exact(result, path, ["operationId", "stopReason"]);
@@ -2432,6 +2467,7 @@ export const RPC_METHODS = [
   "session.unsubscribe",
   "session.fork",
   "session.clone",
+  "session.export",
   "session.send",
   "session.steer",
   "session.followUp",
@@ -2525,6 +2561,14 @@ export const RPC_METHOD_ERROR_CODES = {
     "empty_session",
     ...MUTATION_ERRORS,
     "content_too_large",
+  ],
+  "session.export": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    "invalid_path",
+    "artifact_exists",
+    "blob_missing",
+    "blob_corrupt",
   ],
   "session.send": [
     ...SESSION_BASE_ERRORS,

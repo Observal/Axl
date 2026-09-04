@@ -32,8 +32,8 @@ import {
   parseSessionId,
   parseWireRequest,
   type RetryableMutationMethod,
-  requiredCapability,
   RPC_METHODS,
+  requiredCapability,
   type ServerMessage,
   type SessionActivityFrame,
   type SessionId,
@@ -804,6 +804,11 @@ export class AxlDaemon {
           ...(cloned.selectedText === undefined ? {} : { selectedText: cloned.selectedText }),
         };
       }
+      case "session.export":
+        return this.sessions.exportArtifact(
+          request.params.sessionId,
+          request.params.outputDirectory,
+        );
       case "session.send":
         if (request.params.delivery !== "prompt") {
           throw new DaemonError(

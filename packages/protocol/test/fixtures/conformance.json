@@ -113,6 +113,15 @@
     {
       "kind": "request",
       "id": 13,
+      "method": "session.export",
+      "params": {
+        "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+        "outputDirectory": "/tmp/axl-session"
+      }
+    },
+    {
+      "kind": "request",
+      "id": 14,
       "method": "session.send",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -128,7 +137,7 @@
     },
     {
       "kind": "request",
-      "id": 14,
+      "id": 15,
       "method": "session.steer",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -142,7 +151,7 @@
     },
     {
       "kind": "request",
-      "id": 15,
+      "id": 16,
       "method": "session.followUp",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -156,7 +165,7 @@
     },
     {
       "kind": "request",
-      "id": 16,
+      "id": 17,
       "method": "session.compact",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -165,7 +174,7 @@
     },
     {
       "kind": "request",
-      "id": 17,
+      "id": 18,
       "method": "session.queue.enqueue",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -181,7 +190,7 @@
     },
     {
       "kind": "request",
-      "id": 18,
+      "id": 19,
       "method": "session.queue.requeue",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -192,7 +201,7 @@
     },
     {
       "kind": "request",
-      "id": 19,
+      "id": 20,
       "method": "session.shell",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -203,7 +212,7 @@
     },
     {
       "kind": "request",
-      "id": 20,
+      "id": 21,
       "method": "session.interrupt",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -212,7 +221,7 @@
     },
     {
       "kind": "request",
-      "id": 21,
+      "id": 22,
       "method": "session.reload",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -221,7 +230,7 @@
     },
     {
       "kind": "request",
-      "id": 22,
+      "id": 23,
       "method": "session.configure",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -232,7 +241,7 @@
     },
     {
       "kind": "request",
-      "id": 23,
+      "id": 24,
       "method": "session.interaction.respond",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -246,7 +255,7 @@
     },
     {
       "kind": "request",
-      "id": 24,
+      "id": 25,
       "method": "session.subscribe",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -254,7 +263,7 @@
     },
     {
       "kind": "request",
-      "id": 25,
+      "id": 26,
       "method": "session.workspace.list",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -264,7 +273,7 @@
     },
     {
       "kind": "request",
-      "id": 26,
+      "id": 27,
       "method": "session.workspace.read",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -275,7 +284,7 @@
     },
     {
       "kind": "request",
-      "id": 27,
+      "id": 28,
       "method": "session.workspace.status",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -284,7 +293,7 @@
     },
     {
       "kind": "request",
-      "id": 28,
+      "id": 29,
       "method": "session.workspace.diff",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -296,7 +305,7 @@
     },
     {
       "kind": "request",
-      "id": 29,
+      "id": 30,
       "method": "session.workspace.checkpoint",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -305,7 +314,7 @@
     },
     {
       "kind": "request",
-      "id": 30,
+      "id": 31,
       "method": "session.blob.start",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -316,7 +325,7 @@
     },
     {
       "kind": "request",
-      "id": 31,
+      "id": 32,
       "method": "session.blob.chunk",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -327,7 +336,7 @@
     },
     {
       "kind": "request",
-      "id": 32,
+      "id": 33,
       "method": "session.blob.commit",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -336,7 +345,7 @@
     },
     {
       "kind": "request",
-      "id": 33,
+      "id": 34,
       "method": "session.blob.abort",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -345,7 +354,7 @@
     },
     {
       "kind": "request",
-      "id": 34,
+      "id": 35,
       "method": "session.blob.read",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000",
@@ -356,7 +365,7 @@
     },
     {
       "kind": "request",
-      "id": 35,
+      "id": 36,
       "method": "session.dispose",
       "params": {
         "sessionId": "123e4567-e89b-42d3-a456-426614174000"
@@ -521,6 +530,17 @@
     {
       "kind": "success",
       "id": 13,
+      "method": "session.export",
+      "result": {
+        "outputDirectory": "/tmp/axl-session",
+        "sourceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "eventCount": 1,
+        "blobCount": 0
+      }
+    },
+    {
+      "kind": "success",
+      "id": 14,
       "method": "session.send",
       "result": {
         "operationId": "00000000-0000-4000-8000-000000000010",
@@ -529,7 +549,7 @@
     },
     {
       "kind": "success",
-      "id": 14,
+      "id": 15,
       "method": "session.steer",
       "result": {
         "queued": true
@@ -537,7 +557,7 @@
     },
     {
       "kind": "success",
-      "id": 15,
+      "id": 16,
       "method": "session.followUp",
       "result": {
         "queued": true
@@ -545,7 +565,7 @@
     },
     {
       "kind": "success",
-      "id": 16,
+      "id": 17,
       "method": "session.compact",
       "result": {
         "eventId": "00000000-0000-4000-8000-000000000001"
@@ -553,7 +573,7 @@
     },
     {
       "kind": "success",
-      "id": 17,
+      "id": 18,
       "method": "session.queue.enqueue",
       "result": {
         "queueItemId": "00000000-0000-4000-8000-000000000001",
@@ -562,7 +582,7 @@
     },
     {
       "kind": "success",
-      "id": 18,
+      "id": 19,
       "method": "session.queue.requeue",
       "result": {
         "queueItemId": "00000000-0000-4000-8000-000000000001",
@@ -571,7 +591,7 @@
     },
     {
       "kind": "success",
-      "id": 19,
+      "id": 20,
       "method": "session.shell",
       "result": {
         "operationId": "00000000-0000-4000-8000-000000000010",
@@ -581,7 +601,7 @@
     },
     {
       "kind": "success",
-      "id": 20,
+      "id": 21,
       "method": "session.interrupt",
       "result": {
         "interrupted": true,
@@ -590,7 +610,7 @@
     },
     {
       "kind": "success",
-      "id": 21,
+      "id": 22,
       "method": "session.reload",
       "result": {
         "boundaryEventIds": ["00000000-0000-4000-8000-000000000001"]
@@ -598,7 +618,7 @@
     },
     {
       "kind": "success",
-      "id": 22,
+      "id": 23,
       "method": "session.configure",
       "result": {
         "modelId": "model-1",
@@ -612,7 +632,7 @@
     },
     {
       "kind": "success",
-      "id": 23,
+      "id": 24,
       "method": "session.interaction.respond",
       "result": {
         "interactionId": "interaction-1",
@@ -621,7 +641,7 @@
     },
     {
       "kind": "success",
-      "id": 24,
+      "id": 25,
       "method": "session.subscribe",
       "result": {
         "subscriptionId": "subscription-1",
@@ -653,7 +673,7 @@
     },
     {
       "kind": "success",
-      "id": 25,
+      "id": 26,
       "method": "session.workspace.list",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -669,7 +689,7 @@
     },
     {
       "kind": "success",
-      "id": 26,
+      "id": 27,
       "method": "session.workspace.read",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -685,7 +705,7 @@
     },
     {
       "kind": "success",
-      "id": 27,
+      "id": 28,
       "method": "session.workspace.status",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -711,7 +731,7 @@
     },
     {
       "kind": "success",
-      "id": 28,
+      "id": 29,
       "method": "session.workspace.diff",
       "result": {
         "workspaceGeneration": "workspace-1",
@@ -748,7 +768,7 @@
     },
     {
       "kind": "success",
-      "id": 29,
+      "id": 30,
       "method": "session.workspace.checkpoint",
       "result": {
         "enabled": true,
@@ -757,7 +777,7 @@
     },
     {
       "kind": "success",
-      "id": 30,
+      "id": 31,
       "method": "session.blob.start",
       "result": {
         "uploadId": "upload-1",
@@ -766,7 +786,7 @@
     },
     {
       "kind": "success",
-      "id": 31,
+      "id": 32,
       "method": "session.blob.chunk",
       "result": {
         "nextOffset": 4
@@ -774,7 +794,7 @@
     },
     {
       "kind": "success",
-      "id": 32,
+      "id": 33,
       "method": "session.blob.commit",
       "result": {
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -785,7 +805,7 @@
     },
     {
       "kind": "success",
-      "id": 33,
+      "id": 34,
       "method": "session.blob.abort",
       "result": {
         "aborted": true
@@ -793,7 +813,7 @@
     },
     {
       "kind": "success",
-      "id": 34,
+      "id": 35,
       "method": "session.blob.read",
       "result": {
         "data": "YWJjZA==",
@@ -804,7 +824,7 @@
     },
     {
       "kind": "success",
-      "id": 35,
+      "id": 36,
       "method": "session.dispose",
       "result": {
         "disposed": true,
@@ -944,6 +964,16 @@
     {
       "kind": "error",
       "id": 14,
+      "method": "session.export",
+      "error": {
+        "code": "artifact_exists",
+        "message": "Fixture error: artifact_exists",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 15,
       "method": "session.create",
       "error": {
         "code": "idempotency_conflict",
@@ -953,7 +983,7 @@
     },
     {
       "kind": "error",
-      "id": 15,
+      "id": 16,
       "method": "session.resume",
       "error": {
         "code": "unknown_session",
@@ -963,7 +993,7 @@
     },
     {
       "kind": "error",
-      "id": 16,
+      "id": 17,
       "method": "session.create",
       "error": {
         "code": "corrupt_session",
@@ -973,7 +1003,7 @@
     },
     {
       "kind": "error",
-      "id": 17,
+      "id": 18,
       "method": "session.resume",
       "error": {
         "code": "event_migration_required",
@@ -983,7 +1013,7 @@
     },
     {
       "kind": "error",
-      "id": 18,
+      "id": 19,
       "method": "session.fork",
       "error": {
         "code": "operation_active",
@@ -993,7 +1023,7 @@
     },
     {
       "kind": "error",
-      "id": 19,
+      "id": 20,
       "method": "session.steer",
       "error": {
         "code": "operation_inactive",
@@ -1003,7 +1033,7 @@
     },
     {
       "kind": "error",
-      "id": 20,
+      "id": 21,
       "method": "session.queue.requeue",
       "error": {
         "code": "unknown_queue_item",
@@ -1013,7 +1043,7 @@
     },
     {
       "kind": "error",
-      "id": 21,
+      "id": 22,
       "method": "session.queue.requeue",
       "error": {
         "code": "queue_not_paused",
@@ -1023,7 +1053,7 @@
     },
     {
       "kind": "error",
-      "id": 22,
+      "id": 23,
       "method": "session.fork",
       "error": {
         "code": "invalid_fork_point",
@@ -1033,7 +1063,7 @@
     },
     {
       "kind": "error",
-      "id": 23,
+      "id": 24,
       "method": "session.clone",
       "error": {
         "code": "empty_session",
@@ -1043,7 +1073,7 @@
     },
     {
       "kind": "error",
-      "id": 24,
+      "id": 25,
       "method": "session.interaction.respond",
       "error": {
         "code": "unknown_interaction",
@@ -1053,7 +1083,7 @@
     },
     {
       "kind": "error",
-      "id": 25,
+      "id": 26,
       "method": "session.interaction.respond",
       "error": {
         "code": "interaction_already_resolved",
@@ -1063,7 +1093,7 @@
     },
     {
       "kind": "error",
-      "id": 26,
+      "id": 27,
       "method": "session.ack",
       "error": {
         "code": "unknown_subscription",
@@ -1073,7 +1103,7 @@
     },
     {
       "kind": "error",
-      "id": 27,
+      "id": 28,
       "method": "session.list",
       "error": {
         "code": "unknown_cursor",
@@ -1083,7 +1113,7 @@
     },
     {
       "kind": "error",
-      "id": 28,
+      "id": 29,
       "method": "session.history",
       "error": {
         "code": "snapshot_required",
@@ -1093,7 +1123,7 @@
     },
     {
       "kind": "error",
-      "id": 29,
+      "id": 30,
       "method": "session.workspace.list",
       "error": {
         "code": "workspace_unavailable",
@@ -1103,7 +1133,7 @@
     },
     {
       "kind": "error",
-      "id": 30,
+      "id": 31,
       "method": "session.workspace.list",
       "error": {
         "code": "workspace_changed",
@@ -1113,8 +1143,8 @@
     },
     {
       "kind": "error",
-      "id": 31,
-      "method": "session.workspace.list",
+      "id": 32,
+      "method": "session.export",
       "error": {
         "code": "invalid_path",
         "message": "Fixture error: invalid_path",
@@ -1123,7 +1153,7 @@
     },
     {
       "kind": "error",
-      "id": 32,
+      "id": 33,
       "method": "session.workspace.list",
       "error": {
         "code": "path_denied",
@@ -1133,7 +1163,7 @@
     },
     {
       "kind": "error",
-      "id": 33,
+      "id": 34,
       "method": "session.workspace.list",
       "error": {
         "code": "symlink_escape",
@@ -1143,7 +1173,7 @@
     },
     {
       "kind": "error",
-      "id": 34,
+      "id": 35,
       "method": "session.workspace.list",
       "error": {
         "code": "not_found",
@@ -1153,7 +1183,7 @@
     },
     {
       "kind": "error",
-      "id": 35,
+      "id": 36,
       "method": "session.workspace.read",
       "error": {
         "code": "not_a_file",
@@ -1163,7 +1193,7 @@
     },
     {
       "kind": "error",
-      "id": 36,
+      "id": 37,
       "method": "session.workspace.list",
       "error": {
         "code": "unsupported_file_type",
@@ -1173,7 +1203,7 @@
     },
     {
       "kind": "error",
-      "id": 37,
+      "id": 38,
       "method": "session.workspace.list",
       "error": {
         "code": "unsupported_filename_encoding",
@@ -1183,7 +1213,7 @@
     },
     {
       "kind": "error",
-      "id": 38,
+      "id": 39,
       "method": "session.workspace.read",
       "error": {
         "code": "binary_file",
@@ -1193,7 +1223,7 @@
     },
     {
       "kind": "error",
-      "id": 39,
+      "id": 40,
       "method": "session.workspace.read",
       "error": {
         "code": "invalid_encoding",
@@ -1203,7 +1233,7 @@
     },
     {
       "kind": "error",
-      "id": 40,
+      "id": 41,
       "method": "session.create",
       "error": {
         "code": "content_too_large",
@@ -1213,7 +1243,7 @@
     },
     {
       "kind": "error",
-      "id": 41,
+      "id": 42,
       "method": "session.workspace.status",
       "error": {
         "code": "not_git_repository",
@@ -1223,7 +1253,7 @@
     },
     {
       "kind": "error",
-      "id": 42,
+      "id": 43,
       "method": "session.workspace.status",
       "error": {
         "code": "git_unavailable",
@@ -1233,7 +1263,7 @@
     },
     {
       "kind": "error",
-      "id": 43,
+      "id": 44,
       "method": "session.workspace.status",
       "error": {
         "code": "git_timeout",
@@ -1243,7 +1273,7 @@
     },
     {
       "kind": "error",
-      "id": 44,
+      "id": 45,
       "method": "session.workspace.status",
       "error": {
         "code": "git_output_too_large",
@@ -1253,7 +1283,7 @@
     },
     {
       "kind": "error",
-      "id": 45,
+      "id": 46,
       "method": "session.workspace.status",
       "error": {
         "code": "unsupported_git_state",
@@ -1263,7 +1293,7 @@
     },
     {
       "kind": "error",
-      "id": 46,
+      "id": 47,
       "method": "session.workspace.diff",
       "error": {
         "code": "repository_changed",
@@ -1273,7 +1303,7 @@
     },
     {
       "kind": "error",
-      "id": 47,
+      "id": 48,
       "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_unavailable",
@@ -1283,7 +1313,7 @@
     },
     {
       "kind": "error",
-      "id": 48,
+      "id": 49,
       "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_too_large",
@@ -1293,7 +1323,7 @@
     },
     {
       "kind": "error",
-      "id": 49,
+      "id": 50,
       "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_corrupt",
@@ -1303,7 +1333,7 @@
     },
     {
       "kind": "error",
-      "id": 50,
+      "id": 51,
       "method": "session.blob.start",
       "error": {
         "code": "invalid_media_type",
@@ -1313,7 +1343,7 @@
     },
     {
       "kind": "error",
-      "id": 51,
+      "id": 52,
       "method": "session.blob.start",
       "error": {
         "code": "invalid_blob_name",
@@ -1323,7 +1353,7 @@
     },
     {
       "kind": "error",
-      "id": 52,
+      "id": 53,
       "method": "session.blob.chunk",
       "error": {
         "code": "invalid_blob_chunk",
@@ -1333,7 +1363,7 @@
     },
     {
       "kind": "error",
-      "id": 53,
+      "id": 54,
       "method": "session.blob.start",
       "error": {
         "code": "blob_too_large",
@@ -1343,7 +1373,7 @@
     },
     {
       "kind": "error",
-      "id": 54,
+      "id": 55,
       "method": "session.blob.start",
       "error": {
         "code": "too_many_uploads",
@@ -1353,7 +1383,7 @@
     },
     {
       "kind": "error",
-      "id": 55,
+      "id": 56,
       "method": "session.blob.chunk",
       "error": {
         "code": "unknown_blob_upload",
@@ -1363,7 +1393,7 @@
     },
     {
       "kind": "error",
-      "id": 56,
+      "id": 57,
       "method": "session.blob.chunk",
       "error": {
         "code": "blob_offset_mismatch",
@@ -1373,7 +1403,7 @@
     },
     {
       "kind": "error",
-      "id": 57,
+      "id": 58,
       "method": "session.blob.chunk",
       "error": {
         "code": "blob_size_mismatch",
@@ -1383,7 +1413,7 @@
     },
     {
       "kind": "error",
-      "id": 58,
+      "id": 59,
       "method": "session.blob.chunk",
       "error": {
         "code": "blob_write_failed",
@@ -1393,7 +1423,7 @@
     },
     {
       "kind": "error",
-      "id": 59,
+      "id": 60,
       "method": "session.blob.commit",
       "error": {
         "code": "invalid_image",
@@ -1403,7 +1433,7 @@
     },
     {
       "kind": "error",
-      "id": 60,
+      "id": 61,
       "method": "session.send",
       "error": {
         "code": "blob_not_owned",
@@ -1413,8 +1443,8 @@
     },
     {
       "kind": "error",
-      "id": 61,
-      "method": "session.send",
+      "id": 62,
+      "method": "session.export",
       "error": {
         "code": "blob_missing",
         "message": "Fixture error: blob_missing",
@@ -1423,8 +1453,8 @@
     },
     {
       "kind": "error",
-      "id": 62,
-      "method": "session.send",
+      "id": 63,
+      "method": "session.export",
       "error": {
         "code": "blob_corrupt",
         "message": "Fixture error: blob_corrupt",
@@ -1433,7 +1463,7 @@
     },
     {
       "kind": "error",
-      "id": 63,
+      "id": 64,
       "method": "session.blob.read",
       "error": {
         "code": "invalid_blob_range",
@@ -1443,7 +1473,7 @@
     },
     {
       "kind": "error",
-      "id": 64,
+      "id": 65,
       "method": "session.blob.read",
       "error": {
         "code": "blob_read_failed",
@@ -2546,6 +2576,136 @@
     {
       "kind": "error",
       "id": 1201,
+      "method": "session.export",
+      "error": {
+        "code": "bad_request",
+        "message": "Fixture session.export error: bad_request",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1202,
+      "method": "session.export",
+      "error": {
+        "code": "not_initialized",
+        "message": "Fixture session.export error: not_initialized",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1203,
+      "method": "session.export",
+      "error": {
+        "code": "unsupported_capability",
+        "message": "Fixture session.export error: unsupported_capability",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1204,
+      "method": "session.export",
+      "error": {
+        "code": "rate_limited",
+        "message": "Fixture session.export error: rate_limited",
+        "retryable": true
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1205,
+      "method": "session.export",
+      "error": {
+        "code": "internal_error",
+        "message": "Fixture session.export error: internal_error",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1206,
+      "method": "session.export",
+      "error": {
+        "code": "cancelled",
+        "message": "Fixture session.export error: cancelled",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1207,
+      "method": "session.export",
+      "error": {
+        "code": "unknown_session",
+        "message": "Fixture session.export error: unknown_session",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1208,
+      "method": "session.export",
+      "error": {
+        "code": "event_migration_required",
+        "message": "Fixture session.export error: event_migration_required",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1209,
+      "method": "session.export",
+      "error": {
+        "code": "operation_active",
+        "message": "Fixture session.export error: operation_active",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1210,
+      "method": "session.export",
+      "error": {
+        "code": "invalid_path",
+        "message": "Fixture session.export error: invalid_path",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1211,
+      "method": "session.export",
+      "error": {
+        "code": "artifact_exists",
+        "message": "Fixture session.export error: artifact_exists",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1212,
+      "method": "session.export",
+      "error": {
+        "code": "blob_missing",
+        "message": "Fixture session.export error: blob_missing",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1213,
+      "method": "session.export",
+      "error": {
+        "code": "blob_corrupt",
+        "message": "Fixture session.export error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 1301,
       "method": "session.send",
       "error": {
         "code": "bad_request",
@@ -2555,7 +2715,7 @@
     },
     {
       "kind": "error",
-      "id": 1202,
+      "id": 1302,
       "method": "session.send",
       "error": {
         "code": "not_initialized",
@@ -2565,7 +2725,7 @@
     },
     {
       "kind": "error",
-      "id": 1203,
+      "id": 1303,
       "method": "session.send",
       "error": {
         "code": "unsupported_capability",
@@ -2575,7 +2735,7 @@
     },
     {
       "kind": "error",
-      "id": 1204,
+      "id": 1304,
       "method": "session.send",
       "error": {
         "code": "rate_limited",
@@ -2585,7 +2745,7 @@
     },
     {
       "kind": "error",
-      "id": 1205,
+      "id": 1305,
       "method": "session.send",
       "error": {
         "code": "internal_error",
@@ -2595,7 +2755,7 @@
     },
     {
       "kind": "error",
-      "id": 1206,
+      "id": 1306,
       "method": "session.send",
       "error": {
         "code": "cancelled",
@@ -2605,7 +2765,7 @@
     },
     {
       "kind": "error",
-      "id": 1207,
+      "id": 1307,
       "method": "session.send",
       "error": {
         "code": "unknown_session",
@@ -2615,7 +2775,7 @@
     },
     {
       "kind": "error",
-      "id": 1208,
+      "id": 1308,
       "method": "session.send",
       "error": {
         "code": "event_migration_required",
@@ -2625,7 +2785,7 @@
     },
     {
       "kind": "error",
-      "id": 1209,
+      "id": 1309,
       "method": "session.send",
       "error": {
         "code": "operation_active",
@@ -2635,7 +2795,7 @@
     },
     {
       "kind": "error",
-      "id": 1210,
+      "id": 1310,
       "method": "session.send",
       "error": {
         "code": "invalid_idempotency_key",
@@ -2645,7 +2805,7 @@
     },
     {
       "kind": "error",
-      "id": 1211,
+      "id": 1311,
       "method": "session.send",
       "error": {
         "code": "idempotency_conflict",
@@ -2655,7 +2815,7 @@
     },
     {
       "kind": "error",
-      "id": 1212,
+      "id": 1312,
       "method": "session.send",
       "error": {
         "code": "blob_not_owned",
@@ -2665,7 +2825,7 @@
     },
     {
       "kind": "error",
-      "id": 1213,
+      "id": 1313,
       "method": "session.send",
       "error": {
         "code": "blob_missing",
@@ -2675,7 +2835,7 @@
     },
     {
       "kind": "error",
-      "id": 1214,
+      "id": 1314,
       "method": "session.send",
       "error": {
         "code": "blob_corrupt",
@@ -2685,7 +2845,7 @@
     },
     {
       "kind": "error",
-      "id": 1215,
+      "id": 1315,
       "method": "session.send",
       "error": {
         "code": "content_too_large",
@@ -2695,7 +2855,7 @@
     },
     {
       "kind": "error",
-      "id": 1301,
+      "id": 1401,
       "method": "session.steer",
       "error": {
         "code": "bad_request",
@@ -2705,7 +2865,7 @@
     },
     {
       "kind": "error",
-      "id": 1302,
+      "id": 1402,
       "method": "session.steer",
       "error": {
         "code": "not_initialized",
@@ -2715,7 +2875,7 @@
     },
     {
       "kind": "error",
-      "id": 1303,
+      "id": 1403,
       "method": "session.steer",
       "error": {
         "code": "unsupported_capability",
@@ -2725,7 +2885,7 @@
     },
     {
       "kind": "error",
-      "id": 1304,
+      "id": 1404,
       "method": "session.steer",
       "error": {
         "code": "rate_limited",
@@ -2735,7 +2895,7 @@
     },
     {
       "kind": "error",
-      "id": 1305,
+      "id": 1405,
       "method": "session.steer",
       "error": {
         "code": "internal_error",
@@ -2745,7 +2905,7 @@
     },
     {
       "kind": "error",
-      "id": 1306,
+      "id": 1406,
       "method": "session.steer",
       "error": {
         "code": "cancelled",
@@ -2755,7 +2915,7 @@
     },
     {
       "kind": "error",
-      "id": 1307,
+      "id": 1407,
       "method": "session.steer",
       "error": {
         "code": "unknown_session",
@@ -2765,7 +2925,7 @@
     },
     {
       "kind": "error",
-      "id": 1308,
+      "id": 1408,
       "method": "session.steer",
       "error": {
         "code": "event_migration_required",
@@ -2775,7 +2935,7 @@
     },
     {
       "kind": "error",
-      "id": 1309,
+      "id": 1409,
       "method": "session.steer",
       "error": {
         "code": "operation_inactive",
@@ -2785,7 +2945,7 @@
     },
     {
       "kind": "error",
-      "id": 1310,
+      "id": 1410,
       "method": "session.steer",
       "error": {
         "code": "blob_not_owned",
@@ -2795,7 +2955,7 @@
     },
     {
       "kind": "error",
-      "id": 1311,
+      "id": 1411,
       "method": "session.steer",
       "error": {
         "code": "blob_missing",
@@ -2805,7 +2965,7 @@
     },
     {
       "kind": "error",
-      "id": 1312,
+      "id": 1412,
       "method": "session.steer",
       "error": {
         "code": "blob_corrupt",
@@ -2815,7 +2975,7 @@
     },
     {
       "kind": "error",
-      "id": 1401,
+      "id": 1501,
       "method": "session.followUp",
       "error": {
         "code": "bad_request",
@@ -2825,7 +2985,7 @@
     },
     {
       "kind": "error",
-      "id": 1402,
+      "id": 1502,
       "method": "session.followUp",
       "error": {
         "code": "not_initialized",
@@ -2835,7 +2995,7 @@
     },
     {
       "kind": "error",
-      "id": 1403,
+      "id": 1503,
       "method": "session.followUp",
       "error": {
         "code": "unsupported_capability",
@@ -2845,7 +3005,7 @@
     },
     {
       "kind": "error",
-      "id": 1404,
+      "id": 1504,
       "method": "session.followUp",
       "error": {
         "code": "rate_limited",
@@ -2855,7 +3015,7 @@
     },
     {
       "kind": "error",
-      "id": 1405,
+      "id": 1505,
       "method": "session.followUp",
       "error": {
         "code": "internal_error",
@@ -2865,7 +3025,7 @@
     },
     {
       "kind": "error",
-      "id": 1406,
+      "id": 1506,
       "method": "session.followUp",
       "error": {
         "code": "cancelled",
@@ -2875,7 +3035,7 @@
     },
     {
       "kind": "error",
-      "id": 1407,
+      "id": 1507,
       "method": "session.followUp",
       "error": {
         "code": "unknown_session",
@@ -2885,7 +3045,7 @@
     },
     {
       "kind": "error",
-      "id": 1408,
+      "id": 1508,
       "method": "session.followUp",
       "error": {
         "code": "event_migration_required",
@@ -2895,7 +3055,7 @@
     },
     {
       "kind": "error",
-      "id": 1409,
+      "id": 1509,
       "method": "session.followUp",
       "error": {
         "code": "operation_inactive",
@@ -2905,7 +3065,7 @@
     },
     {
       "kind": "error",
-      "id": 1410,
+      "id": 1510,
       "method": "session.followUp",
       "error": {
         "code": "blob_not_owned",
@@ -2915,7 +3075,7 @@
     },
     {
       "kind": "error",
-      "id": 1411,
+      "id": 1511,
       "method": "session.followUp",
       "error": {
         "code": "blob_missing",
@@ -2925,7 +3085,7 @@
     },
     {
       "kind": "error",
-      "id": 1412,
+      "id": 1512,
       "method": "session.followUp",
       "error": {
         "code": "blob_corrupt",
@@ -2935,7 +3095,7 @@
     },
     {
       "kind": "error",
-      "id": 1501,
+      "id": 1601,
       "method": "session.compact",
       "error": {
         "code": "bad_request",
@@ -2945,7 +3105,7 @@
     },
     {
       "kind": "error",
-      "id": 1502,
+      "id": 1602,
       "method": "session.compact",
       "error": {
         "code": "not_initialized",
@@ -2955,7 +3115,7 @@
     },
     {
       "kind": "error",
-      "id": 1503,
+      "id": 1603,
       "method": "session.compact",
       "error": {
         "code": "unsupported_capability",
@@ -2965,7 +3125,7 @@
     },
     {
       "kind": "error",
-      "id": 1504,
+      "id": 1604,
       "method": "session.compact",
       "error": {
         "code": "rate_limited",
@@ -2975,7 +3135,7 @@
     },
     {
       "kind": "error",
-      "id": 1505,
+      "id": 1605,
       "method": "session.compact",
       "error": {
         "code": "internal_error",
@@ -2985,7 +3145,7 @@
     },
     {
       "kind": "error",
-      "id": 1506,
+      "id": 1606,
       "method": "session.compact",
       "error": {
         "code": "cancelled",
@@ -2995,7 +3155,7 @@
     },
     {
       "kind": "error",
-      "id": 1507,
+      "id": 1607,
       "method": "session.compact",
       "error": {
         "code": "unknown_session",
@@ -3005,7 +3165,7 @@
     },
     {
       "kind": "error",
-      "id": 1508,
+      "id": 1608,
       "method": "session.compact",
       "error": {
         "code": "event_migration_required",
@@ -3015,7 +3175,7 @@
     },
     {
       "kind": "error",
-      "id": 1509,
+      "id": 1609,
       "method": "session.compact",
       "error": {
         "code": "operation_active",
@@ -3025,7 +3185,7 @@
     },
     {
       "kind": "error",
-      "id": 1510,
+      "id": 1610,
       "method": "session.compact",
       "error": {
         "code": "content_too_large",
@@ -3035,7 +3195,7 @@
     },
     {
       "kind": "error",
-      "id": 1601,
+      "id": 1701,
       "method": "session.queue.enqueue",
       "error": {
         "code": "bad_request",
@@ -3045,7 +3205,7 @@
     },
     {
       "kind": "error",
-      "id": 1602,
+      "id": 1702,
       "method": "session.queue.enqueue",
       "error": {
         "code": "not_initialized",
@@ -3055,7 +3215,7 @@
     },
     {
       "kind": "error",
-      "id": 1603,
+      "id": 1703,
       "method": "session.queue.enqueue",
       "error": {
         "code": "unsupported_capability",
@@ -3065,7 +3225,7 @@
     },
     {
       "kind": "error",
-      "id": 1604,
+      "id": 1704,
       "method": "session.queue.enqueue",
       "error": {
         "code": "rate_limited",
@@ -3075,7 +3235,7 @@
     },
     {
       "kind": "error",
-      "id": 1605,
+      "id": 1705,
       "method": "session.queue.enqueue",
       "error": {
         "code": "internal_error",
@@ -3085,7 +3245,7 @@
     },
     {
       "kind": "error",
-      "id": 1606,
+      "id": 1706,
       "method": "session.queue.enqueue",
       "error": {
         "code": "cancelled",
@@ -3095,7 +3255,7 @@
     },
     {
       "kind": "error",
-      "id": 1607,
+      "id": 1707,
       "method": "session.queue.enqueue",
       "error": {
         "code": "unknown_session",
@@ -3105,7 +3265,7 @@
     },
     {
       "kind": "error",
-      "id": 1608,
+      "id": 1708,
       "method": "session.queue.enqueue",
       "error": {
         "code": "event_migration_required",
@@ -3115,7 +3275,7 @@
     },
     {
       "kind": "error",
-      "id": 1609,
+      "id": 1709,
       "method": "session.queue.enqueue",
       "error": {
         "code": "invalid_idempotency_key",
@@ -3125,7 +3285,7 @@
     },
     {
       "kind": "error",
-      "id": 1610,
+      "id": 1710,
       "method": "session.queue.enqueue",
       "error": {
         "code": "idempotency_conflict",
@@ -3135,7 +3295,7 @@
     },
     {
       "kind": "error",
-      "id": 1611,
+      "id": 1711,
       "method": "session.queue.enqueue",
       "error": {
         "code": "blob_not_owned",
@@ -3145,7 +3305,7 @@
     },
     {
       "kind": "error",
-      "id": 1612,
+      "id": 1712,
       "method": "session.queue.enqueue",
       "error": {
         "code": "blob_missing",
@@ -3155,7 +3315,7 @@
     },
     {
       "kind": "error",
-      "id": 1613,
+      "id": 1713,
       "method": "session.queue.enqueue",
       "error": {
         "code": "blob_corrupt",
@@ -3165,7 +3325,7 @@
     },
     {
       "kind": "error",
-      "id": 1614,
+      "id": 1714,
       "method": "session.queue.enqueue",
       "error": {
         "code": "content_too_large",
@@ -3175,7 +3335,7 @@
     },
     {
       "kind": "error",
-      "id": 1701,
+      "id": 1801,
       "method": "session.queue.requeue",
       "error": {
         "code": "bad_request",
@@ -3185,7 +3345,7 @@
     },
     {
       "kind": "error",
-      "id": 1702,
+      "id": 1802,
       "method": "session.queue.requeue",
       "error": {
         "code": "not_initialized",
@@ -3195,7 +3355,7 @@
     },
     {
       "kind": "error",
-      "id": 1703,
+      "id": 1803,
       "method": "session.queue.requeue",
       "error": {
         "code": "unsupported_capability",
@@ -3205,7 +3365,7 @@
     },
     {
       "kind": "error",
-      "id": 1704,
+      "id": 1804,
       "method": "session.queue.requeue",
       "error": {
         "code": "rate_limited",
@@ -3215,7 +3375,7 @@
     },
     {
       "kind": "error",
-      "id": 1705,
+      "id": 1805,
       "method": "session.queue.requeue",
       "error": {
         "code": "internal_error",
@@ -3225,7 +3385,7 @@
     },
     {
       "kind": "error",
-      "id": 1706,
+      "id": 1806,
       "method": "session.queue.requeue",
       "error": {
         "code": "cancelled",
@@ -3235,7 +3395,7 @@
     },
     {
       "kind": "error",
-      "id": 1707,
+      "id": 1807,
       "method": "session.queue.requeue",
       "error": {
         "code": "unknown_session",
@@ -3245,7 +3405,7 @@
     },
     {
       "kind": "error",
-      "id": 1708,
+      "id": 1808,
       "method": "session.queue.requeue",
       "error": {
         "code": "event_migration_required",
@@ -3255,7 +3415,7 @@
     },
     {
       "kind": "error",
-      "id": 1709,
+      "id": 1809,
       "method": "session.queue.requeue",
       "error": {
         "code": "unknown_queue_item",
@@ -3265,7 +3425,7 @@
     },
     {
       "kind": "error",
-      "id": 1710,
+      "id": 1810,
       "method": "session.queue.requeue",
       "error": {
         "code": "queue_not_paused",
@@ -3275,7 +3435,7 @@
     },
     {
       "kind": "error",
-      "id": 1711,
+      "id": 1811,
       "method": "session.queue.requeue",
       "error": {
         "code": "invalid_idempotency_key",
@@ -3285,7 +3445,7 @@
     },
     {
       "kind": "error",
-      "id": 1712,
+      "id": 1812,
       "method": "session.queue.requeue",
       "error": {
         "code": "idempotency_conflict",
@@ -3295,7 +3455,7 @@
     },
     {
       "kind": "error",
-      "id": 1713,
+      "id": 1813,
       "method": "session.queue.requeue",
       "error": {
         "code": "content_too_large",
@@ -3305,7 +3465,7 @@
     },
     {
       "kind": "error",
-      "id": 1801,
+      "id": 1901,
       "method": "session.shell",
       "error": {
         "code": "bad_request",
@@ -3315,7 +3475,7 @@
     },
     {
       "kind": "error",
-      "id": 1802,
+      "id": 1902,
       "method": "session.shell",
       "error": {
         "code": "not_initialized",
@@ -3325,7 +3485,7 @@
     },
     {
       "kind": "error",
-      "id": 1803,
+      "id": 1903,
       "method": "session.shell",
       "error": {
         "code": "unsupported_capability",
@@ -3335,7 +3495,7 @@
     },
     {
       "kind": "error",
-      "id": 1804,
+      "id": 1904,
       "method": "session.shell",
       "error": {
         "code": "rate_limited",
@@ -3345,7 +3505,7 @@
     },
     {
       "kind": "error",
-      "id": 1805,
+      "id": 1905,
       "method": "session.shell",
       "error": {
         "code": "internal_error",
@@ -3355,7 +3515,7 @@
     },
     {
       "kind": "error",
-      "id": 1806,
+      "id": 1906,
       "method": "session.shell",
       "error": {
         "code": "cancelled",
@@ -3365,7 +3525,7 @@
     },
     {
       "kind": "error",
-      "id": 1807,
+      "id": 1907,
       "method": "session.shell",
       "error": {
         "code": "unknown_session",
@@ -3375,7 +3535,7 @@
     },
     {
       "kind": "error",
-      "id": 1808,
+      "id": 1908,
       "method": "session.shell",
       "error": {
         "code": "event_migration_required",
@@ -3385,7 +3545,7 @@
     },
     {
       "kind": "error",
-      "id": 1809,
+      "id": 1909,
       "method": "session.shell",
       "error": {
         "code": "operation_active",
@@ -3395,7 +3555,7 @@
     },
     {
       "kind": "error",
-      "id": 1810,
+      "id": 1910,
       "method": "session.shell",
       "error": {
         "code": "idempotency_conflict",
@@ -3405,7 +3565,7 @@
     },
     {
       "kind": "error",
-      "id": 1811,
+      "id": 1911,
       "method": "session.shell",
       "error": {
         "code": "content_too_large",
@@ -3415,7 +3575,7 @@
     },
     {
       "kind": "error",
-      "id": 1901,
+      "id": 2001,
       "method": "session.interrupt",
       "error": {
         "code": "bad_request",
@@ -3425,7 +3585,7 @@
     },
     {
       "kind": "error",
-      "id": 1902,
+      "id": 2002,
       "method": "session.interrupt",
       "error": {
         "code": "not_initialized",
@@ -3435,7 +3595,7 @@
     },
     {
       "kind": "error",
-      "id": 1903,
+      "id": 2003,
       "method": "session.interrupt",
       "error": {
         "code": "unsupported_capability",
@@ -3445,7 +3605,7 @@
     },
     {
       "kind": "error",
-      "id": 1904,
+      "id": 2004,
       "method": "session.interrupt",
       "error": {
         "code": "rate_limited",
@@ -3455,7 +3615,7 @@
     },
     {
       "kind": "error",
-      "id": 1905,
+      "id": 2005,
       "method": "session.interrupt",
       "error": {
         "code": "internal_error",
@@ -3465,7 +3625,7 @@
     },
     {
       "kind": "error",
-      "id": 1906,
+      "id": 2006,
       "method": "session.interrupt",
       "error": {
         "code": "cancelled",
@@ -3475,7 +3635,7 @@
     },
     {
       "kind": "error",
-      "id": 1907,
+      "id": 2007,
       "method": "session.interrupt",
       "error": {
         "code": "unknown_session",
@@ -3485,7 +3645,7 @@
     },
     {
       "kind": "error",
-      "id": 1908,
+      "id": 2008,
       "method": "session.interrupt",
       "error": {
         "code": "event_migration_required",
@@ -3495,7 +3655,7 @@
     },
     {
       "kind": "error",
-      "id": 1909,
+      "id": 2009,
       "method": "session.interrupt",
       "error": {
         "code": "invalid_idempotency_key",
@@ -3505,7 +3665,7 @@
     },
     {
       "kind": "error",
-      "id": 1910,
+      "id": 2010,
       "method": "session.interrupt",
       "error": {
         "code": "idempotency_conflict",
@@ -3515,7 +3675,7 @@
     },
     {
       "kind": "error",
-      "id": 2001,
+      "id": 2101,
       "method": "session.reload",
       "error": {
         "code": "bad_request",
@@ -3525,7 +3685,7 @@
     },
     {
       "kind": "error",
-      "id": 2002,
+      "id": 2102,
       "method": "session.reload",
       "error": {
         "code": "not_initialized",
@@ -3535,7 +3695,7 @@
     },
     {
       "kind": "error",
-      "id": 2003,
+      "id": 2103,
       "method": "session.reload",
       "error": {
         "code": "unsupported_capability",
@@ -3545,7 +3705,7 @@
     },
     {
       "kind": "error",
-      "id": 2004,
+      "id": 2104,
       "method": "session.reload",
       "error": {
         "code": "rate_limited",
@@ -3555,7 +3715,7 @@
     },
     {
       "kind": "error",
-      "id": 2005,
+      "id": 2105,
       "method": "session.reload",
       "error": {
         "code": "internal_error",
@@ -3565,7 +3725,7 @@
     },
     {
       "kind": "error",
-      "id": 2006,
+      "id": 2106,
       "method": "session.reload",
       "error": {
         "code": "cancelled",
@@ -3575,7 +3735,7 @@
     },
     {
       "kind": "error",
-      "id": 2007,
+      "id": 2107,
       "method": "session.reload",
       "error": {
         "code": "unknown_session",
@@ -3585,7 +3745,7 @@
     },
     {
       "kind": "error",
-      "id": 2008,
+      "id": 2108,
       "method": "session.reload",
       "error": {
         "code": "event_migration_required",
@@ -3595,7 +3755,7 @@
     },
     {
       "kind": "error",
-      "id": 2009,
+      "id": 2109,
       "method": "session.reload",
       "error": {
         "code": "corrupt_session",
@@ -3605,7 +3765,7 @@
     },
     {
       "kind": "error",
-      "id": 2010,
+      "id": 2110,
       "method": "session.reload",
       "error": {
         "code": "operation_active",
@@ -3615,7 +3775,7 @@
     },
     {
       "kind": "error",
-      "id": 2011,
+      "id": 2111,
       "method": "session.reload",
       "error": {
         "code": "invalid_idempotency_key",
@@ -3625,7 +3785,7 @@
     },
     {
       "kind": "error",
-      "id": 2012,
+      "id": 2112,
       "method": "session.reload",
       "error": {
         "code": "idempotency_conflict",
@@ -3635,7 +3795,7 @@
     },
     {
       "kind": "error",
-      "id": 2013,
+      "id": 2113,
       "method": "session.reload",
       "error": {
         "code": "content_too_large",
@@ -3645,7 +3805,7 @@
     },
     {
       "kind": "error",
-      "id": 2101,
+      "id": 2201,
       "method": "session.configure",
       "error": {
         "code": "bad_request",
@@ -3655,7 +3815,7 @@
     },
     {
       "kind": "error",
-      "id": 2102,
+      "id": 2202,
       "method": "session.configure",
       "error": {
         "code": "not_initialized",
@@ -3665,7 +3825,7 @@
     },
     {
       "kind": "error",
-      "id": 2103,
+      "id": 2203,
       "method": "session.configure",
       "error": {
         "code": "unsupported_capability",
@@ -3675,7 +3835,7 @@
     },
     {
       "kind": "error",
-      "id": 2104,
+      "id": 2204,
       "method": "session.configure",
       "error": {
         "code": "rate_limited",
@@ -3685,7 +3845,7 @@
     },
     {
       "kind": "error",
-      "id": 2105,
+      "id": 2205,
       "method": "session.configure",
       "error": {
         "code": "internal_error",
@@ -3695,7 +3855,7 @@
     },
     {
       "kind": "error",
-      "id": 2106,
+      "id": 2206,
       "method": "session.configure",
       "error": {
         "code": "cancelled",
@@ -3705,7 +3865,7 @@
     },
     {
       "kind": "error",
-      "id": 2107,
+      "id": 2207,
       "method": "session.configure",
       "error": {
         "code": "unknown_session",
@@ -3715,7 +3875,7 @@
     },
     {
       "kind": "error",
-      "id": 2108,
+      "id": 2208,
       "method": "session.configure",
       "error": {
         "code": "event_migration_required",
@@ -3725,7 +3885,7 @@
     },
     {
       "kind": "error",
-      "id": 2109,
+      "id": 2209,
       "method": "session.configure",
       "error": {
         "code": "corrupt_session",
@@ -3735,7 +3895,7 @@
     },
     {
       "kind": "error",
-      "id": 2110,
+      "id": 2210,
       "method": "session.configure",
       "error": {
         "code": "operation_active",
@@ -3745,7 +3905,7 @@
     },
     {
       "kind": "error",
-      "id": 2111,
+      "id": 2211,
       "method": "session.configure",
       "error": {
         "code": "invalid_idempotency_key",
@@ -3755,7 +3915,7 @@
     },
     {
       "kind": "error",
-      "id": 2112,
+      "id": 2212,
       "method": "session.configure",
       "error": {
         "code": "idempotency_conflict",
@@ -3765,7 +3925,7 @@
     },
     {
       "kind": "error",
-      "id": 2113,
+      "id": 2213,
       "method": "session.configure",
       "error": {
         "code": "content_too_large",
@@ -3775,7 +3935,7 @@
     },
     {
       "kind": "error",
-      "id": 2201,
+      "id": 2301,
       "method": "session.interaction.respond",
       "error": {
         "code": "bad_request",
@@ -3785,7 +3945,7 @@
     },
     {
       "kind": "error",
-      "id": 2202,
+      "id": 2302,
       "method": "session.interaction.respond",
       "error": {
         "code": "not_initialized",
@@ -3795,7 +3955,7 @@
     },
     {
       "kind": "error",
-      "id": 2203,
+      "id": 2303,
       "method": "session.interaction.respond",
       "error": {
         "code": "unsupported_capability",
@@ -3805,7 +3965,7 @@
     },
     {
       "kind": "error",
-      "id": 2204,
+      "id": 2304,
       "method": "session.interaction.respond",
       "error": {
         "code": "rate_limited",
@@ -3815,7 +3975,7 @@
     },
     {
       "kind": "error",
-      "id": 2205,
+      "id": 2305,
       "method": "session.interaction.respond",
       "error": {
         "code": "internal_error",
@@ -3825,7 +3985,7 @@
     },
     {
       "kind": "error",
-      "id": 2206,
+      "id": 2306,
       "method": "session.interaction.respond",
       "error": {
         "code": "cancelled",
@@ -3835,7 +3995,7 @@
     },
     {
       "kind": "error",
-      "id": 2207,
+      "id": 2307,
       "method": "session.interaction.respond",
       "error": {
         "code": "unknown_session",
@@ -3845,7 +4005,7 @@
     },
     {
       "kind": "error",
-      "id": 2208,
+      "id": 2308,
       "method": "session.interaction.respond",
       "error": {
         "code": "event_migration_required",
@@ -3855,7 +4015,7 @@
     },
     {
       "kind": "error",
-      "id": 2209,
+      "id": 2309,
       "method": "session.interaction.respond",
       "error": {
         "code": "unknown_interaction",
@@ -3865,7 +4025,7 @@
     },
     {
       "kind": "error",
-      "id": 2210,
+      "id": 2310,
       "method": "session.interaction.respond",
       "error": {
         "code": "interaction_already_resolved",
@@ -3875,7 +4035,7 @@
     },
     {
       "kind": "error",
-      "id": 2211,
+      "id": 2311,
       "method": "session.interaction.respond",
       "error": {
         "code": "invalid_idempotency_key",
@@ -3885,7 +4045,7 @@
     },
     {
       "kind": "error",
-      "id": 2212,
+      "id": 2312,
       "method": "session.interaction.respond",
       "error": {
         "code": "idempotency_conflict",
@@ -3895,7 +4055,7 @@
     },
     {
       "kind": "error",
-      "id": 2213,
+      "id": 2313,
       "method": "session.interaction.respond",
       "error": {
         "code": "content_too_large",
@@ -3905,7 +4065,7 @@
     },
     {
       "kind": "error",
-      "id": 2301,
+      "id": 2401,
       "method": "session.subscribe",
       "error": {
         "code": "bad_request",
@@ -3915,7 +4075,7 @@
     },
     {
       "kind": "error",
-      "id": 2302,
+      "id": 2402,
       "method": "session.subscribe",
       "error": {
         "code": "not_initialized",
@@ -3925,7 +4085,7 @@
     },
     {
       "kind": "error",
-      "id": 2303,
+      "id": 2403,
       "method": "session.subscribe",
       "error": {
         "code": "unsupported_capability",
@@ -3935,7 +4095,7 @@
     },
     {
       "kind": "error",
-      "id": 2304,
+      "id": 2404,
       "method": "session.subscribe",
       "error": {
         "code": "rate_limited",
@@ -3945,7 +4105,7 @@
     },
     {
       "kind": "error",
-      "id": 2305,
+      "id": 2405,
       "method": "session.subscribe",
       "error": {
         "code": "internal_error",
@@ -3955,7 +4115,7 @@
     },
     {
       "kind": "error",
-      "id": 2306,
+      "id": 2406,
       "method": "session.subscribe",
       "error": {
         "code": "cancelled",
@@ -3965,7 +4125,7 @@
     },
     {
       "kind": "error",
-      "id": 2307,
+      "id": 2407,
       "method": "session.subscribe",
       "error": {
         "code": "unknown_session",
@@ -3975,7 +4135,7 @@
     },
     {
       "kind": "error",
-      "id": 2308,
+      "id": 2408,
       "method": "session.subscribe",
       "error": {
         "code": "event_migration_required",
@@ -3985,7 +4145,7 @@
     },
     {
       "kind": "error",
-      "id": 2309,
+      "id": 2409,
       "method": "session.subscribe",
       "error": {
         "code": "snapshot_required",
@@ -3995,7 +4155,7 @@
     },
     {
       "kind": "error",
-      "id": 2401,
+      "id": 2501,
       "method": "session.workspace.list",
       "error": {
         "code": "bad_request",
@@ -4005,7 +4165,7 @@
     },
     {
       "kind": "error",
-      "id": 2402,
+      "id": 2502,
       "method": "session.workspace.list",
       "error": {
         "code": "not_initialized",
@@ -4015,7 +4175,7 @@
     },
     {
       "kind": "error",
-      "id": 2403,
+      "id": 2503,
       "method": "session.workspace.list",
       "error": {
         "code": "unsupported_capability",
@@ -4025,7 +4185,7 @@
     },
     {
       "kind": "error",
-      "id": 2404,
+      "id": 2504,
       "method": "session.workspace.list",
       "error": {
         "code": "rate_limited",
@@ -4035,7 +4195,7 @@
     },
     {
       "kind": "error",
-      "id": 2405,
+      "id": 2505,
       "method": "session.workspace.list",
       "error": {
         "code": "internal_error",
@@ -4045,7 +4205,7 @@
     },
     {
       "kind": "error",
-      "id": 2406,
+      "id": 2506,
       "method": "session.workspace.list",
       "error": {
         "code": "cancelled",
@@ -4055,7 +4215,7 @@
     },
     {
       "kind": "error",
-      "id": 2407,
+      "id": 2507,
       "method": "session.workspace.list",
       "error": {
         "code": "unknown_session",
@@ -4065,7 +4225,7 @@
     },
     {
       "kind": "error",
-      "id": 2408,
+      "id": 2508,
       "method": "session.workspace.list",
       "error": {
         "code": "event_migration_required",
@@ -4075,7 +4235,7 @@
     },
     {
       "kind": "error",
-      "id": 2409,
+      "id": 2509,
       "method": "session.workspace.list",
       "error": {
         "code": "workspace_unavailable",
@@ -4085,7 +4245,7 @@
     },
     {
       "kind": "error",
-      "id": 2410,
+      "id": 2510,
       "method": "session.workspace.list",
       "error": {
         "code": "workspace_changed",
@@ -4095,7 +4255,7 @@
     },
     {
       "kind": "error",
-      "id": 2411,
+      "id": 2511,
       "method": "session.workspace.list",
       "error": {
         "code": "invalid_path",
@@ -4105,7 +4265,7 @@
     },
     {
       "kind": "error",
-      "id": 2412,
+      "id": 2512,
       "method": "session.workspace.list",
       "error": {
         "code": "path_denied",
@@ -4115,7 +4275,7 @@
     },
     {
       "kind": "error",
-      "id": 2413,
+      "id": 2513,
       "method": "session.workspace.list",
       "error": {
         "code": "symlink_escape",
@@ -4125,7 +4285,7 @@
     },
     {
       "kind": "error",
-      "id": 2414,
+      "id": 2514,
       "method": "session.workspace.list",
       "error": {
         "code": "not_found",
@@ -4135,7 +4295,7 @@
     },
     {
       "kind": "error",
-      "id": 2415,
+      "id": 2515,
       "method": "session.workspace.list",
       "error": {
         "code": "unsupported_file_type",
@@ -4145,7 +4305,7 @@
     },
     {
       "kind": "error",
-      "id": 2416,
+      "id": 2516,
       "method": "session.workspace.list",
       "error": {
         "code": "unsupported_filename_encoding",
@@ -4155,7 +4315,7 @@
     },
     {
       "kind": "error",
-      "id": 2501,
+      "id": 2601,
       "method": "session.workspace.read",
       "error": {
         "code": "bad_request",
@@ -4165,7 +4325,7 @@
     },
     {
       "kind": "error",
-      "id": 2502,
+      "id": 2602,
       "method": "session.workspace.read",
       "error": {
         "code": "not_initialized",
@@ -4175,7 +4335,7 @@
     },
     {
       "kind": "error",
-      "id": 2503,
+      "id": 2603,
       "method": "session.workspace.read",
       "error": {
         "code": "unsupported_capability",
@@ -4185,7 +4345,7 @@
     },
     {
       "kind": "error",
-      "id": 2504,
+      "id": 2604,
       "method": "session.workspace.read",
       "error": {
         "code": "rate_limited",
@@ -4195,7 +4355,7 @@
     },
     {
       "kind": "error",
-      "id": 2505,
+      "id": 2605,
       "method": "session.workspace.read",
       "error": {
         "code": "internal_error",
@@ -4205,7 +4365,7 @@
     },
     {
       "kind": "error",
-      "id": 2506,
+      "id": 2606,
       "method": "session.workspace.read",
       "error": {
         "code": "cancelled",
@@ -4215,7 +4375,7 @@
     },
     {
       "kind": "error",
-      "id": 2507,
+      "id": 2607,
       "method": "session.workspace.read",
       "error": {
         "code": "unknown_session",
@@ -4225,7 +4385,7 @@
     },
     {
       "kind": "error",
-      "id": 2508,
+      "id": 2608,
       "method": "session.workspace.read",
       "error": {
         "code": "event_migration_required",
@@ -4235,7 +4395,7 @@
     },
     {
       "kind": "error",
-      "id": 2509,
+      "id": 2609,
       "method": "session.workspace.read",
       "error": {
         "code": "workspace_unavailable",
@@ -4245,7 +4405,7 @@
     },
     {
       "kind": "error",
-      "id": 2510,
+      "id": 2610,
       "method": "session.workspace.read",
       "error": {
         "code": "workspace_changed",
@@ -4255,7 +4415,7 @@
     },
     {
       "kind": "error",
-      "id": 2511,
+      "id": 2611,
       "method": "session.workspace.read",
       "error": {
         "code": "invalid_path",
@@ -4265,7 +4425,7 @@
     },
     {
       "kind": "error",
-      "id": 2512,
+      "id": 2612,
       "method": "session.workspace.read",
       "error": {
         "code": "path_denied",
@@ -4275,7 +4435,7 @@
     },
     {
       "kind": "error",
-      "id": 2513,
+      "id": 2613,
       "method": "session.workspace.read",
       "error": {
         "code": "symlink_escape",
@@ -4285,7 +4445,7 @@
     },
     {
       "kind": "error",
-      "id": 2514,
+      "id": 2614,
       "method": "session.workspace.read",
       "error": {
         "code": "not_found",
@@ -4295,7 +4455,7 @@
     },
     {
       "kind": "error",
-      "id": 2515,
+      "id": 2615,
       "method": "session.workspace.read",
       "error": {
         "code": "not_a_file",
@@ -4305,7 +4465,7 @@
     },
     {
       "kind": "error",
-      "id": 2516,
+      "id": 2616,
       "method": "session.workspace.read",
       "error": {
         "code": "unsupported_file_type",
@@ -4315,7 +4475,7 @@
     },
     {
       "kind": "error",
-      "id": 2517,
+      "id": 2617,
       "method": "session.workspace.read",
       "error": {
         "code": "binary_file",
@@ -4325,7 +4485,7 @@
     },
     {
       "kind": "error",
-      "id": 2518,
+      "id": 2618,
       "method": "session.workspace.read",
       "error": {
         "code": "invalid_encoding",
@@ -4335,7 +4495,7 @@
     },
     {
       "kind": "error",
-      "id": 2519,
+      "id": 2619,
       "method": "session.workspace.read",
       "error": {
         "code": "content_too_large",
@@ -4345,7 +4505,7 @@
     },
     {
       "kind": "error",
-      "id": 2601,
+      "id": 2701,
       "method": "session.workspace.status",
       "error": {
         "code": "bad_request",
@@ -4355,7 +4515,7 @@
     },
     {
       "kind": "error",
-      "id": 2602,
+      "id": 2702,
       "method": "session.workspace.status",
       "error": {
         "code": "not_initialized",
@@ -4365,7 +4525,7 @@
     },
     {
       "kind": "error",
-      "id": 2603,
+      "id": 2703,
       "method": "session.workspace.status",
       "error": {
         "code": "unsupported_capability",
@@ -4375,7 +4535,7 @@
     },
     {
       "kind": "error",
-      "id": 2604,
+      "id": 2704,
       "method": "session.workspace.status",
       "error": {
         "code": "rate_limited",
@@ -4385,7 +4545,7 @@
     },
     {
       "kind": "error",
-      "id": 2605,
+      "id": 2705,
       "method": "session.workspace.status",
       "error": {
         "code": "internal_error",
@@ -4395,7 +4555,7 @@
     },
     {
       "kind": "error",
-      "id": 2606,
+      "id": 2706,
       "method": "session.workspace.status",
       "error": {
         "code": "cancelled",
@@ -4405,7 +4565,7 @@
     },
     {
       "kind": "error",
-      "id": 2607,
+      "id": 2707,
       "method": "session.workspace.status",
       "error": {
         "code": "unknown_session",
@@ -4415,7 +4575,7 @@
     },
     {
       "kind": "error",
-      "id": 2608,
+      "id": 2708,
       "method": "session.workspace.status",
       "error": {
         "code": "event_migration_required",
@@ -4425,7 +4585,7 @@
     },
     {
       "kind": "error",
-      "id": 2609,
+      "id": 2709,
       "method": "session.workspace.status",
       "error": {
         "code": "workspace_unavailable",
@@ -4435,7 +4595,7 @@
     },
     {
       "kind": "error",
-      "id": 2610,
+      "id": 2710,
       "method": "session.workspace.status",
       "error": {
         "code": "workspace_changed",
@@ -4445,7 +4605,7 @@
     },
     {
       "kind": "error",
-      "id": 2611,
+      "id": 2711,
       "method": "session.workspace.status",
       "error": {
         "code": "not_git_repository",
@@ -4455,7 +4615,7 @@
     },
     {
       "kind": "error",
-      "id": 2612,
+      "id": 2712,
       "method": "session.workspace.status",
       "error": {
         "code": "git_unavailable",
@@ -4465,7 +4625,7 @@
     },
     {
       "kind": "error",
-      "id": 2613,
+      "id": 2713,
       "method": "session.workspace.status",
       "error": {
         "code": "git_timeout",
@@ -4475,7 +4635,7 @@
     },
     {
       "kind": "error",
-      "id": 2614,
+      "id": 2714,
       "method": "session.workspace.status",
       "error": {
         "code": "git_output_too_large",
@@ -4485,7 +4645,7 @@
     },
     {
       "kind": "error",
-      "id": 2615,
+      "id": 2715,
       "method": "session.workspace.status",
       "error": {
         "code": "unsupported_git_state",
@@ -4495,7 +4655,7 @@
     },
     {
       "kind": "error",
-      "id": 2616,
+      "id": 2716,
       "method": "session.workspace.status",
       "error": {
         "code": "unsupported_filename_encoding",
@@ -4505,7 +4665,7 @@
     },
     {
       "kind": "error",
-      "id": 2617,
+      "id": 2717,
       "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_unavailable",
@@ -4515,7 +4675,7 @@
     },
     {
       "kind": "error",
-      "id": 2618,
+      "id": 2718,
       "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_too_large",
@@ -4525,7 +4685,7 @@
     },
     {
       "kind": "error",
-      "id": 2619,
+      "id": 2719,
       "method": "session.workspace.status",
       "error": {
         "code": "checkpoint_corrupt",
@@ -4535,7 +4695,7 @@
     },
     {
       "kind": "error",
-      "id": 2620,
+      "id": 2720,
       "method": "session.workspace.status",
       "error": {
         "code": "path_denied",
@@ -4545,7 +4705,7 @@
     },
     {
       "kind": "error",
-      "id": 2701,
+      "id": 2801,
       "method": "session.workspace.diff",
       "error": {
         "code": "bad_request",
@@ -4555,7 +4715,7 @@
     },
     {
       "kind": "error",
-      "id": 2702,
+      "id": 2802,
       "method": "session.workspace.diff",
       "error": {
         "code": "not_initialized",
@@ -4565,7 +4725,7 @@
     },
     {
       "kind": "error",
-      "id": 2703,
+      "id": 2803,
       "method": "session.workspace.diff",
       "error": {
         "code": "unsupported_capability",
@@ -4575,7 +4735,7 @@
     },
     {
       "kind": "error",
-      "id": 2704,
+      "id": 2804,
       "method": "session.workspace.diff",
       "error": {
         "code": "rate_limited",
@@ -4585,7 +4745,7 @@
     },
     {
       "kind": "error",
-      "id": 2705,
+      "id": 2805,
       "method": "session.workspace.diff",
       "error": {
         "code": "internal_error",
@@ -4595,7 +4755,7 @@
     },
     {
       "kind": "error",
-      "id": 2706,
+      "id": 2806,
       "method": "session.workspace.diff",
       "error": {
         "code": "cancelled",
@@ -4605,7 +4765,7 @@
     },
     {
       "kind": "error",
-      "id": 2707,
+      "id": 2807,
       "method": "session.workspace.diff",
       "error": {
         "code": "unknown_session",
@@ -4615,7 +4775,7 @@
     },
     {
       "kind": "error",
-      "id": 2708,
+      "id": 2808,
       "method": "session.workspace.diff",
       "error": {
         "code": "event_migration_required",
@@ -4625,7 +4785,7 @@
     },
     {
       "kind": "error",
-      "id": 2709,
+      "id": 2809,
       "method": "session.workspace.diff",
       "error": {
         "code": "workspace_unavailable",
@@ -4635,7 +4795,7 @@
     },
     {
       "kind": "error",
-      "id": 2710,
+      "id": 2810,
       "method": "session.workspace.diff",
       "error": {
         "code": "workspace_changed",
@@ -4645,7 +4805,7 @@
     },
     {
       "kind": "error",
-      "id": 2711,
+      "id": 2811,
       "method": "session.workspace.diff",
       "error": {
         "code": "not_git_repository",
@@ -4655,7 +4815,7 @@
     },
     {
       "kind": "error",
-      "id": 2712,
+      "id": 2812,
       "method": "session.workspace.diff",
       "error": {
         "code": "git_unavailable",
@@ -4665,7 +4825,7 @@
     },
     {
       "kind": "error",
-      "id": 2713,
+      "id": 2813,
       "method": "session.workspace.diff",
       "error": {
         "code": "git_timeout",
@@ -4675,7 +4835,7 @@
     },
     {
       "kind": "error",
-      "id": 2714,
+      "id": 2814,
       "method": "session.workspace.diff",
       "error": {
         "code": "git_output_too_large",
@@ -4685,7 +4845,7 @@
     },
     {
       "kind": "error",
-      "id": 2715,
+      "id": 2815,
       "method": "session.workspace.diff",
       "error": {
         "code": "unsupported_git_state",
@@ -4695,7 +4855,7 @@
     },
     {
       "kind": "error",
-      "id": 2716,
+      "id": 2816,
       "method": "session.workspace.diff",
       "error": {
         "code": "unsupported_filename_encoding",
@@ -4705,7 +4865,7 @@
     },
     {
       "kind": "error",
-      "id": 2717,
+      "id": 2817,
       "method": "session.workspace.diff",
       "error": {
         "code": "checkpoint_unavailable",
@@ -4715,7 +4875,7 @@
     },
     {
       "kind": "error",
-      "id": 2718,
+      "id": 2818,
       "method": "session.workspace.diff",
       "error": {
         "code": "checkpoint_too_large",
@@ -4725,7 +4885,7 @@
     },
     {
       "kind": "error",
-      "id": 2719,
+      "id": 2819,
       "method": "session.workspace.diff",
       "error": {
         "code": "checkpoint_corrupt",
@@ -4735,7 +4895,7 @@
     },
     {
       "kind": "error",
-      "id": 2720,
+      "id": 2820,
       "method": "session.workspace.diff",
       "error": {
         "code": "path_denied",
@@ -4745,7 +4905,7 @@
     },
     {
       "kind": "error",
-      "id": 2721,
+      "id": 2821,
       "method": "session.workspace.diff",
       "error": {
         "code": "repository_changed",
@@ -4755,7 +4915,7 @@
     },
     {
       "kind": "error",
-      "id": 2801,
+      "id": 2901,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "bad_request",
@@ -4765,7 +4925,7 @@
     },
     {
       "kind": "error",
-      "id": 2802,
+      "id": 2902,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "not_initialized",
@@ -4775,7 +4935,7 @@
     },
     {
       "kind": "error",
-      "id": 2803,
+      "id": 2903,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "unsupported_capability",
@@ -4785,7 +4945,7 @@
     },
     {
       "kind": "error",
-      "id": 2804,
+      "id": 2904,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "rate_limited",
@@ -4795,7 +4955,7 @@
     },
     {
       "kind": "error",
-      "id": 2805,
+      "id": 2905,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "internal_error",
@@ -4805,7 +4965,7 @@
     },
     {
       "kind": "error",
-      "id": 2806,
+      "id": 2906,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "cancelled",
@@ -4815,7 +4975,7 @@
     },
     {
       "kind": "error",
-      "id": 2807,
+      "id": 2907,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "unknown_session",
@@ -4825,7 +4985,7 @@
     },
     {
       "kind": "error",
-      "id": 2808,
+      "id": 2908,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "event_migration_required",
@@ -4835,7 +4995,7 @@
     },
     {
       "kind": "error",
-      "id": 2809,
+      "id": 2909,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "operation_active",
@@ -4845,7 +5005,7 @@
     },
     {
       "kind": "error",
-      "id": 2810,
+      "id": 2910,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "not_git_repository",
@@ -4855,7 +5015,7 @@
     },
     {
       "kind": "error",
-      "id": 2811,
+      "id": 2911,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "git_unavailable",
@@ -4865,7 +5025,7 @@
     },
     {
       "kind": "error",
-      "id": 2812,
+      "id": 2912,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "git_timeout",
@@ -4875,7 +5035,7 @@
     },
     {
       "kind": "error",
-      "id": 2813,
+      "id": 2913,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "git_output_too_large",
@@ -4885,7 +5045,7 @@
     },
     {
       "kind": "error",
-      "id": 2814,
+      "id": 2914,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "unsupported_git_state",
@@ -4895,7 +5055,7 @@
     },
     {
       "kind": "error",
-      "id": 2815,
+      "id": 2915,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "unsupported_filename_encoding",
@@ -4905,7 +5065,7 @@
     },
     {
       "kind": "error",
-      "id": 2816,
+      "id": 2916,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "checkpoint_unavailable",
@@ -4915,7 +5075,7 @@
     },
     {
       "kind": "error",
-      "id": 2817,
+      "id": 2917,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "checkpoint_too_large",
@@ -4925,7 +5085,7 @@
     },
     {
       "kind": "error",
-      "id": 2818,
+      "id": 2918,
       "method": "session.workspace.checkpoint",
       "error": {
         "code": "checkpoint_corrupt",
@@ -4935,7 +5095,7 @@
     },
     {
       "kind": "error",
-      "id": 2901,
+      "id": 3001,
       "method": "session.blob.start",
       "error": {
         "code": "bad_request",
@@ -4945,7 +5105,7 @@
     },
     {
       "kind": "error",
-      "id": 2902,
+      "id": 3002,
       "method": "session.blob.start",
       "error": {
         "code": "not_initialized",
@@ -4955,7 +5115,7 @@
     },
     {
       "kind": "error",
-      "id": 2903,
+      "id": 3003,
       "method": "session.blob.start",
       "error": {
         "code": "unsupported_capability",
@@ -4965,7 +5125,7 @@
     },
     {
       "kind": "error",
-      "id": 2904,
+      "id": 3004,
       "method": "session.blob.start",
       "error": {
         "code": "rate_limited",
@@ -4975,7 +5135,7 @@
     },
     {
       "kind": "error",
-      "id": 2905,
+      "id": 3005,
       "method": "session.blob.start",
       "error": {
         "code": "internal_error",
@@ -4985,7 +5145,7 @@
     },
     {
       "kind": "error",
-      "id": 2906,
+      "id": 3006,
       "method": "session.blob.start",
       "error": {
         "code": "cancelled",
@@ -4995,7 +5155,7 @@
     },
     {
       "kind": "error",
-      "id": 2907,
+      "id": 3007,
       "method": "session.blob.start",
       "error": {
         "code": "unknown_session",
@@ -5005,7 +5165,7 @@
     },
     {
       "kind": "error",
-      "id": 2908,
+      "id": 3008,
       "method": "session.blob.start",
       "error": {
         "code": "event_migration_required",
@@ -5015,7 +5175,7 @@
     },
     {
       "kind": "error",
-      "id": 2909,
+      "id": 3009,
       "method": "session.blob.start",
       "error": {
         "code": "invalid_media_type",
@@ -5025,7 +5185,7 @@
     },
     {
       "kind": "error",
-      "id": 2910,
+      "id": 3010,
       "method": "session.blob.start",
       "error": {
         "code": "invalid_blob_name",
@@ -5035,7 +5195,7 @@
     },
     {
       "kind": "error",
-      "id": 2911,
+      "id": 3011,
       "method": "session.blob.start",
       "error": {
         "code": "blob_too_large",
@@ -5045,7 +5205,7 @@
     },
     {
       "kind": "error",
-      "id": 2912,
+      "id": 3012,
       "method": "session.blob.start",
       "error": {
         "code": "too_many_uploads",
@@ -5055,7 +5215,7 @@
     },
     {
       "kind": "error",
-      "id": 3001,
+      "id": 3101,
       "method": "session.blob.chunk",
       "error": {
         "code": "bad_request",
@@ -5065,7 +5225,7 @@
     },
     {
       "kind": "error",
-      "id": 3002,
+      "id": 3102,
       "method": "session.blob.chunk",
       "error": {
         "code": "not_initialized",
@@ -5075,7 +5235,7 @@
     },
     {
       "kind": "error",
-      "id": 3003,
+      "id": 3103,
       "method": "session.blob.chunk",
       "error": {
         "code": "unsupported_capability",
@@ -5085,7 +5245,7 @@
     },
     {
       "kind": "error",
-      "id": 3004,
+      "id": 3104,
       "method": "session.blob.chunk",
       "error": {
         "code": "rate_limited",
@@ -5095,7 +5255,7 @@
     },
     {
       "kind": "error",
-      "id": 3005,
+      "id": 3105,
       "method": "session.blob.chunk",
       "error": {
         "code": "internal_error",
@@ -5105,7 +5265,7 @@
     },
     {
       "kind": "error",
-      "id": 3006,
+      "id": 3106,
       "method": "session.blob.chunk",
       "error": {
         "code": "cancelled",
@@ -5115,7 +5275,7 @@
     },
     {
       "kind": "error",
-      "id": 3007,
+      "id": 3107,
       "method": "session.blob.chunk",
       "error": {
         "code": "unknown_session",
@@ -5125,7 +5285,7 @@
     },
     {
       "kind": "error",
-      "id": 3008,
+      "id": 3108,
       "method": "session.blob.chunk",
       "error": {
         "code": "event_migration_required",
@@ -5135,7 +5295,7 @@
     },
     {
       "kind": "error",
-      "id": 3009,
+      "id": 3109,
       "method": "session.blob.chunk",
       "error": {
         "code": "unknown_blob_upload",
@@ -5145,7 +5305,7 @@
     },
     {
       "kind": "error",
-      "id": 3010,
+      "id": 3110,
       "method": "session.blob.chunk",
       "error": {
         "code": "invalid_blob_chunk",
@@ -5155,7 +5315,7 @@
     },
     {
       "kind": "error",
-      "id": 3011,
+      "id": 3111,
       "method": "session.blob.chunk",
       "error": {
         "code": "blob_offset_mismatch",
@@ -5165,7 +5325,7 @@
     },
     {
       "kind": "error",
-      "id": 3012,
+      "id": 3112,
       "method": "session.blob.chunk",
       "error": {
         "code": "blob_size_mismatch",
@@ -5175,7 +5335,7 @@
     },
     {
       "kind": "error",
-      "id": 3013,
+      "id": 3113,
       "method": "session.blob.chunk",
       "error": {
         "code": "blob_write_failed",
@@ -5185,7 +5345,7 @@
     },
     {
       "kind": "error",
-      "id": 3101,
+      "id": 3201,
       "method": "session.blob.commit",
       "error": {
         "code": "bad_request",
@@ -5195,7 +5355,7 @@
     },
     {
       "kind": "error",
-      "id": 3102,
+      "id": 3202,
       "method": "session.blob.commit",
       "error": {
         "code": "not_initialized",
@@ -5205,7 +5365,7 @@
     },
     {
       "kind": "error",
-      "id": 3103,
+      "id": 3203,
       "method": "session.blob.commit",
       "error": {
         "code": "unsupported_capability",
@@ -5215,7 +5375,7 @@
     },
     {
       "kind": "error",
-      "id": 3104,
+      "id": 3204,
       "method": "session.blob.commit",
       "error": {
         "code": "rate_limited",
@@ -5225,7 +5385,7 @@
     },
     {
       "kind": "error",
-      "id": 3105,
+      "id": 3205,
       "method": "session.blob.commit",
       "error": {
         "code": "internal_error",
@@ -5235,7 +5395,7 @@
     },
     {
       "kind": "error",
-      "id": 3106,
+      "id": 3206,
       "method": "session.blob.commit",
       "error": {
         "code": "cancelled",
@@ -5245,7 +5405,7 @@
     },
     {
       "kind": "error",
-      "id": 3107,
+      "id": 3207,
       "method": "session.blob.commit",
       "error": {
         "code": "unknown_session",
@@ -5255,7 +5415,7 @@
     },
     {
       "kind": "error",
-      "id": 3108,
+      "id": 3208,
       "method": "session.blob.commit",
       "error": {
         "code": "event_migration_required",
@@ -5265,7 +5425,7 @@
     },
     {
       "kind": "error",
-      "id": 3109,
+      "id": 3209,
       "method": "session.blob.commit",
       "error": {
         "code": "unknown_blob_upload",
@@ -5275,7 +5435,7 @@
     },
     {
       "kind": "error",
-      "id": 3110,
+      "id": 3210,
       "method": "session.blob.commit",
       "error": {
         "code": "blob_size_mismatch",
@@ -5285,7 +5445,7 @@
     },
     {
       "kind": "error",
-      "id": 3111,
+      "id": 3211,
       "method": "session.blob.commit",
       "error": {
         "code": "invalid_image",
@@ -5295,7 +5455,7 @@
     },
     {
       "kind": "error",
-      "id": 3112,
+      "id": 3212,
       "method": "session.blob.commit",
       "error": {
         "code": "blob_corrupt",
@@ -5305,7 +5465,7 @@
     },
     {
       "kind": "error",
-      "id": 3201,
+      "id": 3301,
       "method": "session.blob.abort",
       "error": {
         "code": "bad_request",
@@ -5315,7 +5475,7 @@
     },
     {
       "kind": "error",
-      "id": 3202,
+      "id": 3302,
       "method": "session.blob.abort",
       "error": {
         "code": "not_initialized",
@@ -5325,7 +5485,7 @@
     },
     {
       "kind": "error",
-      "id": 3203,
+      "id": 3303,
       "method": "session.blob.abort",
       "error": {
         "code": "unsupported_capability",
@@ -5335,7 +5495,7 @@
     },
     {
       "kind": "error",
-      "id": 3204,
+      "id": 3304,
       "method": "session.blob.abort",
       "error": {
         "code": "rate_limited",
@@ -5345,7 +5505,7 @@
     },
     {
       "kind": "error",
-      "id": 3205,
+      "id": 3305,
       "method": "session.blob.abort",
       "error": {
         "code": "internal_error",
@@ -5355,7 +5515,7 @@
     },
     {
       "kind": "error",
-      "id": 3206,
+      "id": 3306,
       "method": "session.blob.abort",
       "error": {
         "code": "cancelled",
@@ -5365,7 +5525,7 @@
     },
     {
       "kind": "error",
-      "id": 3207,
+      "id": 3307,
       "method": "session.blob.abort",
       "error": {
         "code": "unknown_session",
@@ -5375,7 +5535,7 @@
     },
     {
       "kind": "error",
-      "id": 3208,
+      "id": 3308,
       "method": "session.blob.abort",
       "error": {
         "code": "event_migration_required",
@@ -5385,7 +5545,7 @@
     },
     {
       "kind": "error",
-      "id": 3209,
+      "id": 3309,
       "method": "session.blob.abort",
       "error": {
         "code": "unknown_blob_upload",
@@ -5395,7 +5555,7 @@
     },
     {
       "kind": "error",
-      "id": 3301,
+      "id": 3401,
       "method": "session.blob.read",
       "error": {
         "code": "bad_request",
@@ -5405,7 +5565,7 @@
     },
     {
       "kind": "error",
-      "id": 3302,
+      "id": 3402,
       "method": "session.blob.read",
       "error": {
         "code": "not_initialized",
@@ -5415,7 +5575,7 @@
     },
     {
       "kind": "error",
-      "id": 3303,
+      "id": 3403,
       "method": "session.blob.read",
       "error": {
         "code": "unsupported_capability",
@@ -5425,7 +5585,7 @@
     },
     {
       "kind": "error",
-      "id": 3304,
+      "id": 3404,
       "method": "session.blob.read",
       "error": {
         "code": "rate_limited",
@@ -5435,7 +5595,7 @@
     },
     {
       "kind": "error",
-      "id": 3305,
+      "id": 3405,
       "method": "session.blob.read",
       "error": {
         "code": "internal_error",
@@ -5445,7 +5605,7 @@
     },
     {
       "kind": "error",
-      "id": 3306,
+      "id": 3406,
       "method": "session.blob.read",
       "error": {
         "code": "cancelled",
@@ -5455,7 +5615,7 @@
     },
     {
       "kind": "error",
-      "id": 3307,
+      "id": 3407,
       "method": "session.blob.read",
       "error": {
         "code": "unknown_session",
@@ -5465,7 +5625,7 @@
     },
     {
       "kind": "error",
-      "id": 3308,
+      "id": 3408,
       "method": "session.blob.read",
       "error": {
         "code": "event_migration_required",
@@ -5475,7 +5635,7 @@
     },
     {
       "kind": "error",
-      "id": 3309,
+      "id": 3409,
       "method": "session.blob.read",
       "error": {
         "code": "blob_not_owned",
@@ -5485,7 +5645,7 @@
     },
     {
       "kind": "error",
-      "id": 3310,
+      "id": 3410,
       "method": "session.blob.read",
       "error": {
         "code": "blob_missing",
@@ -5495,7 +5655,7 @@
     },
     {
       "kind": "error",
-      "id": 3311,
+      "id": 3411,
       "method": "session.blob.read",
       "error": {
         "code": "blob_corrupt",
@@ -5505,7 +5665,7 @@
     },
     {
       "kind": "error",
-      "id": 3312,
+      "id": 3412,
       "method": "session.blob.read",
       "error": {
         "code": "invalid_blob_range",
@@ -5515,7 +5675,7 @@
     },
     {
       "kind": "error",
-      "id": 3313,
+      "id": 3413,
       "method": "session.blob.read",
       "error": {
         "code": "blob_read_failed",
@@ -5525,7 +5685,7 @@
     },
     {
       "kind": "error",
-      "id": 3401,
+      "id": 3501,
       "method": "session.dispose",
       "error": {
         "code": "bad_request",
@@ -5535,7 +5695,7 @@
     },
     {
       "kind": "error",
-      "id": 3402,
+      "id": 3502,
       "method": "session.dispose",
       "error": {
         "code": "not_initialized",
@@ -5545,7 +5705,7 @@
     },
     {
       "kind": "error",
-      "id": 3403,
+      "id": 3503,
       "method": "session.dispose",
       "error": {
         "code": "unsupported_capability",
@@ -5555,7 +5715,7 @@
     },
     {
       "kind": "error",
-      "id": 3404,
+      "id": 3504,
       "method": "session.dispose",
       "error": {
         "code": "rate_limited",
@@ -5565,7 +5725,7 @@
     },
     {
       "kind": "error",
-      "id": 3405,
+      "id": 3505,
       "method": "session.dispose",
       "error": {
         "code": "internal_error",
@@ -5575,7 +5735,7 @@
     },
     {
       "kind": "error",
-      "id": 3406,
+      "id": 3506,
       "method": "session.dispose",
       "error": {
         "code": "cancelled",
@@ -5585,7 +5745,7 @@
     },
     {
       "kind": "error",
-      "id": 3407,
+      "id": 3507,
       "method": "session.dispose",
       "error": {
         "code": "unknown_session",
@@ -5595,7 +5755,7 @@
     },
     {
       "kind": "error",
-      "id": 3408,
+      "id": 3508,
       "method": "session.dispose",
       "error": {
         "code": "event_migration_required",
@@ -5605,7 +5765,7 @@
     },
     {
       "kind": "error",
-      "id": 3409,
+      "id": 3509,
       "method": "session.dispose",
       "error": {
         "code": "invalid_idempotency_key",
@@ -5615,7 +5775,7 @@
     },
     {
       "kind": "error",
-      "id": 3410,
+      "id": 3510,
       "method": "session.dispose",
       "error": {
         "code": "idempotency_conflict",

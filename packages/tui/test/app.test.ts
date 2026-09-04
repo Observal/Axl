@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough as NodePassThrough } from "node:stream";
@@ -20,6 +20,7 @@ import {
   ToolRegistry,
 } from "@axl/kernel";
 import type {
+  CanonicalEvent,
   EventPayloadMap,
   JsonObject,
   ModelStreamEvent,
@@ -183,6 +184,40 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   );
   assert.match(resumed.text(), /prompt after resume/);
   resumedApp.stop();
+});
+
+test("/export writes a portable session artifact", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+  const artifactDirectory = join(directory, "exported-session");
+
+  input.write(`/export ${artifactDirectory}\r`);
+  await until(() => text().includes("exported"), "session export");
+
+  const manifest = JSON.parse(await readFile(join(artifactDirectory, "manifest.json"), "utf8")) as {
+    sourceSessionId: string;
+    sourceSha256: string;
+    eventCount: number;
+    blobDigests: string[];
+  };
+  const events = (await readFile(join(artifactDirectory, "events.jsonl"), "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as CanonicalEvent);
+  assert.equal(manifest.sourceSessionId, app.sessionId);
+  assert.match(manifest.sourceSha256, /^[0-9a-f]{64}$/);
+  assert.equal(manifest.eventCount, events.length);
+  assert.deepEqual(manifest.blobDigests, []);
+  assert.equal(events[0]?.type, "session.created");
+  app.stop();
 });
 
 test("detach leaves an accepted turn running for later resume", async (context) => {

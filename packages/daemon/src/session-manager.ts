@@ -61,6 +61,7 @@ import {
 } from "@axl/protocol";
 
 import { BlobStore, BlobStoreError } from "./blob-store.ts";
+import { exportSessionArtifact, SessionArtifactError } from "./session-artifact.ts";
 import { WorkspaceCheckpointError, WorkspaceCheckpointStore } from "./workspace-checkpoint.ts";
 import { WorkspaceError, WorkspaceService } from "./workspace-service.ts";
 
@@ -728,6 +729,51 @@ export class SessionManager {
     const managed = this.sessions.get(sessionId);
     if (managed === undefined) return { state: "inactive" };
     return this.describe(sessionId).runtime;
+  }
+
+  async exportArtifact(
+    sessionId: unknown,
+    outputDirectory: string,
+  ): Promise<{
+    readonly outputDirectory: string;
+    readonly sourceSha256: string;
+    readonly eventCount: number;
+    readonly blobCount: number;
+  }> {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    this.assertNotQuarantined(parsed);
+    const active = this.sessions.get(parsed);
+    if (active?.activeTurn !== undefined || active?.rebuilding !== undefined) {
+      throw new DaemonError("operation_active", "Export the session after its active operation");
+    }
+    let events: readonly CanonicalEvent[];
+    if (active !== undefined) {
+      await active.session.log.drain();
+      events = [...active.events];
+    } else {
+      const path = this.logPath(parsed);
+      try {
+        await stat(path);
+      } catch (cause) {
+        throw new DaemonError("unknown_session", `Session ${parsed} has no recorded history`, {
+          cause,
+        });
+      }
+      events = (await JsonlEventLog.open(path, parsed)).events;
+      for (const event of events) this.authorizeEventBlobs(parsed, event);
+    }
+    try {
+      return await exportSessionArtifact({
+        events,
+        outputDirectory,
+        readBlob: (reference) => this.blobs.readAll(parsed, reference),
+      });
+    } catch (error) {
+      if (error instanceof BlobStoreError || error instanceof SessionArtifactError) {
+        throw new DaemonError(error.code, error.message, { cause: error });
+      }
+      throw error;
+    }
   }
 
   async fork(

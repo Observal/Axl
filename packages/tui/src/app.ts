@@ -56,8 +56,8 @@ import { ExtensionWidgetsComponent } from "./extension-ui.ts";
 import { editPromptExternally } from "./external-editor.ts";
 import { type FullscreenMouse, FullscreenScreen } from "./fullscreen.ts";
 import { isMouseReport } from "./fullscreen-input.ts";
-import type { LoginDialogDefinition } from "./login-dialog.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
+import type { LoginDialogDefinition } from "./login-dialog.ts";
 import {
   AttachmentBarComponent,
   detectTerminalMedia,
@@ -309,6 +309,7 @@ const COMMANDS: readonly { readonly name: string; readonly summary: string }[] =
   { name: "/resume", summary: "open another saved session" },
   { name: "/fork", summary: "fork from an earlier user message" },
   { name: "/clone", summary: "clone the complete current session" },
+  { name: "/export", summary: "export the current session artifact" },
   { name: "/stash", summary: "stash, restore, swap, or clear the prompt" },
   { name: "/favorite", summary: "toggle a model in the favorites list" },
   { name: "/developer", summary: "toggle the optional developer panel" },
@@ -2044,6 +2045,14 @@ export class AxlApp {
       else void this.cloneSession();
       return;
     }
+    if (command === "/export") {
+      if (this.view.working) {
+        this.notice = this.view.palette.dim("· finish or interrupt the turn before exporting");
+      } else {
+        void this.exportSession(argument);
+      }
+      return;
+    }
     if (command === "/help") {
       const { dim, accent } = this.view.palette;
       this.commitLines([
@@ -3264,6 +3273,26 @@ export class AxlApp {
       );
       this.redraw();
     }
+  }
+
+  private async exportSession(path: string): Promise<void> {
+    const outputDirectory = resolve(this.cwd, path || `axl-session-${this.sessionId}`);
+    this.notice = this.view.palette.dim("· exporting session…");
+    this.redraw();
+    try {
+      const exported = await this.client.request("session.export", {
+        sessionId: this.sessionId,
+        outputDirectory,
+      });
+      this.notice = this.view.palette.dim(
+        `· exported ${plural(exported.eventCount, "event")} and ${plural(exported.blobCount, "blob")} to ${sanitizeTerminalText(exported.outputDirectory)}`,
+      );
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "could not export session"}`,
+      );
+    }
+    this.redraw();
   }
 
   private async switchSession(
