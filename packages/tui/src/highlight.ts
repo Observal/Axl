@@ -1,235 +1,206 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-// Small line-based syntax highlighter for fenced code blocks: comments,
-// strings, numbers, and keywords for the common language families. Anything
-// unrecognized passes through untouched.
+import { createRequire } from "node:module";
 
+import { sanitizeTerminalText } from "./render.ts";
 import type { Palette } from "./transcript.ts";
 
-const KEYWORDS: Readonly<Record<string, readonly string[]>> = {
-  javascript: [
-    "async",
-    "await",
-    "break",
-    "case",
-    "catch",
-    "class",
-    "const",
-    "continue",
-    "default",
-    "delete",
-    "do",
-    "else",
-    "export",
-    "extends",
-    "finally",
-    "for",
-    "function",
-    "if",
-    "import",
-    "in",
-    "instanceof",
-    "interface",
-    "let",
-    "new",
-    "of",
-    "return",
-    "static",
-    "switch",
-    "throw",
-    "try",
-    "type",
-    "typeof",
-    "var",
-    "while",
-    "yield",
-    "true",
-    "false",
-    "null",
-    "undefined",
-  ],
-  python: [
-    "and",
-    "as",
-    "assert",
-    "async",
-    "await",
-    "break",
-    "class",
-    "continue",
-    "def",
-    "del",
-    "elif",
-    "else",
-    "except",
-    "finally",
-    "for",
-    "from",
-    "global",
-    "if",
-    "import",
-    "in",
-    "is",
-    "lambda",
-    "not",
-    "or",
-    "pass",
-    "raise",
-    "return",
-    "try",
-    "while",
-    "with",
-    "yield",
-    "True",
-    "False",
-    "None",
-  ],
-  shell: [
-    "if",
-    "then",
-    "else",
-    "elif",
-    "fi",
-    "for",
-    "while",
-    "do",
-    "done",
-    "case",
-    "esac",
-    "function",
-    "return",
-    "exit",
-    "export",
-    "local",
-    "echo",
-    "cd",
-    "set",
-  ],
-  rust: [
-    "as",
-    "break",
-    "const",
-    "continue",
-    "crate",
-    "else",
-    "enum",
-    "fn",
-    "for",
-    "if",
-    "impl",
-    "in",
-    "let",
-    "loop",
-    "match",
-    "mod",
-    "move",
-    "mut",
-    "pub",
-    "ref",
-    "return",
-    "self",
-    "static",
-    "struct",
-    "trait",
-    "type",
-    "use",
-    "where",
-    "while",
-    "true",
-    "false",
-  ],
-  go: [
-    "break",
-    "case",
-    "chan",
-    "const",
-    "continue",
-    "default",
-    "defer",
-    "else",
-    "for",
-    "func",
-    "go",
-    "if",
-    "import",
-    "interface",
-    "map",
-    "package",
-    "range",
-    "return",
-    "select",
-    "struct",
-    "switch",
-    "type",
-    "var",
-    "true",
-    "false",
-    "nil",
-  ],
-};
+// The package declaration references the DOM. Loading through Node keeps the TUI type surface Node-only.
+interface HighlightEngine {
+  getLanguage(name: string): unknown;
+  highlight(
+    code: string,
+    options: { language: string; ignoreIllegals: boolean },
+  ): {
+    readonly value: string;
+  };
+}
+
+const highlightEngine = createRequire(import.meta.url)("highlight.js") as HighlightEngine;
 
 const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
+  cc: "cpp",
+  cjs: "javascript",
+  clj: "clojure",
+  cs: "csharp",
+  cts: "typescript",
+  cxx: "cpp",
+  erl: "erlang",
+  ex: "elixir",
+  exs: "elixir",
+  h: "c",
+  hpp: "cpp",
+  hs: "haskell",
+  htm: "xml",
+  html: "xml",
   js: "javascript",
   jsx: "javascript",
-  ts: "javascript",
-  tsx: "javascript",
-  typescript: "javascript",
-  json: "javascript",
+  kt: "kotlin",
+  md: "markdown",
+  mjs: "javascript",
+  ml: "ocaml",
+  mts: "typescript",
+  proto: "protobuf",
+  ps1: "powershell",
   py: "python",
-  bash: "shell",
-  sh: "shell",
-  zsh: "shell",
+  rb: "ruby",
   rs: "rust",
-  golang: "go",
+  sh: "bash",
+  tf: "hcl",
+  ts: "typescript",
+  tsx: "typescript",
+  yml: "yaml",
 };
 
-const COMMENT_STARTS: Readonly<Record<string, string>> = {
-  javascript: "//",
-  python: "#",
-  shell: "#",
-  rust: "//",
-  go: "//",
+const FILE_LANGUAGES: Readonly<Record<string, string>> = {
+  dockerfile: "dockerfile",
+  makefile: "makefile",
+  cmakelists: "cmake",
+  "cmakelists.txt": "cmake",
+  gemfile: "ruby",
+  rakefile: "ruby",
 };
 
-/** Highlights one line of code for the given fence language tag. */
-export function highlightLine(line: string, language: string, palette: Palette): string {
-  const family =
-    KEYWORDS[language] !== undefined ? language : LANGUAGE_ALIASES[language.toLowerCase()];
-  if (family === undefined) return line;
-  const keyword = palette.keyword ?? palette.accent;
-  const literal = palette.literal ?? palette.dim;
-  const keywords = new Set(KEYWORDS[family]);
-  const commentStart = COMMENT_STARTS[family] as string;
+function languageName(language: string | undefined): string | undefined {
+  if (language === undefined) return undefined;
+  const normalized = language.trim().toLowerCase();
+  if (!normalized || ["text", "plaintext", "txt"].includes(normalized)) return undefined;
+  const resolved = LANGUAGE_ALIASES[normalized] ?? normalized;
+  return highlightEngine.getLanguage(resolved) === undefined ? undefined : resolved;
+}
 
-  let out = "";
-  let index = 0;
-  while (index < line.length) {
-    const rest = line.slice(index);
-    if (rest.startsWith(commentStart)) {
-      out += palette.dim(rest);
-      break;
-    }
-    const string = /^(["'`])(?:\\.|(?!\1).)*\1?/.exec(rest);
-    if (string !== null) {
-      out += literal(string[0]);
-      index += string[0].length;
-      continue;
-    }
-    const number = /^\d[\d._]*/.exec(rest);
-    if (number !== null) {
-      out += literal(number[0]);
-      index += number[0].length;
-      continue;
-    }
-    const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
-    if (word !== null) {
-      out += keywords.has(word[0]) ? keyword(word[0]) : word[0];
-      index += word[0].length;
-      continue;
-    }
-    out += line[index];
-    index += 1;
+/** Resolves a highlight.js language from a file path without content guessing. */
+export function languageForPath(path: string): string | undefined {
+  const name = path.split(/[\\/]/u).at(-1)?.toLowerCase() ?? "";
+  const named = FILE_LANGUAGES[name];
+  if (named !== undefined) return named;
+  const extension = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+  return languageName(extension);
+}
+
+function decodeHtml(value: string): string {
+  return value.replace(/&(?:amp|lt|gt|quot|#x27|#39);/gu, (entity) => {
+    if (entity === "&amp;") return "&";
+    if (entity === "&lt;") return "<";
+    if (entity === "&gt;") return ">";
+    if (entity === "&quot;") return '"';
+    return "'";
+  });
+}
+
+type Color = (text: string) => string;
+
+function tokenColor(classes: readonly string[], palette: Palette): Color | undefined {
+  if (classes.some((name) => name === "comment" || name === "doctag")) {
+    return palette.syntaxComment ?? palette.dim;
   }
-  return out;
+  if (
+    classes.some(
+      (name) =>
+        name === "keyword" ||
+        name === "name" ||
+        name === "selector-tag" ||
+        name === "selector-id" ||
+        name === "selector-class" ||
+        name === "selector-pseudo",
+    )
+  ) {
+    return palette.syntaxKeyword ?? palette.keyword ?? palette.accent;
+  }
+  if (classes.some((name) => name === "title" || name === "function" || name === "section")) {
+    return palette.syntaxFunction ?? palette.accent;
+  }
+  if (
+    classes.some(
+      (name) =>
+        name === "variable" ||
+        name === "params" ||
+        name === "attr" ||
+        name === "attribute" ||
+        name === "property",
+    )
+  ) {
+    return palette.syntaxVariable ?? palette.text ?? palette.accent;
+  }
+  if (
+    classes.some(
+      (name) =>
+        name === "string" ||
+        name === "regexp" ||
+        name === "template-tag" ||
+        name === "template-variable" ||
+        name === "symbol" ||
+        name === "bullet" ||
+        name === "link",
+    )
+  ) {
+    return palette.syntaxString ?? palette.literal ?? palette.success ?? palette.accent;
+  }
+  if (classes.some((name) => name === "number" || name === "literal")) {
+    return palette.syntaxNumber ?? palette.literal ?? palette.warning ?? palette.accent;
+  }
+  if (classes.some((name) => name === "built_in" || name === "type" || name === "class")) {
+    return palette.syntaxType ?? palette.warning ?? palette.accent;
+  }
+  if (classes.includes("operator")) return palette.syntaxOperator ?? palette.accent;
+  if (classes.some((name) => name === "punctuation" || name === "tag")) {
+    return palette.syntaxPunctuation ?? palette.dim;
+  }
+  if (classes.includes("meta")) return palette.dim;
+  return undefined;
+}
+
+function ansiLines(html: string, palette: Palette): string[] {
+  const lines = [""];
+  const colors: Array<Color | undefined> = [];
+  const tokens = /<span class="([^"]+)">|<\/span>|([^<]+)/gu;
+  let offset = 0;
+  for (const match of html.matchAll(tokens)) {
+    if (match.index !== offset) throw new Error("Unexpected syntax highlighter output");
+    offset += match[0].length;
+    if (match[1] !== undefined) {
+      const classes = match[1].split(/\s+/u).map((name) => name.replace(/^hljs-/u, ""));
+      colors.push(tokenColor(classes, palette) ?? colors.at(-1));
+      continue;
+    }
+    if (match[0] === "</span>") {
+      if (colors.length === 0) throw new Error("Unexpected syntax highlighter span");
+      colors.pop();
+      continue;
+    }
+    const parts = decodeHtml(match[2] ?? "").split("\n");
+    for (const [index, part] of parts.entries()) {
+      if (index > 0) lines.push("");
+      if (part) lines[lines.length - 1] += (colors.at(-1) ?? ((text) => text))(part);
+    }
+  }
+  if (offset !== html.length || colors.length !== 0) {
+    throw new Error("Incomplete syntax highlighter output");
+  }
+  return lines;
+}
+
+/** Highlights a complete code block while preserving multiline grammar state. */
+export function highlightCode(
+  code: string,
+  language: string | undefined,
+  palette: Palette,
+): string[] {
+  const clean = sanitizeTerminalText(code);
+  const resolved = languageName(language);
+  if (resolved === undefined) return clean.split("\n");
+  return ansiLines(
+    highlightEngine.highlight(clean, { language: resolved, ignoreIllegals: true }).value,
+    palette,
+  );
+}
+
+/** Highlights one standalone line of code. */
+export function highlightLine(
+  line: string,
+  language: string | undefined,
+  palette: Palette,
+): string {
+  return highlightCode(line, language, palette)[0] ?? "";
 }

@@ -23,14 +23,15 @@
   "dependencies": {
     "@axl/extension-api": "workspace:*",
     "@axl/protocol": "workspace:*",
+    "@axl/sdk": "workspace:*",
     "grok-mermaid": "0.2.2",
-    "marked": "18.0.11",
-    "@axl/sdk": "workspace:*"
+    "highlight.js": "11.12.0",
+    "marked": "18.0.11"
   },
   "devDependencies": {
+    "@axl/daemon": "workspace:*",
     "@axl/extension-mcp": "workspace:*",
     "@axl/extension-skills": "workspace:*",
-    "@axl/kernel": "workspace:*",
-    "@axl/daemon": "workspace:*"
+    "@axl/kernel": "workspace:*"
   }
 }

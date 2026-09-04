@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { decodeOneKey } from "./editor.ts";
+import { highlightLine, languageForPath } from "./highlight.ts";
 import type { Overlay } from "./overlay.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth } from "./render.ts";
 import type { Palette } from "./transcript.ts";
@@ -43,32 +44,41 @@ function fit(value: string, width: number): string {
   return `${clean}${" ".repeat(Math.max(0, width - visibleWidth(clean)))}`;
 }
 
-function colored(line: string, palette: Palette): string {
-  if (line.startsWith("+") && !line.startsWith("+++"))
-    return palette.success?.(line) ?? palette.accent(line);
-  if (line.startsWith("-") && !line.startsWith("---")) return palette.error(line);
+function colored(line: string, language: string | undefined, palette: Palette): string {
+  if (line.startsWith("+") && !line.startsWith("+++")) {
+    return `${palette.success?.("+") ?? palette.accent("+")}${highlightLine(line.slice(1), language, palette)}`;
+  }
+  if (line.startsWith("-") && !line.startsWith("---")) {
+    return `${palette.error("-")}${highlightLine(line.slice(1), language, palette)}`;
+  }
+  if (line.startsWith(" ")) {
+    return `${palette.diffContext?.(" ") ?? " "}${highlightLine(line.slice(1), language, palette)}`;
+  }
   if (line.startsWith("@@")) return palette.accent(line);
-  if (line.startsWith("diff ") || line.startsWith("---") || line.startsWith("+++"))
+  if (line.startsWith("diff ") || line.startsWith("---") || line.startsWith("+++")) {
     return palette.dim(line);
+  }
   return line;
 }
 
 function unifiedRows(file: WorkspaceReviewFile, width: number, palette: Palette): string[] {
+  const language = languageForPath(file.path);
   return sanitizeTerminalText(file.patch)
     .split("\n")
-    .map((line) => colored(truncateToWidth(line, width, ""), palette));
+    .map((line) => colored(truncateToWidth(line, width, ""), language, palette));
 }
 
 function splitRows(file: WorkspaceReviewFile, width: number, palette: Palette): string[] {
   const gap = " │ ";
   const column = Math.max(8, Math.floor((width - visibleWidth(gap)) / 2));
+  const language = languageForPath(file.path);
   return sanitizeTerminalText(file.patch)
     .split("\n")
     .filter((line) => !line.startsWith("diff ") && !line.startsWith("index "))
     .map((line) => {
       const left = line.startsWith("+") && !line.startsWith("+++") ? "" : line;
       const right = line.startsWith("-") && !line.startsWith("---") ? "" : line;
-      return `${colored(fit(left, column), palette)}${palette.dim(gap)}${colored(fit(right, column), palette)}`;
+      return `${colored(fit(left, column), language, palette)}${palette.dim(gap)}${colored(fit(right, column), language, palette)}`;
     });
 }
 

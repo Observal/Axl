@@ -4,13 +4,13 @@
 
 import {
   diagramKind,
-  render as renderMermaid,
   type MermaidArt,
   type Span as MermaidSpan,
+  render as renderMermaid,
 } from "grok-mermaid";
 import { Lexer, marked, type Token, type Tokens } from "marked";
 
-import { highlightLine } from "./highlight.ts";
+import { highlightCode } from "./highlight.ts";
 import {
   sanitizeTerminalText,
   stripAnsi,
@@ -306,22 +306,19 @@ function renderMermaidBlock(source: string, width: number, palette: Palette): st
 
 function renderCode(code: Tokens.Code, width: number, palette: Palette): string[] {
   const language = code.lang?.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-  const lines = code.text.split("\n");
-  if (lines.at(-1) === "") lines.pop();
+  const sourceLines = code.text.split("\n");
+  if (sourceLines.at(-1) === "") sourceLines.pop();
   if (language === "text" || language === "plaintext" || language === "txt") {
-    return lines.flatMap((line) => wrapLine(line || " ", width));
+    return sourceLines.flatMap((line) => wrapLine(line || " ", width));
   }
   if (language === "mermaid") return renderMermaidBlock(code.text, width, palette);
   const border = palette.mdCodeBlockBorder ?? palette.dim;
   const gutter = border("│");
   const available = Math.max(1, width - 2);
+  const lines = highlightCode(sourceLines.join("\n"), language, palette);
   return [
     border(language ? `╭─ ${language}` : "╭─"),
-    ...lines.flatMap((line) =>
-      wrapLine(highlightLine(line || " ", language, palette), available).map(
-        (part) => `${gutter} ${part}`,
-      ),
-    ),
+    ...lines.flatMap((line) => wrapLine(line || " ", available).map((part) => `${gutter} ${part}`)),
     border("╰─"),
   ];
 }

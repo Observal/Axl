@@ -11,6 +11,8 @@ Axl uses the official Model Context Protocol TypeScript SDK as an external depen
 
 Axl uses Marked 18.0.11 as an external dependency for Markdown tokenization. It is distributed under its own MIT license.
 
+Axl uses highlight.js 11.12.0 as an external dependency for syntax highlighting. It is distributed under its own BSD-3-Clause license.
+
 Axl uses grok-mermaid 0.2.2 as an external dependency for Unicode Mermaid rendering. It is distributed under its own Apache-2.0 license.
 
 Axl uses `@deepseek-ai/node-addon-landlock-run` 0.1.1 from DeepSeek Harness.

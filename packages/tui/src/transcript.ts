@@ -4,8 +4,8 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-import { type ClientModelInfo, ConversationProjector } from "@axl/sdk";
 import type { BlobReference, CanonicalEvent } from "@axl/protocol";
+import { type ClientModelInfo, ConversationProjector } from "@axl/sdk";
 
 import { renderMarkdown } from "./markdown.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapLine } from "./render.ts";
@@ -41,6 +41,15 @@ export interface Palette {
   mdQuote?(text: string): string;
   mdQuoteBorder?(text: string): string;
   mdListBullet?(text: string): string;
+  syntaxComment?(text: string): string;
+  syntaxKeyword?(text: string): string;
+  syntaxFunction?(text: string): string;
+  syntaxVariable?(text: string): string;
+  syntaxString?(text: string): string;
+  syntaxNumber?(text: string): string;
+  syntaxType?(text: string): string;
+  syntaxOperator?(text: string): string;
+  syntaxPunctuation?(text: string): string;
   keyword?(text: string): string;
   literal?(text: string): string;
 }

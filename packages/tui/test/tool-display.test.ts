@@ -64,10 +64,28 @@ test("edit transactions render adaptive unified and split previews", () => {
     true,
   );
   assert.equal(rich.join("\n").includes("\x1b[48;2;51;45;32m"), true);
+  assert.equal(rich.join("\n").includes("\x1b[38;2;251;73;52mconst"), true);
   assert.equal(rich[0], "");
   assert.equal(stripAnsi(rich[1] ?? "").trim(), "");
   assert.match(stripAnsi(rich[2] ?? ""), /EDIT/);
   assert.equal(stripAnsi(rich[3] ?? "").trim(), "");
+});
+
+test("full read results use syntax highlighting from the file path", () => {
+  const palette = THEMES["axl-dark"];
+  assert.ok(palette);
+  const rendered = renderToolTransaction({
+    name: "read",
+    args: { path: "src/config.py" },
+    result: 'def load(value: str):\n    return f"value={value}"',
+    status: "succeeded",
+    width: 80,
+    mode: "full",
+    palette,
+  }).join("\n");
+  assert.equal(rendered.includes("\x1b[38;2;251;73;52mdef"), true);
+  assert.equal(rendered.includes("\x1b[38;2;184;187;38mload"), true);
+  assert.match(stripAnsi(rendered), /def load\(value: str\):/);
 });
 
 test("one transaction combines lifecycle, target, duration, and bounded result", () => {

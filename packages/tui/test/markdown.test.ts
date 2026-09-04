@@ -5,7 +5,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { PLAIN_PALETTE, renderInline, renderMarkdown, visibleWidth } from "../src/index.ts";
+import {
+  PLAIN_PALETTE,
+  renderInline,
+  renderMarkdown,
+  stripAnsi,
+  visibleWidth,
+} from "../src/index.ts";
 
 test("plain paragraphs pass through untouched", () => {
   assert.deepEqual(renderMarkdown("just a sentence.", 80, PLAIN_PALETTE), ["just a sentence."]);
@@ -157,14 +163,69 @@ test("long markdown lines hard-wrap to the viewport", () => {
   assert.equal(lines.length, 3);
 });
 
-test("code fences syntax-highlight known languages", async () => {
-  const { highlightLine, THEMES } = await import("../src/index.ts");
+test("code fences use broad, stateful syntax highlighting", async () => {
+  const { highlightCode, highlightLine, languageForPath, THEMES } = await import("../src/index.ts");
   const palette = THEMES.axl as NonNullable<(typeof THEMES)["axl"]>;
-  const highlighted = highlightLine('const x = "hi"; // done', "ts", palette);
-  assert.equal(highlighted.includes("const"), true);
-  assert.notEqual(highlighted, 'const x = "hi"; // done'); // styling applied
-  // Unknown languages pass through untouched.
-  assert.equal(highlightLine("whatever ???", "brainfuck", palette), "whatever ???");
+  const source = '/* first\nsecond */\nfunction greet(name: string) { return "hi"; }';
+  const highlighted = highlightCode(source, "ts", palette);
+  assert.equal(stripAnsi(highlighted.join("\n")), source);
+  assert.notEqual(highlighted[0], "/* first");
+  assert.notEqual(highlighted[1], "second */");
+  assert.equal(
+    [81, 117, 175].some((color) => highlighted.join("\n").includes(`\x1b[38;5;${color}m`)),
+    true,
+  );
+  assert.deepEqual(
+    [
+      "app.rb",
+      "Main.java",
+      "main.kt",
+      "view.swift",
+      "query.sql",
+      "site.html",
+      "style.css",
+      "config.yaml",
+      "Dockerfile",
+      "Makefile",
+      "CMakeLists.txt",
+      "main.tf",
+    ].map(languageForPath),
+    [
+      "ruby",
+      "java",
+      "kotlin",
+      "swift",
+      "sql",
+      "xml",
+      "css",
+      "yaml",
+      "dockerfile",
+      "makefile",
+      "cmake",
+      undefined,
+    ],
+  );
+  for (const [language, code] of [
+    ["ruby", "def greet(name)"],
+    ["java", "class Greeting {}"],
+    ["kotlin", "fun greet() = 1"],
+    ["swift", "func greet() {}"],
+    ["sql", "SELECT count(*) FROM users"],
+    ["yaml", "enabled: true"],
+    ["dockerfile", "FROM node:22"],
+    ["protobuf", "message Greeting {}"],
+  ] as const) {
+    assert.notEqual(highlightCode(code, language, palette).join("\n"), code, language);
+  }
+  const markup = '<main title="a & b">hello</main>';
+  assert.equal(stripAnsi(highlightCode(markup, "html", palette).join("\n")), markup);
+  assert.equal(
+    renderMarkdown("```ruby\ndef greet(name)\n```", 40, palette)
+      .join("\n")
+      .includes("\x1b[38;5;81m"),
+    true,
+  );
+  assert.equal(highlightLine("whatever ???", "not-a-real-language", palette), "whatever ???");
 });
 
 test("themes exist and provide full palettes", async () => {

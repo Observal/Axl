@@ -3,7 +3,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -91,6 +91,7 @@ export function checkWorkspace(root: string): string[] {
     "@axl/extension-api",
     sdkName,
     "grok-mermaid",
+    "highlight.js",
     "marked",
     protocolName,
   ]);

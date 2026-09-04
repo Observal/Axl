@@ -16,7 +16,7 @@ The TUI includes:
 - Sandboxed `!command` passthrough, plus context-excluded `!!command` passthrough
 - Model and thinking changes recorded by the daemon
 - Daemon-owned steering with Enter and ordered follow-ups with Alt+Enter while a model turn runs; prompts entered during shell or compaction work wait locally
-- GFM Markdown, syntax highlighting, Unicode Mermaid diagrams, safe visible links, bordered prompts, retained tool transactions, bounded shell output, and line-numbered diffs that switch between unified and split views
+- GFM Markdown, broad language-aware syntax highlighting across code fences, file reads, edit/write previews, and workspace diffs, Unicode Mermaid diagrams, safe visible links, bordered prompts, retained tool transactions, bounded shell output, and line-numbered diffs that switch between unified and split views
 - A framed editor showing token use, cache rate, cost, context, model, effort, path, Git branch, and local throughput
 - Clean resize reconstruction, interruption, detach, daemon restart reconnect, searchable all-placement session resume with visible unsafe labels, fork, clone, and visible connection state
 - Optional persistent fullscreen mode with a separated fixed dock, highlighted transcript search, prompt jumps, line, half-page, and page navigation, draggable scrollbars, mouse selection with verified copy, native mouse mode, and transcript or resume-hint exit output

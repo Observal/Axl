@@ -11,7 +11,7 @@ import type {
   TerminalToolRenderResult,
 } from "@axl/extension-api";
 
-import { highlightLine } from "./highlight.ts";
+import { highlightCode, languageForPath } from "./highlight.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapLine } from "./render.ts";
 import type { Palette, ToolOutputDisplay } from "./transcript.ts";
 
@@ -105,6 +105,8 @@ interface DiffRow {
 
 interface ChangedLines {
   readonly rows: readonly DiffRow[];
+  readonly oldLines: readonly string[];
+  readonly newLines: readonly string[];
   readonly removed: number;
   readonly added: number;
 }
@@ -157,7 +159,7 @@ function changedLines(oldText: string, newText: string): ChangedLines {
       newLine: newEnd + offset + 1,
     });
   }
-  return { rows, removed: oldEnd - prefix, added: newEnd - prefix };
+  return { rows, oldLines, newLines, removed: oldEnd - prefix, added: newEnd - prefix };
 }
 
 function diffSummary(
@@ -183,15 +185,6 @@ function diffSummary(
   return [truncateToWidth(label, width, ""), (palette.border ?? palette.dim)("─".repeat(width))];
 }
 
-function languageForPath(path: string): string {
-  const extension = /\.([^./]+)$/.exec(path)?.[1]?.toLowerCase();
-  return extension ?? "";
-}
-
-function highlighted(line: string, language: string, palette: Palette): string {
-  return highlightLine(line || " ", language, palette);
-}
-
 function rowLineNumber(row: DiffRow): number | undefined {
   return row.kind === "add" ? row.newLine : row.oldLine;
 }
@@ -207,17 +200,21 @@ function unifiedDiff(
     ...change.rows.map((row) => String(rowLineNumber(row) ?? "").length),
   );
   const language = languageForPath(path);
+  const oldLines = highlightCode(change.oldLines.join("\n"), language, palette);
+  const newLines = highlightCode(change.newLines.join("\n"), language, palette);
   const rendered = change.rows.flatMap((row) => {
     const number = String(rowLineNumber(row) ?? "").padStart(numberWidth);
     const marker = row.kind === "add" ? "+" : row.kind === "remove" ? "-" : " ";
     const gutter = `  ${number} ${marker}│ `;
     const available = Math.max(1, width - visibleWidth(gutter));
-    return wrapLine(row.text || " ", available).map((part, index) => {
+    const highlighted =
+      row.kind === "add" ? newLines[(row.newLine ?? 1) - 1] : oldLines[(row.oldLine ?? 1) - 1];
+    return wrapLine(highlighted || " ", available).map((part, index) => {
       const prefix =
         index === 0
           ? `${paint(palette, row.kind, `  ${number} ${marker}│`)} `
           : `${paint(palette, row.kind, `  ${"".padStart(numberWidth)}  │`)} `;
-      const line = fit(`${prefix}${highlighted(part, language, palette)}`, width);
+      const line = fit(`${prefix}${part}`, width);
       return lineBackground(palette, row.kind, line);
     });
   });
@@ -255,7 +252,7 @@ function splitCell(
   side: "left" | "right",
   width: number,
   numberWidth: number,
-  language: string,
+  highlightedLines: readonly string[],
   palette: Palette,
 ): string[] {
   if (row === undefined) return [" ".repeat(width)];
@@ -264,12 +261,13 @@ function splitCell(
   const marker = row.kind === "add" ? "+" : row.kind === "remove" ? "-" : " ";
   const gutter = `${number} ${marker}│ `;
   const available = Math.max(1, width - visibleWidth(gutter));
-  return wrapLine(row.text || " ", available).map((part, index) => {
+  const highlighted = highlightedLines[(value ?? 1) - 1];
+  return wrapLine(highlighted || " ", available).map((part, index) => {
     const prefix =
       index === 0
         ? `${paint(palette, row.kind, `${number} ${marker}│`)} `
         : `${paint(palette, row.kind, `${"".padStart(numberWidth)}  │`)} `;
-    const line = fit(`${prefix}${highlighted(part, language, palette)}`, width);
+    const line = fit(`${prefix}${part}`, width);
     return lineBackground(palette, row.kind, line);
   });
 }
@@ -282,10 +280,12 @@ function splitDiff(change: ChangedLines, path: string, width: number, palette: P
     ...change.rows.map((row) => String(rowLineNumber(row) ?? "").length),
   );
   const language = languageForPath(path);
+  const oldLines = highlightCode(change.oldLines.join("\n"), language, palette);
+  const newLines = highlightCode(change.newLines.join("\n"), language, palette);
   const header = `${fit(palette.dim("old"), column)}${separator}${fit(palette.dim("new"), column)}`;
   const rendered = splitPairs(change.rows).flatMap((pair) => {
-    const left = splitCell(pair.left, "left", column, numberWidth, language, palette);
-    const right = splitCell(pair.right, "right", column, numberWidth, language, palette);
+    const left = splitCell(pair.left, "left", column, numberWidth, oldLines, palette);
+    const right = splitCell(pair.right, "right", column, numberWidth, newLines, palette);
     return Array.from({ length: Math.max(left.length, right.length) }, (_, index) => {
       const leftLine = left[index] ?? " ".repeat(column);
       const rightLine = right[index] ?? " ".repeat(column);
@@ -456,7 +456,10 @@ function transactionBody(input: {
   if (result === undefined) return lines;
   if (mode === "focus" && status === "succeeded") return lines;
 
-  const resultLines = sanitizeTerminalText(result).split("\n");
+  const resultLines =
+    name === "read"
+      ? highlightCode(result, languageForPath(pathLabel(args)), palette)
+      : sanitizeTerminalText(result).split("\n");
   const hidesSuccessfulBody =
     status === "succeeded" &&
     mode === "compact" &&
@@ -470,7 +473,11 @@ function transactionBody(input: {
         ? BASH_PREVIEW_LINES
         : COMPACT_PREVIEW_LINES;
   const color = isError ? palette.error : (palette.text ?? palette.dim);
-  lines.push(...clipRows(resultLines, limit, palette).map((line) => color(line || " ")));
+  lines.push(
+    ...clipRows(resultLines, limit, palette).map((line) =>
+      name === "read" && !isError ? line || " " : color(line || " "),
+    ),
+  );
   return lines;
 }
 
