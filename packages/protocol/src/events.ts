@@ -14,7 +14,7 @@ import {
 } from "./event-envelope.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-export type SessionProfile = "standard" | "exec";
+export type SessionProfile = "minimal" | "standard" | "chat" | "exec";
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type InteractionAction = "accept" | "decline" | "cancel";
 export type InteractionKind =
@@ -410,7 +410,7 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
   },
   "config.profile": (payload, path) => {
     exact(payload, path, ["profile"]);
-    choice(payload.profile, `${path}.profile`, ["standard", "exec"]);
+    choice(payload.profile, `${path}.profile`, ["minimal", "standard", "chat", "exec"]);
     return payload;
   },
   "config.thinking": (payload, path) => {

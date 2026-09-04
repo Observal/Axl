@@ -9,10 +9,15 @@ import { PassThrough as NodePassThrough } from "node:stream";
 import test, { type TestContext } from "node:test";
 
 import { AxlDaemon, type SessionInteractionRequest } from "@axl/daemon";
-import { connectUnixClient } from "@axl/sdk/unix";
 import type { TerminalExtension } from "@axl/extension-api";
-import { type ModelPort, ToolRegistry } from "@axl/kernel";
+import {
+  type CompactionSettings,
+  type ModelPort,
+  type ModelTurnRequest,
+  ToolRegistry,
+} from "@axl/kernel";
 import type { EventPayloadMap, JsonObject, ModelStreamEvent, Usage } from "@axl/protocol";
+import { connectUnixClient } from "@axl/sdk/unix";
 
 import { AxlApp, stripAnsi } from "../src/index.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -51,6 +56,7 @@ async function startStack(
     }>,
   ) => ToolRegistry = () => new ToolRegistry(),
   sandbox?: EventPayloadMap["sandbox.configured"],
+  compaction?: Partial<CompactionSettings>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "axl-tui-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -63,6 +69,7 @@ async function startStack(
       tools: makeTools(interact),
       system: "You are Axl.",
       ...(sandbox === undefined ? {} : { sandbox }),
+      ...(compaction === undefined ? {} : { compaction }),
       ...(selection.modelId === undefined ? {} : { configModel: { modelId: selection.modelId } }),
       ...(selection.thinkingLevel === undefined
         ? {}
@@ -159,6 +166,108 @@ test("a full round trip: type, send, render the reply, detach, resume", async (c
   assert.match(resumed.text(), /│ hello axl/);
   assert.match(resumed.text(), /the answer/);
   resumedApp.stop();
+});
+
+test("initial resume opens the all-session picker without creating a throwaway session", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const seed = await connectUnixClient(socketPath);
+  const saved = await seed.request("session.create", { cwd: directory });
+  seed.close();
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    initialResume: true,
+    listResumeSessions: async () => [
+      {
+        sessionId: saved.sessionId,
+        resumeKey: `native:${saved.sessionId}`,
+        cwd: directory,
+        createdAt: 1,
+        updatedAt: 1,
+        userMessageCount: 0,
+        runtime: { state: "inactive" },
+        attachmentCount: 0,
+        placementLabel: "SANDBOXED · native",
+        unsafe: false,
+      },
+    ],
+    openResumeSession: async () => ({
+      client: await connectUnixClient(socketPath),
+      reconnectClient: () => connectUnixClient(socketPath),
+    }),
+  });
+  await until(() => text().includes("Resume Session (All)"), "initial resume selector");
+  const listingClient = await connectUnixClient(socketPath);
+  const before = await listingClient.request("session.list", {
+    scope: "all_local",
+    order: "recent",
+    pageSize: 100,
+  });
+  assert.equal(before.sessions.length, 1);
+  input.write("\r");
+  await until(() => app.sessionId === saved.sessionId, "initial resumed session");
+  const after = await listingClient.request("session.list", {
+    scope: "all_local",
+    order: "recent",
+    pageSize: 100,
+  });
+  assert.equal(after.sessions.length, 1);
+  listingClient.close();
+  app.stop();
+});
+
+test("/compact summarizes older context through the daemon", async (context) => {
+  const requests: ModelTurnRequest[] = [];
+  const model: ModelPort = {
+    stream(request) {
+      requests.push(request);
+      const text =
+        requests.length === 1
+          ? "old answer"
+          : requests.length === 2
+            ? "recent answer"
+            : "## Goal\nKeep working";
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        yield { type: "text_delta", text };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, undefined, undefined, {
+    keepRecentTokens: 7,
+    maxOutputTokens: 123,
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+
+  input.write("old prompt\r");
+  await until(() => text().includes("old answer"), "old response");
+  input.write("recent prompt\r");
+  await until(() => text().includes("recent answer"), "recent response");
+  input.write("/compact Focus on the current task\r");
+  await until(() => text().includes("Context compacted"), "compaction");
+
+  assert.equal(requests[2]?.toolChoice, "none");
+  assert.match(
+    requests[2]?.messages[0]?.content[0]?.type === "text"
+      ? requests[2].messages[0].content[0].text
+      : "",
+    /Focus on the current task/,
+  );
+  assert.match(text(), /Keep working/);
+  app.stop();
 });
 
 test("an unenforced session keeps a persistent unsafe warning", async (context) => {
@@ -800,7 +909,7 @@ test("bang commands run through daemon shell authority", async (context) => {
   const { socketPath, directory } = await startStack(context, recordingPort, () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "shell",
+      name: "bash",
       description: "Run shell",
       inputSchema: { type: "object" },
       async execute(input) {
@@ -853,7 +962,7 @@ test("Escape interrupts shell passthrough and preserves queued prompts", async (
   const { socketPath, directory } = await startStack(context, recordingPort, () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "shell",
+      name: "bash",
       description: "Blocking shell",
       inputSchema: { type: "object" },
       async execute(_input, signal) {
@@ -935,7 +1044,7 @@ test("Ctrl+Z suspends and resumes without detaching the session", async (context
   app.stop();
 });
 
-test("prompts entered while working queue in order", async (context) => {
+test("Enter steers and Alt+Enter queues a follow-up while working", async (context) => {
   let releaseFirst = (): void => undefined;
   let calls = 0;
   const prompts: string[] = [];
@@ -943,7 +1052,7 @@ test("prompts entered while working queue in order", async (context) => {
     stream(request) {
       calls += 1;
       const turn = calls;
-      const last = request.messages.at(-1);
+      const last = request.messages.findLast((message) => message.role === "user");
       if (last?.role === "user") {
         prompts.push(last.content.map((item) => (item.type === "text" ? item.text : "")).join(""));
       }
@@ -971,8 +1080,9 @@ test("prompts entered while working queue in order", async (context) => {
 
   input.write("one\r");
   await until(() => calls === 1, "first model call");
-  input.write("two\rthree\r");
-  await until(() => text().includes("queued follow-up"), "queue notice");
+  input.write("two\rthree\x1b[13;3u");
+  await until(() => text().includes("follow-up queued"), "queue notice");
+  assert.match(text(), /STEER/);
   assert.equal(calls, 1);
   releaseFirst();
   await until(() => calls === 3, "queued model calls");

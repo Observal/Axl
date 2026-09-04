@@ -365,7 +365,7 @@ test("internal RPC failures do not expose subsystem messages", async (context) =
   );
 });
 
-test("requires version-4 initialization before session access", async (context) => {
+test("requires version-8 initialization before session access", async (context) => {
   const fixture = await startDaemon(context);
   const raw = rawConnection(fixture.socketPath);
   context.after(() => raw.socket.destroy());
@@ -1671,7 +1671,7 @@ test("bounds Git execution time and output without invoking a shell", async (con
   const executable = join(directory, "git");
   await writeFile(
     executable,
-    '#!/bin/sh\ncase " $* " in *" config --local "*) exit 1;; esac\nsleep 2\n',
+    '#!/bin/sh\ncase " $* " in *" config --local "*) exit 1;; esac\n/bin/sleep 2\n',
   );
   await chmod(executable, 0o700);
   const previousPath = process.env.PATH;
@@ -2213,7 +2213,7 @@ test("direct shell recovery returns canonical results without repeating effects"
   const runtime = () => {
     const tools = new ToolRegistry();
     tools.register({
-      name: "shell",
+      name: "bash",
       description: "Record one test shell effect",
       inputSchema: { type: "object" },
       async execute() {
@@ -2317,6 +2317,60 @@ test("concurrent sends conflict loudly instead of interleaving", async (context)
   );
   const snapshot = await subscribeAll(client, created.sessionId);
   assert.equal(snapshot.events.filter((event) => event.type === "user.message").length, 1);
+});
+
+test("steering and follow-ups cross clients through the daemon", async (context) => {
+  let releaseFirst = (): void => undefined;
+  context.after(() => releaseFirst());
+  let calls = 0;
+  const prompts: string[] = [];
+  const model: ModelPort = {
+    stream(request) {
+      calls += 1;
+      const call = calls;
+      const lastUser = request.messages.findLast((message) => message.role === "user");
+      prompts.push(lastUser?.content[0]?.type === "text" ? lastUser.content[0].text : "<missing>");
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          await new Promise<void>((resolvePromise) => {
+            releaseFirst = resolvePromise;
+          });
+        }
+        yield { type: "text_delta", text: `reply ${call}` };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model);
+  const sender = await connectUnixClient(socketPath);
+  const controller = await connectUnixClient(socketPath);
+  context.after(() => {
+    sender.close();
+    controller.close();
+  });
+  const created = await sender.request("session.create", { cwd });
+  const sending = sender.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "start" }],
+  });
+  while (calls === 0) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+
+  assert.deepEqual(
+    await controller.request("session.steer", {
+      sessionId: created.sessionId,
+      content: [{ type: "text", text: "adjust" }],
+    }),
+    { queued: true },
+  );
+  await controller.request("session.followUp", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "then summarize" }],
+  });
+  releaseFirst();
+  await sending;
+
+  assert.deepEqual(prompts, ["start", "adjust", "then summarize"]);
 });
 
 test("daemon-owned queued prompts are canonical and execute in priority order", async (context) => {
@@ -3310,7 +3364,9 @@ test("configuration changes rebuild and log the selected model and thinking", as
   assert.equal(changed.modelId, "gpt-4.1");
   assert.equal(changed.requestedThinkingLevel, "high");
   assert.equal(changed.effectiveThinkingLevel, "high");
-  assert.equal(changed.profile, "minimal");
+  assert.equal(changed.profile, "standard");
+  assert.equal(changed.webFetch, false);
+  assert.equal(changed.webSearch, false);
   assert.equal(changed.boundaryEventIds.length, 2);
 
   client.close();

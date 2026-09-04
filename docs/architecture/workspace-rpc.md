@@ -30,7 +30,7 @@ session.workspace.checkpoint
 
 List, read, status, and diff are read-only feature capabilities. Checkpoint configuration is a daemon-owned session operation. None grants model tools or changes the session profile.
 
-Wire version 3 provides batch `session.workspace.diff` results for working and last-turn review. Wire version 4 preserves checkpoint capture but replaces that batch result with status plus per-entry diff so the TUI and web app use one generation-checked contract. The TUI migrates through `packages/sdk`; no version-3 compatibility shim remains.
+Wire version 7 provides batch `session.workspace.diff` results for working and last-turn review. Wire version 8 preserves checkpoint capture but replaces that batch result with status plus per-entry diff so the TUI and web app use one generation-checked contract. The TUI migrates through `packages/sdk`; no version-7 compatibility shim remains.
 
 ## Workspace identity and path policy
 

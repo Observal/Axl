@@ -13,6 +13,7 @@ import type {
   BlobReference,
   CanonicalEvent,
   InteractionAction,
+  SessionProfile,
   ThinkingLevel,
   UserContent,
 } from "./events.ts";
@@ -23,11 +24,20 @@ export const MAX_WIRE_MESSAGE_BYTES = 1024 * 1024;
 
 export type EventCursor = string;
 
-export type SessionProfile = "minimal" | "standard" | "chat";
-
 export interface SessionModelSelection {
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+}
+
+export interface SessionToolSelection {
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
+}
+
+export type SessionSelection = SessionModelSelection & SessionToolSelection;
+
+export interface SessionConfiguration extends SessionSelection {
+  readonly profile?: SessionProfile;
 }
 
 export interface SessionOpenResult {
@@ -49,6 +59,9 @@ export interface SessionSummary {
   readonly firstUserMessage?: string;
   readonly lastUserMessage?: string;
   readonly parentSessionId?: SessionId;
+  readonly securityMode?: "sandboxed" | "unsafe";
+  readonly sandboxProvider?: string;
+  readonly sandboxImage?: string;
   readonly runtime: SessionOpenResult["runtime"];
   readonly attachmentCount: number;
 }
@@ -592,6 +605,9 @@ export const WIRE_CAPABILITIES = [
   "session.fork",
   "session.clone",
   "session.send.prompt",
+  "session.steer",
+  "session.follow_up",
+  "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
   "session.shell",
@@ -668,10 +684,7 @@ export interface RpcMethodMap {
     readonly result: RequestCancelResult;
   };
   readonly "session.create": {
-    readonly params: {
-      readonly cwd: string;
-      readonly profile?: SessionProfile;
-    } & SessionModelSelection;
+    readonly params: { readonly cwd: string } & SessionConfiguration;
     readonly result: SessionOpenResult;
   };
   readonly "session.resume": {
@@ -713,6 +726,18 @@ export interface RpcMethodMap {
       readonly stopReason: AssistantStopReason;
     };
   };
+  readonly "session.steer": {
+    readonly params: { readonly sessionId: SessionId; readonly content: readonly UserContent[] };
+    readonly result: { readonly queued: true };
+  };
+  readonly "session.followUp": {
+    readonly params: { readonly sessionId: SessionId; readonly content: readonly UserContent[] };
+    readonly result: { readonly queued: true };
+  };
+  readonly "session.compact": {
+    readonly params: { readonly sessionId: SessionId; readonly instructions?: string };
+    readonly result: { readonly eventId: EventId };
+  };
   readonly "session.queue.enqueue": {
     readonly params: {
       readonly sessionId: SessionId;
@@ -751,15 +776,14 @@ export interface RpcMethodMap {
     readonly result: { readonly boundaryEventIds: readonly EventId[] };
   };
   readonly "session.configure": {
-    readonly params: {
-      readonly sessionId: SessionId;
-      readonly profile?: SessionProfile;
-    } & SessionModelSelection;
+    readonly params: { readonly sessionId: SessionId } & SessionConfiguration;
     readonly result: {
       readonly modelId: string;
       readonly requestedThinkingLevel: ThinkingLevel;
       readonly effectiveThinkingLevel: ThinkingLevel;
       readonly profile: SessionProfile;
+      readonly webFetch: boolean;
+      readonly webSearch: boolean;
       readonly boundaryEventIds: readonly EventId[];
     };
   };
@@ -873,6 +897,7 @@ export function requiredCapability(method: RpcMethod): CapabilityId | undefined 
     return undefined;
   }
   if (method === "session.send") return "session.send.prompt";
+  if (method === "session.followUp") return "session.follow_up";
   return method;
 }
 export type RpcResult<Method extends RpcMethod> = RpcMethodMap[Method]["result"];
@@ -915,6 +940,7 @@ export const RPC_ERROR_CODES = [
   "corrupt_session",
   "event_migration_required",
   "operation_active",
+  "operation_inactive",
   "unknown_queue_item",
   "queue_not_paused",
   "invalid_fork_point",
@@ -1295,13 +1321,13 @@ const thinkingLevels: readonly ThinkingLevel[] = [
 
 function sessionProfile(value: unknown, path: string): SessionProfile | undefined {
   if (value === undefined) return undefined;
-  if (value !== "minimal" && value !== "standard" && value !== "chat") {
-    throw new ProtocolValidationError(path, "must be minimal, standard, or chat");
+  if (value !== "minimal" && value !== "standard" && value !== "chat" && value !== "exec") {
+    throw new ProtocolValidationError(path, "must be minimal, standard, chat, or exec");
   }
   return value;
 }
 
-function selection(params: Record<string, unknown>, path: string): SessionModelSelection {
+function selection(params: Record<string, unknown>, path: string): SessionSelection {
   const modelId =
     params.modelId === undefined ? undefined : string(params.modelId, `${path}.modelId`);
   const thinkingLevel = params.thinkingLevel;
@@ -1311,9 +1337,16 @@ function selection(params: Record<string, unknown>, path: string): SessionModelS
       `must be one of: ${thinkingLevels.join(", ")}`,
     );
   }
+  for (const field of ["webFetch", "webSearch"] as const) {
+    if (params[field] !== undefined && typeof params[field] !== "boolean") {
+      throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
+    }
+  }
   return {
     ...(modelId === undefined ? {} : { modelId }),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel: thinkingLevel as ThinkingLevel }),
+    ...(params.webFetch === undefined ? {} : { webFetch: params.webFetch as boolean }),
+    ...(params.webSearch === undefined ? {} : { webSearch: params.webSearch as boolean }),
   };
 }
 
@@ -1380,7 +1413,14 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.create") {
-    exact(params, "request.params", ["cwd", "modelId", "thinkingLevel", "profile"]);
+    exact(params, "request.params", [
+      "cwd",
+      "modelId",
+      "thinkingLevel",
+      "webFetch",
+      "webSearch",
+      "profile",
+    ]);
     const profile = sessionProfile(params.profile, "request.params.profile");
     return {
       ...base,
@@ -1388,7 +1428,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       params: {
         cwd: string(params.cwd, "request.params.cwd"),
         ...selection(params, "request.params"),
-        profile: profile ?? "minimal",
+        profile: profile ?? "standard",
       },
     };
   }
@@ -1515,6 +1555,36 @@ export function parseWireRequest(value: unknown): WireRequest {
       },
     };
   }
+  if (method === "session.steer" || method === "session.followUp") {
+    exact(params, "request.params", ["sessionId", "content"]);
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        content: parseUserContent(params.content, "request.params.content"),
+      },
+    };
+  }
+  if (method === "session.compact") {
+    exact(params, "request.params", ["sessionId", "instructions"]);
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        ...(params.instructions === undefined
+          ? {}
+          : {
+              instructions: boundedString(
+                params.instructions,
+                "request.params.instructions",
+                16_384,
+              ),
+            }),
+      },
+    };
+  }
   if (method === "session.queue.enqueue") {
     exact(params, "request.params", ["sessionId", "content", "priority"]);
     if (params.priority !== "front" && params.priority !== "back") {
@@ -1562,17 +1632,26 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.configure") {
-    exact(params, "request.params", ["sessionId", "modelId", "thinkingLevel", "profile"]);
+    exact(params, "request.params", [
+      "sessionId",
+      "modelId",
+      "thinkingLevel",
+      "webFetch",
+      "webSearch",
+      "profile",
+    ]);
     const configured = selection(params, "request.params");
     const profile = sessionProfile(params.profile, "request.params.profile");
     if (
       configured.modelId === undefined &&
       configured.thinkingLevel === undefined &&
+      configured.webFetch === undefined &&
+      configured.webSearch === undefined &&
       profile === undefined
     ) {
       throw new ProtocolValidationError(
         "request.params",
-        "must include modelId, thinkingLevel, or profile",
+        "must include modelId, thinkingLevel, webFetch, webSearch, or profile",
       );
     }
     return {
@@ -1581,7 +1660,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
         ...configured,
-        profile: profile ?? "minimal",
+        ...(profile === undefined ? {} : { profile }),
       },
     };
   }
@@ -1861,7 +1940,7 @@ function parseSessionOpenResult(
   if (!states.includes(runtime.state as (typeof states)[number])) {
     throw new ProtocolValidationError(`${path}.runtime.state`, "is not a valid runtime state");
   }
-  const profiles: readonly SessionProfile[] = ["minimal", "standard", "chat"];
+  const profiles: readonly SessionProfile[] = ["minimal", "standard", "chat", "exec"];
   if (!profiles.includes(result.profile as SessionProfile)) {
     throw new ProtocolValidationError(`${path}.profile`, "is not a valid session profile");
   }
@@ -1894,9 +1973,19 @@ function parseSessionSummary(value: unknown, path: string): SessionSummary {
     "firstUserMessage",
     "lastUserMessage",
     "parentSessionId",
+    "securityMode",
+    "sandboxProvider",
+    "sandboxImage",
     "runtime",
     "attachmentCount",
   ]);
+  if (
+    summary.securityMode !== undefined &&
+    summary.securityMode !== "sandboxed" &&
+    summary.securityMode !== "unsafe"
+  ) {
+    throw new ProtocolValidationError(`${path}.securityMode`, "must be sandboxed or unsafe");
+  }
   return {
     sessionId: parseSessionId(summary.sessionId, `${path}.sessionId`),
     cwd: string(summary.cwd, `${path}.cwd`),
@@ -1914,6 +2003,15 @@ function parseSessionSummary(value: unknown, path: string): SessionSummary {
     ...(summary.parentSessionId === undefined
       ? {}
       : { parentSessionId: parseSessionId(summary.parentSessionId, `${path}.parentSessionId`) }),
+    ...(summary.securityMode === undefined ? {} : { securityMode: summary.securityMode }),
+    ...(summary.sandboxProvider === undefined
+      ? {}
+      : {
+          sandboxProvider: boundedString(summary.sandboxProvider, `${path}.sandboxProvider`, 128),
+        }),
+    ...(summary.sandboxImage === undefined
+      ? {}
+      : { sandboxImage: boundedString(summary.sandboxImage, `${path}.sandboxImage`, 1024) }),
     runtime: parseSessionRuntime(summary.runtime, `${path}.runtime`),
     attachmentCount: nonNegativeInteger(summary.attachmentCount, `${path}.attachmentCount`),
   };
@@ -2084,6 +2182,17 @@ export function parseRpcResult<Method extends RpcMethod>(
       operationId: parseOperationId(result.operationId, `${path}.operationId`),
       stopReason: result.stopReason,
     };
+  } else if (method === "session.steer" || method === "session.followUp") {
+    const result = object(value, path);
+    exact(result, path, ["queued"]);
+    if (result.queued !== true) {
+      throw new ProtocolValidationError(`${path}.queued`, "must be true");
+    }
+    parsed = { queued: true };
+  } else if (method === "session.compact") {
+    const result = object(value, path);
+    exact(result, path, ["eventId"]);
+    parsed = { eventId: parseEventId(result.eventId, `${path}.eventId`) };
   } else if (method === "session.queue.enqueue" || method === "session.queue.requeue") {
     const result = object(value, path);
     exact(result, path, ["queueItemId", "state"]);
@@ -2138,6 +2247,8 @@ export function parseRpcResult<Method extends RpcMethod>(
       "requestedThinkingLevel",
       "effectiveThinkingLevel",
       "profile",
+      "webFetch",
+      "webSearch",
       "boundaryEventIds",
     ]);
     if (!thinkingLevels.includes(result.requestedThinkingLevel as ThinkingLevel)) {
@@ -2152,6 +2263,11 @@ export function parseRpcResult<Method extends RpcMethod>(
         "must be a thinking level",
       );
     }
+    for (const field of ["webFetch", "webSearch"] as const) {
+      if (typeof result[field] !== "boolean") {
+        throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
+      }
+    }
     if (!Array.isArray(result.boundaryEventIds) || result.boundaryEventIds.length > 256) {
       throw new ProtocolValidationError(`${path}.boundaryEventIds`, "must contain at most 256 IDs");
     }
@@ -2164,6 +2280,8 @@ export function parseRpcResult<Method extends RpcMethod>(
       requestedThinkingLevel: result.requestedThinkingLevel,
       effectiveThinkingLevel: result.effectiveThinkingLevel,
       profile,
+      webFetch: result.webFetch,
+      webSearch: result.webSearch,
       boundaryEventIds: result.boundaryEventIds.map((id, index) =>
         parseEventId(id, `${path}.boundaryEventIds[${index}]`),
       ),
@@ -2311,6 +2429,9 @@ export const RPC_METHODS = [
   "session.fork",
   "session.clone",
   "session.send",
+  "session.steer",
+  "session.followUp",
+  "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
   "session.shell",
@@ -2410,6 +2531,21 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_corrupt",
     "content_too_large",
   ],
+  "session.steer": [
+    ...SESSION_BASE_ERRORS,
+    "operation_inactive",
+    "blob_not_owned",
+    "blob_missing",
+    "blob_corrupt",
+  ],
+  "session.followUp": [
+    ...SESSION_BASE_ERRORS,
+    "operation_inactive",
+    "blob_not_owned",
+    "blob_missing",
+    "blob_corrupt",
+  ],
+  "session.compact": [...SESSION_BASE_ERRORS, "operation_active", "content_too_large"],
   "session.queue.enqueue": [
     ...SESSION_BASE_ERRORS,
     ...MUTATION_ERRORS,

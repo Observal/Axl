@@ -125,7 +125,7 @@ There is no generic gateway, SDK, or log-writer conversion from arbitrary JSON o
 
 Before accepting connections after the limit is introduced, the daemon scans existing session logs. A session containing an oversized committed event remains byte-for-byte unchanged and is quarantined with `event_migration_required`. The error identifies the session, event ID, event type, encoded size, limit, and recovery command without including payload content.
 
-Version 4 ships an offline recovery path before enforcing the limit:
+Version 8 ships an offline recovery path before enforcing the limit:
 
 1. `axl session export <session-id> --raw` copies the original JSONL and referenced blobs without parsing away unknown data.
 2. `axl session migrate-events <session-id>` requires the daemon to be stopped or an exclusive data-directory lock. It first creates a read-only backup and records source hashes.
@@ -183,7 +183,7 @@ interface SessionHistoryResult {
 }
 ```
 
-Version 4 evolves merged `session.history` into the mandatory base-protocol page method. Page cursors are opaque and bind the snapshot identity, session, selected node, event position, and expiry.
+Version 8 evolves merged `session.history` into the mandatory base-protocol page method. Page cursors are opaque and bind the snapshot identity, session, selected node, event position, and expiry.
 
 Each page fits within the negotiated ordinary-message limit and contains only complete canonical events. The universal canonical-event limit ensures one event can fit with its delivery envelope. Total history is bounded through paging rather than event splitting.
 

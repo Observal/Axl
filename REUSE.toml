@@ -26,6 +26,11 @@ path = [".agents/skills/**"]
 SPDX-FileCopyrightText = "2026 Hari Srinivasan"
 SPDX-License-Identifier = "Apache-2.0"
 
+[[annotations]]
+path = ["packages/protocol/test/fixtures/*.json"]
+SPDX-FileCopyrightText = "2026 Hari Srinivasan"
+SPDX-License-Identifier = "Apache-2.0"
+
 # Build output is disposable and inherits its source license.
 [[annotations]]
 path = ["packages/*/dist/**", "packages/extensions/*/dist/**"]

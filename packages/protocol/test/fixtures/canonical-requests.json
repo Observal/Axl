@@ -10,8 +10,8 @@
         "cwd": "/tmp/é",
         "modelId": "openai/gpt-5"
       },
-      "canonical": "{\"method\":\"session.create\",\"params\":{\"cwd\":\"/tmp/é\",\"modelId\":\"openai/gpt-5\",\"profile\":\"minimal\",\"thinkingLevel\":\"medium\"}}",
-      "sha256": "20e4826d7d2aea2a1a58a346d3874a4fac961c661d8ef075b62e2caa1a9889a0"
+      "canonical": "{\"method\":\"session.create\",\"params\":{\"cwd\":\"/tmp/é\",\"modelId\":\"openai/gpt-5\",\"profile\":\"standard\",\"thinkingLevel\":\"medium\"}}",
+      "sha256": "ba5bbbcced0dbdfac40c0c8f51d01937f0863988f258efc845608ba3dc5e38dd"
     },
     {
       "name": "nested interaction content",

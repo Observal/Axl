@@ -99,6 +99,7 @@ export class SessionView {
   private readonly renderBlob: BlobRenderer | undefined;
   model: string | undefined;
   thinking: string | undefined;
+  profile: string | undefined;
   sandbox: string | undefined;
   working = false;
   thinkingDisplay: ThinkingDisplay = "compact";
@@ -108,7 +109,7 @@ export class SessionView {
   outputTokens = 0;
   cacheReadTokens = 0;
   cacheWriteTokens = 0;
-  contextTokens = 0;
+  contextTokens: number | undefined = 0;
   cacheHitPercent: number | undefined;
   totalCostUsd = 0;
   tokensPerSecond: number | undefined;
@@ -183,9 +184,11 @@ export class SessionView {
       if (parts.length === 0) parts.push("ready");
     } else {
       const percent =
-        this.contextTokens === 0
-          ? "0.0%"
-          : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
+        this.contextTokens === undefined
+          ? "?"
+          : this.contextTokens === 0
+            ? "0.0%"
+            : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
       parts.push(`${percent}/${compactNumber(model.contextWindow)} context`);
     }
     return parts.join(" ");
@@ -219,6 +222,7 @@ export class SessionView {
     const projected = this.projection.state;
     this.model = projected.model;
     this.thinking = projected.thinking;
+    this.profile = projected.profile;
     this.sandbox =
       projected.sandbox === undefined
         ? undefined
@@ -374,6 +378,8 @@ export class SessionView {
       case "context.injected":
         return this.wrap(dim(`+ context [${sanitizeTerminalText(event.payload.source)}]`));
       case "context.compacted":
+        this.contextTokens = undefined;
+        this.cacheHitPercent = undefined;
         return [
           "",
           this.palette.accent("◇ Context compacted"),
@@ -396,7 +402,7 @@ export class SessionView {
       : queued
         ? `idle +${queued}`
         : "idle";
-    const full = `${activity} · session ${sessionId.slice(0, 8)} · model ${this.model ?? "?"} · thinking ${this.thinking ?? "?"} · sandbox ${this.sandbox ?? "none"}`;
+    const full = `${activity} · session ${sessionId.slice(0, 8)} · profile ${this.profile ?? "?"} · model ${this.model ?? "?"} · thinking ${this.thinking ?? "?"} · sandbox ${this.sandbox ?? "none"}`;
     return this.palette.dim(truncateToWidth(full, this.width, ""));
   }
 

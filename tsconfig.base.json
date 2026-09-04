@@ -18,6 +18,8 @@
       "@axl/protocol": ["./packages/protocol/src/index.ts"],
       "@axl/runtime": ["./packages/runtime/src/index.ts"],
       "@axl/sandbox": ["./packages/sandbox/src/index.ts"],
+      "@axl/sdk": ["./packages/sdk/src/index.ts"],
+      "@axl/sdk/unix": ["./packages/sdk/src/unix.ts"],
       "@axl/tui": ["./packages/tui/src/index.ts"]
     },
     "lib": ["ES2023", "ESNext.Array"],

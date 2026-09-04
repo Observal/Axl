@@ -17,6 +17,7 @@ import { basename, join, resolve } from "node:path";
 
 import {
   AgentSession,
+  type CompactionSettings,
   EventLogMigrationRequiredError,
   type EventLogOptions,
   type ExtensionHost,
@@ -42,8 +43,8 @@ import {
   parseOperationId,
   parseSessionId,
   type SessionActivityFrame,
+  type SessionConfiguration,
   type SessionId,
-  type SessionModelSelection,
   type SessionOpenResult,
   type SessionSummary,
   type UserContent,
@@ -80,13 +81,21 @@ export interface SessionRuntime {
   readonly system?: string;
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
+  readonly compaction?: Partial<CompactionSettings>;
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
+  readonly configProfile?: EventPayloadMap["config.profile"];
+  readonly configTools?: EventPayloadMap["config.tools"];
   readonly configDialect?: EventPayloadMap["config.dialect"];
 }
 
-export type SessionRuntimeBoundary = "session_start" | "reload" | "model_switch" | "config_change";
+export type SessionRuntimeBoundary =
+  | "session_start"
+  | "reload"
+  | "model_switch"
+  | "tool_change"
+  | "config_change";
 
 export interface SessionInteractionRequest {
   readonly kind: EventPayloadMap["interaction.requested"]["kind"];
@@ -104,7 +113,7 @@ export type SessionRuntimeFactory = (input: {
   readonly sessionId: SessionId;
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
-  readonly selection: SessionModelSelection;
+  readonly selection: SessionConfiguration;
   readonly interact: (
     request: SessionInteractionRequest,
     signal?: AbortSignal,
@@ -119,8 +128,9 @@ export interface SessionManagerOptions {
 }
 
 interface ActiveTurn {
+  readonly kind: "turn" | "shell" | "compaction";
   readonly operationId: OperationId;
-  readonly controller: AbortController;
+  controller: AbortController;
   readonly done: Promise<void>;
   finish(): void;
 }
@@ -150,8 +160,9 @@ interface ManagedSession {
     thinking: string;
     tools: Array<{ callId: string; name: string }>;
   };
-  selection: SessionModelSelection;
+  selection: SessionConfiguration;
   activeTurn?: ActiveTurn;
+  queuedInputs: Promise<void>;
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
   readonly queue: QueuedTurn[];
@@ -161,12 +172,15 @@ interface ManagedSession {
   workspaceCheckpointsEnabled: boolean;
 }
 
-function deferredTurn(operationId = parseOperationId(randomUUID(), "operationId")): ActiveTurn {
+function deferredTurn(
+  kind: ActiveTurn["kind"],
+  operationId = parseOperationId(randomUUID(), "operationId"),
+): ActiveTurn {
   let resolveDone = (): void => undefined;
   const done = new Promise<void>((resolvePromise) => {
     resolveDone = resolvePromise;
   });
-  return { operationId, controller: new AbortController(), done, finish: resolveDone };
+  return { kind, operationId, controller: new AbortController(), done, finish: resolveDone };
 }
 
 function userMessageText(event: CanonicalEvent): string | undefined {
@@ -179,7 +193,7 @@ function userMessageText(event: CanonicalEvent): string | undefined {
   return text || undefined;
 }
 
-type StoredSessionSummary = Omit<SessionSummary, "runtime" | "attachmentCount">;
+export type StoredSessionSummary = Omit<SessionSummary, "runtime" | "attachmentCount">;
 
 function summarizeSession(events: readonly CanonicalEvent[]): StoredSessionSummary {
   const created = events[0];
@@ -192,6 +206,11 @@ function summarizeSession(events: readonly CanonicalEvent[]): StoredSessionSumma
   });
   const firstUserMessage = messages[0];
   const lastUserMessage = messages.at(-1);
+  const sandbox = events.findLast((event) => event.type === "sandbox.configured");
+  const image =
+    sandbox?.type === "sandbox.configured" && typeof sandbox.payload.details?.image === "string"
+      ? sandbox.payload.details.image
+      : undefined;
   return {
     sessionId: created.sessionId,
     cwd: created.payload.cwd,
@@ -203,7 +222,47 @@ function summarizeSession(events: readonly CanonicalEvent[]): StoredSessionSumma
     ...(created.payload.parentSessionId === undefined
       ? {}
       : { parentSessionId: created.payload.parentSessionId }),
+    ...(sandbox?.type !== "sandbox.configured"
+      ? {}
+      : {
+          securityMode: sandbox.payload.enforced ? ("sandboxed" as const) : ("unsafe" as const),
+          sandboxProvider: sandbox.payload.provider,
+        }),
+    ...(image === undefined ? {} : { sandboxImage: image }),
   };
+}
+
+export async function listStoredSessions(
+  dataDirectory: string,
+): Promise<readonly SessionSummary[]> {
+  const directory = join(resolve(dataDirectory), "sessions");
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  const summaries: SessionSummary[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+    const sessionId = parseSessionId(basename(entry.name, ".jsonl"), "session file name");
+    const raw = await readFile(join(directory, entry.name), "utf8");
+    const lines = raw.split("\n");
+    lines.pop();
+    const events = lines
+      .filter((line) => line.length > 0)
+      .map((line) => parseEvent(JSON.parse(line) as unknown));
+    if (events.some((event) => event.sessionId !== sessionId)) {
+      throw new DaemonError("corrupt_session", `Session file ${entry.name} contains another ID`);
+    }
+    summaries.push({
+      ...summarizeSession(events),
+      runtime: { state: "inactive" },
+      attachmentCount: 0,
+    });
+  }
+  return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
 }
 
 /** Owns every live session. Clients never receive a mutable kernel object. */
@@ -332,7 +391,7 @@ export class SessionManager {
       tools: Array<{ callId: string; name: string }>;
     },
     boundary: SessionRuntimeBoundary,
-    selection: SessionModelSelection,
+    selection: SessionConfiguration,
     boundaryOperationId?: OperationId,
     creationOperationId?: OperationId,
   ): Promise<AgentSession> {
@@ -357,9 +416,12 @@ export class SessionManager {
         prepareOversizedEvent: (event) => this.externalizeOversizedContent(sessionId, event),
       },
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
+      ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
+      ...(runtime.configProfile === undefined ? {} : { configProfile: runtime.configProfile }),
+      ...(runtime.configTools === undefined ? {} : { configTools: runtime.configTools }),
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
       ...(boundaryOperationId === undefined ? {} : { boundaryOperationId }),
       ...(creationOperationId === undefined ? {} : { creationOperationId }),
@@ -378,7 +440,7 @@ export class SessionManager {
   private async open(
     sessionId: SessionId,
     cwd: string,
-    selection: SessionModelSelection,
+    selection: SessionConfiguration,
     creationOperationId?: OperationId,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [];
@@ -413,6 +475,7 @@ export class SessionManager {
       activityListeners,
       activityState,
       selection,
+      queuedInputs: Promise.resolve(),
       interactions: new Map(),
       queue: [],
       queueDraining: false,
@@ -426,7 +489,7 @@ export class SessionManager {
 
   async create(
     cwd: string,
-    selection: SessionModelSelection = {},
+    selection: SessionConfiguration = {},
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
@@ -631,7 +694,7 @@ export class SessionManager {
               : "idle",
         ...(activeOperationId === undefined ? {} : { activeOperationId }),
       },
-      profile: "minimal",
+      profile: managed.selection.profile ?? "standard",
     };
   }
 
@@ -894,14 +957,25 @@ export class SessionManager {
       throw new DaemonError("corrupt_session", `Session ${sessionId} has no creation event`);
     }
     let modelId: string | undefined;
-    let thinkingLevel: SessionModelSelection["thinkingLevel"];
+    let thinkingLevel: SessionConfiguration["thinkingLevel"];
+    let webFetch: boolean | undefined;
+    let webSearch: boolean | undefined;
+    let profile: SessionConfiguration["profile"];
     for (const event of events) {
       if (event.type === "config.model") modelId = event.payload.modelId;
       else if (event.type === "config.thinking") thinkingLevel = event.payload.requested;
+      else if (event.type === "config.profile") profile = event.payload.profile;
+      else if (event.type === "config.tools") {
+        webFetch = event.payload.webFetch;
+        webSearch = event.payload.webSearch;
+      }
     }
     return this.open(sessionId, created.payload.cwd, {
       ...(modelId === undefined ? {} : { modelId }),
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+      ...(webFetch === undefined ? {} : { webFetch }),
+      ...(webSearch === undefined ? {} : { webSearch }),
+      profile: profile ?? "standard",
     });
   }
 
@@ -926,13 +1000,15 @@ export class SessionManager {
 
   async configure(
     sessionId: unknown,
-    update: SessionModelSelection,
+    update: SessionConfiguration,
     operationId?: OperationId,
   ): Promise<{
     modelId: string;
-    requestedThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
-    effectiveThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
-    profile: "minimal";
+    requestedThinkingLevel: NonNullable<SessionConfiguration["thinkingLevel"]>;
+    effectiveThinkingLevel: NonNullable<SessionConfiguration["thinkingLevel"]>;
+    profile: NonNullable<SessionConfiguration["profile"]>;
+    webFetch: boolean;
+    webSearch: boolean;
     boundaryEventIds: readonly EventId[];
   }> {
     const managed = this.managed(sessionId);
@@ -956,7 +1032,10 @@ export class SessionManager {
     const boundary: SessionRuntimeBoundary =
       update.modelId !== undefined && update.modelId !== managed.selection.modelId
         ? "model_switch"
-        : "config_change";
+        : (update.webFetch !== undefined && update.webFetch !== managed.selection.webFetch) ||
+            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch)
+          ? "tool_change"
+          : "config_change";
     const before = managed.events.length;
     await this.rebuild(managed, boundary, selection, operationId);
     managed.selection = selection;
@@ -968,9 +1047,11 @@ export class SessionManager {
     boundaryEvents: readonly CanonicalEvent[],
   ): {
     modelId: string;
-    requestedThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
-    effectiveThinkingLevel: NonNullable<SessionModelSelection["thinkingLevel"]>;
-    profile: "minimal";
+    requestedThinkingLevel: NonNullable<SessionConfiguration["thinkingLevel"]>;
+    effectiveThinkingLevel: NonNullable<SessionConfiguration["thinkingLevel"]>;
+    profile: NonNullable<SessionConfiguration["profile"]>;
+    webFetch: boolean;
+    webSearch: boolean;
     boundaryEventIds: readonly EventId[];
   } {
     const modelId = managed.selection.modelId;
@@ -978,13 +1059,16 @@ export class SessionManager {
       throw new DaemonError("corrupt_session", "Configured session has no model identity");
     }
     const thinking = managed.events.findLast((event) => event.type === "config.thinking");
+    const tools = managed.events.findLast((event) => event.type === "config.tools");
     const requestedThinkingLevel = managed.selection.thinkingLevel ?? "off";
     return {
       modelId,
       requestedThinkingLevel,
       effectiveThinkingLevel:
         thinking?.type === "config.thinking" ? thinking.payload.effective : requestedThinkingLevel,
-      profile: "minimal",
+      profile: managed.selection.profile ?? "standard",
+      webFetch: tools?.type === "config.tools" ? tools.payload.webFetch : false,
+      webSearch: tools?.type === "config.tools" ? tools.payload.webSearch : false,
       boundaryEventIds: boundaryEvents.map((event) => event.id),
     };
   }
@@ -1069,6 +1153,46 @@ export class SessionManager {
     return { queueItemId, state: "queued" };
   }
 
+  steer(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
+    return this.queueInput(sessionId, content, "steer");
+  }
+
+  followUp(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
+    return this.queueInput(sessionId, content, "followUp");
+  }
+
+  private queueInput(
+    sessionId: unknown,
+    content: readonly UserContent[],
+    mode: "steer" | "followUp",
+  ): Promise<{ queued: true }> {
+    const managed = this.managed(sessionId);
+    const queued = managed.queuedInputs.then(async () => {
+      try {
+        for (const item of content) {
+          if (item.type === "blob") {
+            await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+          }
+        }
+      } catch (error) {
+        if (error instanceof BlobStoreError) {
+          throw new DaemonError(error.code, error.message, { cause: error });
+        }
+        throw error;
+      }
+      if (managed.activeTurn?.kind !== "turn" || managed.rebuilding) {
+        throw new DaemonError("operation_inactive", `No active model turn can receive ${mode}`);
+      }
+      managed.session[mode](content);
+      return { queued: true as const };
+    });
+    managed.queuedInputs = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
   async send(
     sessionId: unknown,
     content: readonly UserContent[],
@@ -1105,15 +1229,19 @@ export class SessionManager {
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn(operationId);
+    const active = deferredTurn("turn", operationId);
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
-      const result = await managed.session.runTurn(
+      let result = await managed.session.runTurn(
         content,
         active.controller.signal,
         active.operationId,
       );
+      while (managed.session.hasQueuedMessages()) {
+        active.controller = new AbortController();
+        result = (await managed.session.continueQueued(active.controller.signal)) ?? result;
+      }
       return { operationId: active.operationId, stopReason: result.stopReason };
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
@@ -1171,6 +1299,23 @@ export class SessionManager {
     }
   }
 
+  async compact(sessionId: unknown, customInstructions?: string): Promise<{ eventId: EventId }> {
+    const managed = this.managed(sessionId);
+    if (managed.activeTurn || managed.rebuilding) {
+      throw new DaemonError("operation_active", "An operation already owns this branch");
+    }
+    const active = deferredTurn("compaction");
+    managed.activeTurn = active;
+    try {
+      const event = await managed.session.compact(customInstructions, active.controller.signal);
+      return { eventId: event.id };
+    } finally {
+      if (managed.activeTurn === active) delete managed.activeTurn;
+      active.finish();
+      void this.drainQueue(managed);
+    }
+  }
+
   async shell(
     sessionId: unknown,
     operationId: OperationId,
@@ -1217,7 +1362,7 @@ export class SessionManager {
     if (managed.activeTurn || managed.rebuilding) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn(operationId);
+    const active = deferredTurn("shell", operationId);
     managed.activeTurn = active;
     try {
       await this.captureWorkspaceCheckpoint(managed);
@@ -1532,7 +1677,7 @@ export class SessionManager {
   private async rebuild(
     managed: ManagedSession,
     boundary: SessionRuntimeBoundary,
-    selection: SessionModelSelection,
+    selection: SessionConfiguration,
     operationId?: OperationId,
   ): Promise<void> {
     const previous = managed.session;

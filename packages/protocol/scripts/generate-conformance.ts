@@ -80,7 +80,9 @@ const eventPayloads = {
   "config.model": { modelId: "model-1" },
   "config.provider": { providerId: "provider-1" },
   "config.entitlement": { entitlementId: "credential-reference" },
+  "config.profile": { profile: "standard" },
   "config.thinking": { requested: "high", effective: "medium", clamped: true },
+  "config.tools": { webFetch: true, webSearch: false },
   "config.dialect": {
     dialectId: "openai-chat",
     rosterFingerprint: digest,
@@ -151,7 +153,7 @@ const params = {
   },
   "connection.ping": {},
   "request.cancel": { requestId: 7 },
-  "session.create": { cwd: "/workspace", profile: "minimal" },
+  "session.create": { cwd: "/workspace", profile: "standard" },
   "session.resume": { sessionId },
   "session.list": { scope: "all_local", order: "recent", pageSize: 50 },
   "session.history": { snapshotId: "snapshot-1", pageCursor: "page-1" },
@@ -160,6 +162,9 @@ const params = {
   "session.fork": { sessionId, fromEventId: eventId },
   "session.clone": { sessionId },
   "session.send": { sessionId, content: [{ type: "text", text: "hello" }], delivery: "prompt" },
+  "session.steer": { sessionId, content: [{ type: "text", text: "adjust" }] },
+  "session.followUp": { sessionId, content: [{ type: "text", text: "then summarize" }] },
+  "session.compact": { sessionId, instructions: "Focus on code changes" },
   "session.queue.enqueue": {
     sessionId,
     content: [{ type: "text", text: "later" }],
@@ -200,7 +205,7 @@ const opened = {
   sessionId,
   cwd: "/workspace",
   runtime: { state: "idle" },
-  profile: "minimal",
+  profile: "standard",
 } as const;
 const entry = {
   entryId: "entry-1",
@@ -249,6 +254,9 @@ const results = {
   "session.fork": { ...opened, selectedText: "hello" },
   "session.clone": opened,
   "session.send": { operationId, stopReason: "stop" },
+  "session.steer": { queued: true },
+  "session.followUp": { queued: true },
+  "session.compact": { eventId },
   "session.queue.enqueue": { queueItemId: eventId, state: "queued" },
   "session.queue.requeue": { queueItemId: eventId, state: "queued" },
   "session.shell": { operationId, isError: false, resultEventId: eventId },
@@ -258,7 +266,9 @@ const results = {
     modelId: "model-1",
     requestedThinkingLevel: "medium",
     effectiveThinkingLevel: "medium",
-    profile: "minimal",
+    profile: "standard",
+    webFetch: true,
+    webSearch: false,
     boundaryEventIds: [eventId],
   },
   "session.interaction.respond": {

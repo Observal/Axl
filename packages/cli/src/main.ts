@@ -11,10 +11,13 @@ import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
 import { type AxlClient, AxlClientError } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
-import type { ThinkingLevel } from "@axl/protocol";
+import type { SessionProfile, ThinkingLevel } from "@axl/protocol";
 import {
   diagnoseLocalSandboxes,
   type LocalSandboxSelection,
+  type LocalSessionDescriptor,
+  type LocalSessionPlacement,
+  listLocalSessions,
   localSandboxStateKey,
   startLocalDaemon,
 } from "@axl/runtime";
@@ -34,12 +37,20 @@ Options:
   --cwd <path>       Set the workspace directory
   --model <id>       Select the initial model
   --thinking <level> Select the initial reasoning effort
+  --profile <name>   Select the standard or Bash-only exec profile
   --theme <name>     Select the terminal theme
   --tui-mode <mode>  Use regular or fullscreen terminal mode
   --socket <path>    Use a custom daemon socket
   --sandbox <kind>   Use native, podman, or docker isolation
+  -r, --resume       Open the all-session resume picker
   --image <digest>   Use a locally available digest-pinned OCI image
   --unsafe           Disable operating-system isolation
+  --web               Enable web_fetch and web_search (default)
+  --no-web            Disable web_fetch and web_search
+  --web-fetch         Enable web_fetch
+  --no-web-fetch      Disable web_fetch
+  --web-search        Enable web_search
+  --no-web-search     Disable web_search
   --output <path>    Set the raw session export directory
   --confirm-prefix   Recover only events before an unsupported oversized event
   --help             Show this help
@@ -57,12 +68,16 @@ interface CliArguments {
   socket?: string;
   model?: string;
   thinking?: ThinkingLevel;
+  profile?: SessionProfile;
+  webFetch?: boolean;
+  webSearch?: boolean;
   theme?: string;
   tuiMode?: "regular" | "fullscreen";
   image?: string;
   sandbox: SandboxChoice;
   cwd: string;
   unsafe: boolean;
+  resume: boolean;
   showHelp: boolean;
   showVersion: boolean;
 }
@@ -72,6 +87,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     cwd: process.cwd(),
     sandbox: "native",
     unsafe: false,
+    resume: false,
     raw: false,
     confirmPrefix: false,
     showHelp: false,
@@ -105,6 +121,22 @@ function parseArguments(argv: readonly string[]): CliArguments {
     else if (argument === "--confirm-prefix") parsed.confirmPrefix = true;
     else if (argument === "--model") parsed.model = next();
     else if (argument === "--thinking") parsed.thinking = next() as ThinkingLevel;
+    else if (argument === "--profile") {
+      const profile = next();
+      if (profile !== "standard" && profile !== "exec") {
+        throw new Error(`Unknown profile ${profile}; expected standard or exec`);
+      }
+      parsed.profile = profile;
+    } else if (argument === "--web") {
+      parsed.webFetch = true;
+      parsed.webSearch = true;
+    } else if (argument === "--no-web") {
+      parsed.webFetch = false;
+      parsed.webSearch = false;
+    } else if (argument === "--web-fetch") parsed.webFetch = true;
+    else if (argument === "--no-web-fetch") parsed.webFetch = false;
+    else if (argument === "--web-search") parsed.webSearch = true;
+    else if (argument === "--no-web-search") parsed.webSearch = false;
     else if (argument === "--cwd") parsed.cwd = next();
     else if (argument === "--theme") parsed.theme = next();
     else if (argument === "--tui-mode") {
@@ -114,6 +146,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
       }
       parsed.tuiMode = mode;
     } else if (argument === "--image") parsed.image = next();
+    else if (argument === "--resume" || argument === "-r") parsed.resume = true;
     else if (argument === "--sandbox") {
       const sandbox = next();
       if (!(["native", "podman", "docker"] as const).includes(sandbox as SandboxChoice)) {
@@ -128,6 +161,12 @@ function parseArguments(argv: readonly string[]): CliArguments {
     } else if (!argument.startsWith("-") && !parsed.command?.startsWith("session-")) {
       parsed.sessionId = argument;
     } else throw new Error(`Unknown argument ${argument}`);
+  }
+  if (parsed.resume && parsed.sessionId !== undefined) {
+    throw new Error("--resume cannot be combined with a session ID");
+  }
+  if (parsed.resume && parsed.command !== undefined) {
+    throw new Error("--resume cannot be combined with a command");
   }
   if (parsed.command === "session-export" && !parsed.raw) {
     throw new Error("session export requires --raw");
@@ -151,6 +190,51 @@ function parseArguments(argv: readonly string[]): CliArguments {
     throw new Error(`--sandbox ${parsed.sandbox} requires --image with a sha256 digest`);
   }
   return parsed;
+}
+
+interface LocalDaemonTarget {
+  readonly stateDirectory: string;
+  readonly socketPath: string;
+  readonly unsafe: boolean;
+  readonly sandbox: SandboxChoice;
+  readonly image?: string;
+}
+
+function targetForPlacement(axlHome: string, placement: LocalSessionPlacement): LocalDaemonTarget {
+  if (placement.type === "unsafe") {
+    const stateDirectory = join(axlHome, "unsafe");
+    return {
+      stateDirectory,
+      socketPath: join(stateDirectory, "axl.sock"),
+      unsafe: true,
+      sandbox: "native",
+    };
+  }
+  const sandbox: LocalSandboxSelection =
+    placement.type === "native"
+      ? { type: "native" }
+      : { type: "oci", engine: placement.engine, image: placement.image };
+  const key = localSandboxStateKey(sandbox);
+  const stateDirectory = key === undefined ? axlHome : join(axlHome, key);
+  return {
+    stateDirectory,
+    socketPath: join(stateDirectory, "axl.sock"),
+    unsafe: false,
+    sandbox: placement.type === "native" ? "native" : placement.engine,
+    ...(placement.type === "oci" ? { image: placement.image } : {}),
+  };
+}
+
+function sessionResumeKey(session: LocalSessionDescriptor): string {
+  if (session.placement.type === "unsafe") return `unsafe:${session.sessionId}`;
+  if (session.placement.type === "native") return `native:${session.sessionId}`;
+  return `${session.placement.engine}:${session.placement.image}:${session.sessionId}`;
+}
+
+function samePlacement(left: LocalSessionPlacement, right: LocalSessionPlacement): boolean {
+  if (left.type !== right.type) return false;
+  if (left.type !== "oci" || right.type !== "oci") return true;
+  return left.engine === right.engine && left.image === right.image;
 }
 
 async function ensureCredentials(store: CredentialStore): Promise<void> {
@@ -181,6 +265,8 @@ async function ensureCredentials(store: CredentialStore): Promise<void> {
 interface ActiveConfig {
   readonly modelId: string;
   readonly thinkingLevel: ThinkingLevel;
+  readonly webFetch: boolean;
+  readonly webSearch: boolean;
 }
 
 class SecurityModeMismatchError extends Error {
@@ -236,6 +322,8 @@ async function connectOrStartDaemon(input: {
   readonly unsafe: boolean;
   readonly sandbox: SandboxChoice;
   readonly image?: string;
+  readonly webFetch: boolean;
+  readonly webSearch: boolean;
 }): Promise<AxlClient> {
   try {
     return await connectExpectedDaemon(input.socketPath, input.unsafe, input.sandbox, input.image);
@@ -259,6 +347,8 @@ async function connectOrStartDaemon(input: {
         ...(input.unsafe ? ["--unsafe"] : []),
         ...(input.sandbox === "native" ? [] : ["--sandbox", input.sandbox]),
         ...(input.image === undefined ? [] : ["--image", input.image]),
+        ...(input.webFetch ? [] : ["--no-web-fetch"]),
+        ...(input.webSearch ? [] : ["--no-web-search"]),
       ],
       { detached: true, stdio: "ignore" },
     );
@@ -333,6 +423,15 @@ async function main(): Promise<void> {
     process.stdout.write(`axl ${AXL_VERSION}\n`);
     return;
   }
+  if (cli.profile !== undefined && cli.command === "daemon") {
+    throw new Error("--profile selects a session and cannot be used with the daemon command");
+  }
+  if (cli.profile !== undefined && cli.sessionId !== undefined) {
+    throw new Error("--profile cannot replace the recorded profile of a resumed session");
+  }
+  if (cli.profile !== undefined && cli.resume) {
+    throw new Error("--profile cannot be combined with --resume");
+  }
 
   const startupIndicator = cli.command === undefined && showStartupIndicator("starting…");
   const tuiModule = cli.command === undefined ? import("@axl/tui") : undefined;
@@ -401,6 +500,8 @@ async function main(): Promise<void> {
   const active: ActiveConfig = {
     modelId: cli.model ?? settings.modelId ?? "gpt-5",
     thinkingLevel: cli.thinking ?? settings.thinkingLevel ?? "medium",
+    webFetch: cli.webFetch ?? settings.webFetch ?? true,
+    webSearch: cli.webSearch ?? settings.webSearch ?? true,
   };
 
   if (cli.command === "daemon") {
@@ -429,25 +530,71 @@ async function main(): Promise<void> {
     return;
   }
 
-  let client: AxlClient;
-  try {
-    client = await connectExpectedDaemon(socketPath, cli.unsafe, cli.sandbox, cli.image);
-    timing.mark("daemon connect");
-  } catch (error) {
-    if (error instanceof SecurityModeMismatchError) throw error;
-    const { store } = await credentials();
-    timing.mark("credential load");
-    await ensureCredentials(store);
-    client = await connectOrStartDaemon({
-      socketPath,
-      model: active.modelId,
-      thinking: active.thinkingLevel,
-      unsafe: cli.unsafe,
-      sandbox: cli.sandbox,
-      ...(cli.image === undefined ? {} : { image: cli.image }),
-    });
-    timing.mark("daemon start");
-  }
+  const connectTarget = async (target: LocalDaemonTarget): Promise<AxlClient> => {
+    await mkdir(target.stateDirectory, { recursive: true, mode: 0o700 });
+    try {
+      return await connectExpectedDaemon(
+        target.socketPath,
+        target.unsafe,
+        target.sandbox,
+        target.image,
+      );
+    } catch (error) {
+      if (error instanceof SecurityModeMismatchError) throw error;
+      const { store } = await credentials();
+      await ensureCredentials(store);
+      return connectOrStartDaemon({
+        socketPath: target.socketPath,
+        model: active.modelId,
+        thinking: active.thinkingLevel,
+        unsafe: target.unsafe,
+        sandbox: target.sandbox,
+        ...(target.image === undefined ? {} : { image: target.image }),
+        webFetch: active.webFetch,
+        webSearch: active.webSearch,
+      });
+    }
+  };
+  const currentPlacement: LocalSessionPlacement = cli.unsafe
+    ? { type: "unsafe" }
+    : sandbox.type === "native"
+      ? { type: "native" }
+      : { type: "oci", engine: sandbox.engine, image: sandbox.image };
+  const currentTarget: LocalDaemonTarget = {
+    stateDirectory,
+    socketPath,
+    unsafe: cli.unsafe,
+    sandbox: cli.sandbox,
+    ...(cli.image === undefined ? {} : { image: cli.image }),
+  };
+  const client = await connectTarget(currentTarget);
+  timing.mark("daemon connect");
+
+  let resumeCatalog = new Map<string, LocalSessionDescriptor>();
+  const loadResumeSessions = async () => {
+    const sessions = await listLocalSessions(axlHome);
+    resumeCatalog = new Map(sessions.map((session) => [sessionResumeKey(session), session]));
+    return sessions.map((session) => ({
+      ...session,
+      resumeKey: sessionResumeKey(session),
+      unsafe: session.placement.type === "unsafe",
+    }));
+  };
+  const openResumeSession = async (entry: { readonly resumeKey: string }) => {
+    let session = resumeCatalog.get(entry.resumeKey);
+    if (session === undefined) {
+      await loadResumeSessions();
+      session = resumeCatalog.get(entry.resumeKey);
+    }
+    if (session === undefined) throw new Error("Selected session is no longer available");
+    const target = samePlacement(session.placement, currentPlacement)
+      ? currentTarget
+      : targetForPlacement(axlHome, session.placement);
+    return {
+      client: await connectTarget(target),
+      reconnectClient: () => connectTarget(target),
+    };
+  };
 
   let settingsWrite: Promise<void> = Promise.resolve();
   const persistSettings = (update: Partial<Omit<TuiSettings, "version">>): Promise<void> => {
@@ -470,6 +617,9 @@ async function main(): Promise<void> {
     input: process.stdin,
     output: process.stdout,
     cwd: cli.cwd,
+    listResumeSessions: loadResumeSessions,
+    openResumeSession,
+    initialResume: cli.resume,
     ...((cli.theme ?? settings.theme) === undefined ? {} : { theme: cli.theme ?? settings.theme }),
     ...(settings.toolOutputDisplay === undefined
       ? {}
@@ -491,20 +641,15 @@ async function main(): Promise<void> {
     imageDisplay: settings.imageDisplay ?? "auto",
     extensions: [mcpTerminalExtension, skillTerminalExtension],
     clearStartupLine: startupIndicator,
-    reconnectClient: () =>
-      connectOrStartDaemon({
-        socketPath,
-        model: active.modelId,
-        thinking: active.thinkingLevel,
-        unsafe: cli.unsafe,
-        sandbox: cli.sandbox,
-        ...(cli.image === undefined ? {} : { image: cli.image }),
-      }),
+    reconnectClient: () => connectTarget(currentTarget),
     onPreferenceChange: persistSettings,
     models: AZURE_OPENAI_MODELS.map((model) => model.modelId),
     modelCatalog: AZURE_OPENAI_MODELS,
     currentModel: active.modelId,
     currentThinking: active.thinkingLevel,
+    ...(cli.profile === undefined ? {} : { profile: cli.profile }),
+    webFetch: active.webFetch,
+    webSearch: active.webSearch,
     loadCredentials: credentials,
     ...(cli.sessionId === undefined ? {} : { sessionId: cli.sessionId }),
     onExit: () => {

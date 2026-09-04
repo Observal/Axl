@@ -214,7 +214,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       const { ai, kernel, sandbox, provider } = await loadAssembly();
       const profile = selection.profile ?? "standard";
       const [hasMcpConfig, hasSkills] =
-        profile === "exec"
+        profile !== "standard"
           ? [false, false]
           : await Promise.all([
               Promise.all([
@@ -268,10 +268,14 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       });
       const tools = new kernel.ToolRegistry();
       const overflowDirectory = join(stateDirectory, "tool-output");
-      tools.register(sandbox.makeShellTool({ cwd, overflowDirectory, policy }));
+      if (profile !== "chat") {
+        tools.register(sandbox.makeShellTool({ cwd, overflowDirectory, policy }));
+      }
       if (profile === "standard") {
         tools.register(kernel.makeReadTool({ cwd, ...(unsafe ? {} : { policy }) }));
         tools.register(kernel.makeWriteTool({ cwd, ...(unsafe ? {} : { policy }) }));
+        tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
+      } else if (profile === "minimal") {
         tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
       }
       if (active.webFetch) tools.register(kernel.makeWebFetchTool());

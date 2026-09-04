@@ -95,8 +95,8 @@ The detailed protocol is specified in [web-protocol.md](web-protocol.md) and [we
 
 The approved direction is:
 
-- treat merged wire version 3 as the baseline for activity, blobs, bounded history, shell, workspace review, and daemon security mode
-- advance to wire version 4 because typed response envelopes, initialization, idempotency keys, subscription identities, opaque cursors, acknowledgements, presence, and structured errors are incompatible wire changes
+- treat merged wire version 7 as the baseline for activity, blobs, bounded history, shell, workspace review, daemon security mode, session profiles, web-tool selection, manual compaction, steering, and follow-ups
+- advance to wire version 8 because typed response envelopes, initialization, idempotency keys, subscription identities, opaque cursors, acknowledgements, presence, and structured errors are incompatible wire changes
 - validate method-specific requests, successes, and errors at runtime
 - represent requests and successes as mapped discriminated unions
 - keep mandatory connection-control methods in the base protocol rather than the negotiated feature catalog
@@ -122,7 +122,7 @@ The approved direction is:
 readonly delivery: "prompt" | "steer" | "follow_up";
 ```
 
-`prompt` is ordinary input. `steer` and `follow_up` are accepted only when their capabilities exist. Unsupported modes fail and are never simulated.
+`prompt` is ordinary input. Version 8 retains the version-7 `session.steer` and `session.followUp` methods. The unified `steer` and `follow_up` delivery values remain unavailable until their capabilities exist. Unsupported modes fail and are never simulated.
 
 The initial paged-snapshot protocol freezes a snapshot boundary, buffers the live tail, returns bounded pages, and begins live delivery only after the client completes that snapshot. It does not reject a session merely because its history exceeds one frame.
 
@@ -224,22 +224,22 @@ Missing, corrupt, or incompatible assets fail startup. Production never falls ba
 
 ## Compatibility impact
 
-Merged protocol version 3 is the compatibility baseline. This RFC advances the shared protocol to version 4 because it changes request and response envelopes, hello and initialization, errors, subscriptions, cursors, acknowledgements, and retryable mutations incompatibly. Before 1.0, clients and daemons accept only an exact version, and mismatches fail before session access.
+Merged protocol version 7 is the compatibility baseline. This RFC advances the shared protocol to version 8 because it changes request and response envelopes, hello and initialization, errors, subscriptions, cursors, acknowledgements, and retryable mutations incompatibly. Before 1.0, clients and daemons accept only an exact version, and mismatches fail before session access.
 
 The browser transport does not replace Unix sockets. Existing canonical JSONL remains authoritative. New profile or shell events require explicit event-catalog review and tests rather than client-local state.
 
-The web branch is rebased onto the merged TUI foundation. Version 4 preserves and types the working version-3 behavior for `daemon.info`, session list, resume, history, fork, clone, activity, blob start/chunk/commit/abort/read, direct shell, workspace checkpoints, and runtime assembly.
+The web branch is rebased onto the merged TUI foundation. Version 8 preserves and types the working version-7 behavior for `daemon.info`, session list, resume, history, fork, clone, activity, blob start/chunk/commit/abort/read, direct shell, workspace checkpoints, session profiles, web-tool selection, manual compaction, steering, follow-ups, and runtime assembly.
 
-Version 4 deliberately evolves the overlapping contracts:
+Version 8 deliberately evolves the overlapping contracts:
 
 - `session.resume` returns metadata only; `session.history` and `session.subscribe` provide race-free paged snapshot/cursor delivery
 - activity is associated with a subscription and reduced by the shared SDK projector
 - `session.shell` gains caller correlation and explicit uncertain outcomes without automatic retry
-- both clients move from the version-3 batch workspace diff to shared `session.workspace.*` list, read, status, per-entry diff, and checkpoint methods
+- both clients move from the version-7 batch workspace diff to shared `session.workspace.*` list, read, status, per-entry diff, and checkpoint methods
 - presentation-neutral TUI projection moves into `packages/sdk`; terminal layout and rendering remain in `packages/tui`
 - `packages/cli` keeps process startup and daemon assembly
 
-No compatibility shim preserves the version-3 wire or private TUI projection behavior.
+No compatibility shim preserves the version-7 wire or private TUI projection behavior.
 
 ## Alternatives considered
 
@@ -248,7 +248,7 @@ No compatibility shim preserves the version-3 wire or private TUI projection beh
 - Keep `result: unknown`: rejected because type assertions do not validate untrusted data.
 - Use event IDs as cursors: rejected because cursors also bind daemon lineage, append position, and selected node.
 - Keep idempotency in memory: rejected because restart after a lost response could duplicate a mutation.
-- Keep version-3 `includeEvents` plus event-ID paging unchanged: rejected because version 4 needs one typed snapshot/cursor and acknowledgement contract for every client.
+- Keep version-7 `includeEvents` plus event-ID paging unchanged: rejected because version 8 needs one typed snapshot/cursor and acknowledgement contract for every client.
 - Give the browser filesystem or Git arguments: rejected in favor of bounded session-scoped workspace RPCs.
 - Reduce events in React: rejected because TUI and web projections would drift.
 - Load Vite from another browser origin: rejected in favor of a same-origin gateway proxy.

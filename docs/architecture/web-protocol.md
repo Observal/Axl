@@ -11,13 +11,13 @@ This document specifies typed RPC, negotiation, errors, package ownership, and t
 
 ## Current baseline
 
-Merged wire version 3 uses newline-delimited JSON over a Unix socket. It adds daemon security reporting, bounded `session.history` pages, direct shell events, transient activity, session-bound blob upload/read/abort, and daemon-owned workspace checkpoint diffs to the prior session lifecycle methods.
+Merged wire version 7 uses newline-delimited JSON over a Unix socket. It includes daemon security reporting, bounded `session.history` pages, direct shell events, transient activity, session-bound blob upload/read/abort, daemon-owned workspace checkpoint diffs, session profiles, web-tool selection, manual compaction, steering, and follow-ups.
 
-Version 3 still returns `result: unknown`, uses untyped string errors, has a version-only hello, and has no initialization, capabilities, idempotency keys, subscription identity, acknowledgement, presence, or opaque cursor contract. The TUI casts results and reduces canonical state locally.
+Version 7 still returns `result: unknown`, uses untyped string errors, has a version-only hello, and has no initialization, capabilities, idempotency keys, subscription identity, acknowledgement, presence, or opaque cursor contract. The TUI casts results and reduces canonical state locally.
 
 ## Versioning
 
-Implement this RFC as wire version 4. Its typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence are incompatible with version 3. Compatible capability additions after version 4 do not require a bump. Pre-1.0 clients require an exact wire-version match.
+Implement this RFC as wire version 8. Its typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence are incompatible with version 7. Compatible capability additions after version 8 do not require a bump. Pre-1.0 clients require an exact wire-version match.
 
 The daemon sends `hello` first:
 
@@ -257,12 +257,14 @@ A validation failure before a request ID can be trusted uses `id: -1`. Once a va
 ## Session method shapes
 
 ```ts
-type SessionProfile = "minimal" | "standard" | "chat";
+type SessionProfile = "minimal" | "standard" | "chat" | "exec";
 type SendDelivery = "prompt" | "steer" | "follow_up";
 
 interface SessionModelSelection {
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
 }
 
 interface SessionCreateParams extends SessionModelSelection {
@@ -298,6 +300,20 @@ interface SessionSendResult {
   readonly operationId: OperationId;
   readonly stopReason: AssistantStopReason;
 }
+
+interface SessionSteerParams {
+  readonly sessionId: SessionId;
+  readonly content: readonly UserContent[];
+}
+type SessionSteerResult = { readonly queued: true };
+type SessionFollowUpParams = SessionSteerParams;
+type SessionFollowUpResult = SessionSteerResult;
+
+interface SessionCompactParams {
+  readonly sessionId: SessionId;
+  readonly instructions?: string;
+}
+type SessionCompactResult = { readonly eventId: EventId };
 
 interface SessionQueueEnqueueParams {
   readonly sessionId: SessionId;
@@ -354,6 +370,8 @@ interface SessionConfigureResult {
   readonly requestedThinkingLevel: ThinkingLevel;
   readonly effectiveThinkingLevel: ThinkingLevel;
   readonly profile: SessionProfile;
+  readonly webFetch: boolean;
+  readonly webSearch: boolean;
   readonly boundaryEventIds: readonly EventId[];
 }
 
@@ -379,7 +397,7 @@ interface SessionDisposeResult {
 
 `session.configure` includes at least one changed field. It returns event IDs rather than duplicate full events; the canonical events arrive through the subscription.
 
-`delivery: "prompt"` is the existing ordinary prompt behavior. `steer` and `follow_up` are accepted only when their capabilities are granted. Before those semantics land, clients send only `prompt` and do not present ordinary queuing as steering.
+`delivery: "prompt"` is ordinary prompt behavior. The version-7 `session.steer` and `session.followUp` methods remain available in version 8. The `session.send` delivery variants `steer` and `follow_up` remain unavailable until their separate capabilities are implemented, and clients must not simulate them.
 
 `session.send` completes when the turn reaches a canonical terminal assistant event or error. Detaching does not cancel it. `session.interrupt` is the session-operation cancellation path.
 
@@ -387,19 +405,19 @@ Queued prompts use `session.queue.enqueue` and `session.queue.requeue`. Enqueue 
 
 `session.shell` is correlated by its caller-supplied operation ID but is never retried automatically. Its SDK wrapper returns either `{ state: "completed", result }` or `{ state: "uncertain", operationId }`. If transport loss prevents the SDK from proving a canonical `user.shell` result, it preserves the command for explicit user review. `session.interrupt` may cancel the active shell operation, but cancellation does not imply that prior shell side effects were rolled back.
 
-A profile is accepted only when the daemon can enforce, persist, log, and restore it. Web chat maps to the zero-tool `chat` profile. Other profiles use the code interface. A reviewed canonical profile event is required before exposing the chat toggle.
+A profile is accepted only when the daemon can enforce, persist, log, and restore it. Web chat maps to the zero-tool `chat` profile. `minimal` provides Bash and editing, `standard` provides the normal tool set, and `exec` is Bash-only. The non-chat profiles use the code interface.
 
-## Merged version-3 reconciliation
+## Merged version-7 reconciliation
 
-Version 4 preserves these merged contracts while adding method-specific validation:
+Version 8 preserves these merged contracts while adding method-specific validation:
 
 - `daemon.info` continues to report `sandboxed` or `unsafe` before session access.
 - transient activity retains operation IDs, monotonic per-operation sequences, bounded text/thinking/tool-call frames, snapshots, and clear frames
 - blob start, chunk, commit, abort, and read remain session-bound and content-addressed
 - `user.shell` remains canonical, including command, content, error, and exclusion state
-- session list, fork, clone, runtime assembly, and exact version rejection remain daemon-owned
+- session list, fork, clone, runtime assembly, profiles, web-tool selection, manual compaction, steering, follow-ups, and exact version rejection remain daemon-owned
 
-Version 4 replaces the overlapping version-3 client contracts:
+Version 8 replaces the overlapping version-7 client contracts:
 
 - `session.resume.includeEvents` is removed; resume returns metadata only
 - `session.history` becomes the bounded page method for a frozen subscription snapshot and opaque cursors
@@ -408,7 +426,7 @@ Version 4 replaces the overlapping version-3 client contracts:
 - the batch `session.workspace.diff` result is replaced by shared list, read, status, per-entry diff, and checkpoint contracts
 - presentation-neutral event and activity reduction moves into `packages/sdk`
 
-No compatibility shim preserves the version-3 wire or private TUI projection behavior.
+No compatibility shim preserves the version-7 wire or private TUI projection behavior.
 
 ## Session-open and list shapes
 
@@ -474,7 +492,7 @@ Unsubscribe, detach, gateway stop, interrupt, session disposal, and daemon stop 
 
 ## Transient activity and blobs
 
-The merged activity frame remains non-canonical and uses strictly increasing per-operation sequence numbers with bounded text, thinking, tool-call, snapshot, and clear variants. Version 4 wraps it in the owning subscription:
+The merged activity frame remains non-canonical and uses strictly increasing per-operation sequence numbers with bounded text, thinking, tool-call, snapshot, and clear variants. Version 8 wraps it in the owning subscription:
 
 ```ts
 interface ActivityDelivery {
@@ -537,7 +555,7 @@ The first private in-tree TypeScript SDK surface is limited to:
 - injected transport and credential interfaces
 - Node Unix-socket and browser WebSocket adapters outside browser-neutral code
 
-It contains no global state framework, agent loop, policy, Git execution, React component, or credential value. TUI and web migrate to this surface in the version-4 slice. A future Tauri app may reuse it directly; native Android and iOS clients use later language-specific implementations of the same protocol.
+It contains no global state framework, agent loop, policy, Git execution, React component, or credential value. TUI and web migrate to this surface in the version-8 slice. A future Tauri app may reuse it directly; native Android and iOS clients use later language-specific implementations of the same protocol.
 
 ## Protocol tests
 
@@ -546,7 +564,7 @@ Required tests cover:
 - every method request, success, and allowed error
 - unknown and extra fields
 - method-to-params discrimination
-- exact version-3 versus version-4 mismatch
+- exact version-7 versus version-8 mismatch
 - missing capability behavior
 - calls before initialization
 - valid unknown diagnostic client kinds without authority changes

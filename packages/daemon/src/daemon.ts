@@ -669,12 +669,7 @@ export class AxlDaemon {
       });
       normalized = {
         ...request,
-        params: { ...request.params, cwd, profile: request.params.profile ?? "minimal" },
-      };
-    } else if (request.method === "session.configure") {
-      normalized = {
-        ...request,
-        params: { ...request.params, profile: request.params.profile ?? "minimal" },
+        params: { ...request.params, cwd, profile: request.params.profile ?? "standard" },
       };
     } else if (request.method === "session.list" && request.params.cwd !== undefined) {
       const cwd = await realpath(request.params.cwd).catch((cause: unknown) => {
@@ -759,19 +754,16 @@ export class AxlDaemon {
         return { cancellationRequested: controller !== undefined };
       }
       case "session.create": {
-        const { cwd, modelId, thinkingLevel, profile } = request.params;
-        if (profile !== undefined && profile !== "minimal") {
-          throw new DaemonError(
-            "unsupported_capability",
-            `Session profile ${profile} is not available`,
-          );
-        }
+        const { cwd, modelId, thinkingLevel, webFetch, webSearch, profile } = request.params;
         const reservation = this.creationReservation(acceptance);
         const created = await this.sessions.create(
           cwd,
           {
             ...(modelId === undefined ? {} : { modelId }),
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+            ...(webFetch === undefined ? {} : { webFetch }),
+            ...(webSearch === undefined ? {} : { webSearch }),
+            profile: profile ?? "standard",
           },
           reservation,
         );
@@ -813,7 +805,7 @@ export class AxlDaemon {
         if (request.params.delivery !== "prompt") {
           throw new DaemonError(
             "unsupported_capability",
-            `Delivery mode ${request.params.delivery} is not available`,
+            `Delivery mode ${request.params.delivery} is not available; use the negotiated steering method`,
           );
         }
         return this.sessions.send(
@@ -821,6 +813,12 @@ export class AxlDaemon {
           request.params.content,
           this.mutationOperationId(acceptance),
         );
+      case "session.steer":
+        return this.sessions.steer(request.params.sessionId, request.params.content);
+      case "session.followUp":
+        return this.sessions.followUp(request.params.sessionId, request.params.content);
+      case "session.compact":
+        return this.sessions.compact(request.params.sessionId, request.params.instructions);
       case "session.queue.enqueue":
         return this.sessions.enqueue(
           request.params.sessionId,
@@ -847,18 +845,15 @@ export class AxlDaemon {
       case "session.reload":
         return this.sessions.reload(request.params.sessionId, this.mutationOperationId(acceptance));
       case "session.configure": {
-        const { sessionId, modelId, thinkingLevel, profile } = request.params;
-        if (profile !== undefined && profile !== "minimal") {
-          throw new DaemonError(
-            "unsupported_capability",
-            `Session profile ${profile} is not available`,
-          );
-        }
+        const { sessionId, modelId, thinkingLevel, webFetch, webSearch, profile } = request.params;
         return this.sessions.configure(
           sessionId,
           {
             ...(modelId === undefined ? {} : { modelId }),
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+            ...(webFetch === undefined ? {} : { webFetch }),
+            ...(webSearch === undefined ? {} : { webSearch }),
+            ...(profile === undefined ? {} : { profile }),
           },
           this.mutationOperationId(acceptance),
         );

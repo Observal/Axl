@@ -10,6 +10,7 @@ import type {
   OperationId,
   SessionActivityFrame,
   SessionId,
+  SessionProfile,
   ThinkingLevel,
   Usage,
 } from "@axl/protocol";
@@ -102,6 +103,9 @@ export interface ConversationState {
   readonly provider?: string;
   readonly entitlement?: string;
   readonly thinking?: ThinkingLevel;
+  readonly profile?: SessionProfile;
+  readonly webFetch?: boolean;
+  readonly webSearch?: boolean;
   readonly sandbox?: { readonly provider: string; readonly enforced: boolean };
   readonly usage: UsageTotals;
   readonly activity?: ProjectedActivity;
@@ -181,6 +185,9 @@ export class ConversationProjector {
   private provider: string | undefined;
   private entitlement: string | undefined;
   private thinking: ThinkingLevel | undefined;
+  private profile: SessionProfile | undefined;
+  private webFetch: boolean | undefined;
+  private webSearch: boolean | undefined;
   private sandbox: ConversationState["sandbox"];
   private usage: UsageTotals = EMPTY_USAGE;
   private activity: ProjectedActivity | undefined;
@@ -213,6 +220,9 @@ export class ConversationProjector {
       ...(this.provider === undefined ? {} : { provider: this.provider }),
       ...(this.entitlement === undefined ? {} : { entitlement: this.entitlement }),
       ...(this.thinking === undefined ? {} : { thinking: this.thinking }),
+      ...(this.profile === undefined ? {} : { profile: this.profile }),
+      ...(this.webFetch === undefined ? {} : { webFetch: this.webFetch }),
+      ...(this.webSearch === undefined ? {} : { webSearch: this.webSearch }),
       ...(this.sandbox === undefined ? {} : { sandbox: this.sandbox }),
       usage: this.usage,
       ...(this.activity === undefined ? {} : { activity: this.activity }),
@@ -248,6 +258,9 @@ export class ConversationProjector {
     this.provider = undefined;
     this.entitlement = undefined;
     this.thinking = undefined;
+    this.profile = undefined;
+    this.webFetch = undefined;
+    this.webSearch = undefined;
     this.sandbox = undefined;
     this.usage = EMPTY_USAGE;
     this.activity = undefined;
@@ -389,6 +402,13 @@ export class ConversationProjector {
         break;
       case "config.thinking":
         this.thinking = event.payload.effective;
+        break;
+      case "config.profile":
+        this.profile = event.payload.profile;
+        break;
+      case "config.tools":
+        this.webFetch = event.payload.webFetch;
+        this.webSearch = event.payload.webSearch;
         break;
       case "sandbox.configured":
         this.sandbox = { provider: event.payload.provider, enforced: event.payload.enforced };
