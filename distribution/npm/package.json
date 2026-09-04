@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
+    "ws": "8.21.0",
     "yaml": "2.8.3"
   }
 }

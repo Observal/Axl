@@ -102,7 +102,7 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
     target: "node22",
     sourcemap: false,
     legalComments: "none",
-    external: ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "yaml"],
+    external: ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "ws", "yaml"],
     define: {
       "process.env.AXL_BUILD_VERSION": JSON.stringify(manifest.version),
     },

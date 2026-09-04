@@ -29,10 +29,12 @@
     "@axl/extension-skills": "workspace:*",
     "@axl/protocol": "workspace:*",
     "@axl/runtime": "workspace:*",
+    "@axl/sdk": "workspace:*",
     "@axl/tui": "workspace:*",
-    "@axl/sdk": "workspace:*"
+    "ws": "8.21.0"
   },
   "devDependencies": {
-    "@axl/kernel": "workspace:*"
+    "@axl/kernel": "workspace:*",
+    "@types/ws": "8.18.1"
   }
 }
