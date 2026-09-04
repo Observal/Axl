@@ -171,6 +171,12 @@ function exactOrigin(request: IncomingMessage, expected: string): boolean {
   return request.headers.origin === expected;
 }
 
+function sameOriginHttpRequest(request: IncomingMessage, expected: string): boolean {
+  const suppliedOrigin = request.headers.origin;
+  if (suppliedOrigin !== undefined) return suppliedOrigin === expected;
+  return request.headers["sec-fetch-site"] === "same-origin";
+}
+
 function cookieValue(request: IncomingMessage, name: string): string | undefined {
   const header = request.headers.cookie;
   if (header === undefined) return undefined;
@@ -580,7 +586,7 @@ export async function startWebGateway(options: StartWebGatewayOptions): Promise<
       }
       const authenticated =
         requestUrl.pathname.startsWith(`${pathPrefix}/`) &&
-        exactOrigin(request, origin) &&
+        sameOriginHttpRequest(request, origin) &&
         now() < credentialExpiresAt &&
         secretMatches(cookieValue(request, cookieName), credential);
       if (!authenticated) {

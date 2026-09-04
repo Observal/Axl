@@ -38,6 +38,9 @@ async function request(
     readonly origin?: string;
     readonly host?: string;
     readonly cookie?: string;
+    readonly fetchSite?: string;
+    readonly fetchMode?: string;
+    readonly fetchDest?: string;
     readonly body?: string;
   } = {},
 ): Promise<HttpResult> {
@@ -47,6 +50,9 @@ async function request(
     if (options.origin !== undefined) outgoingHeaders.Origin = options.origin;
     if (options.host !== undefined) outgoingHeaders.Host = options.host;
     if (options.cookie !== undefined) outgoingHeaders.Cookie = options.cookie;
+    if (options.fetchSite !== undefined) outgoingHeaders["Sec-Fetch-Site"] = options.fetchSite;
+    if (options.fetchMode !== undefined) outgoingHeaders["Sec-Fetch-Mode"] = options.fetchMode;
+    if (options.fetchDest !== undefined) outgoingHeaders["Sec-Fetch-Dest"] = options.fetchDest;
     const outgoing = httpRequest(
       target,
       { method: options.method ?? "GET", headers: outgoingHeaders },
@@ -377,7 +383,7 @@ test("9. every HTTP response carries the required security headers", async (cont
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
-test("10. development traffic is authenticated and remains on the gateway origin", async (context) => {
+test("10. bootstrap navigation and development traffic remain authenticated on the gateway origin", async (context) => {
   const vitePaths: string[] = [];
   const vite = createHttpServer((request, response) => {
     vitePaths.push(request.url ?? "");
@@ -393,11 +399,27 @@ test("10. development traffic is authenticated and remains on the gateway origin
   });
   const auth = await authenticate(gateway);
   assert.equal(auth.path, `${gateway.pathPrefix}/dev/`);
-  assert.equal(
-    (await request(gateway, auth.path, { origin: gateway.origin, cookie: auth.cookie })).body,
-    `import "${gateway.pathPrefix}/dev/@vite/client";`,
-  );
+  const navigation = await request(gateway, auth.path, {
+    cookie: auth.cookie,
+    fetchSite: "same-origin",
+    fetchMode: "navigate",
+    fetchDest: "document",
+  });
+  assert.equal(navigation.status, 200);
+  assert.equal(navigation.body, `import "${gateway.pathPrefix}/dev/@vite/client";`);
   assert.deepEqual(vitePaths, ["/__axl_dev__/"]);
+
+  for (const rejected of [
+    await request(gateway, auth.path, { cookie: auth.cookie }),
+    await request(gateway, auth.path, { cookie: auth.cookie, fetchSite: "cross-site" }),
+    await request(gateway, auth.path, {
+      cookie: auth.cookie,
+      origin: "http://attacker.invalid",
+      fetchSite: "same-origin",
+    }),
+  ]) {
+    assert.equal(rejected.status, 404);
+  }
   assert.throws(() => validateLoopbackViteUrl("http://example.com:5173"));
 });
 

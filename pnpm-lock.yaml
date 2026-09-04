@@ -206,6 +206,9 @@ importers:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
     devDependencies:
+      '@axl/cli':
+        specifier: workspace:*
+        version: link:../cli
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon

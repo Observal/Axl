@@ -9,6 +9,7 @@
     "paths": {
       "@axl/ai": ["./packages/ai/src/index.ts"],
       "@axl/ai/models": ["./packages/ai/src/models.ts"],
+      "@axl/cli": ["./packages/cli/src/index.ts"],
       "@axl/daemon": ["./packages/daemon/src/index.ts"],
       "@axl/daemon/client": ["./packages/daemon/src/client.ts"],
       "@axl/extension-api": ["./packages/extensions/api/src/index.ts"],

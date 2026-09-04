@@ -58,7 +58,9 @@ It does not rely on a DNS hostname.
 
 Every request must carry the exact selected `Host`. Absolute-form targets and forwarded headers do not override it. Invalid hosts receive a fixed response with no protected content.
 
-Every authenticated HTTP request and WebSocket upgrade must carry the exact selected `Origin`. Missing, `null`, file, extension, alternate-port, alternate-loopback-name, and suffix-matched origins are rejected. CORS is disabled.
+Authentication exchanges and WebSocket upgrades must carry the exact selected `Origin`. Protected HTTP requests must carry either the exact selected `Origin` or, when `Origin` is absent on a same-origin top-level navigation or subresource request, `Sec-Fetch-Site: same-origin`. A supplied `Origin` always takes precedence and must match exactly. Missing both signals, `null`, cross-site, file, extension, alternate-port, alternate-loopback-name, and suffix-matched origins are rejected. CORS is disabled.
+
+Browsers do not reliably send `Origin` on top-level GET navigation, including the `location.replace` that follows launch-token exchange. Fetch Metadata is therefore the fail-closed navigation signal. It is accepted only together with the valid path-scoped cookie, unguessable process path, and exact `Host`; authentication POSTs and WebSocket upgrades do not use this exception.
 
 ## Launch authentication
 
@@ -115,7 +117,7 @@ flowchart LR
 
 The browser never loads application assets or opens development WebSockets directly against a second Vite origin.
 
-Development mode is explicit. The gateway validates the configured Vite target as loopback, reverse-proxies only known asset and hot-reload paths, and keeps authentication and Host/Origin checks active. It prints a development warning.
+Development mode is explicit. The gateway validates the configured Vite target as loopback, reverse-proxies only known asset and hot-reload paths, and keeps authentication, exact Host, and same-origin request checks active. It prints a development warning.
 
 The gateway does not trust headers returned by Vite. It applies its own security and cache headers at the browser boundary. Production never starts or falls back to Vite.
 
