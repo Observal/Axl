@@ -1,0 +1,26 @@
+{
+  "name": "@axl/extension-prompts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Prompt template discovery and expansion for Axl",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json --force",
+    "test": "pnpm --filter @axl/extension-api build && node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@axl/extension-api": "workspace:*",
+    "yaml": "2.8.3"
+  }
+}

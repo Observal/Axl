@@ -12,6 +12,8 @@ Use `axl doctor` to inspect native, Podman, and Docker enforcement. Select local
 
 Web fetch and search are enabled by default. Use `--no-web-fetch`, `--no-web-search`, or `--no-web` to remove them from a new session's tool roster.
 
+Interactive sessions load global prompt templates from `~/.axl/prompts/*.md` and project overrides from `.axl/prompts/*.md`. Use `/prompt` to browse templates or `/prompt <name> [arguments]` to expand one into an editable draft.
+
 ## Print mode
 
 `axl print <prompt>` or `axl -p <prompt>` creates a durable session, runs one headless turn, writes only the final assistant text to stdout, and exits. Piped UTF-8 stdin is appended to the argument prompt after a blank line. Diagnostics and failures go to stderr, and a request for interactive input makes the command fail instead of waiting indefinitely.

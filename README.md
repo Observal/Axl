@@ -9,7 +9,7 @@ Axl, short for Axolotl, is a local-first agent harness for developers who want o
 
 A single daemon owns the session, model loop, tools, policy, and canonical event history. Clients connect through a typed protocol and shared SDK. They render the same state and submit user intent, but they do not become independent agents.
 
-> **Project status:** Axl is under active development and has not published its first release. Roadmap phases 0 through 4 are complete. The TUI, Agent Skills, MCP support, native Linux hardening, and local OCI execution were brought forward from later phases. Web, desktop, mobile, hosted relay, and broader provider work remain planned unless explicitly marked implemented.
+> **Project status:** Axl is under active development and has not published its first release. Roadmap phases 0 through 4 are complete. The TUI, prompt templates, Agent Skills, MCP support, native Linux hardening, and local OCI execution were brought forward from later phases. Web, desktop, mobile, hosted relay, and broader provider work remain planned unless explicitly marked implemented.
 
 ## Who Axl is for
 
@@ -35,11 +35,25 @@ Axl is not yet a hosted service, remote collaboration product, browser applicati
 | Automation | One-shot text and canonical JSONL output with `axl print` and `axl json`, plus native daemon RPC with `axl rpc` |
 | Model interaction | Azure OpenAI model catalog, model selection, thinking levels, streaming text and reasoning, tool calls, steering, and follow-ups |
 | Built-in tools | `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search` |
-| Extensions | Public extension API, Agent Skills, and MCP 2025-11-25 over stdio and Streamable HTTP |
+| Extensions | Public extension API, prompt templates, Agent Skills, and MCP 2025-11-25 over stdio and Streamable HTTP |
 | Workspace review | Bounded file listing and reads, Git status, structured diffs, and daemon-owned last-turn checkpoints |
 | Terminal UI | Multiline editor, history, themes, model controls, tool rendering, image attachments, regular scrollback mode, and fullscreen mode |
 | Isolation | Bubblewrap, Landlock, seccomp, and rlimits on Linux; Seatbelt on macOS; optional rootless Podman or Docker execution |
 | Safety | Path canonicalization, symlink-escape rejection, secret redaction, bounded protocol messages, and fail-closed sandbox selection |
+
+## Prompt templates
+
+Put reusable Markdown prompts in `~/.axl/prompts/` or `.axl/prompts/`. Project templates override global templates with the same filename. Run `/prompt` to browse them or `/prompt <name> [arguments]` to expand one into the editor for review before sending. Templates reload with `/reload`.
+
+```markdown
+---
+description: Review one file
+usage: "<path> [focus]"
+---
+Review {{1}}. Focus on {{2=correctness}}.
+```
+
+Use `{{1}}` through `{{99}}` for quoted positional arguments, `{{all}}` for every argument, and `{{1=default}}` or `{{all=default}}` for defaults.
 
 ## Architecture
 
@@ -59,7 +73,7 @@ flowchart LR
     Daemon[Daemon<br/>sessions, subscriptions,<br/>presence, workspace RPCs]
     Kernel[Kernel<br/>JSONL, agent loop, tools,<br/>policy, operation ownership]
     AI[AI providers<br/>credentials, models, dialects]
-    Extensions[Extensions<br/>Skills and MCP]
+    Extensions[Extensions<br/>prompts, Skills, and MCP]
     Sandbox[Sandbox<br/>native and OCI]
   end
 
@@ -298,6 +312,7 @@ First-party and third-party features use the same public extension API. Extensio
 
 Implemented first-party integrations include:
 
+- Prompt template discovery, argument expansion, and editable review
 - Agent Skills discovery, validation, and progressive loading
 - MCP 2025-11-25 over stdio and Streamable HTTP
 - capability-scoped terminal commands, shortcuts, widgets, lifecycle listeners, and tool renderers
@@ -315,6 +330,7 @@ Implemented first-party integrations include:
 | `packages/sandbox` | Native and OCI operating-system confinement |
 | `packages/cli` | Process startup, placement selection, provider setup, and client launch |
 | `packages/tui` | Interactive terminal presentation over the public SDK |
+| `packages/extensions/prompts` | Prompt template discovery and editor expansion |
 | `packages/extensions/skills` | Agent Skills integration |
 | `packages/extensions/mcp` | MCP integration |
 

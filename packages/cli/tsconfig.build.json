@@ -13,6 +13,7 @@
     { "path": "../ai/tsconfig.build.json" },
     { "path": "../daemon/tsconfig.build.json" },
     { "path": "../extensions/mcp/tsconfig.build.json" },
+    { "path": "../extensions/prompts/tsconfig.build.json" },
     { "path": "../extensions/skills/tsconfig.build.json" },
     { "path": "../runtime/tsconfig.build.json" },
     { "path": "../tui/tsconfig.build.json" },

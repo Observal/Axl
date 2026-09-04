@@ -38,6 +38,9 @@ importers:
       '@axl/extension-mcp':
         specifier: workspace:*
         version: link:../extensions/mcp
+      '@axl/extension-prompts':
+        specifier: workspace:*
+        version: link:../extensions/prompts
       '@axl/extension-skills':
         specifier: workspace:*
         version: link:../extensions/skills
@@ -87,6 +90,15 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.30.0
         version: 1.30.0(zod@4.5.4)
+
+  packages/extensions/prompts:
+    dependencies:
+      '@axl/extension-api':
+        specifier: workspace:*
+        version: link:../api
+      yaml:
+        specifier: 2.8.3
+        version: 2.8.3
 
   packages/extensions/skills:
     dependencies:

@@ -889,9 +889,15 @@ async function main(): Promise<void> {
     return settingsWrite;
   };
 
-  const [{ AxlApp }, { mcpTerminalExtension }, { skillTerminalExtension }] = await Promise.all([
+  const [
+    { AxlApp },
+    { mcpTerminalExtension },
+    { promptTemplatesExtension },
+    { skillTerminalExtension },
+  ] = await Promise.all([
     tuiModule ?? import("@axl/tui"),
     import("@axl/extension-mcp"),
+    import("@axl/extension-prompts"),
     import("@axl/extension-skills"),
   ]);
   timing.mark("TUI modules");
@@ -922,7 +928,11 @@ async function main(): Promise<void> {
     diffLayout: settings.diffLayout ?? "unified",
     workspaceReview: settings.workspaceReview ?? false,
     imageDisplay: settings.imageDisplay ?? "auto",
-    extensions: [mcpTerminalExtension, skillTerminalExtension],
+    extensions: [
+      mcpTerminalExtension,
+      promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),
+      skillTerminalExtension,
+    ],
     clearStartupLine: startupIndicator,
     reconnectClient: () => connectTarget(currentTarget),
     onPreferenceChange: persistSettings,

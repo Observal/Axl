@@ -13,6 +13,7 @@
       "@axl/daemon/client": ["./packages/daemon/src/client.ts"],
       "@axl/extension-api": ["./packages/extensions/api/src/index.ts"],
       "@axl/extension-mcp": ["./packages/extensions/mcp/src/index.ts"],
+      "@axl/extension-prompts": ["./packages/extensions/prompts/src/index.ts"],
       "@axl/extension-skills": ["./packages/extensions/skills/src/index.ts"],
       "@axl/kernel": ["./packages/kernel/src/index.ts"],
       "@axl/protocol": ["./packages/protocol/src/index.ts"],
