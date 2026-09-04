@@ -57,6 +57,7 @@ This file records notable user-facing changes.
 - `/detach` leaves daemon-owned work running, resumed turns accept new input, and resume lists place the most recently updated session first
 - Client reconnect handling no longer races the SDK's mutation retry and leaves a resumed TUI without a live attachment
 - Kitty keyboard negotiation no longer requests release events that can duplicate typed characters
+- The terminal composer no longer prefixes typed prompts with `>`
 - Terminal editor frames no longer accumulate when WSL emits rapid resize events while moving between displays
 - Session startup and runtime rebuilds no longer flood the transcript with repeated model, sandbox, thinking, and tool-dialect rows
 - Live terminal frames no longer emit trailing line feeds, preventing repeated updates from growing downward scrollback

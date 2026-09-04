@@ -595,7 +595,7 @@ test("workspace review opens from daemon data and the developer panel is opt-in"
   const terminal = new VirtualTerminal(120, 16);
   terminal.write(output.text);
   const rows = terminal.rows();
-  const promptRow = rows.findIndex((row) => row.includes("│ >"));
+  const promptRow = rows.findIndex((row) => /^│\s+│$/.test(row));
   assert.equal(promptRow >= 0, true);
   assert.equal(terminal.cursorRow, promptRow);
   const workspaceRow = rows.findIndex((row) => row.includes("Workspace"));

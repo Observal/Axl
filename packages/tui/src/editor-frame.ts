@@ -53,7 +53,7 @@ export class EditorFrameComponent implements Component {
 
   private renderCompact(width: number): string[] {
     const view = this.view();
-    const prefix = this.state.mode ? `${this.state.mode.slice(0, 1)} > ` : "> ";
+    const prefix = this.state.mode ? `${this.state.mode.slice(0, 1)} ` : "";
     const editorWidth = Math.max(1, width - visibleWidth(prefix));
     const rendered = this.editor.render(editorWidth);
     const model = view.modelLabel();
@@ -84,7 +84,7 @@ export class EditorFrameComponent implements Component {
   private renderFramed(width: number): string[] {
     const view = this.view();
     const contentWidth = width - 4;
-    const prefix = "> ";
+    const prefix = "";
     const editorWidth = Math.max(1, contentWidth - visibleWidth(prefix));
     const rendered = this.editor.render(editorWidth);
     const body = rendered.lines.map((line, row) =>

@@ -1041,7 +1041,7 @@ test("history navigation passes through slash-command entries without trapping a
   const terminal = new VirtualTerminal(100, 24);
   terminal.write(text());
   assert.equal(
-    terminal.rows().some((row) => row.includes("│ > first prompt")),
+    terminal.rows().some((row) => row.includes("│ first prompt")),
     true,
   );
 
@@ -1050,7 +1050,7 @@ test("history navigation passes through slash-command entries without trapping a
   const returned = new VirtualTerminal(100, 24);
   returned.write(text());
   assert.equal(
-    returned.rows().some((row) => /│ >\s+│/.test(row)),
+    returned.rows().some((row) => /^│\s+│$/.test(row)),
     true,
   );
   app.stop();
