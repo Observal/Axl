@@ -3,24 +3,24 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  type CapabilityId,
+  type ClientIdentity,
+  type ConnectionInitializeResult,
   encodeWireMessage,
   isKnownRpcErrorCode,
   isRetryableMutationMethod,
   isRpcErrorAllowed,
-  parseServerMessage,
-  parseWireRequest,
-  requiredCapability,
-  WIRE_PROTOCOL_VERSION,
-  type CapabilityId,
-  type ClientIdentity,
-  type ConnectionInitializeResult,
   type OperationId,
   type PresenceDelivery,
+  parseServerMessage,
+  parseWireRequest,
   type RpcMethod,
   type RpcParams,
   type RpcResult,
+  requiredCapability,
   type ServerMessage,
   type SessionId,
+  WIRE_PROTOCOL_VERSION,
   type WireActivity,
   type WireEvent,
 } from "@axl/protocol";
@@ -93,6 +93,8 @@ export interface AxlClientOptions<Credential = unknown> {
   readonly credentials?: CredentialProvider<Credential>;
   readonly requestedCapabilities?: readonly CapabilityId[];
   readonly handshakeTimeoutMs?: number;
+  /** Observes every state, including states entered before connect resolves. */
+  readonly onStateChange?: (state: ConnectionState) => void;
 }
 
 type Pending = {
@@ -564,6 +566,7 @@ export class AxlClient {
   private setState(state: ConnectionState): void {
     if (state === this.currentState) return;
     this.currentState = state;
+    this.options.onStateChange?.(state);
     for (const listener of this.stateListeners) listener(state);
   }
 }

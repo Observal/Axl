@@ -4,13 +4,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
-import {
-  AxlClient,
-  AxlClientError,
-  type AxlTransport,
-  type AxlTransportFactory,
-} from "../src/index.ts";
 import {
   type CapabilityId,
   EVENT_FORMAT_VERSION,
@@ -20,6 +13,12 @@ import {
   WIRE_CAPABILITIES,
   WIRE_PROTOCOL_VERSION,
 } from "@axl/protocol";
+import {
+  AxlClient,
+  AxlClientError,
+  type AxlTransport,
+  type AxlTransportFactory,
+} from "../src/index.ts";
 
 class FakeTransport implements AxlTransport {
   messages: unknown[] = [];
@@ -123,6 +122,19 @@ async function connect(
   assert.ok(transport);
   return { client, transport };
 }
+
+test("reports initial connection negotiation before connect resolves", async () => {
+  const states: string[] = [];
+  const client = await AxlClient.connect({
+    transport: new Factory(),
+    identity: { kind: "fixture", version: "1", instanceId: "client-1" },
+    idempotencyKeys: { create: () => "00000000-0000-4000-8000-000000000001" },
+    onStateChange: (state) => states.push(state),
+  });
+  assert.deepEqual(states, ["connecting", "negotiating", "connected"]);
+  client.close();
+  assert.equal(states.at(-1), "disconnected");
+});
 
 test("initializes exactly once and creates keys only for retryable mutations", async () => {
   const { client, transport } = await connect();

@@ -11,7 +11,7 @@ import type {
   WireEvent,
 } from "@axl/protocol";
 
-import { type AxlClient, AxlClientError, cursorStoreKey, type CursorStore } from "./client.ts";
+import { type AxlClient, AxlClientError, type CursorStore, cursorStoreKey } from "./client.ts";
 import { ConversationProjector, ProjectionError } from "./projector.ts";
 
 export type CursorPersistenceStatus =
@@ -47,6 +47,7 @@ export interface SessionSubscriptionOptions {
     projector: ConversationProjector,
   ) => void | Promise<void>;
   readonly onChange?: (projector: ConversationProjector) => void;
+  readonly onCursorPersistenceChange?: (status: CursorPersistenceStatus) => void;
   readonly onResyncRequired?: (error: Error) => void;
 }
 
@@ -394,8 +395,10 @@ class ResumableSessionSubscription implements SessionSubscription {
   }
 
   private disableCursorStore(): void {
+    if (this.cursorStoreFailed) return;
     this.resumableState = false;
     this.cursorStoreFailed = true;
+    this.options.onCursorPersistenceChange?.(this.cursorPersistence);
   }
 
   private handleDeliveryFailure(error: unknown): void {

@@ -6,14 +6,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  type AxlClient,
+  AxlClientError,
+  type CanonicalEvent,
   EVENT_FORMAT_VERSION,
   parseEvent,
   parseOperationId,
   parseSessionId,
   subscribeSession,
-  type AxlClient,
-  AxlClientError,
-  type CanonicalEvent,
   type WireActivity,
   type WireEvent,
 } from "../src/index.ts";
@@ -232,6 +232,7 @@ test("replaces a snapshot when its boundary cursor expires before acknowledgemen
 
 test("cursor-store failure disables resumability without stopping delivery", async () => {
   const fixture = new FixtureClient();
+  const persistenceChanges: unknown[] = [];
   const subscription = await subscribeSession(fixture as unknown as AxlClient, sessionId, {
     cursorStore: {
       async load() {
@@ -242,12 +243,16 @@ test("cursor-store failure disables resumability without stopping delivery", asy
       },
       async delete() {},
     },
+    onCursorPersistenceChange(status) {
+      persistenceChanges.push(status);
+    },
   });
   assert.equal(subscription.resumable, false);
   assert.deepEqual(subscription.cursorPersistence, {
     state: "unavailable",
     reason: "cursor_store_failed",
   });
+  assert.deepEqual(persistenceChanges, [{ state: "unavailable", reason: "cursor_store_failed" }]);
   assert.equal(subscription.projector.state.records.length, 2);
   const replacement = new FixtureClient();
   await subscription.reconnect(replacement as unknown as AxlClient);
