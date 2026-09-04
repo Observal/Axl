@@ -1,4 +1,8 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 Kaushik Kumar -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 Srihari -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl roadmap
@@ -305,15 +309,19 @@ When a non-interactive session needs information, it records a safe and reversib
 
 Adoption is a small, bounded model workflow:
 
-```text
-fetch and lock source
--> inspect source without executing it
--> prompt the conversion model
--> generate native output in a staging directory
--> typecheck and run available tests in isolation
--> allow one repair prompt if checks fail
--> show the diff, permissions, checks, and unsupported behavior
--> activate after approval
+```mermaid
+flowchart TD
+  Fetch[Fetch and lock source] --> Inspect[Inspect source without executing it]
+  Inspect --> Prompt[Prompt the conversion model]
+  Prompt --> Generate[Generate native output in a staging directory]
+  Generate --> Verify[Type-check and run available tests in isolation]
+  Verify --> Repair{Checks pass?}
+  Repair -->|No| Retry[Allow one repair prompt]
+  Retry --> Verify
+  Repair -->|Yes| Review[Show diff, permissions, checks, and unsupported behavior]
+  Review --> Approve{Approved?}
+  Approve -->|Yes| Activate[Activate]
+  Approve -->|No| Stop[Leave inactive]
 ```
 
 V1 does not include a deterministic translation framework, feature-mapping rules, type-equivalence machinery, mutation analysis, differential fuzzing, or a custom semantic verifier. Existing upstream tests are reused when available. Generated tests may add coverage, but they do not prove semantic equivalence.
@@ -1085,31 +1093,33 @@ Cloud skills may explain setup, diagnose configuration, and prepare manifests. T
 
 #### 12.2 Lifecycle
 
-```text
-requested
--> provisioning
--> starting
--> running
--> draining
--> terminating
--> terminated
+```mermaid
+stateDiagram-v2
+  [*] --> requested
+  requested --> provisioning
+  provisioning --> starting
+  starting --> running
+  running --> draining
+  draining --> terminating
+  terminating --> terminated
+  terminated --> [*]
 ```
 
 Failure is recorded separately without pretending cleanup completed.
 
 Termination sequence:
 
-```text
-stop admission
--> signal agent
--> flush event log
--> upload artifacts
--> request graceful process exit
--> wait bounded grace period
--> force kill
--> delete compute resources
--> revoke temporary credentials
--> verify resources are absent
+```mermaid
+flowchart TD
+  Admission[Stop admission] --> Signal[Signal agent]
+  Signal --> Flush[Flush event log]
+  Flush --> Upload[Upload artifacts]
+  Upload --> Graceful[Request graceful process exit]
+  Graceful --> Wait[Wait bounded grace period]
+  Wait --> Kill[Force kill if still running]
+  Kill --> Delete[Delete compute resources]
+  Delete --> Revoke[Revoke temporary credentials]
+  Revoke --> Verify[Verify resources are absent]
 ```
 
 #### 12.3 Leak prevention

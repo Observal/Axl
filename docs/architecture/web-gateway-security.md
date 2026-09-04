@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Web gateway security specification
@@ -13,11 +14,10 @@ This document defines the localhost browser threat model, launch authentication,
 
 The gateway is a thin local process:
 
-```text
-Browser
-  -> loopback HTTP and WebSocket
-  -> authenticated gateway
-  -> one Unix-socket daemon connection per attachment
+```mermaid
+flowchart LR
+  Browser -->|loopback HTTP and WebSocket| Gateway[Authenticated gateway]
+  Gateway -->|one Unix-socket connection per attachment| Daemon[Authoritative daemon]
 ```
 
 It serves assets and bridges validated protocol messages. It contains no session, agent, model, workspace, or Git behavior.
@@ -107,11 +107,10 @@ A WebSocket upgrade requires the valid cookie, exact Host, exact Origin, and pro
 
 Development uses the same gateway origin as production:
 
-```text
-Browser
-  -> gateway origin
-  -> gateway reverse proxy
-  -> loopback Vite development server
+```mermaid
+flowchart LR
+  Browser -->|gateway origin| Gateway[Authenticated gateway]
+  Gateway -->|restricted reverse proxy| Vite[Loopback Vite development server]
 ```
 
 The browser never loads application assets or opens development WebSockets directly against a second Vite origin.

@@ -69,7 +69,19 @@ Do not edit generated files. Change their source or generator and regenerate. Ge
 
 ### SPDX and provenance
 
-Every file must carry SPDX copyright and license information. Files that cannot contain comments are covered by `REUSE.toml`. Credit externally inspired behavior beside its implementation with a source link and note that it was independently implemented from public interfaces or black-box observation. Preserve required attribution and notices for copied or adapted material.
+Every file must carry SPDX copyright and license information. Files that cannot contain comments are covered by `REUSE.toml`.
+
+Before changing an existing file, inspect its surviving authorship:
+
+```bash
+git blame --line-porcelain --follow -- path/to/file
+```
+
+Preserve existing copyright lines and add one `SPDX-FileCopyrightText` line for every contributor whose authored lines remain in the file. Use the contributor identity and contribution year from Git history. Collapse consecutive years into a range. Do not infer ownership from another file or replace contributor names with a company name unless the contributor or repository policy establishes that ownership.
+
+For a new file, add the creating contributor's copyright line and the repository license identifier. For JSON, generated fixtures, license texts, and other files that cannot carry comments, add exact path coverage to `REUSE.toml` with every applicable copyright holder. Do not edit generated files to change headers. Update the generator or REUSE annotation and regenerate instead.
+
+Credit externally inspired behavior beside its implementation with a source link and note that it was independently implemented from public interfaces or black-box observation. Preserve required attribution and notices for copied or adapted material.
 
 ```bash
 reuse lint

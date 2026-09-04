@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Local web client architecture
@@ -25,14 +26,15 @@ These contracts are expensive to change after the web interface ships. They requ
 
 Build the web client as a projection of the authoritative daemon:
 
-```text
-Browser
-  -> @axl/sdk
-  -> authenticated WebSocket
-  -> loopback-only web gateway
-  -> Unix socket
-  -> authoritative daemon
-  -> kernel, canonical JSONL, tools, providers, and sandbox
+```mermaid
+flowchart LR
+  Browser --> SDK["@axl/sdk"]
+  SDK -->|authenticated WebSocket| Gateway[Loopback-only web gateway]
+  Gateway -->|Unix socket| Daemon[Authoritative daemon]
+  Daemon --> Kernel[Kernel and canonical JSONL]
+  Daemon --> Tools[Tools and extensions]
+  Daemon --> Providers[Providers]
+  Daemon --> Sandbox[Sandbox]
 ```
 
 The gateway serves assets and bridges one daemon connection per browser attachment. It owns browser authentication and transport limits. It owns no session, agent, workspace, Git, or model behavior.

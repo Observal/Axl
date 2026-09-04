@@ -6,29 +6,127 @@ version = 1
 [[annotations]]
 path = [
   ".release.json",
+  ".agents/skills/**",
   "LICENSE",
-  "NOTICE",
+  "LICENSES/Apache-2.0.txt",
   "biome.json",
-  "package.json",
   "distribution/npm/package.json",
-  "packages/*/package.json",
-  "packages/*/tsconfig*.json",
-  "packages/extensions/*/package.json",
-  "packages/extensions/*/tsconfig*.json",
-  "pnpm-lock.yaml",
-  "tsconfig*.json",
+  "package.json",
+  "packages/ai/tsconfig.build.json",
+  "packages/ai/tsconfig.json",
+  "packages/daemon/tsconfig.build.json",
+  "packages/daemon/tsconfig.json",
+  "packages/extensions/mcp/tsconfig.json",
+  "packages/extensions/skills/tsconfig.json",
+  "packages/kernel/package.json",
+  "packages/kernel/tsconfig.build.json",
+  "packages/kernel/tsconfig.json",
+  "packages/protocol/package.json",
+  "packages/protocol/tsconfig.build.json",
+  "packages/protocol/tsconfig.json",
+  "packages/sandbox/tsconfig.build.json",
+  "packages/sandbox/tsconfig.json",
+  "tsconfig.json",
 ]
 SPDX-FileCopyrightText = "2026 Hari Srinivasan"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
-path = [".agents/skills/**"]
-SPDX-FileCopyrightText = "2026 Hari Srinivasan"
+path = [
+  "packages/ai/package.json",
+  "packages/extensions/api/package.json",
+  "packages/extensions/api/tsconfig.build.json",
+  "packages/extensions/api/tsconfig.json",
+  "packages/extensions/mcp/package.json",
+  "packages/extensions/mcp/tsconfig.build.json",
+  "packages/extensions/skills/package.json",
+  "packages/extensions/skills/tsconfig.build.json",
+  "packages/tui/tsconfig.json",
+]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Kaushik Kumar",
+]
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
-path = ["packages/protocol/test/fixtures/*.json"]
-SPDX-FileCopyrightText = "2026 Hari Srinivasan"
+path = ["NOTICE"]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Kaushik Kumar",
+  "2026 Lokesh",
+  "2026 Srihari",
+  "2026 VishnuM449",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["tsconfig.base.json"]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Kaushik Kumar",
+  "2026 Lokesh",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "packages/cli/package.json",
+  "packages/cli/tsconfig.build.json",
+  "packages/tui/package.json",
+  "pnpm-lock.yaml",
+]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Kaushik Kumar",
+  "2026 Lokesh",
+  "2026 VishnuM449",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["packages/tui/tsconfig.build.json"]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Kaushik Kumar",
+  "2026 VishnuM449",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "packages/cli/tsconfig.json",
+  "packages/runtime/tsconfig.build.json",
+  "packages/runtime/tsconfig.json",
+  "packages/sandbox/package.json",
+]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Lokesh",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "packages/daemon/package.json",
+  "packages/protocol/test/fixtures/canonical-requests.json",
+  "packages/protocol/test/fixtures/conformance.json",
+  "packages/sdk/package.json",
+  "packages/sdk/tsconfig.build.json",
+]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 VishnuM449",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["packages/runtime/package.json"]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Lokesh",
+  "2026 VishnuM449",
+]
 SPDX-License-Identifier = "Apache-2.0"
 
 # Build output is disposable and inherits its source license.

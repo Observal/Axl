@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl development guide
@@ -332,15 +333,16 @@ The TUI keeps completed output in normal terminal scrollback. It does not use an
 
 The main local flow is:
 
-```text
-axl executable
-  -> connect to or start the local daemon
-  -> daemon creates or resumes one session
-  -> runtime assembles model, tools, extensions, prompt, and sandbox
-  -> kernel runs the turn
-  -> canonical events append to JSONL
-  -> daemon publishes events over the local wire protocol
-  -> TUI projects those events
+```mermaid
+flowchart TD
+  CLI[axl executable] --> Connect[Connect to or start the local daemon]
+  Connect --> Session[Daemon creates or resumes one session]
+  Runtime[Runtime assembles model, tools, extensions, prompt, and sandbox] --> Session
+  Session --> Kernel[Kernel runs the turn]
+  Kernel --> Log[Append canonical events to JSONL]
+  Log --> Publish[Daemon publishes events over the local wire protocol]
+  Publish --> SDK[SDK validates and projects events]
+  SDK --> TUI[TUI renders projected state]
 ```
 
 The daemon owns the session even when the TUI disconnects. Reattaching starts with a snapshot and then follows the live tail. A client never reconstructs a competing model loop.
@@ -349,16 +351,37 @@ The daemon owns the session even when the TUI disconnects. Reattaching starts wi
 
 Workspace packages depend in this direction:
 
-```text
-kernel   -> protocol
-ai       -> protocol
-daemon   -> kernel, protocol
-sandbox  -> kernel, protocol
-skills   -> kernel, protocol
-mcp      -> kernel, protocol
-runtime  -> ai, daemon, kernel, protocol, sandbox, skills, mcp
-tui      -> ai, daemon, protocol
-cli      -> ai, daemon, protocol, runtime, tui
+```mermaid
+flowchart LR
+  Kernel[kernel] --> Protocol[protocol]
+  AI[ai] --> Protocol
+  Daemon[daemon] --> Kernel
+  Daemon --> Protocol
+  SDK[sdk] --> Protocol
+  ExtensionAPI[extension-api]
+  Sandbox[sandbox] --> Kernel
+  Sandbox --> Protocol
+  Skills[skills] --> ExtensionAPI
+  Skills --> Kernel
+  Skills --> Protocol
+  MCP[mcp] --> ExtensionAPI
+  MCP --> Kernel
+  MCP --> Protocol
+  Runtime[runtime] --> AI
+  Runtime --> Daemon
+  Runtime --> Kernel
+  Runtime --> Protocol
+  Runtime --> Sandbox
+  Runtime --> Skills
+  Runtime --> MCP
+  TUI[tui] --> ExtensionAPI
+  TUI --> SDK
+  TUI --> Protocol
+  CLI[cli] --> AI
+  CLI --> Protocol
+  CLI --> Runtime
+  CLI --> SDK
+  CLI --> TUI
 ```
 
 Development-only dependencies are omitted. Consult each `package.json` and `scripts/check-boundaries.ts` for the enforced graph.

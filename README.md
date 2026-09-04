@@ -1,4 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 Srihari -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl
@@ -40,27 +42,41 @@ Axl is not yet a hosted service, remote collaboration product, browser applicati
 
 ## Architecture
 
-```text
-                         public typed contracts
-                    +-----------------------------+
-                    |      packages/protocol      |
-                    +-----------------------------+
-                               ^           ^
-                               |           |
-Presentation clients           |           |       Authoritative runtime
-+-------------------+           |           |       +-------------------+
-| packages/tui      | -> packages/sdk -> Unix RPC -> packages/daemon   |
-| future web/IDE UI |    connection,       events    | session manager   |
-+-------------------+    retry, cursors,              +---------+---------+
-                       subscriptions,                           |
-                       projections                              v
-                                                    +-------------------+
-                                                    | packages/kernel   |
-                                                    | log, loop, tools, |
-                                                    | policy, queues    |
-                                                    +-------------------+
+```mermaid
+flowchart LR
+  subgraph Clients[Presentation clients]
+    TUI[Terminal UI]
+    Future[Future web, desktop, IDE, and mobile clients]
+  end
 
-CLI process host -> packages/runtime -> packages/ai + extensions + sandbox
+  CLI[CLI process host]
+  SDK[TypeScript SDK<br/>connection, retry, cursors,<br/>subscriptions, projections]
+  Protocol[Protocol<br/>events, RPCs, capabilities,<br/>runtime validation]
+
+  subgraph Authority[Authoritative daemon process]
+    Runtime[Runtime assembly]
+    Daemon[Daemon<br/>sessions, subscriptions,<br/>presence, workspace RPCs]
+    Kernel[Kernel<br/>JSONL, agent loop, tools,<br/>policy, operation ownership]
+    AI[AI providers<br/>credentials, models, dialects]
+    Extensions[Extensions<br/>Skills and MCP]
+    Sandbox[Sandbox<br/>native and OCI]
+  end
+
+  TUI --> SDK
+  Future --> SDK
+  SDK -->|typed RPC and events| Daemon
+  SDK -. validates with .-> Protocol
+  Daemon --> Kernel
+  Daemon -. validates with .-> Protocol
+  CLI --> Runtime
+  CLI --> TUI
+  Runtime --> Daemon
+  Runtime --> AI
+  Runtime --> Extensions
+  Runtime --> Sandbox
+  AI -. model port .-> Kernel
+  Extensions -. public extension API .-> Kernel
+  Sandbox -. command execution .-> Kernel
 ```
 
 The boundaries are deliberate:

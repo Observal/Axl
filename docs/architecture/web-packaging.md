@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Web build and packaging specification
@@ -39,11 +40,10 @@ axl web --dev
 
 The Vite server and gateway both bind to loopback. The browser always loads the gateway origin:
 
-```text
-Browser
-  -> gateway origin
-  -> reverse proxy
-  -> Vite assets and hot reload
+```mermaid
+flowchart LR
+  Browser -->|gateway origin| Gateway[Authenticated gateway]
+  Gateway -->|restricted reverse proxy| Vite[Vite assets and hot reload]
 ```
 
 The browser does not connect directly to a separate Vite origin. This keeps Host, Origin, cookie, CSP, and WebSocket authentication consistent with production.

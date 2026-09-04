@@ -33,10 +33,16 @@ The BDFL is the release authority until release duties are delegated in [GOVERNA
 
 Axl uses one forward-development branch and one long-lived branch per maintained minor series:
 
-```text
-main:          A--B--C--D--F--G
-                      \
-release/0.2:           R-alpha--F'--R-beta--R-rc--R-stable--P1
+```mermaid
+flowchart LR
+  subgraph Main[main]
+    A --> B --> C --> D --> F --> G
+  end
+  subgraph Release[release/0.2]
+    RAlpha[R-alpha] --> FPrime[F-prime] --> RBeta[R-beta] --> RC[R-rc] --> Stable[R-stable] --> P1
+  end
+  C --> RAlpha
+  F -. backport .-> FPrime
 ```
 
 `release/0.2` is cut from an exact commit on `main`. After that point:
@@ -499,10 +505,11 @@ Only the newest stable minor line may own npm's `latest` tag.
 
 If the newest stable release is `0.3.x`:
 
-```text
-release/0.3 stable -> latest
-release/0.2 stable -> lts-0.2
-release/0.1 stable -> lts-0.1
+```mermaid
+flowchart LR
+  R03[release/0.3 stable] --> Latest[npm tag: latest]
+  R02[release/0.2 stable] --> LTS02[npm tag: lts-0.2]
+  R01[release/0.1 stable] --> LTS01[npm tag: lts-0.1]
 ```
 
 An older maintenance release must never move `latest` backward.
@@ -515,12 +522,12 @@ All ordinary fixes land on `main` first.
 
 The normal flow is:
 
-```text
-main fix PR
-  -> merge through rebase
-  -> backport PR to release/0.3
-  -> backport PR to release/0.2
-  -> patch release from each affected branch
+```mermaid
+flowchart TD
+  Main[Main fix PR] --> Merge[Merge through rebase]
+  Merge --> Newer[Backport PR to release/0.3]
+  Newer --> Older[Backport PR to release/0.2]
+  Older --> Patch[Patch release from each affected branch]
 ```
 
 Do not author an ordinary fix only on a release branch. That creates a hidden divergence and makes the same defect likely to return on `main`.
@@ -607,8 +614,9 @@ The PR number identifies the logical change. Commit SHAs identify particular app
 
 Preferred order remains:
 
-```text
-main -> release backport -> security release
+```mermaid
+flowchart LR
+  Main[Main fix] --> Backport[Release backport] --> Security[Security release]
 ```
 
 If an embargo requires private release-branch work:
