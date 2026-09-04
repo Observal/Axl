@@ -472,13 +472,24 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
     color: false,
   });
   const sourceSessionId = app.sessionId;
+  const observer = await connectUnixClient(socketPath);
+  const subscription = await subscribeSession(observer, sourceSessionId);
+  context.after(async () => {
+    await subscription.close();
+    observer.close();
+  });
+  const completedResponses = () =>
+    subscription.projector.state.records.filter(
+      (record) =>
+        record.kind === "event" &&
+        record.event.type === "assistant.message" &&
+        record.event.payload.stopReason !== "tool_use",
+    ).length;
 
   input.write("first prompt\r");
-  await until(() => text().includes("the answer"), "first reply");
-  const firstReplyCount = (text().match(/the answer/g) ?? []).length;
+  await until(() => completedResponses() === 1, "first reply");
   input.write("second prompt\r");
-  await until(() => (text().match(/the answer/g) ?? []).length > firstReplyCount, "second reply");
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await until(() => completedResponses() === 2, "second reply");
 
   input.write("/fork\r");
   await until(() => text().includes("Fork from Message"), "fork selector");
@@ -1249,14 +1260,13 @@ test("Enter steers and Alt+Enter queues a follow-up while working", async (conte
   releaseFirst();
   await until(() => calls === 3, "queued model calls");
   assert.deepEqual(prompts, ["one", "two", "three"]);
-  const terminal = new VirtualTerminal(100, 24);
-  terminal.write(text());
-  assert.equal(
-    terminal
+  await until(() => {
+    const terminal = new VirtualTerminal(100, 24);
+    terminal.write(text());
+    return !terminal
       .rows()
-      .some((row) => row.includes("steering queued") || row.includes("follow-up queued")),
-    false,
-  );
+      .some((row) => row.includes("steering queued") || row.includes("follow-up queued"));
+  }, "consumed queue notices to clear");
   app.stop();
 });
 
