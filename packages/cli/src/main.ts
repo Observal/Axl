@@ -10,10 +10,16 @@ import { mkdir } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { TextDecoder } from "node:util";
 
 import type { AuthContext, CredentialStore } from "@axl/ai";
 import { AZURE_OPENAI_MODELS } from "@axl/ai/models";
-import type { SessionProfile, ThinkingLevel } from "@axl/protocol";
+import {
+  type CanonicalEvent,
+  MAX_WIRE_MESSAGE_BYTES,
+  type SessionProfile,
+  type ThinkingLevel,
+} from "@axl/protocol";
 import {
   diagnoseLocalSandboxes,
   type LocalSandboxSelection,
@@ -23,7 +29,7 @@ import {
   localSandboxStateKey,
   startLocalDaemon,
 } from "@axl/runtime";
-import { type AxlClient, AxlClientError } from "@axl/sdk";
+import { type AxlClient, AxlClientError, subscribeSession } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
 
 import { azureLoginDialog, runAzureSetup } from "./azure-auth-ui.ts";
@@ -35,6 +41,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl login
        axl doctor
        axl daemon [options]
+       axl print [prompt] [options]
        axl rpc [options]
        axl session export <session-id> --raw [--output <directory>]
        axl session migrate-events <session-id> [--confirm-prefix]
@@ -48,6 +55,7 @@ Options:
   --tui-mode <mode>  Use regular or fullscreen terminal mode
   --socket <path>    Use a custom daemon socket
   --sandbox <kind>   Use native, podman, or docker isolation
+  -p, --print        Print one response and exit
   -r, --resume       Open the all-session resume picker
   --image <digest>   Use a locally available digest-pinned OCI image
   --unsafe           Disable operating-system isolation
@@ -66,8 +74,16 @@ Options:
 type SandboxChoice = "native" | "podman" | "docker";
 
 interface CliArguments {
-  command?: "login" | "daemon" | "doctor" | "rpc" | "session-export" | "session-migrate-events";
+  command?:
+    | "login"
+    | "daemon"
+    | "doctor"
+    | "print"
+    | "rpc"
+    | "session-export"
+    | "session-migrate-events";
   sessionId?: string;
+  prompt: string[];
   output?: string;
   raw: boolean;
   confirmPrefix: boolean;
@@ -91,6 +107,7 @@ interface CliArguments {
 function parseArguments(argv: readonly string[]): CliArguments {
   const parsed: CliArguments = {
     cwd: process.cwd(),
+    prompt: [],
     sandbox: "native",
     unsafe: false,
     resume: false,
@@ -121,6 +138,10 @@ function parseArguments(argv: readonly string[]): CliArguments {
       if (value === undefined) throw new Error(`${argument} requires a value`);
       return value;
     };
+    if (argument === "--" && parsed.command === "print") {
+      parsed.prompt.push(...argv.slice(index + 1));
+      break;
+    }
     if (argument === "--socket") parsed.socket = next();
     else if (argument === "--output") parsed.output = next();
     else if (argument === "--raw") parsed.raw = true;
@@ -162,7 +183,11 @@ function parseArguments(argv: readonly string[]): CliArguments {
     } else if (argument === "--unsafe") parsed.unsafe = true;
     else if (argument === "--help" || argument === "-h") parsed.showHelp = true;
     else if (argument === "--version" || argument === "-v") parsed.showVersion = true;
-    else if (
+    else if (argument === "print" || argument === "--print" || argument === "-p") {
+      parsed.command = "print";
+    } else if (parsed.command === "print" && !argument.startsWith("-")) {
+      parsed.prompt.push(argument);
+    } else if (
       argument === "login" ||
       argument === "daemon" ||
       argument === "doctor" ||
@@ -179,8 +204,8 @@ function parseArguments(argv: readonly string[]): CliArguments {
   if (parsed.resume && parsed.command !== undefined) {
     throw new Error("--resume cannot be combined with a command");
   }
-  if (parsed.command === "rpc" && parsed.sessionId !== undefined) {
-    throw new Error("rpc does not accept a session ID; use session RPC methods instead");
+  if ((parsed.command === "print" || parsed.command === "rpc") && parsed.sessionId !== undefined) {
+    throw new Error(`${parsed.command} does not accept a session ID`);
   }
   if (parsed.command === "session-export" && !parsed.raw) {
     throw new Error("session export requires --raw");
@@ -302,9 +327,10 @@ async function connectExpectedDaemon(
   unsafe: boolean,
   sandbox: SandboxChoice,
   image?: string,
+  clientKind = "tui",
 ): Promise<AxlClient> {
   const client = await connectUnixClient(socketPath, {
-    identity: { kind: "tui", version: AXL_VERSION, instanceId: crypto.randomUUID() },
+    identity: { kind: clientKind, version: AXL_VERSION, instanceId: crypto.randomUUID() },
   });
   try {
     const info = await client.request("daemon.info", {});
@@ -345,9 +371,16 @@ async function connectOrStartDaemon(input: {
   readonly image?: string;
   readonly webFetch: boolean;
   readonly webSearch: boolean;
+  readonly clientKind: string;
 }): Promise<AxlClient> {
   try {
-    return await connectExpectedDaemon(input.socketPath, input.unsafe, input.sandbox, input.image);
+    return await connectExpectedDaemon(
+      input.socketPath,
+      input.unsafe,
+      input.sandbox,
+      input.image,
+      input.clientKind,
+    );
   } catch (error) {
     if (error instanceof SecurityModeMismatchError) throw error;
     if (error instanceof AxlClientError && error.code !== "connection_error") throw error;
@@ -395,6 +428,7 @@ async function connectOrStartDaemon(input: {
           input.unsafe,
           input.sandbox,
           input.image,
+          input.clientKind,
         );
       } catch (retryError) {
         if (retryError instanceof SecurityModeMismatchError) throw retryError;
@@ -430,6 +464,112 @@ function showStartupIndicator(message: string): boolean {
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) return false;
   process.stdout.write(`\r\x1b[2K◆ Axl · ${message}`);
   return true;
+}
+
+async function readPrintPrompt(parts: readonly string[]): Promise<string> {
+  const argument = parts.join(" ");
+  const chunks: Buffer[] = [];
+  let bytes = Buffer.byteLength(argument);
+  if (!process.stdin.isTTY) {
+    for await (const chunk of process.stdin) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      bytes += buffer.byteLength;
+      if (bytes > MAX_WIRE_MESSAGE_BYTES) {
+        throw new Error(`Print prompt exceeds ${MAX_WIRE_MESSAGE_BYTES} bytes`);
+      }
+      chunks.push(buffer);
+    }
+  }
+  let piped = "";
+  try {
+    piped = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+  } catch (cause) {
+    throw new Error("Print input must be valid UTF-8", { cause });
+  }
+  const prompt = [argument, piped].filter((part) => part.trim().length > 0).join("\n\n");
+  if (prompt.length === 0) throw new Error("print requires a prompt argument or piped stdin");
+  if (Buffer.byteLength(prompt) > MAX_WIRE_MESSAGE_BYTES) {
+    throw new Error(`Print prompt exceeds ${MAX_WIRE_MESSAGE_BYTES} bytes`);
+  }
+  return prompt;
+}
+
+type AssistantMessageEvent = Extract<CanonicalEvent, { readonly type: "assistant.message" }>;
+
+async function runPrint(
+  client: AxlClient,
+  input: {
+    readonly cwd: string;
+    readonly prompt: string;
+    readonly active: ActiveConfig;
+    readonly profile?: SessionProfile;
+  },
+): Promise<void> {
+  const opened = await client.request("session.create", {
+    cwd: input.cwd,
+    modelId: input.active.modelId,
+    thinkingLevel: input.active.thinkingLevel,
+    webFetch: input.active.webFetch,
+    webSearch: input.active.webSearch,
+    ...(input.profile === undefined ? {} : { profile: input.profile }),
+  });
+  const subscription = await subscribeSession(client, opened.sessionId);
+  let terminal: AssistantMessageEvent | undefined;
+  let interaction: string | undefined;
+  let interactionError: Error | undefined;
+  let interactionResponse = Promise.resolve();
+  const removeEvent = client.onEvent((delivery) => {
+    if (delivery.subscriptionId !== subscription.subscriptionId) return;
+    const event = delivery.event;
+    if (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") {
+      terminal = event;
+    } else if (event.type === "interaction.requested") {
+      interaction ??= event.payload.message;
+      interactionResponse = interactionResponse.then(async () => {
+        try {
+          await client.request("session.interaction.respond", {
+            sessionId: opened.sessionId,
+            interactionId: event.payload.interactionId,
+            action: "cancel",
+          });
+        } catch (error) {
+          interactionError = error instanceof Error ? error : new Error(String(error));
+          await client.request("session.interrupt", { sessionId: opened.sessionId });
+        }
+      });
+    }
+  });
+  try {
+    const result = await client.request("session.send", {
+      sessionId: opened.sessionId,
+      content: [{ type: "text", text: input.prompt }],
+      delivery: "prompt",
+    });
+    await interactionResponse;
+    if (interactionError !== undefined) throw interactionError;
+    if (interaction !== undefined) {
+      throw new Error(`Print mode cannot answer interaction: ${interaction}`);
+    }
+    if (
+      terminal === undefined ||
+      terminal.operationId !== result.operationId ||
+      terminal.payload.stopReason !== result.stopReason
+    ) {
+      throw new Error("Print response completed without a matching canonical assistant event");
+    }
+    if (terminal.payload.stopReason === "error") {
+      throw new Error(terminal.payload.errorMessage ?? "The model request failed");
+    }
+    if (terminal.payload.stopReason === "aborted") throw new Error("The model request was aborted");
+    const text = terminal.payload.content
+      .filter((content) => content.type === "text")
+      .map((content) => content.text)
+      .join("");
+    process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+  } finally {
+    removeEvent();
+    await subscription.close();
+  }
 }
 
 function bridgeRpc(socketPath: string): Promise<void> {
@@ -491,6 +631,7 @@ async function main(): Promise<void> {
     throw new Error("--profile cannot be combined with --resume");
   }
 
+  const printPrompt = cli.command === "print" ? await readPrintPrompt(cli.prompt) : undefined;
   const startupIndicator = cli.command === undefined && showStartupIndicator("starting…");
   const tuiModule = cli.command === undefined ? import("@axl/tui") : undefined;
   const axlHome = join(homedir(), ".axl");
@@ -562,14 +703,14 @@ async function main(): Promise<void> {
     webSearch: cli.webSearch ?? settings.webSearch ?? true,
   };
 
+  if (cli.unsafe && ["daemon", "print", "rpc"].includes(cli.command ?? "")) {
+    process.stderr.write(
+      "WARNING: --unsafe disables operating-system isolation and gives tools full host access.\n",
+    );
+  }
   if (cli.command === "daemon") {
     const { store } = await credentials();
     await ensureCredentials(store);
-    if (cli.unsafe) {
-      process.stderr.write(
-        "WARNING: --unsafe disables operating-system isolation and gives tools full host access.\n",
-      );
-    }
     const daemon = await startLocalDaemon({
       axlHome,
       stateDirectory,
@@ -588,6 +729,8 @@ async function main(): Promise<void> {
     return;
   }
 
+  const clientKind =
+    cli.command === "print" ? "print" : cli.command === "rpc" ? "rpc_probe" : "tui";
   const connectTarget = async (target: LocalDaemonTarget): Promise<AxlClient> => {
     await mkdir(target.stateDirectory, { recursive: true, mode: 0o700 });
     try {
@@ -596,11 +739,12 @@ async function main(): Promise<void> {
         target.unsafe,
         target.sandbox,
         target.image,
+        clientKind,
       );
     } catch (error) {
       if (error instanceof SecurityModeMismatchError) throw error;
       const { store } = await credentials();
-      await ensureCredentials(store, cli.command !== "rpc");
+      await ensureCredentials(store, cli.command === undefined);
       return connectOrStartDaemon({
         socketPath: target.socketPath,
         model: active.modelId,
@@ -610,6 +754,7 @@ async function main(): Promise<void> {
         ...(target.image === undefined ? {} : { image: target.image }),
         webFetch: active.webFetch,
         webSearch: active.webSearch,
+        clientKind,
       });
     }
   };
@@ -630,6 +775,20 @@ async function main(): Promise<void> {
   if (cli.command === "rpc") {
     client.close();
     await bridgeRpc(socketPath);
+    return;
+  }
+  if (cli.command === "print") {
+    if (printPrompt === undefined) throw new Error("Print prompt was not loaded");
+    try {
+      await runPrint(client, {
+        cwd: cli.cwd,
+        prompt: printPrompt,
+        active,
+        ...(cli.profile === undefined ? {} : { profile: cli.profile }),
+      });
+    } finally {
+      client.close();
+    }
     return;
   }
 

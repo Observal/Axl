@@ -28,6 +28,7 @@ test("--help and --version do not require credentials", () => {
   assert.match(help.stdout, /-r, --resume/);
   assert.match(help.stdout, /--profile/);
   assert.match(help.stdout, /--no-web-search/);
+  assert.match(help.stdout, /axl print/);
   assert.match(help.stdout, /axl rpc/);
 
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
@@ -65,13 +66,15 @@ async function stopChild(child: ChildProcess): Promise<void> {
 async function runCli(
   args: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  input?: string,
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   let stdout = "";
   let stderr = "";
   const child = spawn(process.execPath, [entry, ...args], {
     env,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
+  if (input !== undefined) child.stdin?.end(input);
   child.stdout?.on("data", (chunk: Buffer) => {
     stdout += chunk.toString("utf8");
   });
@@ -278,6 +281,54 @@ const idleModel: ModelPort = {
     })();
   },
 };
+
+test("print runs one headless turn and writes only the final answer", async (context) => {
+  const directory = await temporaryDirectory(context);
+  const empty = await runCli(["-p"], { ...process.env, HOME: directory }, "");
+  assert.equal(empty.code, 1);
+  assert.match(empty.stderr, /requires a prompt argument or piped stdin/);
+
+  const workspace = join(directory, "workspace");
+  const socketPath = join(directory, "axl.sock");
+  await mkdir(workspace);
+  let prompt: string | undefined;
+  const model: ModelPort = {
+    stream(request) {
+      const user = request.messages.findLast((message) => message.role === "user");
+      prompt =
+        user?.role === "user"
+          ? user.content
+              .filter((content) => content.type === "text")
+              .map((content) => content.text)
+              .join("")
+          : undefined;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        yield { type: "text_delta", text: "printed response" };
+        yield {
+          type: "completed",
+          stopReason: "stop",
+          usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        };
+      })();
+    },
+  };
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    securityMode: "sandboxed",
+    runtime: () => ({ model, tools: new ToolRegistry() }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+
+  const result = await runCli(
+    ["print", "Summarize", "this", "--cwd", workspace, "--socket", socketPath],
+    { ...process.env, HOME: directory },
+    "piped input\n",
+  );
+  assert.deepEqual(result, { code: 0, stdout: "printed response\n", stderr: "" });
+  assert.equal(prompt, "Summarize this\n\npiped input\n");
+});
 
 test("rpc bridges the native daemon protocol over stdio", async (context) => {
   const directory = await temporaryDirectory(context);
