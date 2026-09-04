@@ -13,6 +13,10 @@
     "./unix": {
       "types": "./dist/unix.d.ts",
       "import": "./dist/unix.js"
+    },
+    "./websocket": {
+      "types": "./dist/websocket.d.ts",
+      "import": "./dist/websocket.js"
     }
   },
   "files": [
