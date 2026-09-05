@@ -19,8 +19,12 @@ import {
   type SessionProfile,
   type SessionSubscription,
   type SessionSummary,
+  SessionWorkspace,
   subscribeSession,
   type ThinkingLevel,
+  type WorkspaceState,
+  emptyWorkspaceState,
+  type GitStatusEntry,
 } from "@axl/sdk";
 
 export const BROWSER_CAPABILITIES = [
@@ -39,6 +43,11 @@ export const BROWSER_CAPABILITIES = [
   "session.subscribe",
   "session.activity",
   "session.presence",
+  "session.workspace.list",
+  "session.workspace.read",
+  "session.workspace.status",
+  "session.workspace.diff",
+  "session.workspace.checkpoint",
 ] as const satisfies readonly CapabilityId[];
 
 const PAGE_SIZE = 30;
@@ -55,6 +64,7 @@ export interface ApplicationShellState {
   readonly search: string;
   readonly selected: SessionOpenResult | undefined;
   readonly conversation: ConversationState;
+  readonly workspace: WorkspaceState;
   readonly draft: string;
   readonly cursorPersistence: CursorPersistenceStatus;
   readonly presence: readonly AttachmentPresence[];
@@ -81,6 +91,7 @@ export class ApplicationShell {
     search: "",
     selected: undefined,
     conversation: emptyConversation(),
+    workspace: emptyWorkspaceState(),
     draft: "",
     cursorPersistence: { state: "not_configured" },
     presence: [],
@@ -92,6 +103,7 @@ export class ApplicationShell {
   private readonly drafts = new Map<string, string>();
   private client: AxlClient | undefined;
   private subscription: SessionSubscription | undefined;
+  private sessionWorkspace: SessionWorkspace | undefined;
   private removePresence: (() => void) | undefined;
   private selectionGeneration = 0;
   private pendingOperations = 0;
@@ -262,6 +274,26 @@ export class ApplicationShell {
     );
   }
 
+  async refreshWorkspace(): Promise<void> {
+    await this.requireWorkspace().refresh();
+  }
+
+  async listWorkspace(path: string, nextPage = false): Promise<void> {
+    await this.requireWorkspace().list(path, nextPage);
+  }
+
+  async readWorkspaceFile(path: string): Promise<void> {
+    await this.requireWorkspace().read(path);
+  }
+
+  async loadWorkspaceDiff(entry: GitStatusEntry): Promise<void> {
+    await this.requireWorkspace().diff(entry);
+  }
+
+  async configureWorkspaceCheckpoint(enabled: boolean): Promise<void> {
+    await this.requireWorkspace().checkpoint(enabled);
+  }
+
   async disposeSession(): Promise<void> {
     const selected = this.requireSelected();
     await this.run(async (client) => {
@@ -274,6 +306,8 @@ export class ApplicationShell {
     this.selectionGeneration += 1;
     this.subscription?.detach();
     this.subscription = undefined;
+    this.sessionWorkspace?.clear();
+    this.sessionWorkspace = undefined;
     this.removePresence?.();
     this.removePresence = undefined;
     this.client?.close();
@@ -286,6 +320,7 @@ export class ApplicationShell {
       presence: [],
       busy: false,
       conversation,
+      workspace: emptyWorkspaceState(),
     });
   }
 
@@ -294,6 +329,8 @@ export class ApplicationShell {
     this.selectionGeneration += 1;
     this.subscription?.detach();
     this.subscription = undefined;
+    this.sessionWorkspace?.clear();
+    this.sessionWorkspace = undefined;
     this.removePresence?.();
     this.removePresence = undefined;
     this.client?.close();
@@ -301,6 +338,7 @@ export class ApplicationShell {
     this.update({
       selected: undefined,
       conversation: emptyConversation(),
+      workspace: emptyWorkspaceState(),
       draft: "",
       cursorPersistence: { state: "not_configured" },
       presence: [],
@@ -371,9 +409,12 @@ export class ApplicationShell {
     this.selectionGeneration += 1;
     const old = this.subscription;
     this.subscription = undefined;
+    this.sessionWorkspace?.clear();
+    this.sessionWorkspace = undefined;
     this.update({
       selected: undefined,
       conversation: emptyConversation(),
+      workspace: emptyWorkspaceState(),
       draft: "",
       cursorPersistence: { state: "not_configured" },
     });
@@ -383,9 +424,14 @@ export class ApplicationShell {
   private async selectOpened(opened: SessionOpenResult): Promise<void> {
     const client = this.requireClient();
     const generation = ++this.selectionGeneration;
+    const workspace = new SessionWorkspace(client, opened.sessionId, (workspaceState) => {
+      if (generation === this.selectionGeneration) this.update({ workspace: workspaceState });
+    });
+    this.sessionWorkspace = workspace;
     this.update({
       selected: opened,
       conversation: new ConversationProjector(opened.sessionId).state,
+      workspace: workspace.state,
       draft: this.drafts.get(opened.sessionId) ?? "",
       cursorPersistence: { state: "available" },
     });
@@ -437,6 +483,11 @@ export class ApplicationShell {
   private requireSelected(): SessionOpenResult {
     if (this.stateValue.selected === undefined) throw new Error("Select a session first");
     return this.stateValue.selected;
+  }
+
+  private requireWorkspace(): SessionWorkspace {
+    if (this.sessionWorkspace === undefined) throw new Error("Select a session workspace first");
+    return this.sessionWorkspace;
   }
 
   private async run<Result>(operation: (client: AxlClient) => Promise<Result>): Promise<Result> {

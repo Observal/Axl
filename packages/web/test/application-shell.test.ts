@@ -190,8 +190,15 @@ test("browser and TUI projections converge, reconnect exactly, and detach leaves
   assert.equal(new Set(eventIds(shell)).size, eventIds(shell).length);
 
   const firstSessionId = sessionId;
+  await shell.listWorkspace("");
+  assert.ok(shell.state.workspace.directories[""]?.entries.length !== undefined);
   await shell.createSession({ cwd });
   assert.notEqual(shell.state.selected?.sessionId, firstSessionId);
+  assert.equal(shell.state.workspace.sessionId, shell.state.selected?.sessionId);
+  assert.deepEqual(shell.state.workspace.directories, {});
+  assert.deepEqual(shell.state.workspace.previews, {});
+  assert.deepEqual(shell.state.workspace.statuses, {});
+  assert.deepEqual(shell.state.workspace.diffs, {});
   assert.ok(
     shell.state.conversation.records.every(
       (record) => record.event.sessionId === shell.state.selected?.sessionId,

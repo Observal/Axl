@@ -307,6 +307,155 @@ button:disabled {
   resize: vertical;
 }
 
+.workspace-review {
+  margin: 1rem 0;
+  border: 1px solid #2a333e;
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+
+.workspace-toolbar,
+.workspace-columns,
+.tab-list {
+  display: flex;
+  gap: 0.7rem;
+}
+
+.workspace-toolbar {
+  align-items: center;
+  padding: 0.75rem;
+  border-bottom: 1px solid #2a333e;
+}
+
+.workspace-toolbar h2 {
+  margin: 0 auto 0 0;
+}
+
+.workspace-columns > section {
+  flex: 1 1 50%;
+  min-width: 0;
+  padding: 0.75rem;
+}
+
+.workspace-columns > section + section {
+  border-left: 1px solid #2a333e;
+}
+
+.explorer-list,
+.change-group ul {
+  list-style: none;
+  padding-left: 0.8rem;
+}
+
+.explorer-list button,
+.change-group button {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+  text-align: left;
+}
+
+.explorer-entry {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  overflow-wrap: anywhere;
+}
+
+.explorer-symlink,
+.workspace-error-denied,
+.workspace-error-invalid_encoding,
+.workspace-error-stale_workspace,
+.workspace-error-stale_repository {
+  color: #ffd17a;
+}
+
+.explorer-other,
+.workspace-error-unsupported {
+  color: #9fb0c3;
+}
+
+.repository-state > div {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.5rem;
+}
+
+.repository-state dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.workspace-tabs {
+  border-top: 1px solid #2a333e;
+}
+
+.tab-list {
+  padding: 0.6rem;
+  overflow-x: auto;
+}
+
+.tab-list > span {
+  display: flex;
+  flex: 0 0 auto;
+}
+
+.tab-list > span > button + button {
+  border-left: 0;
+}
+
+.tab-list [aria-selected="true"] {
+  border-color: #65b8ff;
+  background: #1d3040;
+}
+
+.tab-panel {
+  padding: 0.75rem;
+}
+
+.file-preview pre,
+.diff-preview pre {
+  margin: 0;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.file-preview > pre,
+.diff-hunk {
+  max-height: 42rem;
+  overflow: auto;
+  background: #0c1014;
+  padding: 0.7rem;
+}
+
+.diff-hunk table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.diff-hunk td,
+.diff-hunk th {
+  padding: 0.15rem 0.35rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.diff-addition {
+  background: #173624;
+}
+
+.diff-deletion {
+  background: #3d2024;
+}
+
+.diff-marker {
+  color: #ffd17a;
+}
+
 @media (max-width: 720px) {
   .workspace {
     grid-template-columns: 1fr;

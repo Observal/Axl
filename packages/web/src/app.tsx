@@ -7,6 +7,7 @@ import type { CapabilityId, SessionProfile, ThinkingLevel } from "@axl/sdk";
 
 import { ConversationPresentation } from "./conversation.tsx";
 import type { ApplicationShell } from "./shell.ts";
+import { WorkspacePresentation } from "./workspace.tsx";
 
 const CONNECTION_LABELS = {
   connecting: "Connecting",
@@ -271,6 +272,12 @@ export function App({ shell }: { readonly shell: ApplicationShell }) {
                   Web fetch
                 </label>
               </section>
+
+              <WorkspacePresentation
+                shell={shell}
+                workspace={state.workspace}
+                sessionId={selected.sessionId}
+              />
 
               <ConversationPresentation
                 state={projection}
