@@ -88,25 +88,15 @@ export interface ModelStreamError {
   readonly retryAfterMs?: number;
 }
 
-/** Emitted before a provider-neutral port waits to redispatch an identical request. */
-export interface ModelRetryScheduled {
-  readonly type: "retry_scheduled";
-  readonly attempt: number;
-  readonly maxAttempts: number;
-  readonly delayMs: number;
-  readonly error: ModelStreamError;
-}
-
 /**
- * Canonical model stream shape. Every stream yields zero or more deltas, tool
- * calls, and retry notices, then exactly one terminal event: `completed`, `error`, or
+ * Canonical model stream shape. Every stream yields zero or more deltas and
+ * tool calls, then exactly one terminal event: `completed`, `error`, or
  * `aborted`. Nothing follows a terminal event.
  */
 export type ModelStreamEvent =
   | { readonly type: "text_delta"; readonly text: string }
   | { readonly type: "thinking_delta"; readonly text: string }
   | ({ readonly type: "tool_call" } & ToolCallRequest)
-  | ModelRetryScheduled
   | { readonly type: "completed"; readonly stopReason: AssistantStopReason; readonly usage: Usage }
   | ({ readonly type: "error" } & ModelStreamError)
   | { readonly type: "aborted" };

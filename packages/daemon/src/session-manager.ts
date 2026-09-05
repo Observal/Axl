@@ -26,6 +26,7 @@ import {
   type ExtensionHost,
   JsonlEventLog,
   type ModelPort,
+  type ModelRetryOptions,
   SessionTree,
   type StablePrompt,
   type ToolRegistry,
@@ -90,6 +91,7 @@ export interface SessionRuntime {
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
   readonly compaction?: Partial<CompactionSettings>;
+  readonly retry?: ModelRetryOptions | false;
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
@@ -425,6 +427,7 @@ export class SessionManager {
       },
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
       ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
+      ...(runtime.retry === undefined ? {} : { retry: runtime.retry }),
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
