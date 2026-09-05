@@ -11,6 +11,7 @@ import {
   makeFakeModelInfo,
   type ModelRequest,
   type ModelStreamEvent,
+  OpenAiResponsesProvider,
   ResponsesCodecError,
   type SseFrame,
 } from "../src/index.ts";
@@ -204,11 +205,107 @@ test("failures decode to error terminals", async () => {
     },
   ]);
   assert.deepEqual(failed, [
-    { type: "error", code: "rate_limited", message: "slow down", retryable: false },
+    {
+      type: "error",
+      code: "rate_limited",
+      message: "slow down",
+      retryable: true,
+      category: "rate_limit",
+      requestPhase: "awaiting_response",
+    },
   ]);
 
   const wireError = await decode([{ type: "error", code: "bad_request", message: "no" }]);
   assert.equal(wireError[0]?.type, "error");
+});
+
+test("classifies HTTP throttling and preserves Retry-After", async () => {
+  const provider = new OpenAiResponsesProvider({
+    id: "responses",
+    displayName: "Responses",
+    authMethods: ["keyless"],
+    endpoint: {
+      url: () => "https://example.test/responses",
+      headers: () => ({}),
+      deploymentFor: (modelId) => modelId,
+    },
+    models: [model],
+    resolveAuth: () => Promise.resolve({ auth: {}, source: "test", secretValues: [] }),
+    fetch: () =>
+      Promise.resolve(new Response("busy", { status: 429, headers: { "retry-after": "2" } })),
+  });
+
+  const events = await Array.fromAsync(provider.stream({ modelId: "gpt-5", messages: [] }));
+  assert.deepEqual(events, [
+    {
+      type: "error",
+      code: "http_429",
+      message: "Provider responses returned 429: busy",
+      retryable: true,
+      category: "rate_limit",
+      requestPhase: "awaiting_response",
+      retryAfterMs: 2_000,
+    },
+  ]);
+});
+
+test("classifies fetch failures as retryable and retains a known pre-dispatch phase", async () => {
+  const networkCause = Object.assign(new Error("dns unavailable"), { code: "EAI_AGAIN" });
+  const provider = new OpenAiResponsesProvider({
+    id: "responses",
+    displayName: "Responses",
+    authMethods: ["keyless"],
+    endpoint: {
+      url: () => "https://example.test/responses",
+      headers: () => ({}),
+      deploymentFor: (modelId) => modelId,
+    },
+    models: [model],
+    resolveAuth: () => Promise.resolve({ auth: {}, source: "test", secretValues: [] }),
+    fetch: () => Promise.reject(new TypeError("fetch failed", { cause: networkCause })),
+  });
+
+  const events = await Array.fromAsync(provider.stream({ modelId: "gpt-5", messages: [] }));
+  assert.equal(events[0]?.type === "error" && events[0].retryable, true);
+  assert.equal(events[0]?.type === "error" && events[0].requestPhase, "before_dispatch");
+});
+
+test("classifies a terminated response stream as retryable", async () => {
+  const provider = new OpenAiResponsesProvider({
+    id: "responses",
+    displayName: "Responses",
+    authMethods: ["keyless"],
+    endpoint: {
+      url: () => "https://example.test/responses",
+      headers: () => ({}),
+      deploymentFor: (modelId) => modelId,
+    },
+    models: [model],
+    resolveAuth: () => Promise.resolve({ auth: {}, source: "test", secretValues: [] }),
+    fetch: () =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new TypeError("terminated"));
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+  });
+
+  const events = await Array.fromAsync(provider.stream({ modelId: "gpt-5", messages: [] }));
+  assert.deepEqual(events, [
+    {
+      type: "error",
+      code: "provider_stream_failed",
+      message: "terminated",
+      retryable: true,
+      category: "stream_interrupted",
+      requestPhase: "streaming",
+    },
+  ]);
 });
 
 test("undecodable frames and tool arguments fail loudly", async () => {

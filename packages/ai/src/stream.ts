@@ -44,7 +44,14 @@ function terminalForFailure(
   message: string,
 ): TerminalModelStreamEvent {
   if (signal?.aborted) return { type: "aborted" };
-  return { type: "error", code, message, retryable: false };
+  return {
+    type: "error",
+    code,
+    message,
+    retryable: true,
+    category: "stream_interrupted",
+    requestPhase: "streaming",
+  };
 }
 
 /** Collects a normalized stream; the last event is always terminal. */

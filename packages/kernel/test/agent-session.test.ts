@@ -467,6 +467,45 @@ test("model failures land as an error assistant message without corrupting the l
   await reopened.dispose();
 });
 
+test("records provider retry attempts before the final assistant response", async (context) => {
+  const port = makePort([
+    [
+      {
+        type: "retry_scheduled",
+        attempt: 2,
+        maxAttempts: 3,
+        delayMs: 500,
+        error: { code: "http_503", message: "busy", retryable: true },
+      },
+      { type: "text_delta", text: "recovered" },
+      { type: "completed", stopReason: "stop", usage },
+    ],
+  ]);
+  const { session } = await makeSession(context, port);
+
+  const result = await session.runTurn([{ type: "text", text: "hi" }]);
+  assert.deepEqual(
+    result.events.map((event) => event.type),
+    ["user.message", "model.retry_scheduled", "assistant.message"],
+  );
+  const retry = result.events[1];
+  assert.equal(retry?.type === "model.retry_scheduled" && retry.payload.attempt, 2);
+});
+
+test("accepts another prompt after an unrecoverable model failure", async (context) => {
+  const port = makePort([
+    [{ type: "error", code: "invalid_request", message: "bad request", retryable: false }],
+    say("recovered on the next prompt"),
+  ]);
+  const { session } = await makeSession(context, port);
+
+  const failed = await session.runTurn([{ type: "text", text: "first" }]);
+  assert.equal(failed.stopReason, "error");
+  const recovered = await session.runTurn([{ type: "text", text: "second" }]);
+  assert.equal(recovered.stopReason, "stop");
+  assert.equal(port.requests.length, 2);
+});
+
 test("a silently truncated stream becomes a loud error terminal", async (context) => {
   const truncated: ModelPort = {
     stream: async function* () {

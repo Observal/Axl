@@ -14,6 +14,49 @@ import { decodeSseStream, type SseFrame } from "./sse.ts";
 
 /** OpenAI Responses rejects max_output_tokens below 16. */
 const MIN_OUTPUT_TOKENS = 16;
+const SAFE_CONNECT_FAILURES = new Set([
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+function retryAfterMs(headers: Headers, now = Date.now()): number | undefined {
+  const value = headers.get("retry-after")?.trim();
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : undefined;
+}
+
+function nestedErrorCode(error: unknown): string | undefined {
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) return undefined;
+    const candidate = current as { code?: unknown; cause?: unknown };
+    if (typeof candidate.code === "string") return candidate.code;
+    current = candidate.cause;
+  }
+  return undefined;
+}
+
+function providerFailure(code: string, message: string): ModelStreamEvent {
+  const normalized = code.toLowerCase();
+  const rateLimited = normalized.includes("rate_limit") || normalized.includes("too_many_requests");
+  const overloaded =
+    normalized.includes("overload") ||
+    normalized.includes("temporarily_unavailable") ||
+    normalized.includes("server_error");
+  return {
+    type: "error",
+    code,
+    message,
+    retryable: rateLimited || overloaded,
+    category: rateLimited ? "rate_limit" : overloaded ? "overloaded" : "unknown",
+    requestPhase: "awaiting_response",
+  };
+}
 
 export class ResponsesCodecError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -259,12 +302,10 @@ export async function* decodeResponsesStream(
         | { error?: { message?: string; code?: string } }
         | undefined;
       const message = response?.error?.message ?? (event.message as string | undefined);
-      yield {
-        type: "error",
-        code: String(response?.error?.code ?? event.code ?? "provider_error"),
-        message: message ?? "Provider reported a failure",
-        retryable: false,
-      };
+      yield providerFailure(
+        String(response?.error?.code ?? event.code ?? "provider_error"),
+        message ?? "Provider reported a failure",
+      );
       return;
     }
     // Unknown event types are forward-compatible noise and are ignored.
@@ -332,7 +373,8 @@ export class OpenAiResponsesProvider implements ModelProvider {
     model: ModelInfo,
     request: ModelRequest,
   ): AsyncGenerator<ModelStreamEvent, void, undefined> {
-    let response: Response;
+    let url: string;
+    let init: RequestInit;
     try {
       const resolved = await this.resolveAuth();
       const body = encodeResponsesRequest(
@@ -341,7 +383,8 @@ export class OpenAiResponsesProvider implements ModelProvider {
         this.endpoint.deploymentFor(model.modelId, resolved),
         await resolveRequestBlobs(request),
       );
-      response = await this.fetchImpl(this.endpoint.url(resolved), {
+      url = this.endpoint.url(resolved);
+      init = {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -350,19 +393,48 @@ export class OpenAiResponsesProvider implements ModelProvider {
         },
         body: JSON.stringify(body),
         ...(request.signal === undefined ? {} : { signal: request.signal }),
-      });
+      };
     } catch (error) {
-      yield this.failure(request, error);
+      yield this.failure(request, error, "provider_request_setup_failed", "before_dispatch", false);
+      return;
+    }
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, init);
+    } catch (error) {
+      const code = nestedErrorCode(error);
+      yield this.failure(
+        request,
+        error,
+        "provider_request_failed",
+        code !== undefined && SAFE_CONNECT_FAILURES.has(code) ? "before_dispatch" : "unknown",
+        true,
+      );
       return;
     }
 
     if (!response.ok) {
       const detail = (await response.text().catch(() => "")).slice(0, 2000);
+      const retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status);
+      const retryDelay = retryable ? retryAfterMs(response.headers) : undefined;
       yield {
         type: "error",
         code: `http_${response.status}`,
         message: `Provider ${this.id} returned ${response.status}${detail ? `: ${detail}` : ""}`,
-        retryable: response.status === 429 || response.status >= 500,
+        retryable,
+        category:
+          response.status === 429
+            ? "rate_limit"
+            : response.status >= 500
+              ? "provider_internal"
+              : response.status === 401
+                ? "authentication"
+                : response.status === 403
+                  ? "authorization"
+                  : "invalid_request",
+        requestPhase: "awaiting_response",
+        ...(retryDelay === undefined ? {} : { retryAfterMs: retryDelay }),
       };
       return;
     }
@@ -372,6 +444,8 @@ export class OpenAiResponsesProvider implements ModelProvider {
         code: "empty_response",
         message: `Provider ${this.id} returned no response body`,
         retryable: true,
+        category: "provider_internal",
+        requestPhase: "awaiting_response",
       };
       return;
     }
@@ -379,17 +453,25 @@ export class OpenAiResponsesProvider implements ModelProvider {
     try {
       yield* decodeResponsesStream(decodeSseStream(response.body));
     } catch (error) {
-      yield this.failure(request, error);
+      yield this.failure(request, error, "provider_stream_failed", "streaming", true);
     }
   }
 
-  private failure(request: ModelRequest, error: unknown): ModelStreamEvent {
+  private failure(
+    request: ModelRequest,
+    error: unknown,
+    code: string,
+    requestPhase: "before_dispatch" | "streaming" | "unknown",
+    retryable: boolean,
+  ): ModelStreamEvent {
     if (request.signal?.aborted) return { type: "aborted" };
     return {
       type: "error",
-      code: "provider_request_failed",
+      code,
       message: error instanceof Error ? error.message : "provider request failed",
-      retryable: false,
+      retryable,
+      category: requestPhase === "streaming" ? "stream_interrupted" : "network",
+      requestPhase,
     };
   }
 }

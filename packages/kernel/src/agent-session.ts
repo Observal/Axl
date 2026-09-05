@@ -454,7 +454,7 @@ export class AgentSession {
           return { events: appended, stopReason: "error" };
         }
 
-        const outcome = await this.modelTurn(operationId, activity, signal);
+        const outcome = await this.modelTurn(operationId, activity, signal, appended);
         const assistantEvent = await this.append(operationId, "assistant.message", {
           content: outcome.content,
           stopReason: outcome.stopReason,
@@ -559,6 +559,7 @@ export class AgentSession {
     operationId: OperationId,
     activity: { sequence: number },
     signal: AbortSignal | undefined,
+    appended: CanonicalEvent[],
   ): Promise<TurnOutcome> {
     let thinking = "";
     let text = "";
@@ -597,6 +598,15 @@ export class AgentSession {
             type: "tool_call",
             call: { callId: event.callId, name: event.name },
           });
+        } else if (event.type === "retry_scheduled") {
+          appended.push(
+            await this.append(operationId, "model.retry_scheduled", {
+              attempt: event.attempt,
+              maxAttempts: event.maxAttempts,
+              delayMs: event.delayMs,
+              code: event.error.code,
+            }),
+          );
         }
         if (isTerminalModelStreamEvent(event)) {
           terminal = event;
