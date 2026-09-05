@@ -151,11 +151,12 @@ test("tracks profile, model, thinking, and sandbox without noisy startup rows", 
   );
 });
 
-test("cycles compact, full, and focus transcript detail modes", () => {
+test("Ctrl+O toggles expanded and collapsed details without hiding tools", () => {
   const view = new SessionView(80, PLAIN_PALETTE);
   assert.equal(view.toggleToolOutput(), "full");
-  assert.equal(view.toggleToolOutput(), "focus");
   assert.equal(view.toggleToolOutput(), "compact");
+  view.toolOutputDisplay = "focus";
+  assert.equal(view.toggleToolOutput(), "full");
 });
 
 test("reports cumulative usage, cache hit rate, cost, and local throughput", () => {

@@ -1803,7 +1803,6 @@ export class AxlApp {
       } else if (key.kind === "ctrl" && key.char === "o") {
         this.toolGroupModes.clear();
         const mode = this.view.toggleToolOutput();
-        void this.persistPreferences({ toolOutputDisplay: mode });
         this.notice = this.view.palette.dim(`· tool details ${mode}`);
         this.rebuildTranscript();
       } else if (key.kind === "ctrl" && key.char === "t") {
@@ -2920,7 +2919,6 @@ export class AxlApp {
     }
     this.toolGroupModes.clear();
     this.view.toolOutputDisplay = mode;
-    void this.persistPreferences({ toolOutputDisplay: mode });
     this.notice = this.view.palette.dim(`· tool details ${mode}`);
     this.rebuildTranscript();
   }
@@ -3035,7 +3033,6 @@ export class AxlApp {
       onPick: (value) => {
         this.toolGroupModes.clear();
         this.view.toolOutputDisplay = value as ToolOutputDisplay;
-        void this.persistPreferences({ toolOutputDisplay: this.view.toolOutputDisplay });
         this.rebuildTranscript();
       },
     });

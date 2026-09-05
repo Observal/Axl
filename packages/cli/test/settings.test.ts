@@ -86,3 +86,26 @@ test("uses empty defaults only for a missing file and rejects invalid settings",
   await writeFile(path, '{"version":1,"webFetch":"yes"}\n');
   await assert.rejects(loadTuiSettings(path), /webFetch must be a boolean/);
 });
+
+test("expanded tool inspection does not become the next startup default", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-tool-defaults-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "settings.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      version: 1,
+      toolOutputDisplay: "full",
+      modelId: "gpt-5.6",
+      theme: "axl-dark",
+    }),
+  );
+  assert.deepEqual(await loadTuiSettings(path), {
+    version: 1,
+    toolOutputDisplay: "compact",
+    modelId: "gpt-5.6",
+    theme: "axl-dark",
+  });
+  await saveTuiSettings(path, { version: 1, toolOutputDisplay: "full" });
+  assert.equal(JSON.parse(await readFile(path, "utf8")).toolOutputDisplay, "compact");
+});

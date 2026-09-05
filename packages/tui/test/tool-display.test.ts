@@ -33,7 +33,8 @@ test("edit transactions render adaptive unified and split previews", () => {
     palette: PLAIN_PALETTE,
   });
   const unifiedText = unified.join("\n");
-  assert.match(unifiedText, /◌ running {2}EDIT {2}src\/app\.ts/);
+  assert.match(unifiedText, /EDIT {2}src\/app\.ts\s+running/);
+  assert.ok(!unifiedText.includes("✓"));
   assert.match(unifiedText, /↳ diff \+1 -1 unified \[━{2}\]/);
   assert.match(unifiedText, /1 -│ const value = 1;/);
   assert.match(unifiedText, /1 \+│ const value = 2;/);
@@ -63,12 +64,13 @@ test("edit transactions render adaptive unified and split previews", () => {
     rich.every((line) => visibleWidth(line) <= 80),
     true,
   );
-  assert.equal(rich.join("\n").includes("\x1b[48;2;51;45;32m"), true);
+  assert.ok(
+    rich[1]?.includes(theme.toolBackground?.("marker").split("marker")[0] ?? "missing background"),
+  );
   assert.equal(rich.join("\n").includes("\x1b[38;2;251;73;52mconst"), true);
   assert.equal(rich[0], "");
-  assert.equal(stripAnsi(rich[1] ?? "").trim(), "");
-  assert.match(stripAnsi(rich[2] ?? ""), /EDIT/);
-  assert.equal(stripAnsi(rich[3] ?? "").trim(), "");
+  assert.match(stripAnsi(rich[1] ?? ""), /^ {2}EDIT .*running$/);
+  assert.equal(rich[2], "");
 });
 
 test("full read results use syntax highlighting from the file path", () => {
@@ -98,7 +100,8 @@ test("one transaction combines lifecycle, target, duration, and bounded result",
     mode: "compact",
     palette: PLAIN_PALETTE,
   });
-  assert.match(running.join("\n"), /◌ running {2}SHELL {2}pnpm test/);
+  assert.match(running[1] ?? "", /^ {2}SHELL\s+running$/);
+  assert.match(running.join("\n"), /\$ pnpm test/);
   assert.equal(running.filter((line) => line.includes("╭")).length, 0);
 
   const settled = renderToolTransaction({
@@ -111,10 +114,11 @@ test("one transaction combines lifecycle, target, duration, and bounded result",
     mode: "compact",
     palette: PLAIN_PALETTE,
   });
-  assert.match(settled.join("\n"), /✓ done · 1\.3s {2}SHELL {2}pnpm test/);
+  assert.match(settled[1] ?? "", /^ {2}SHELL\s+done \| 1\.3s$/);
+  assert.match(settled.join("\n"), /\$ pnpm test/);
   assert.match(settled.join("\n"), /lines hidden · Ctrl\+O to expand/);
   assert.equal(settled.filter((line) => line.includes("╭")).length, 0);
-  const firstOutput = settled.findIndex((line) => line.includes("│"));
+  const firstOutput = settled.findIndex((line) => line.includes("$ pnpm test"));
   assert.equal(firstOutput > 0 && settled[firstOutput - 1] === "", true);
 
   const expanded = renderToolTransaction({
@@ -153,7 +157,7 @@ test("focus mode hides routine success while retaining failures and edits", () =
     mode: "focus",
     palette: PLAIN_PALETTE,
   });
-  assert.match(failed.join("\n"), /! failed/);
+  assert.match(failed[1] ?? "", /^ {2}READ .*failed$/);
   assert.match(failed.join("\n"), /not found/);
 });
 
@@ -296,7 +300,7 @@ test("long tool targets remain inside the inset status surface", () => {
     rendered.every((line) => visibleWidth(line) <= 40),
     true,
   );
-  assert.equal(stripAnsi(rendered[2] ?? "").startsWith("  ! failed  SHELL"), true);
+  assert.match(stripAnsi(rendered[1] ?? ""), /^ {2}SHELL\s+failed$/);
   for (let width = 1; width <= 20; width += 1) {
     const narrow = renderToolTransaction({
       name: "shell",
@@ -325,7 +329,8 @@ test("user shell output stays distinct and bounded", () => {
     mode: "compact",
     palette: PLAIN_PALETTE,
   });
-  assert.match(rendered.join("\n"), /\$ pwd {2}local only/);
+  assert.match(rendered.join("\n"), /local only/);
+  assert.match(rendered.join("\n"), /\$ pwd/);
   assert.match(rendered.join("\n"), /lines hidden/);
 });
 
@@ -371,7 +376,7 @@ test("oversized inputs have character and wrapped-row bounds without changing ar
       assert.ok(compact.join("").length < 2_000);
       assert.ok(full.join("").length < 8_192);
       const bodyText = (rows: readonly string[]) =>
-        rows.map((row) => stripAnsi(row).replace(/^ {2}│ /u, "")).join("");
+        rows.map((row) => stripAnsi(row).replace(/^ {2}/u, "")).join("");
       assert.match(bodyText(compact), /BEGIN/);
       assert.match(bodyText(compact), /END/);
       assert.match(bodyText(compact), /chars/);
@@ -395,4 +400,75 @@ test("oversized inputs have character and wrapped-row bounds without changing ar
       assert.equal(JSON.stringify(args), before);
     }
   }
+});
+
+test("tool headers lead with the operation and keep status and duration visible", () => {
+  const header =
+    renderToolTransaction({
+      name: "read",
+      args: { path: `src/${"long-path/".repeat(30)}file.ts` },
+      status: "succeeded",
+      durationMs: 1234,
+      width: 60,
+      mode: "compact",
+      palette: PLAIN_PALETTE,
+    })[1] ?? "";
+  assert.match(header, /^ {2}READ {2}src\//);
+  assert.match(header, /done \| 1\.2s$/);
+  assert.equal(visibleWidth(header), 60);
+  assert.ok(!/[✓◌○■]/u.test(header));
+});
+
+test("Bash commands retain line breaks, syntax, and bounded expanded output", () => {
+  const command =
+    'set -eu\nexpected=\'File 1\'\nactual="$(cat file1.txt)"\ntest "$actual" = "$expected"';
+  const palette = THEMES["axl-dark"];
+  assert.ok(palette);
+  for (const mode of ["compact", "full"] as const) {
+    const rows = renderToolTransaction({
+      name: "bash",
+      args: { command },
+      result: "ok",
+      status: "succeeded",
+      durationMs: 8,
+      width: 80,
+      mode,
+      palette,
+    });
+    const plain = rows.map(stripAnsi);
+    assert.match(plain[1] ?? "", /^ {2}BASH\s+done \| 8ms$/);
+    for (const line of command.split("\n"))
+      assert.ok(
+        plain.some((row) => row.includes(line)),
+        line,
+      );
+    assert.ok(!plain.some((row) => row.includes('"command":')));
+    assert.ok(rows.some((row) => row.includes("expected") && row.includes("\x1b[")));
+  }
+  const rows = renderToolTransaction({
+    name: "read",
+    args: { path: "large.txt" },
+    result: `${"line\n".repeat(10_000)}TAIL`,
+    status: "succeeded",
+    width: 80,
+    mode: "full",
+    palette: PLAIN_PALETTE,
+  });
+  assert.ok(rows.length < 215);
+  assert.match(rows.join("\n"), /\/export for complete result/);
+  assert.match(rows.join("\n"), /TAIL/);
+});
+
+test("full input budgets count terminal cells rather than JavaScript characters", () => {
+  const rows = renderToolTransaction({
+    name: "custom",
+    args: { query: "界".repeat(2_000) },
+    status: "running",
+    width: 80,
+    mode: "full",
+    palette: PLAIN_PALETTE,
+  });
+  assert.ok(rows.length < 50);
+  assert.match(rows.join("\n"), /Input preview/);
+  assert.ok(rows.every((row) => visibleWidth(row) <= 80));
 });

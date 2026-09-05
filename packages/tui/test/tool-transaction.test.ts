@@ -14,6 +14,7 @@ import {
   type ToolOutputDisplay,
 } from "../src/index.ts";
 
+const startedAt = Date.now();
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
 
 function call(): CanonicalEvent<"tool.call"> {
@@ -23,7 +24,7 @@ function call(): CanonicalEvent<"tool.call"> {
     sessionId,
     operationId: "00000000-0000-4000-8000-000000000010",
     parentId: null,
-    timestamp: 1_000,
+    timestamp: startedAt,
     type: "tool.call",
     payload: { callId: "call-1", name: "shell", input: { command: "pnpm test" } },
   }) as CanonicalEvent<"tool.call">;
@@ -36,7 +37,7 @@ function result(details: Record<string, unknown> = {}): CanonicalEvent<"tool.res
     sessionId,
     operationId: "00000000-0000-4000-8000-000000000010",
     parentId: "00000000-0000-4000-8000-000000000001",
-    timestamp: 2_250,
+    timestamp: startedAt + 1_250,
     type: "tool.result",
     payload: {
       callId: "call-1",
@@ -54,10 +55,10 @@ test("updates one retained component from running to succeeded", () => {
     () => PLAIN_PALETTE,
     () => "compact",
   );
-  assert.match(component.render(80).join("\n"), /◌ running/);
+  assert.match(component.render(80).join("\n"), /SHELL\s+running \|/);
   component.settle(result());
   const settled = component.render(80).join("\n");
-  assert.match(settled, /✓ done · 1\.3s/);
+  assert.match(settled, /SHELL\s+done \| 1\.3s/);
   assert.match(settled, /tests passed/);
 });
 
@@ -68,7 +69,7 @@ test("renders unresolved restored calls as pending", () => {
     () => "compact",
     "pending",
   );
-  assert.match(pending.render(80).join("\n"), /○ pending/);
+  assert.match(pending.render(80).join("\n"), /SHELL\s+pending/);
 });
 
 test("preserves denied and aborted lifecycle states", () => {
@@ -79,7 +80,7 @@ test("preserves denied and aborted lifecycle states", () => {
   );
   denied.markDenied("outside workspace");
   denied.settle(result());
-  assert.match(denied.render(80).join("\n"), /! denied/);
+  assert.match(denied.render(80).join("\n"), /SHELL\s+denied \|/);
 
   const aborted = new ToolTransactionComponent(
     call(),
@@ -87,7 +88,7 @@ test("preserves denied and aborted lifecycle states", () => {
     () => "compact",
   );
   aborted.settle(result({ endedBy: "abort" }));
-  assert.match(aborted.render(80).join("\n"), /■ aborted/);
+  assert.match(aborted.render(80).join("\n"), /SHELL\s+aborted \|/);
 });
 
 test("tool groups retain call order, lifecycle counts, and full detail until drained", () => {

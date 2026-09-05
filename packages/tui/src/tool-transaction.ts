@@ -48,6 +48,7 @@ export class ToolTransactionComponent implements Component {
   private cachedPalette: Palette | undefined;
   private cachedLines: string[] | undefined;
   private cachedSummary = false;
+  private cachedDurationMs: number | undefined;
 
   constructor(
     event: CanonicalEvent<"tool.call">,
@@ -101,12 +102,18 @@ export class ToolTransactionComponent implements Component {
   render(width: number, summaryOnly = false): string[] {
     const palette = this.palette();
     const mode = this.detailMode();
+    const durationMs =
+      this.durationMs ??
+      (this.status === "running"
+        ? Math.max(0, Math.floor((Date.now() - this.startedAt) / 1_000) * 1_000)
+        : undefined);
     if (
       this.cachedLines !== undefined &&
       this.cachedWidth === width &&
       this.cachedMode === mode &&
       this.cachedPalette === palette &&
-      this.cachedSummary === summaryOnly
+      this.cachedSummary === summaryOnly &&
+      this.cachedDurationMs === durationMs
     ) {
       return this.cachedLines;
     }
@@ -119,7 +126,7 @@ export class ToolTransactionComponent implements Component {
       ...(this.result === undefined ? {} : { result: this.result }),
       isError: this.isError,
       status: this.status,
-      ...(this.durationMs === undefined ? {} : { durationMs: this.durationMs }),
+      ...(durationMs === undefined ? {} : { durationMs }),
       width,
       mode,
       palette,
@@ -131,6 +138,7 @@ export class ToolTransactionComponent implements Component {
         ? []
         : this.blobs.flatMap((blob) => this.renderBlob?.(blob, width, palette) ?? [])),
     ];
+    this.cachedDurationMs = durationMs;
     this.cachedSummary = summaryOnly;
     this.cachedWidth = width;
     this.cachedMode = mode;

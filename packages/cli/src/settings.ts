@@ -217,7 +217,11 @@ function parseSettings(value: unknown, path: string): TuiSettings {
   ) {
     throw new Error(`${path}: invalid diffLayout`);
   }
-  return input as unknown as TuiSettings;
+  // Expanded tools are a temporary inspection state, not a startup default.
+  return {
+    ...(input as unknown as TuiSettings),
+    ...(input.toolOutputDisplay === "full" ? { toolOutputDisplay: "compact" as const } : {}),
+  };
 }
 
 export async function loadTuiSettings(path: string): Promise<TuiSettings> {

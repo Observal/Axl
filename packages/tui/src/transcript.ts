@@ -157,12 +157,7 @@ export class SessionView {
   }
 
   toggleToolOutput(): ToolOutputDisplay {
-    this.toolOutputDisplay =
-      this.toolOutputDisplay === "compact"
-        ? "full"
-        : this.toolOutputDisplay === "full"
-          ? "focus"
-          : "compact";
+    this.toolOutputDisplay = this.toolOutputDisplay === "full" ? "compact" : "full";
     return this.toolOutputDisplay;
   }
 

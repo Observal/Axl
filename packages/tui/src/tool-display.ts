@@ -18,6 +18,8 @@ import type { Palette, ToolOutputDisplay } from "./transcript.ts";
 const HIDDEN_RESULT_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write", "skill"]);
 const COMPACT_PREVIEW_LINES = 6;
 const BASH_PREVIEW_LINES = 6;
+const FULL_RESULT_LINES = 200;
+const FULL_RESULT_CHARS = 65_536;
 const DIFF_PREVIEW_LINES = 16;
 const SPLIT_DIFF_MIN_WIDTH = 120;
 const COMPACT_EXTENSION_LINES = 12;
@@ -365,9 +367,8 @@ function transactionBackground(
   status: ToolTransactionStatus,
   palette: Palette,
 ): ((text: string) => string) | undefined {
-  if (status === "pending" || status === "running")
-    return palette.toolPendingBackground ?? palette.toolBackground;
-  if (status === "succeeded") return palette.toolSuccessBackground ?? palette.toolBackground;
+  if (status === "pending" || status === "running" || status === "succeeded")
+    return palette.toolBackground;
   if (status === "denied") return palette.toolDeniedBackground ?? palette.toolBackground;
   return palette.toolErrorBackground ?? palette.toolBackground;
 }
@@ -377,17 +378,41 @@ function transactionStatus(
   durationMs: number | undefined,
   palette: Palette,
 ): string {
+  const label = status === "succeeded" ? "done" : status;
   const duration =
     durationMs === undefined
       ? ""
-      : ` · ${durationMs < 1_000 ? `${durationMs}ms` : `${(durationMs / 1_000).toFixed(1)}s`}`;
-  const color = transactionColor(status, palette);
-  if (status === "pending") return color(`○ pending${duration}`);
-  if (status === "running") return color(`◌ running${duration}`);
-  if (status === "succeeded") return color(`✓ done${duration}`);
-  if (status === "denied") return color(`! denied${duration}`);
-  if (status === "aborted") return color(`■ aborted${duration}`);
-  return color(`! failed${duration}`);
+      : ` | ${durationMs < 1_000 && status !== "running" ? `${durationMs}ms` : `${(durationMs / 1_000).toFixed(1)}s`}`;
+  return `${transactionColor(status, palette)(label)}${palette.dim(duration)}`;
+}
+
+function shellCommandPreview(
+  command: string,
+  width: number,
+  mode: ToolOutputDisplay,
+  palette: Palette,
+): string[] {
+  const maxChars = mode === "full" ? MAX_TOOL_INPUT_CHARS : 1_024;
+  const maxRows = mode === "full" ? FULL_INPUT_PREVIEW_ROWS : BASH_PREVIEW_LINES;
+  const preview = previewText(command, maxChars);
+  const gutter = width >= 3 ? 2 : 0;
+  const rows = highlightCode(preview, "bash", palette).flatMap((line) =>
+    wrapLine(line, Math.max(1, width - gutter)),
+  );
+  const clipped = rows.length > maxRows || sanitizeTerminalText(command).length > maxChars;
+  return [
+    ...clipRows(rows, maxRows, palette, "command rows hidden").map(
+      (line, index) => `${gutter ? (index === 0 ? palette.dim("$ ") : "  ") : ""}${line}`,
+    ),
+    ...(clipped
+      ? wrapLine(
+          palette.dim(
+            `Command preview · ~${command.length.toLocaleString("en-US")} chars · ${mode === "full" ? "/export for complete input" : "Ctrl+O to expand"}`,
+          ),
+          width,
+        )
+      : []),
+  ];
 }
 
 function transactionTarget(name: string, input: Record<string, unknown>): string {
@@ -463,9 +488,12 @@ function transactionBody(input: {
   readonly oversizedInput?: string;
 }): string[] {
   const { name, args, result, isError, status, width, mode, palette } = input;
-  const bodyWidth = Math.max(1, width - 6);
+  const bodyWidth = Math.max(1, width - 2);
   const lines: string[] = [];
-  if (input.oversizedInput !== undefined) {
+  if ((name === "bash" || name === "shell") && typeof args.command === "string") {
+    lines.push(...shellCommandPreview(args.command, bodyWidth, mode, palette));
+    if (typeof args.timeout === "number") lines.push(palette.dim(`timeout ${args.timeout}s`));
+  } else if (input.oversizedInput !== undefined) {
     lines.push(...inputPreview(input.oversizedInput, bodyWidth, mode, palette));
   } else {
     if (name === "edit" || name === "write") lines.push(...editPreview(args, bodyWidth, palette));
@@ -488,7 +516,10 @@ function transactionBody(input: {
     (HIDDEN_RESULT_TOOLS.has(name) || isMcpTool(name));
   if (hidesSuccessfulBody && lines.length > 0) return lines;
   if (hidesSuccessfulBody) return [];
-  const resultPreview = mode === "full" ? result : previewText(result, MAX_TOOL_INPUT_CHARS);
+  const resultPreview = previewText(
+    result,
+    mode === "full" ? FULL_RESULT_CHARS : MAX_TOOL_INPUT_CHARS,
+  );
   const resultLines = (
     name === "read"
       ? highlightCode(resultPreview, languageForPath(pathLabel(args)), palette)
@@ -496,15 +527,21 @@ function transactionBody(input: {
   ).flatMap((line) => wrapLine(line, bodyWidth));
   const limit =
     mode === "full"
-      ? resultLines.length
+      ? FULL_RESULT_LINES
       : name === "shell" || name === "bash"
         ? BASH_PREVIEW_LINES
         : COMPACT_PREVIEW_LINES;
   const color = isError ? palette.error : (palette.text ?? palette.dim);
   lines.push(
-    ...clipRows(resultLines, limit, palette).map((line) =>
-      name === "read" && !isError ? line || " " : color(line || " "),
-    ),
+    ...(lines.length > 0 ? [""] : []),
+    ...clipRows(
+      resultLines,
+      limit,
+      palette,
+      mode === "full"
+        ? "lines hidden · /export for complete result"
+        : "lines hidden · Ctrl+O to expand",
+    ).map((line) => (name === "read" && !isError ? line || " " : color(line || " "))),
   );
   return lines;
 }
@@ -532,7 +569,8 @@ export function renderToolTransaction(input: {
     serialized
       .split("\n")
       .reduce(
-        (rows, line) => rows + Math.max(1, Math.ceil(line.length / Math.max(1, input.width - 6))),
+        (rows, line) =>
+          rows + Math.max(1, Math.ceil(visibleWidth(line) / Math.max(1, input.width - 2))),
         0,
       ) > inputRows
       ? serialized
@@ -564,19 +602,30 @@ export function renderToolTransaction(input: {
       ["read", "grep", "find", "ls", "mcp", "skill"].includes(input.name))
   )
     return [];
-  const target = previewText(custom?.target ?? transactionTarget(input.name, args), 1_024);
+  const target = previewText(
+    custom?.target ??
+      ((input.name === "bash" || input.name === "shell") && !input.summaryOnly
+        ? (field(args, "cwd") ?? "")
+        : transactionTarget(input.name, args)),
+    1_024,
+  );
   const status = transactionStatus(input.status, input.durationMs, input.palette);
   const compactTarget = target.replace(/\s+/gu, " ").trim();
   const label = previewText(custom?.label ?? input.name, 256)
     .replace(/\s+/gu, " ")
     .trim()
     .toUpperCase();
-  const heading = `${status}  ${title(input.palette, label)}${
-    compactTarget ? `  ${input.palette.accent(compactTarget)}` : ""
-  }`;
+  const indent = input.width >= 3 ? "  " : "";
+  const surfaceWidth = Math.max(1, input.width - indent.length);
+  const operation = `${title(input.palette, label)}${compactTarget ? `  ${input.palette.accent(compactTarget)}` : ""}`;
+  const available = surfaceWidth - visibleWidth(status) - 2;
+  const header =
+    available >= visibleWidth(label)
+      ? `${fit(truncateToWidth(operation, available, "…"), available)}  ${status}`
+      : truncateToWidth(`${title(input.palette, label)} ${status}`, surfaceWidth, "");
   if (input.summaryOnly) {
     return [
-      truncateToWidth(`  ${heading}`, input.width, "…"),
+      `${indent}${header}`,
       ...(rendererError === undefined
         ? []
         : [
@@ -590,11 +639,9 @@ export function renderToolTransaction(input: {
           ]),
     ];
   }
-  const rail = transactionColor(input.status, input.palette);
   const surface = transactionBackground(input.status, input.palette);
-  const indent = input.width >= 3 ? "  " : "";
-  const bodyPrefix = input.width >= 4 ? `${indent}${rail("│")} ` : "";
-  const bodyWidth = Math.max(1, input.width - visibleWidth(bodyPrefix));
+  const bodyPrefix = indent;
+  const bodyWidth = Math.max(1, input.width - bodyPrefix.length);
   const renderedBody =
     custom?.lines === undefined
       ? transactionBody({
@@ -620,17 +667,7 @@ export function renderToolTransaction(input: {
       truncateToWidth(`${bodyPrefix}${truncateToWidth(part, bodyWidth, "")}`, input.width, ""),
     ),
   );
-  const surfaceWidth = Math.max(1, input.width - visibleWidth(indent));
-  const header = truncateToWidth(heading, surfaceWidth, "");
-  const headerRows =
-    surface === undefined
-      ? ["", `${indent}${header}`]
-      : [
-          "",
-          `${indent}${surface(" ".repeat(surfaceWidth))}`,
-          `${indent}${surface(fit(header, surfaceWidth))}`,
-          `${indent}${surface(" ".repeat(surfaceWidth))}`,
-        ];
+  const headerRows = ["", `${indent}${surface?.(fit(header, surfaceWidth)) ?? header}`];
   return body.length === 0 ? headerRows : [...headerRows, "", ...body];
 }
 
@@ -644,12 +681,24 @@ export function renderShellPassthrough(input: {
   readonly palette: Palette;
 }): string[] {
   const { command, isError, excluded, width, mode, palette } = input;
-  const output = sanitizeTerminalText(input.text).split("\n");
-  const visible = mode === "full" ? output : clipRows(output, BASH_PREVIEW_LINES, palette);
+  const widthInside = Math.max(1, width - 6);
+  const output = previewText(input.text, mode === "full" ? FULL_RESULT_CHARS : MAX_TOOL_INPUT_CHARS)
+    .split("\n")
+    .flatMap((line) => wrapLine(line, widthInside));
+  const visible = clipRows(
+    output,
+    mode === "full" ? FULL_RESULT_LINES : BASH_PREVIEW_LINES,
+    palette,
+    mode === "full"
+      ? "lines hidden · /export for complete result"
+      : "lines hidden · Ctrl+O to expand",
+  );
   const color = isError ? palette.error : (palette.text ?? ((value: string) => value));
   return toolSurface(
     [
-      `${title(palette, "$")} ${palette.accent(sanitizeTerminalText(command).replace(/\s+/gu, " ").trim())}${excluded ? palette.dim("  local only") : ""}`,
+      ...(excluded ? [palette.dim("local only")] : []),
+      ...shellCommandPreview(command, widthInside, mode, palette),
+      "",
       ...visible.map((line) => color(line || " ")),
     ],
     width,
