@@ -50,6 +50,14 @@ export class OperationConflictError extends Error {
   }
 }
 
+/** Expected refusal when manual compaction has no eligible older context. */
+export class CompactionUnavailableError extends Error {
+  constructor(alreadyCompacted: boolean) {
+    super(alreadyCompacted ? "Already compacted" : "Nothing to compact (session too small)");
+    this.name = "CompactionUnavailableError";
+  }
+}
+
 /** The maximum model calls one turn may make before the kernel stops loudly. */
 const DEFAULT_MAX_MODEL_CALLS_PER_TURN = 50;
 
@@ -393,7 +401,8 @@ export class AgentSession {
       const tree = SessionTree.fromEvents(this.log.sessionId, stored.events);
       const lineage = this.tip === null ? [] : tree.lineage(this.tip);
       const plan = prepareCompaction(lineage, this.compaction.keepRecentTokens);
-      if (plan === undefined) throw new Error("Nothing to compact");
+      if (plan === undefined)
+        throw new CompactionUnavailableError(lineage.at(-1)?.type === "context.compacted");
       const result = await summarizeCompaction(
         plan,
         this.model,

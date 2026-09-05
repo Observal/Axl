@@ -217,8 +217,17 @@ test("renders compaction and session lifecycle entries distinctly", () => {
     }),
   );
   assert.match(compacted.join("\n"), /◇ Context compacted/);
-  assert.match(compacted.join("\n"), /Continued work/);
-  assert.match(compacted.join("\n"), /• keep the sandbox active/);
+  assert.doesNotMatch(compacted.join("\n"), /Continued work|keep the sandbox active/);
+  assert.match(compacted.join("\n"), /Ctrl\+O to expand/);
+  view.toolOutputDisplay = "full";
+  const expanded = view.apply(
+    makeEvent("context.compacted", {
+      summary: "## Continued work\n\n- keep the sandbox active",
+      replacedEventIds: [parseEventId("00000000-0000-4000-8000-000000000001")],
+    }),
+  );
+  assert.match(expanded.join("\n"), /Continued work/);
+  assert.match(expanded.join("\n"), /• keep the sandbox active/);
   assert.equal(view.totalTokens, 25);
   assert.equal(view.cacheReadTokens, 3);
   assert.equal(view.contextTokens, undefined);

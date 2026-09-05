@@ -121,6 +121,15 @@ export type ConversationOverview = Omit<
   "records" | "tools" | "interactions" | "operations" | "queue" | "uncertainShellOperations"
 > & { readonly recordCount: number };
 
+/** Display order for locally pending inputs under the daemon's steer-before-follow-up contract.
+ * This is a projection, not a queue or a complete view of inputs from other clients.
+ */
+export function orderPendingTurnInputs<T extends { readonly mode: "steer" | "followUp" }>(
+  inputs: readonly T[],
+): readonly T[] {
+  return inputs.toSorted((a, b) => Number(a.mode === "followUp") - Number(b.mode === "followUp"));
+}
+
 const MAX_PROJECTED_ACTIVITY_CHARACTERS = 131_072;
 const ACTIVITY_TRIM_BATCH_CHARACTERS = 16_384;
 
@@ -204,6 +213,12 @@ export class ConversationProjector {
   private closed = false;
   private lastError: CanonicalEvent<"session.error"> | undefined;
   private lastCompaction: CanonicalEvent<"context.compacted"> | undefined;
+  private readonly compactedEvents = new Set<EventId>();
+
+  /** Whether an event remains in history but has been replaced in the active context. */
+  isEventCompacted(eventId: EventId): boolean {
+    return this.compactedEvents.has(eventId);
+  }
 
   constructor(sessionId?: SessionId, selectedNodeId?: EventId) {
     this.expectedSessionId = sessionId;
@@ -285,6 +300,7 @@ export class ConversationProjector {
     this.closed = false;
     this.lastError = undefined;
     this.lastCompaction = undefined;
+    this.compactedEvents.clear();
   }
 
   applyEvent(event: CanonicalEvent): boolean {
@@ -447,6 +463,7 @@ export class ConversationProjector {
       case "context.compacted":
         this.usage = addUsage(this.usage, event.payload.usage);
         this.lastCompaction = event;
+        for (const id of event.payload.replacedEventIds) this.compactedEvents.add(id);
         break;
       case "session.error":
         this.lastError = event;

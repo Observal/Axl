@@ -514,6 +514,7 @@ test("resume selects the most recently updated session first", async (context) =
 
 test("/compact summarizes older context through the daemon", async (context) => {
   const requests: ModelTurnRequest[] = [];
+  let releaseSummary: (() => void) | undefined;
   const model: ModelPort = {
     stream(request) {
       requests.push(request);
@@ -524,6 +525,10 @@ test("/compact summarizes older context through the daemon", async (context) => 
             ? "recent answer"
             : "## Goal\nKeep working";
       return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (requests.length === 3)
+          await new Promise<void>((resolve) => {
+            releaseSummary = resolve;
+          });
         yield { type: "text_delta", text };
         yield { type: "completed", stopReason: "stop", usage };
       })();
@@ -541,7 +546,9 @@ test("/compact summarizes older context through the daemon", async (context) => 
     output,
     cwd: directory,
     color: false,
+    tuiMode: "fullscreen",
   });
+  context.after(() => app.stop());
   const observer = await connectUnixClient(socketPath);
   const subscription = await subscribeSession(observer, app.sessionId);
   context.after(async () => {
@@ -556,11 +563,23 @@ test("/compact summarizes older context through the daemon", async (context) => 
         record.event.payload.stopReason !== "tool_use",
     ).length;
 
+  input.write("/compact\r");
+  await until(
+    () => text().includes("Nothing to compact (session too small)"),
+    "small-context notice",
+  );
+  assert.equal(requests.length, 0);
   input.write("old prompt\r");
   await until(() => completedResponses() === 1, "old response");
   input.write("recent prompt\r");
   await until(() => completedResponses() === 2, "recent response");
   input.write("/compact Focus on the current task\r");
+  await until(
+    () => releaseSummary !== undefined && text().includes("Compacting context… (Esc to cancel)"),
+    "compaction progress",
+  );
+  assert.ok(releaseSummary);
+  releaseSummary();
   await until(() => text().includes("Context compacted"), "compaction");
 
   assert.equal(requests[2]?.toolChoice, "none");
@@ -570,8 +589,45 @@ test("/compact summarizes older context through the daemon", async (context) => 
       : "",
     /Focus on the current task/,
   );
-  assert.match(text(), /Keep working/);
+  assert.doesNotMatch(text(), /Keep working/);
+  const compactedTerminal = new VirtualTerminal(100, 24);
+  compactedTerminal.write(text());
+  assert.doesNotMatch(compactedTerminal.rows().join("\n"), /old prompt|old answer|Keep working/);
+  assert.match(compactedTerminal.rows().join("\n"), /recent prompt|recent answer/);
+  input.write("\x0f");
+  await until(() => text().includes("Keep working"), "expand compaction summary");
+  input.write("\x0f/compact\r");
+  await until(() => text().includes("Already compacted"), "repeat compaction notice");
+  assert.equal(requests.length, 3);
+  assert.doesNotMatch(text(), /Request failed/);
+  assert.ok(
+    subscription.projector.state.records.some(
+      (record) =>
+        record.kind === "event" &&
+        record.event.type === "user.message" &&
+        record.event.payload.content.some(
+          (item) => item.type === "text" && item.text === "old prompt",
+        ),
+    ),
+  );
+  const sessionId = app.sessionId;
   app.stop();
+  for (const tuiMode of ["regular", "fullscreen"] as const) {
+    const resumed = captureOutput();
+    const resumedApp = await AxlApp.start({
+      client: await connectUnixClient(socketPath),
+      input: new PassThrough(),
+      output: resumed.output,
+      cwd: directory,
+      sessionId,
+      color: false,
+      tuiMode,
+    });
+    context.after(() => resumedApp.stop());
+    assert.match(resumed.text(), /Context compacted/);
+    assert.doesNotMatch(resumed.text(), /old prompt|old answer|Keep working/);
+    resumedApp.stop();
+  }
 });
 
 test("an unenforced session keeps a persistent unsafe warning", async (context) => {
@@ -1435,12 +1491,13 @@ test("Ctrl+Z suspends and resumes without detaching the session", async (context
   app.stop();
 });
 
-test("Enter steers and Alt+Enter queues a follow-up while working", async (context) => {
+test("pending steering and follow-ups display their actual injection order above the editor", async (context) => {
   let releaseFirst = (): void => undefined;
   let calls = 0;
   const prompts: string[] = [];
   const queuedPort: ModelPort = {
     stream(request) {
+      const signal = request.signal;
       calls += 1;
       const turn = calls;
       const last = request.messages.findLast((message) => message.role === "user");
@@ -1449,8 +1506,10 @@ test("Enter steers and Alt+Enter queues a follow-up while working", async (conte
       }
       return (async function* (): AsyncGenerator<ModelStreamEvent> {
         if (turn === 1) {
+          assert.ok(signal);
           await new Promise<void>((resolvePromise) => {
             releaseFirst = resolvePromise;
+            signal.addEventListener("abort", () => resolvePromise(), { once: true });
           });
         }
         yield { type: "text_delta", text: `reply ${turn}` };
@@ -1471,19 +1530,27 @@ test("Enter steers and Alt+Enter queues a follow-up while working", async (conte
 
   input.write("one\r");
   await until(() => calls === 1, "first model call");
-  input.write("two\rthree\x1b[13;3u");
-  await until(() => text().includes("follow-up queued"), "queue notice");
-  assert.match(text(), /STEER/);
+  input.write("follow A\x1b[13;3usteer A\rfollow B\x1b[13;3usteer B\r");
+  await until(() => text().includes("4. Follow-up: follow B"), "ordered queue");
+  const queuedTerminal = new VirtualTerminal(100, 24);
+  queuedTerminal.write(text());
+  const rows = queuedTerminal.rows();
+  const first = rows.findIndex((row) => row.includes("1. Steering: steer A"));
+  assert.ok(first >= 0);
+  assert.match(rows[first + 1] ?? "", /2. Steering: steer B/);
+  assert.match(rows[first + 2] ?? "", /3. Follow-up: follow A/);
+  assert.match(rows[first + 3] ?? "", /4. Follow-up: follow B/);
+  assert.ok(rows.findIndex((row) => row.includes("Working")) > first + 3);
+  assert.ok(rows.findLastIndex((row) => row.includes("╭")) > first + 3);
+  assert.ok(rows.filter((row) => row.includes("╭")).every((row) => !/STEER|FOLLOW-UP/.test(row)));
   assert.equal(calls, 1);
   releaseFirst();
-  await until(() => calls === 3, "queued model calls");
-  assert.deepEqual(prompts, ["one", "two", "three"]);
+  await until(() => calls === 5, "queued model calls");
+  assert.deepEqual(prompts, ["one", "steer A", "steer B", "follow A", "follow B"]);
   await until(() => {
     const terminal = new VirtualTerminal(100, 24);
     terminal.write(text());
-    return !terminal
-      .rows()
-      .some((row) => row.includes("steering queued") || row.includes("follow-up queued"));
+    return !terminal.rows().some((row) => row.includes("Pending from this terminal"));
   }, "consumed queue notices to clear");
   app.stop();
 });
@@ -2064,4 +2131,68 @@ test("fullscreen clicks toggle one tool group without expanding the others", asy
   );
   assert.ok(terminal.rows().some((row) => row.includes("RESULT:first.txt")));
   assert.ok(terminal.rows().some((row) => row.includes("RESULT:second.txt")));
+});
+
+test("Escape cancels compaction without replacing context", async (context) => {
+  let calls = 0;
+  let summarizing = false;
+  const model: ModelPort = {
+    stream(request) {
+      const signal = request.signal;
+      const call = ++calls;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 3) {
+          assert.ok(signal);
+          summarizing = true;
+          await new Promise<void>((resolve) =>
+            signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          signal.throwIfAborted();
+        }
+        yield { type: "text_delta", text: "answer" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, undefined, undefined, {
+    keepRecentTokens: 7,
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+  context.after(() => app.stop());
+  const observer = await connectUnixClient(socketPath);
+  const subscription = await subscribeSession(observer, app.sessionId);
+  context.after(async () => {
+    await subscription.close();
+    observer.close();
+  });
+  input.write("older prompt\r");
+  await until(
+    () =>
+      subscription.projector.state.records.filter(
+        (record) => record.kind === "event" && record.event.type === "assistant.message",
+      ).length === 1,
+    "first answer",
+  );
+  input.write("recent prompt\r");
+  await until(
+    () =>
+      subscription.projector.state.records.filter(
+        (record) => record.kind === "event" && record.event.type === "assistant.message",
+      ).length === 2,
+    "second answer",
+  );
+  input.write("/compact\r");
+  await until(() => summarizing && text().includes("Compacting context"), "summary started");
+  input.write("\x1b");
+  await until(() => text().includes("Compaction cancelled"), "compaction cancellation");
+  assert.equal(subscription.projector.overview.lastCompaction, undefined);
+  assert.doesNotMatch(text(), /Request failed/);
 });

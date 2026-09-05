@@ -20,6 +20,7 @@ import { basename, join, resolve } from "node:path";
 import {
   AgentSession,
   type CompactionSettings,
+  CompactionUnavailableError,
   EventLogMigrationRequiredError,
   type EventLogOptions,
   type ExtensionHost,
@@ -1405,6 +1406,12 @@ export class SessionManager {
     try {
       const event = await managed.session.compact(customInstructions, active.controller.signal);
       return { eventId: event.id };
+    } catch (error) {
+      if (active.controller.signal.aborted)
+        throw new DaemonError("cancelled", "Compaction cancelled", { cause: error });
+      if (error instanceof CompactionUnavailableError)
+        throw new DaemonError("bad_request", error.message, { cause: error });
+      throw error;
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();

@@ -33,6 +33,7 @@ import {
   type AxlClient,
   type ClientModelInfo,
   ConversationProjector,
+  orderPendingTurnInputs,
   type SessionSubscription,
   subscribeSession,
   supportedThinkingLevels,
@@ -375,7 +376,7 @@ const HOTKEYS: readonly { readonly key: string; readonly action: string }[] = [
   { key: "Ctrl+G", action: "Open the prompt in an external editor" },
   { key: "Alt+S", action: "Stash or restore the prompt" },
   { key: "Ctrl+R", action: "Search prompt history" },
-  { key: "Ctrl+O", action: "Expand or collapse tool details" },
+  { key: "Ctrl+O", action: "Expand or collapse tool and compaction details" },
   { key: "Ctrl+T", action: "Change thought visibility" },
   { key: "Shift+Tab", action: "Change reasoning effort" },
   { key: "Tab", action: "Complete a slash command" },
@@ -568,6 +569,7 @@ export class AxlApp {
   private readonly pendingTurnInputs: Array<{
     readonly mode: "steer" | "followUp";
     readonly contentKey: string;
+    readonly text: string;
   }> = [];
   private sending = false;
   private activeRequest: "turn" | "shell" | "compaction" | undefined;
@@ -958,6 +960,7 @@ export class AxlApp {
       }
       if (app.developerPanelEnabled) void app.refreshWorkspaceDiff();
     }
+    app.rebuildTranscript(false);
     app.hydrating = false;
     app.setWorking(app.sessionSubscription?.projector.overview.activeOperationId !== undefined);
     app.openNextInteraction();
@@ -966,6 +969,7 @@ export class AxlApp {
       await app.restartThemeWatcher(false);
       app.terminal.start();
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
+      else app.repaintRegularTranscript();
       app.paint();
       if (initialResume) void app.openResume();
       return app;
@@ -1171,23 +1175,15 @@ export class AxlApp {
       label:
         this.connectionState === "reconnecting"
           ? "Reconnecting"
-          : extensionSingleLine(this.extensionHost.workingLabel() ?? "Working"),
+          : this.activeRequest === "compaction"
+            ? "Compacting context… (Esc to cancel)"
+            : extensionSingleLine(this.extensionHost.workingLabel() ?? "Working"),
       spinner,
       elapsedSeconds: this.view.elapsedSeconds,
       queued: this.queued.length,
     });
     const completion = this.completions();
-    const inputMode = this.view.working
-      ? this.activeRequest === "shell" || this.activeRequest === "compaction"
-        ? "FOLLOW-UP"
-        : "STEER"
-      : undefined;
-    const editorMode = [
-      this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined,
-      inputMode,
-    ]
-      .filter(Boolean)
-      .join(" · ");
+    const editorMode = this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined;
     this.editorFrame.update({
       ...(this.notice === undefined ? {} : { notice: this.notice }),
       ...(editorMode ? { mode: editorMode } : {}),
@@ -1214,29 +1210,44 @@ export class AxlApp {
       this.extensionWidgetsAbove,
       this.attachmentBar,
       ...(this.developerPanelEnabled ? [this.developerPanel] : []),
+      {
+        render: (width) => {
+          const pending = orderPendingTurnInputs(this.pendingTurnInputs);
+          const rows = pending.map(
+            (item, index) =>
+              `${index + 1}. ${item.mode === "steer" ? "Steering" : "Follow-up"}: ${extensionSingleLine(item.text) || "[attachment]"}`,
+          );
+          return [
+            ...(rows.length === 0
+              ? []
+              : ["", `Pending from this terminal (${rows.length}) · injection order`, ...rows]),
+            ...(this.view.working
+              ? [
+                  this.activeRequest === "shell" || this.activeRequest === "compaction"
+                    ? "Enter queues a follow-up · Esc cancels"
+                    : "Enter steers next · Alt+Enter follows up after the turn",
+                ]
+              : []),
+          ].map((line) => this.view.palette.dim(truncateToWidth(line, width, "…")));
+        },
+      },
+      this.activity,
       this.editorFrame,
       this.extensionWidgetsBelow,
     ];
     const measured = fixed.map((component) => component.render(this.width));
     const reservedRows = measured.reduce((total, lines) => total + lines.length, 0);
     const prefixRows = measured.slice(0, unsafeComponents.length).flat();
-    const activity = includePendingTools ? this.activity.render(this.width) : [];
     const tools = includePendingTools
-      ? this.toolTransactions.renderWindow(
-          this.width,
-          Math.max(0, this.height - reservedRows - activity.length),
-        )
+      ? this.toolTransactions.renderWindow(this.width, Math.max(0, this.height - reservedRows))
       : [];
     this.liveAssistant.setMaxRows(
-      includePendingTools
-        ? Math.max(0, this.height - reservedRows - activity.length - tools.length)
-        : undefined,
+      includePendingTools ? Math.max(0, this.height - reservedRows - tools.length) : undefined,
     );
     const assistant = includePendingTools ? this.liveAssistant.render(this.width) : [];
     const editorCursor = this.editorFrame.cursorPlacement();
     const lines = [
       ...prefixRows,
-      ...activity,
       ...tools,
       ...assistant,
       ...measured.slice(unsafeComponents.length).flat(),
@@ -1249,7 +1260,6 @@ export class AxlApp {
           measured
             .slice(0, fixed.indexOf(this.editorFrame))
             .reduce((total, rows) => total + rows.length, 0) +
-          activity.length +
           tools.length +
           assistant.length +
           editorCursor.row,
@@ -1438,13 +1448,7 @@ export class AxlApp {
         prompt: false,
         rowInSource,
       }));
-      const activity = this.activity.render(this.width).map((text, rowInSource) => ({
-        text,
-        sourceId: "activity",
-        prompt: false,
-        rowInSource,
-      }));
-      this.fullscreenRowsCache = [...this.document.rows, ...pending, ...streaming, ...activity];
+      this.fullscreenRowsCache = [...this.document.rows, ...pending, ...streaming];
     }
     return this.fullscreenRowsCache;
   }
@@ -1587,7 +1591,11 @@ export class AxlApp {
         this.overlays.close();
         this.openNextInteraction();
       }
-    } else if (lines.length > 0 && !absorbedSandboxViolation) {
+    } else if (
+      lines.length > 0 &&
+      !absorbedSandboxViolation &&
+      event.type !== "context.compacted"
+    ) {
       this.commitLines(lines, false, false, {
         sourceId: event.id,
         prompt: event.type === "user.message",
@@ -1600,7 +1608,8 @@ export class AxlApp {
     if (this.developerPanelEnabled && (event.type === "tool.result" || completesOperation)) {
       void this.refreshWorkspaceDiff();
     }
-    if (redraw) this.redraw();
+    if (event.type === "context.compacted" && !this.hydrating) this.rebuildTranscript();
+    else if (redraw) this.redraw();
   }
 
   private reportExtensionErrors(errors: readonly Error[]): void {
@@ -2391,7 +2400,7 @@ export class AxlApp {
     if (rows.length === 0) return;
     this.document.appendRows(rows);
     this.invalidateFullscreenRows();
-    if (this.tuiMode === "regular") {
+    if (this.tuiMode === "regular" && !this.hydrating) {
       this.options.output.write(this.screen.clear());
       this.options.output.write(`${rows.map((row) => row.text).join("\r\n")}\r\n`);
     }
@@ -2408,7 +2417,7 @@ export class AxlApp {
       if (remember) this.transcript.push({ kind: "lines", lines: [...lines] });
       this.document.append(lines, metadata);
       this.invalidateFullscreenRows();
-      if (this.tuiMode === "regular") {
+      if (this.tuiMode === "regular" && !this.hydrating) {
         this.options.output.write(this.screen.clear());
         this.options.output.write(`${lines.join("\r\n")}\r\n`);
       }
@@ -2453,6 +2462,10 @@ export class AxlApp {
         continue;
       }
       const event = entry.event;
+      if (this.sessionSubscription?.projector.isEventCompacted(event.id)) {
+        next.apply(event);
+        continue;
+      }
       if (event.type === "tool.call") {
         next.apply(event);
         pending.start(event, runningCalls.has(event.payload.callId) ? "running" : "pending");
@@ -4060,12 +4073,11 @@ export class AxlApp {
         ...queued.attachments.map((blob) => ({ type: "blob" as const, blob })),
       ],
     };
-    const pending = { mode, contentKey: JSON.stringify(params.content) };
+    const pending = { mode, contentKey: JSON.stringify(params.content), text: queued.text };
     this.pendingTurnInputs.push(pending);
     try {
       if (mode === "steer") await this.client.request("session.steer", params);
       else await this.client.request("session.followUp", params);
-      this.updateTurnInputNotice();
     } catch (error) {
       const pendingIndex = this.pendingTurnInputs.indexOf(pending);
       if (pendingIndex >= 0) {
@@ -4082,28 +4094,11 @@ export class AxlApp {
 
   private consumePendingTurnInput(event: CanonicalEvent<"user.message">): void {
     const contentKey = JSON.stringify(event.payload.content);
-    const index = this.pendingTurnInputs.findIndex((pending) => pending.contentKey === contentKey);
-    if (index < 0) return;
-    this.pendingTurnInputs.splice(index, 1);
-    this.updateTurnInputNotice();
-  }
-
-  private updateTurnInputNotice(): void {
-    const steering = this.pendingTurnInputs.filter((pending) => pending.mode === "steer").length;
-    const followUps = this.pendingTurnInputs.length - steering;
-    if (steering === 0 && followUps === 0) {
-      if (this.notice?.includes("steering queued") || this.notice?.includes("follow-up queued")) {
-        this.notice = undefined;
-      }
-      return;
-    }
-    const parts = [
-      ...(steering === 0 ? [] : [`${steering === 1 ? "steering" : `${steering} steering`} queued`]),
-      ...(followUps === 0
-        ? []
-        : [`${followUps === 1 ? "follow-up" : `${followUps} follow-ups`} queued`]),
-    ];
-    this.notice = this.view.palette.dim(`· ${parts.join(" · ")}`);
+    const pending = orderPendingTurnInputs(this.pendingTurnInputs).find(
+      (item) => item.contentKey === contentKey,
+    );
+    if (pending === undefined) return;
+    this.pendingTurnInputs.splice(this.pendingTurnInputs.indexOf(pending), 1);
   }
 
   private async enqueuePrompt(
@@ -4206,7 +4201,7 @@ export class AxlApp {
     this.sending = true;
     this.activeRequest = "compaction";
     this.setWorking(true);
-    this.notice = this.view.palette.dim("· compacting context");
+    this.notice = undefined;
     this.redraw();
     try {
       await this.client.request("session.compact", {

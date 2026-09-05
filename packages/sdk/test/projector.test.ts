@@ -8,6 +8,7 @@ import test from "node:test";
 
 import {
   ConversationProjector,
+  orderPendingTurnInputs,
   EVENT_FORMAT_VERSION,
   ProjectionError,
   parseEvent,
@@ -287,4 +288,43 @@ test("overview reads remain history-free for a 100,000-event session", () => {
   projector.reset();
   assert.equal(projector.overview.recordCount, 0);
   assert.equal(projector.overview.model, undefined);
+});
+
+test("projects compacted membership across repeated summaries without deleting records", () => {
+  const projector = new ConversationProjector(sessionId);
+  const old = event("user.message", { content: [{ type: "text", text: "old" }] });
+  const first = event(
+    "context.compacted",
+    { summary: "first", replacedEventIds: [old.id] },
+    old.id,
+  );
+  const recent = event("user.message", { content: [{ type: "text", text: "recent" }] }, first.id);
+  const second = event(
+    "context.compacted",
+    { summary: "second", replacedEventIds: [first.id, recent.id] },
+    recent.id,
+  );
+  for (const item of [old, first, recent, second]) projector.applyEvent(item);
+  for (const item of [old, first, recent]) assert.equal(projector.isEventCompacted(item.id), true);
+  assert.equal(projector.isEventCompacted(second.id), false);
+  assert.equal(projector.state.records.length, 4);
+  projector.replace([old]);
+  assert.equal(projector.isEventCompacted(old.id), false);
+});
+
+test("pending-input presentation follows steering FIFO before follow-up FIFO without mutating submissions", () => {
+  const submitted = [
+    { mode: "followUp", text: "f1" },
+    { mode: "steer", text: "s1" },
+    { mode: "followUp", text: "f2" },
+    { mode: "steer", text: "s2" },
+  ] as const;
+  assert.deepEqual(
+    orderPendingTurnInputs(submitted).map((item) => item.text),
+    ["s1", "s2", "f1", "f2"],
+  );
+  assert.deepEqual(
+    submitted.map((item) => item.text),
+    ["f1", "s1", "f2", "s2"],
+  );
 });

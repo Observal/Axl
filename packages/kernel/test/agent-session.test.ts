@@ -21,6 +21,7 @@ import {
 
 import {
   AgentSession,
+  CompactionUnavailableError,
   type KernelTool,
   type ModelPort,
   type ModelTurnRequest,
@@ -159,10 +160,24 @@ test("manual compaction replaces old model context without deleting history", as
   const { session, path } = await makeSession(context, port, new ToolRegistry(), {
     compaction: { keepRecentTokens: 7, maxOutputTokens: 123 },
   });
+  const initial = (await session.log.read()).events;
+  await assert.rejects(session.compact(), {
+    name: "CompactionUnavailableError",
+    message: "Nothing to compact (session too small)",
+  });
+  assert.deepEqual((await session.log.read()).events, initial);
+  assert.equal(port.requests.length, 0);
   await session.runTurn([{ type: "text", text: "old prompt" }]);
   await session.runTurn([{ type: "text", text: "recent prompt" }]);
 
   const compacted = await session.compact("Focus on exact test state");
+  const beforeRetry = (await session.log.read()).events;
+  await assert.rejects(
+    session.compact(),
+    (error) => error instanceof CompactionUnavailableError && error.message === "Already compacted",
+  );
+  assert.deepEqual((await session.log.read()).events, beforeRetry);
+  assert.equal(port.requests.length, 3);
   assert.equal(compacted.payload.summary, "## Goal\nContinue the test");
   assert.deepEqual(compacted.payload.usage, usage);
   assert.equal(compacted.payload.replacedEventIds.length, 2);

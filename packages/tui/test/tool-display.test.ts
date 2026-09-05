@@ -70,7 +70,32 @@ test("edit transactions render adaptive unified and split previews", () => {
   assert.equal(rich.join("\n").includes("\x1b[38;2;251;73;52mconst"), true);
   assert.equal(rich[0], "");
   assert.match(stripAnsi(rich[1] ?? ""), /^ {2}EDIT .*running$/);
-  assert.equal(rich[2], "");
+  assert.equal(stripAnsi(rich[2] ?? "").trim(), "");
+  for (const row of rich.slice(1)) assert.ok(row.includes("\x1b[48;2;32;35;36m"));
+});
+
+test("tool backgrounds include the text inset and reach the full terminal width", () => {
+  const palette = THEMES["axl-dark"];
+  assert.ok(palette);
+  const background = palette.toolBackground?.("marker").split("marker")[0];
+  assert.ok(background);
+  for (const width of [1, 2, 20, 80, 140]) {
+    for (const name of ["read", "edit", "bash"]) {
+      const rows = renderToolTransaction({
+        name,
+        args: { path: "example.ts", oldText: "before", newText: "after", command: "printf hello" },
+        status: "succeeded",
+        result: "done",
+        width,
+        mode: "compact",
+        palette,
+      });
+      for (const row of rows.slice(1)) {
+        assert.ok(row.startsWith(background), `${name}: margin at ${width}`);
+        assert.equal(visibleWidth(row), width);
+      }
+    }
+  }
 });
 
 test("full read results use syntax highlighting from the file path", () => {
@@ -119,7 +144,7 @@ test("one transaction combines lifecycle, target, duration, and bounded result",
   assert.match(settled.join("\n"), /lines hidden · Ctrl\+O to expand/);
   assert.equal(settled.filter((line) => line.includes("╭")).length, 0);
   const firstOutput = settled.findIndex((line) => line.includes("$ pnpm test"));
-  assert.equal(firstOutput > 0 && settled[firstOutput - 1] === "", true);
+  assert.equal(firstOutput > 0 && settled[firstOutput - 1]?.trim() === "", true);
 
   const expanded = renderToolTransaction({
     name: "shell",
@@ -471,4 +496,28 @@ test("full input budgets count terminal cells rather than JavaScript characters"
   assert.ok(rows.length < 50);
   assert.match(rows.join("\n"), /Input preview/);
   assert.ok(rows.every((row) => visibleWidth(row) <= 80));
+});
+
+test("edit diffs stay expanded in compact groups without duplicate JSON or acknowledgements", () => {
+  const args = {
+    path: "example.ts",
+    oldText: "const before = 1;",
+    newText: Array.from({ length: 32 }, (_, i) => `const after${i} = ${i};`).join("\n"),
+  };
+  for (const mode of ["compact", "full"] as const) {
+    const lines = renderToolTransaction({
+      name: "edit",
+      args,
+      result: "Replaced 1 occurrence",
+      status: "succeeded",
+      width: 80,
+      mode,
+      palette: PLAIN_PALETTE,
+    });
+    const text = lines.join("\n");
+    assert.match(text, /const before = 1/);
+    assert.match(text, /const after31 = 31/);
+    assert.doesNotMatch(text, /"oldText"|"newText"|Replaced 1 occurrence|Ctrl\+O/);
+    assert.ok(lines.every((line) => visibleWidth(line) <= 80));
+  }
 });

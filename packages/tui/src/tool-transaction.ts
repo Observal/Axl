@@ -47,7 +47,6 @@ export class ToolTransactionComponent implements Component {
   private cachedMode: ToolOutputDisplay | undefined;
   private cachedPalette: Palette | undefined;
   private cachedLines: string[] | undefined;
-  private cachedSummary = false;
   private cachedDurationMs: number | undefined;
 
   constructor(
@@ -99,7 +98,7 @@ export class ToolTransactionComponent implements Component {
     return this.status;
   }
 
-  render(width: number, summaryOnly = false): string[] {
+  render(width: number): string[] {
     const palette = this.palette();
     const mode = this.detailMode();
     const durationMs =
@@ -112,7 +111,6 @@ export class ToolTransactionComponent implements Component {
       this.cachedWidth === width &&
       this.cachedMode === mode &&
       this.cachedPalette === palette &&
-      this.cachedSummary === summaryOnly &&
       this.cachedDurationMs === durationMs
     ) {
       return this.cachedLines;
@@ -120,7 +118,6 @@ export class ToolTransactionComponent implements Component {
     const renderer = this.renderer();
     const toolLines = renderToolTransaction({
       callId: this.callId,
-      summaryOnly,
       name: this.name,
       args: this.args,
       ...(this.result === undefined ? {} : { result: this.result }),
@@ -134,12 +131,9 @@ export class ToolTransactionComponent implements Component {
     });
     this.cachedLines = [
       ...toolLines,
-      ...(summaryOnly
-        ? []
-        : this.blobs.flatMap((blob) => this.renderBlob?.(blob, width, palette) ?? [])),
+      ...this.blobs.flatMap((blob) => this.renderBlob?.(blob, width, palette) ?? []),
     ];
     this.cachedDurationMs = durationMs;
-    this.cachedSummary = summaryOnly;
     this.cachedWidth = width;
     this.cachedMode = mode;
     this.cachedPalette = palette;
@@ -154,7 +148,7 @@ export class ToolTransactionComponent implements Component {
   }
 }
 
-// Independently implements Pi-style collapsed details; consecutive-call grouping is Axl-specific.
+// Independent per-call surfaces with collapsed read results and always-visible edit diffs.
 // Reference: https://www.npmjs.com/package/@earendil-works/pi-coding-agent/v/0.85.0
 /** Retains a consecutive tool group until it can be committed before the next message. */
 export class ToolTransactionStore implements Component {
@@ -282,15 +276,11 @@ export class ToolTransactionStore implements Component {
           palette.dim(
             truncateToWidth(`  Tools · ${components.length} calls · ${status}`, width, "…"),
           ),
-          ...(components.length > 3
-            ? [palette.dim(`  … ${components.length - 3} earlier calls`)]
-            : []),
         ],
         `${groupId}:header`,
       );
     }
-    for (const component of compact ? components.slice(-3) : components)
-      append(component.render(width, compact && components.length > 1), component.sourceId);
+    for (const component of components) append(component.render(width), component.sourceId);
     append(
       [
         palette.dim(

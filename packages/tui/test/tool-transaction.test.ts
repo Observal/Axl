@@ -11,6 +11,8 @@ import {
   PLAIN_PALETTE,
   ToolTransactionComponent,
   ToolTransactionStore,
+  THEMES,
+  stripAnsi,
   TranscriptDocument,
   type ToolOutputDisplay,
 } from "../src/index.ts";
@@ -114,8 +116,9 @@ test("tool groups retain call order, lifecycle counts, and full detail until dra
   }
   const compact = store.render(80).join("\n");
   assert.match(compact, /5 calls · 3 done · 1 failed · 1 running/);
-  assert.match(compact, /2 earlier calls/);
-  assert.ok(store.render(80).length <= 7);
+  assert.doesNotMatch(compact, /earlier calls/);
+  for (let i = 1; i <= 5; i++) assert.match(compact, new RegExp(`command-${i}`));
+  assert.ok(store.renderWindow(80, 7).length <= 7);
   assert.deepEqual(store.drain(80), []);
   const event = result({ endedBy: "abort" });
   store.settle({ ...event, payload: { ...event.payload, callId: "call-5" } });
@@ -181,4 +184,45 @@ test("bounded regular previews preserve the pending tool header and explain omit
   assert.equal(store.renderWindow(80, 1).length, 1);
   assert.deepEqual(store.renderWindow(80, 0), []);
   assert.ok(store.rows(80).length > 100);
+});
+
+test("compact groups retain every read block and expose edit diffs", () => {
+  const palette = THEMES["axl-dark"];
+  assert.ok(palette);
+  const store = new ToolTransactionStore(
+    () => palette,
+    () => "compact",
+  );
+  for (let index = 1; index <= 5; index++) {
+    const original = call();
+    store.start({
+      ...original,
+      payload: {
+        ...original.payload,
+        callId: `read-${index}`,
+        name: "read",
+        input: { path: `file-${index}.ts` },
+      },
+    });
+  }
+  const original = call();
+  store.start({
+    ...original,
+    payload: {
+      ...original.payload,
+      callId: "edit",
+      name: "edit",
+      input: { path: "file-1.ts", oldText: "before", newText: "after" },
+    },
+  });
+  const rows = store.render(80);
+  for (let index = 1; index <= 5; index++) {
+    const row = rows.findIndex((line) => stripAnsi(line).includes(`READ  file-${index}.ts`));
+    assert.ok(row >= 0);
+    assert.ok(rows[row]?.includes("\x1b[48;2;32;35;36m"));
+    assert.ok(rows[row + 1]?.includes("\x1b[48;2;32;35;36m"));
+    assert.equal(stripAnsi(rows[row + 1] ?? "").trim(), "");
+  }
+  assert.match(stripAnsi(rows.join("\n")), /-│ before/);
+  assert.match(stripAnsi(rows.join("\n")), /\+│ after/);
 });

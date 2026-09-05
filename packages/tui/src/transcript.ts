@@ -389,11 +389,13 @@ export class SessionView {
         return [
           "",
           this.palette.accent("◇ Context compacted"),
-          ...renderMarkdown(
-            sanitizeTerminalText(event.payload.summary),
-            Math.max(1, this.width - 2),
-            this.palette,
-          ).map((line) => `  ${line}`),
+          ...(this.toolOutputDisplay === "full"
+            ? renderMarkdown(
+                sanitizeTerminalText(event.payload.summary),
+                Math.max(1, this.width - 2),
+                this.palette,
+              ).map((line) => `  ${line}`)
+            : this.wrap(dim("  Summary hidden · Ctrl+O to expand · /export for original history"))),
         ];
       case "session.closed":
         return this.wrap(dim(`· session ${event.payload.reason}`));

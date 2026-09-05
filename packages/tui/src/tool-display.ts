@@ -20,7 +20,7 @@ const COMPACT_PREVIEW_LINES = 6;
 const BASH_PREVIEW_LINES = 6;
 const FULL_RESULT_LINES = 200;
 const FULL_RESULT_CHARS = 65_536;
-const DIFF_PREVIEW_LINES = 16;
+const DIFF_PREVIEW_LINES = FULL_RESULT_LINES;
 const SPLIT_DIFF_MIN_WIDTH = 120;
 const COMPACT_EXTENSION_LINES = 12;
 const FULL_EXTENSION_LINES = 200;
@@ -252,7 +252,12 @@ function unifiedDiff(
   });
   return [
     ...diffSummary(change, "unified", width, palette),
-    ...clipRows(rendered, DIFF_PREVIEW_LINES, palette),
+    ...clipRows(
+      rendered,
+      DIFF_PREVIEW_LINES,
+      palette,
+      "diff rows hidden · /export for complete input",
+    ),
   ];
 }
 
@@ -327,7 +332,12 @@ function splitDiff(change: ChangedLines, path: string, width: number, palette: P
   return [
     ...diffSummary(change, "split", width, palette),
     header,
-    ...clipRows(rendered, DIFF_PREVIEW_LINES, palette),
+    ...clipRows(
+      rendered,
+      DIFF_PREVIEW_LINES,
+      palette,
+      "diff rows hidden · /export for complete input",
+    ),
   ];
 }
 
@@ -497,7 +507,7 @@ function transactionBody(input: {
     lines.push(...inputPreview(input.oversizedInput, bodyWidth, mode, palette));
   } else {
     if (name === "edit" || name === "write") lines.push(...editPreview(args, bodyWidth, palette));
-    if (mode === "full") {
+    if (mode === "full" && name !== "edit" && name !== "write") {
       lines.push(
         ...sanitizeTerminalText(JSON.stringify(args, null, 2))
           .split("\n")
@@ -508,6 +518,8 @@ function transactionBody(input: {
   if (status === "denied" && result === undefined)
     lines.push(palette.error("policy denied this operation"));
   if (result === undefined) return lines;
+  if (status === "succeeded" && (name === "edit" || name === "write") && lines.length > 0)
+    return lines;
   if (mode === "focus" && status === "succeeded") return lines;
 
   const hidesSuccessfulBody =
@@ -559,20 +571,21 @@ export function renderToolTransaction(input: {
   readonly mode: ToolOutputDisplay;
   readonly palette: Palette;
   readonly renderer?: OwnedTerminalToolRenderer;
-  readonly summaryOnly?: boolean;
 }): string[] {
   const args = record(input.args);
   const serialized = JSON.stringify(args, null, 2);
   const inputRows = input.mode === "full" ? FULL_INPUT_PREVIEW_ROWS : INPUT_PREVIEW_ROWS;
   const oversizedInput =
     serialized.length > MAX_TOOL_INPUT_CHARS ||
-    serialized
-      .split("\n")
-      .reduce(
-        (rows, line) =>
-          rows + Math.max(1, Math.ceil(visibleWidth(line) / Math.max(1, input.width - 2))),
-        0,
-      ) > inputRows
+    (input.name !== "edit" &&
+      input.name !== "write" &&
+      serialized
+        .split("\n")
+        .reduce(
+          (rows, line) =>
+            rows + Math.max(1, Math.ceil(visibleWidth(line) / Math.max(1, input.width - 2))),
+          0,
+        ) > inputRows)
       ? serialized
       : undefined;
   let custom: TerminalToolRenderResult | undefined;
@@ -604,7 +617,7 @@ export function renderToolTransaction(input: {
     return [];
   const target = previewText(
     custom?.target ??
-      ((input.name === "bash" || input.name === "shell") && !input.summaryOnly
+      (input.name === "bash" || input.name === "shell"
         ? (field(args, "cwd") ?? "")
         : transactionTarget(input.name, args)),
     1_024,
@@ -623,22 +636,6 @@ export function renderToolTransaction(input: {
     available >= visibleWidth(label)
       ? `${fit(truncateToWidth(operation, available, "…"), available)}  ${status}`
       : truncateToWidth(`${title(input.palette, label)} ${status}`, surfaceWidth, "");
-  if (input.summaryOnly) {
-    return [
-      `${indent}${header}`,
-      ...(rendererError === undefined
-        ? []
-        : [
-            input.palette.error(
-              truncateToWidth(
-                `  renderer ${input.renderer?.extensionId ?? "unknown"} failed · ${rendererError}`,
-                input.width,
-                "…",
-              ),
-            ),
-          ]),
-    ];
-  }
   const surface = transactionBackground(input.status, input.palette);
   const bodyPrefix = indent;
   const bodyWidth = Math.max(1, input.width - bodyPrefix.length);
@@ -650,7 +647,7 @@ export function renderToolTransaction(input: {
           ...(oversizedInput === undefined ? {} : { oversizedInput }),
         })
       : [
-          ...(input.mode === "full"
+          ...(input.mode === "full" && input.name !== "edit" && input.name !== "write"
             ? sanitizeTerminalText(serialized).split("\n").map(input.palette.dim)
             : []),
           ...customBody(custom.lines, input.mode, input.palette),
@@ -662,13 +659,18 @@ export function renderToolTransaction(input: {
       ),
     );
   }
-  const body = renderedBody.flatMap((line) =>
-    wrapLine(line, bodyWidth).map((part) =>
-      truncateToWidth(`${bodyPrefix}${truncateToWidth(part, bodyWidth, "")}`, input.width, ""),
-    ),
-  );
-  const headerRows = ["", `${indent}${surface?.(fit(header, surfaceWidth)) ?? header}`];
-  return body.length === 0 ? headerRows : [...headerRows, "", ...body];
+  const body = renderedBody.flatMap((line) => wrapLine(line, bodyWidth));
+  const block = [header, "", ...body, ...(body.length > 0 ? [""] : [])];
+  return [
+    "",
+    ...block.map((line) => {
+      // Restore the enclosing surface after a nested diff cell resets its background.
+      const padded = `${indent}${line}`;
+      return surface === undefined
+        ? padded
+        : fit(padded, Math.max(1, input.width)).split("\x1b[49m").map(surface).join("");
+    }),
+  ];
 }
 
 export function renderShellPassthrough(input: {
