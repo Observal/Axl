@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -114,7 +114,7 @@ function isNavigationTransition(error: unknown): boolean {
   );
 }
 
-async function evaluatePage(port: number, origin: string): Promise<string> {
+async function evaluatePage(port: number, origin: string, cwd: string): Promise<string> {
   const debuggerUrl = await waitFor(async () => {
     const targets = (await fetch(`http://127.0.0.1:${port}/json/list`).then((response) =>
       response.json(),
@@ -198,17 +198,16 @@ async function evaluatePage(port: number, origin: string): Promise<string> {
     });
   try {
     await command("Runtime.enable");
+    const evaluate = async (expression: string): Promise<unknown> => {
+      const response = await command("Runtime.evaluate", { expression, returnByValue: true });
+      if (typeof response !== "object" || response === null || !("result" in response)) {
+        throw new Error("CDP Runtime.evaluate returned an invalid result");
+      }
+      return (response as { readonly result: { readonly value?: unknown } }).result.value;
+    };
     const body = await waitFor(async () => {
       try {
-        const response = await command("Runtime.evaluate", {
-          expression: "document.body?.innerText ?? ''",
-          returnByValue: true,
-        });
-        if (typeof response !== "object" || response === null || !("result" in response)) {
-          throw new Error("CDP Runtime.evaluate returned an invalid result");
-        }
-        const remote = (response as { readonly result: { readonly value?: unknown } }).result;
-        const value = remote.value;
+        const value = await evaluate("document.body?.innerText ?? ''");
         return typeof value === "string" &&
           value.includes("Select or create") &&
           value.includes("Sessions") &&
@@ -220,6 +219,183 @@ async function evaluatePage(port: number, origin: string): Promise<string> {
         throw error;
       }
     }, "stable Axl application execution context");
+
+    assert.equal(
+      await evaluate(
+        "Boolean(document.querySelector('nav[aria-label=\"Quick navigation\"] button[aria-current=\"page\"]')?.textContent?.includes('Chat'))",
+      ),
+      true,
+    );
+    assert.equal(
+      await evaluate(
+        "Boolean(document.querySelector('aside[aria-label=\"Application sidebar\"]'))",
+      ),
+      true,
+    );
+    await evaluate("document.querySelector('button[aria-label=\"Collapse sidebar\"]')?.click()");
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "document.querySelector('aside[aria-label=\"Application sidebar\"]') === null",
+        )) === true
+          ? true
+          : undefined,
+      "desktop sidebar collapse",
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('Expand sidebar'))?.click()",
+    );
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "Boolean(document.querySelector('aside[aria-label=\"Application sidebar\"]'))",
+        )) === true
+          ? true
+          : undefined,
+      "desktop sidebar restoration",
+    );
+
+    await evaluate(
+      `(() => { const input = document.querySelector('#new-cwd'); const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set; setter?.call(input, ${JSON.stringify(cwd)}); input?.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+    );
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "document.querySelector('.create-session button[type=\"submit\"]')?.disabled === false",
+        )) === true
+          ? true
+          : undefined,
+      "enabled session creation",
+    );
+    await evaluate("document.querySelector('.create-session')?.requestSubmit()");
+    await waitFor(
+      async () =>
+        (await evaluate("Boolean(document.querySelector('.session-heading h1'))")) === true
+          ? true
+          : undefined,
+      "session creation",
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('nav[aria-label=\"Primary\"] button')).find((button) => button.textContent?.includes('Explorer'))?.click()",
+    );
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "Array.from(document.querySelectorAll('.explorer-list button')).some((button) => button.textContent?.includes('a-preview.txt'))",
+        )) === true
+          ? true
+          : undefined,
+      "workspace fixture listing",
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('.explorer-list button')).find((button) => button.textContent?.includes('a-preview.txt'))?.click()",
+    );
+    await waitFor(
+      async () =>
+        (await evaluate("Boolean(document.querySelector('[role=\"tab\"]'))")) === true
+          ? true
+          : undefined,
+      "first preview tab",
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('button')).find((button) => button.getAttribute('aria-label') === 'Pin a-preview.txt')?.click()",
+    );
+    await evaluate(
+      "Array.from(document.querySelectorAll('.explorer-list button')).find((button) => button.textContent?.includes('b-preview.txt'))?.click()",
+    );
+    await waitFor(
+      async () =>
+        (await evaluate("document.querySelectorAll('[role=\"tab\"]').length === 2")) === true
+          ? true
+          : undefined,
+      "reusable pinned preview tabs",
+    );
+    assert.equal(
+      await evaluate(
+        "(() => { const selected = document.querySelector('[role=\"tab\"][aria-selected=\"true\"]'); const panel = document.querySelector('[role=\"tabpanel\"]'); return selected?.getAttribute('aria-controls') === panel?.id && panel?.getAttribute('aria-labelledby') === selected?.id && document.body.innerText.includes('Pinned'); })()",
+      ),
+      true,
+    );
+    await evaluate('document.querySelector(\'[role="tab"][aria-selected="true"]\')?.focus()');
+    await command("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "ArrowLeft",
+      code: "ArrowLeft",
+    });
+    await command("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowLeft", code: "ArrowLeft" });
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "document.activeElement?.getAttribute('role') === 'tab' && document.activeElement?.textContent?.includes('a-preview.txt')",
+        )) === true
+          ? true
+          : undefined,
+      "preview tab keyboard navigation",
+    );
+    await command("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
+    await command("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "document.querySelector('nav[aria-label=\"Quick navigation\"] button[aria-current=\"page\"]')?.textContent?.trim() === 'Chat'",
+        )) === true
+          ? true
+          : undefined,
+      "Escape return to Chat",
+    );
+    await evaluate(
+      "window.__axlPreviousSession = document.querySelector('.session-heading p')?.textContent; document.querySelector('.create-session')?.requestSubmit()",
+    );
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "document.querySelector('.session-heading p')?.textContent !== window.__axlPreviousSession && !document.querySelector('[role=\"tab\"]')",
+        )) === true
+          ? true
+          : undefined,
+      "session switch presentation reset",
+    );
+
+    await command("Emulation.setDeviceMetricsOverride", {
+      width: 600,
+      height: 800,
+      deviceScaleFactor: 1,
+      mobile: false,
+    });
+    const menuReady = await waitFor(
+      async () =>
+        (await evaluate(
+          "Array.from(document.querySelectorAll('nav[aria-label=\"Quick navigation\"] button')).some((button) => button.textContent?.trim() === 'Menu')",
+        )) === true
+          ? true
+          : undefined,
+      "narrow navigation control",
+    );
+    assert.equal(menuReady, true);
+    await evaluate(
+      "window.__axlMenuOpener = Array.from(document.querySelectorAll('nav[aria-label=\"Quick navigation\"] button')).find((button) => button.textContent?.trim() === 'Menu'); window.__axlMenuOpener?.focus(); window.__axlMenuOpener?.click()",
+    );
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "Boolean(document.querySelector('[role=\"dialog\"]')?.contains(document.activeElement))",
+        )) === true
+          ? true
+          : undefined,
+      "focus entry into navigation overlay",
+    );
+    await command("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
+    await command("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
+    await waitFor(
+      async () =>
+        (await evaluate(
+          "!document.querySelector('[role=\"dialog\"]') && document.activeElement === window.__axlMenuOpener",
+        )) === true
+          ? true
+          : undefined,
+      "overlay close and exact focus restoration",
+    );
+    assert.equal(await evaluate("document.documentElement.scrollWidth <= window.innerWidth"), true);
     return body;
   } finally {
     rejectPending(new Error("Chrome debugger test completed"));
@@ -240,6 +416,10 @@ test(
       runtime: () => ({ model, tools: new ToolRegistry(), system: "You are Axl." }),
     });
     await daemon.start();
+    await Promise.all([
+      writeFile(join(directory, "a-preview.txt"), "first preview\n", "utf8"),
+      writeFile(join(directory, "b-preview.txt"), "second preview\n", "utf8"),
+    ]);
     const vitePort = await availablePort();
     const vite = spawn(
       process.execPath,
@@ -289,8 +469,8 @@ test(
           return undefined;
         }
       }, "Chrome debugger");
-      const body = await evaluatePage(debuggerPort, gateway.origin);
-      assert.match(body, /Axl\s*Connected/);
+      const body = await evaluatePage(debuggerPort, gateway.origin, directory);
+      assert.match(body, /Axl\s*Connection: Connected/);
       assert.match(body, /Sessions/);
     } finally {
       await gateway?.close();

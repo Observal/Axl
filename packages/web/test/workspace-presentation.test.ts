@@ -16,9 +16,13 @@ import {
 
 import type { ApplicationShell } from "../dist/shell.js";
 import {
+  closeWorkspaceTab,
   DiffPreview,
   FilePreview,
   openReusableTab,
+  PreviewTabs,
+  replaceStaleTabs,
+  tabKeyTarget,
   WorkspaceErrorState,
   WorkspacePresentation,
 } from "../dist/workspace.js";
@@ -130,7 +134,7 @@ function fixtureState(): WorkspaceState {
         result: {
           workspaceGeneration: "workspace-1",
           repositoryGeneration: "repository-1",
-          repositoryRoot: "",
+          repositoryRoot: "<repository>",
           branch: { state: "unborn" },
           sparseCheckout: true,
           entries: entries.filter((entry) => entry.area !== "last-turn"),
@@ -206,13 +210,18 @@ const shell = {
 } as unknown as ApplicationShell;
 
 test("Explorer and Changes render explicit repository, link, and change states as text", () => {
-  const html = renderToStaticMarkup(
-    createElement(WorkspacePresentation, {
-      shell,
-      workspace: fixtureState(),
-      sessionId: "session-1",
-    }),
-  );
+  const html = (["explorer", "changes"] as const)
+    .map((activePane) =>
+      renderToStaticMarkup(
+        createElement(WorkspacePresentation, {
+          shell,
+          workspace: fixtureState(),
+          sessionId: "session-1",
+          activePane,
+        }),
+      ),
+    )
+    .join("\n");
   for (const label of [
     "symlink",
     "outside_workspace",
@@ -235,8 +244,9 @@ test("Explorer and Changes render explicit repository, link, and change states a
   ]) {
     assert.match(html, new RegExp(label));
   }
-  assert.doesNotMatch(html, /<added>/);
+  assert.doesNotMatch(html, /<added>|<repository>/);
   assert.match(html, /&lt;added&gt;/);
+  assert.match(html, /&lt;repository&gt;/);
 });
 
 test("file and structured diff previews are bounded read-only escaped text", () => {
@@ -315,4 +325,45 @@ test("all explicit workspace errors and reusable pinned preview behavior remain 
   const replacement = { type: "file" as const, key: "file:c", path: "c", pinned: false };
   assert.deepEqual(openReusableTab([pinned, transient], replacement), [pinned, replacement]);
   assert.deepEqual(openReusableTab([pinned], pinned), [pinned]);
+  assert.deepEqual(closeWorkspaceTab([pinned, transient], "file:a"), {
+    tabs: [transient],
+    activeKey: "file:b",
+  });
+  const diff = { type: "diff" as const, key: "diff:modified", entry: entry(1), pinned: true };
+  assert.deepEqual(replaceStaleTabs([pinned, diff], "repository"), [pinned]);
+  assert.deepEqual(replaceStaleTabs([pinned, diff], "workspace"), []);
+});
+
+test("preview tabs expose keyboard navigation and labelled tabpanel relationships", () => {
+  assert.equal(tabKeyTarget(0, "ArrowRight", 3), 1);
+  assert.equal(tabKeyTarget(0, "ArrowLeft", 3), 2);
+  assert.equal(tabKeyTarget(1, "Home", 3), 0);
+  assert.equal(tabKeyTarget(1, "End", 3), 2);
+  assert.equal(tabKeyTarget(1, "Escape", 3), undefined);
+
+  const activeKey = "file:<hostile>.ts";
+  const tabs = [
+    { type: "file" as const, key: activeKey, path: "<hostile>.ts", pinned: true },
+    { type: "diff" as const, key: "diff:modified", entry: entry(1), pinned: false },
+  ];
+  const html = renderToStaticMarkup(
+    createElement(PreviewTabs, {
+      tabs,
+      activeKey,
+      workspace: fixtureState(),
+      layout: "unified",
+      onActivate: () => undefined,
+      onPin: () => undefined,
+      onClose: () => undefined,
+      onLayout: () => undefined,
+    }),
+  );
+  const controls = html.match(/role="tab"[^>]*aria-controls="([^"]+)"/);
+  assert.ok(controls?.[1]);
+  assert.match(html, new RegExp(`id="${controls[1]}"[^>]*role="tabpanel"`));
+  assert.match(html, /aria-selected="true"/);
+  assert.match(html, /Selected · Pinned/);
+  assert.match(html, /aria-pressed="true"/);
+  assert.match(html, /aria-label="Close &lt;hostile&gt;\.ts"/);
+  assert.doesNotMatch(html, /<hostile>/);
 });
