@@ -24,6 +24,7 @@ import {
   CompactionUnavailableError,
   type KernelTool,
   type ModelPort,
+  type ModelRetryOptions,
   type ModelTurnRequest,
   messagesFromLineage,
   OperationConflictError,
@@ -87,6 +88,7 @@ async function makeSession(
   options: {
     system?: string;
     maxModelCallsPerTurn?: number;
+    retry?: ModelRetryOptions | false;
     compaction?: { keepRecentTokens?: number; maxOutputTokens?: number };
     onActivity?: (frame: SessionActivityFrame) => void;
   } = {},
@@ -467,21 +469,30 @@ test("model failures land as an error assistant message without corrupting the l
   await reopened.dispose();
 });
 
-test("records provider retry attempts before the final assistant response", async (context) => {
+test("owns provider retries inside one session turn", async (context) => {
   const port = makePort([
     [
       {
-        type: "retry_scheduled",
-        attempt: 2,
-        maxAttempts: 3,
-        delayMs: 500,
-        error: { code: "http_503", message: "busy", retryable: true },
+        type: "error",
+        code: "http_503",
+        message: "busy",
+        retryable: true,
+        requestPhase: "awaiting_response",
+        retryAfterMs: 750,
       },
-      { type: "text_delta", text: "recovered" },
-      { type: "completed", stopReason: "stop", usage },
     ],
+    say("recovered"),
   ]);
-  const { session } = await makeSession(context, port);
+  const delays: number[] = [];
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    retry: {
+      sleep: (delay) => {
+        delays.push(delay);
+        return Promise.resolve();
+      },
+      random: () => 0.5,
+    },
+  });
 
   const result = await session.runTurn([{ type: "text", text: "hi" }]);
   assert.deepEqual(
@@ -490,20 +501,97 @@ test("records provider retry attempts before the final assistant response", asyn
   );
   const retry = result.events[1];
   assert.equal(retry?.type === "model.retry_scheduled" && retry.payload.attempt, 2);
+  assert.deepEqual(delays, [750]);
+  assert.equal(port.requests.length, 2);
+  assert.deepEqual(port.requests[0]?.messages, port.requests[1]?.messages);
 });
 
-test("accepts another prompt after an unrecoverable model failure", async (context) => {
-  const port = makePort([
-    [{ type: "error", code: "invalid_request", message: "bad request", retryable: false }],
-    say("recovered on the next prompt"),
-  ]);
-  const { session } = await makeSession(context, port);
+test("accepts another prompt after model retries are exhausted", async (context) => {
+  const failure = {
+    type: "error",
+    code: "http_503",
+    message: "busy",
+    retryable: true,
+    requestPhase: "awaiting_response",
+  } as const;
+  const port = makePort([[failure], [failure], [failure], say("recovered on the next prompt")]);
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    retry: { sleep: () => Promise.resolve(), random: () => 0.5 },
+  });
 
   const failed = await session.runTurn([{ type: "text", text: "first" }]);
   assert.equal(failed.stopReason, "error");
+  assert.deepEqual(
+    failed.events.map((event) => event.type),
+    ["user.message", "model.retry_scheduled", "model.retry_scheduled", "assistant.message"],
+  );
   const recovered = await session.runTurn([{ type: "text", text: "second" }]);
   assert.equal(recovered.stopReason, "stop");
-  assert.equal(port.requests.length, 2);
+  assert.equal(port.requests.length, 4);
+});
+
+test("does not retry after output or an unknown dispatch state", async (context) => {
+  for (const response of [
+    [
+      { type: "text_delta", text: "partial" },
+      {
+        type: "error",
+        code: "http_503",
+        message: "busy",
+        retryable: true,
+        requestPhase: "awaiting_response",
+      },
+    ],
+    [
+      {
+        type: "error",
+        code: "provider_request_failed",
+        message: "connection reset",
+        retryable: true,
+        requestPhase: "unknown",
+      },
+    ],
+  ] satisfies readonly (readonly ModelStreamEvent[])[]) {
+    const port = makePort([response]);
+    const { session } = await makeSession(context, port, new ToolRegistry(), {
+      retry: { sleep: () => Promise.resolve() },
+    });
+
+    const result = await session.runTurn([{ type: "text", text: "hi" }]);
+    assert.equal(result.stopReason, "error");
+    assert.equal(port.requests.length, 1);
+  }
+});
+
+test("cancellation during retry backoff aborts without redispatch", async (context) => {
+  const controller = new AbortController();
+  const port = makePort([
+    [
+      {
+        type: "error",
+        code: "http_503",
+        message: "busy",
+        retryable: true,
+        requestPhase: "awaiting_response",
+      },
+    ],
+  ]);
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    retry: {
+      sleep: () => {
+        controller.abort();
+        return Promise.reject(new DOMException("aborted", "AbortError"));
+      },
+    },
+  });
+
+  const result = await session.runTurn([{ type: "text", text: "hi" }], controller.signal);
+  assert.equal(result.stopReason, "aborted");
+  assert.deepEqual(
+    result.events.map((event) => event.type),
+    ["user.message", "model.retry_scheduled", "assistant.message"],
+  );
+  assert.equal(port.requests.length, 1);
 });
 
 test("a silently truncated stream becomes a loud error terminal", async (context) => {

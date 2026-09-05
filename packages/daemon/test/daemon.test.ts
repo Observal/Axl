@@ -27,7 +27,7 @@ import { StringDecoder } from "node:string_decoder";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 
-import { type ModelPort, ToolRegistry } from "@axl/kernel";
+import { type ModelPort, type ModelRetryOptions, ToolRegistry } from "@axl/kernel";
 import type {
   CanonicalEvent,
   ModelStreamEvent,
@@ -138,20 +138,29 @@ async function startDaemon(
   securityMode: "sandboxed" | "unsafe" = "sandboxed",
   sandboxProvider?: string,
   sandboxImage?: string,
-  deliveryOptions: { readonly cursorLifetimeMs?: number } = {},
+  deliveryOptions: {
+    readonly cursorLifetimeMs?: number;
+    readonly retry?: ModelRetryOptions | false;
+  } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
+  const { retry, ...daemonOptions } = deliveryOptions;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
     securityMode,
     ...(sandboxProvider === undefined ? {} : { sandboxProvider }),
     ...(sandboxImage === undefined ? {} : { sandboxImage }),
-    ...deliveryOptions,
-    runtime: () => ({ model: port, tools: new ToolRegistry(), system: "You are Axl." }),
+    ...daemonOptions,
+    runtime: () => ({
+      model: port,
+      tools: new ToolRegistry(),
+      system: "You are Axl.",
+      ...(retry === undefined ? {} : { retry }),
+    }),
   });
   await daemon.start();
   context.after(() => daemon.stop());
@@ -1032,20 +1041,14 @@ test("retry exhaustion leaves attached clients idle and the daemon session reusa
     stream() {
       turns += 1;
       return (async function* (): AsyncGenerator<ModelStreamEvent> {
-        if (turns === 1) {
+        if (turns <= 3) {
           yield {
-            type: "retry_scheduled",
-            attempt: 2,
-            maxAttempts: 2,
-            delayMs: 500,
-            error: {
-              code: "http_503",
-              message: "busy",
-              retryable: true,
-              requestPhase: "awaiting_response",
-            },
+            type: "error",
+            code: "http_503",
+            message: "busy",
+            retryable: true,
+            requestPhase: "awaiting_response",
           };
-          yield { type: "error", code: "http_503", message: "busy", retryable: true };
           return;
         }
         yield { type: "text_delta", text: "recovered" };
@@ -1053,7 +1056,9 @@ test("retry exhaustion leaves attached clients idle and the daemon session reusa
       })();
     },
   };
-  const { socketPath, cwd } = await startDaemon(context, port);
+  const { socketPath, cwd } = await startDaemon(context, port, "sandboxed", undefined, undefined, {
+    retry: { sleep: () => Promise.resolve(), random: () => 0.5 },
+  });
   const tui = await connectUnixClient(socketPath, {
     identity: { kind: "tui", version: "0.0.0", instanceId: randomUUID() },
   });

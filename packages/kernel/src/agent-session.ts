@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import {
   type AssistantContent,
@@ -16,6 +17,7 @@ import {
   type EventType,
   isTerminalModelStreamEvent,
   type ModelMessage,
+  type ModelStreamError,
   type OperationId,
   parseEvent,
   parseOperationId,
@@ -61,6 +63,75 @@ export class CompactionUnavailableError extends Error {
 /** The maximum model calls one turn may make before the kernel stops loudly. */
 const DEFAULT_MAX_MODEL_CALLS_PER_TURN = 50;
 
+export interface ModelRetryPolicy {
+  readonly maxAttempts: number;
+  readonly initialDelayMs: number;
+  readonly maximumDelayMs: number;
+  readonly multiplier: number;
+  readonly jitterRatio: number;
+}
+
+export interface ModelRetryOptions extends Partial<ModelRetryPolicy> {
+  /** Test seam. Production uses an abortable timer. */
+  readonly sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  /** Test seam. Production uses Math.random. */
+  readonly random?: () => number;
+}
+
+export const DEFAULT_MODEL_RETRY_POLICY: ModelRetryPolicy = Object.freeze({
+  maxAttempts: 3,
+  initialDelayMs: 500,
+  maximumDelayMs: 60_000,
+  multiplier: 2,
+  jitterRatio: 0.2,
+});
+
+function modelRetryPolicy(options: ModelRetryOptions | undefined): ModelRetryPolicy {
+  const policy = { ...DEFAULT_MODEL_RETRY_POLICY, ...options };
+  for (const [name, value] of [
+    ["maxAttempts", policy.maxAttempts],
+    ["initialDelayMs", policy.initialDelayMs],
+    ["maximumDelayMs", policy.maximumDelayMs],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new TypeError(`retry.${name} must be a positive safe integer`);
+    }
+  }
+  if (!Number.isFinite(policy.multiplier) || policy.multiplier < 1) {
+    throw new TypeError("retry.multiplier must be at least 1");
+  }
+  if (!Number.isFinite(policy.jitterRatio) || policy.jitterRatio < 0 || policy.jitterRatio > 1) {
+    throw new TypeError("retry.jitterRatio must be between 0 and 1");
+  }
+  return policy;
+}
+
+function abortableSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return sleep(milliseconds, undefined, { signal, ref: false });
+}
+
+function modelRetryDelay(
+  error: ModelStreamError,
+  failedAttempt: number,
+  policy: ModelRetryPolicy,
+  random: () => number,
+): number {
+  if (
+    error.retryAfterMs !== undefined &&
+    Number.isFinite(error.retryAfterMs) &&
+    error.retryAfterMs >= 0
+  ) {
+    return Math.min(policy.maximumDelayMs, Math.round(error.retryAfterMs));
+  }
+  const base = Math.min(
+    policy.maximumDelayMs,
+    policy.initialDelayMs * policy.multiplier ** (failedAttempt - 1),
+  );
+  const sample = Math.min(1, Math.max(0, random()));
+  const jitter = 1 + (sample * 2 - 1) * policy.jitterRatio;
+  return Math.min(policy.maximumDelayMs, Math.max(0, Math.round(base * jitter)));
+}
+
 function unansweredToolCalls(events: readonly CanonicalEvent[]): CanonicalEvent<"tool.call">[] {
   const pending = new Map<string, CanonicalEvent<"tool.call">>();
   for (const event of events) {
@@ -93,6 +164,7 @@ export interface AgentSessionOptions {
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
   readonly maxModelCallsPerTurn?: number;
+  readonly retry?: ModelRetryOptions | false;
   readonly compaction?: Partial<CompactionSettings>;
   readonly log?: EventLogOptions;
   /** Sandbox state announced at every open as a `sandbox.configured` event. */
@@ -142,7 +214,8 @@ interface TurnOutcome {
   readonly toolCalls: readonly ToolCallRequest[];
   readonly stopReason: AssistantStopReason;
   readonly usage?: Usage;
-  readonly errorMessage?: string;
+  readonly error?: ModelStreamError;
+  readonly exposedOutput: boolean;
 }
 
 /**
@@ -159,6 +232,9 @@ export class AgentSession {
   private readonly onActivity: ((frame: SessionActivityFrame) => void) | undefined;
   private readonly system: string | undefined;
   private readonly maxModelCalls: number;
+  private readonly retry: ModelRetryPolicy | undefined;
+  private readonly retrySleep: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  private readonly retryRandom: () => number;
   private readonly compaction: CompactionSettings;
   private tip: EventId | null;
   private messages: ModelMessage[];
@@ -183,6 +259,11 @@ export class AgentSession {
     if (!Number.isSafeInteger(this.maxModelCalls) || this.maxModelCalls < 1) {
       throw new TypeError("maxModelCallsPerTurn must be a positive safe integer");
     }
+    this.retry = options.retry === false ? undefined : modelRetryPolicy(options.retry);
+    this.retrySleep =
+      options.retry === false ? abortableSleep : (options.retry?.sleep ?? abortableSleep);
+    this.retryRandom =
+      options.retry === false ? Math.random : (options.retry?.random ?? Math.random);
     this.compaction = {
       keepRecentTokens:
         options.compaction?.keepRecentTokens ?? DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
@@ -459,7 +540,9 @@ export class AgentSession {
           content: outcome.content,
           stopReason: outcome.stopReason,
           ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
-          ...(outcome.errorMessage === undefined ? {} : { errorMessage: outcome.errorMessage }),
+          ...(outcome.error === undefined
+            ? {}
+            : { errorMessage: `${outcome.error.code}: ${outcome.error.message}` }),
         });
         appended.push(assistantEvent);
         this.messages.push({
@@ -561,10 +644,69 @@ export class AgentSession {
     signal: AbortSignal | undefined,
     appended: CanonicalEvent[],
   ): Promise<TurnOutcome> {
+    const retry = this.retry;
+    const maxAttempts = retry?.maxAttempts ?? 1;
+    for (let attempt = 1; ; attempt += 1) {
+      const outcome = await this.modelAttempt(operationId, activity, signal);
+      const error = outcome.error;
+      if (
+        retry === undefined ||
+        error === undefined ||
+        !error.retryable ||
+        error.requestPhase === undefined ||
+        error.requestPhase === "unknown" ||
+        outcome.exposedOutput ||
+        attempt >= maxAttempts
+      ) {
+        return outcome;
+      }
+
+      const delayMs = modelRetryDelay(error, attempt, retry, this.retryRandom);
+      appended.push(
+        await this.append(operationId, "model.retry_scheduled", {
+          attempt: attempt + 1,
+          maxAttempts,
+          delayMs,
+          code: error.code,
+        }),
+      );
+      try {
+        await this.retrySleep(delayMs, signal);
+      } catch (sleepError) {
+        if (signal?.aborted) {
+          return { content: [], toolCalls: [], stopReason: "aborted", exposedOutput: false };
+        }
+        return {
+          content: [],
+          toolCalls: [],
+          stopReason: "error",
+          exposedOutput: false,
+          error: {
+            code: "retry_scheduler_failed",
+            message:
+              sleepError instanceof Error ? sleepError.message : "model retry scheduler failed",
+            retryable: false,
+            category: "unknown",
+            requestPhase: "before_dispatch",
+          },
+        };
+      }
+      if (signal?.aborted) {
+        return { content: [], toolCalls: [], stopReason: "aborted", exposedOutput: false };
+      }
+    }
+  }
+
+  private async modelAttempt(
+    operationId: OperationId,
+    activity: { sequence: number },
+    signal: AbortSignal | undefined,
+  ): Promise<TurnOutcome> {
     let thinking = "";
     let text = "";
     const toolCalls: ToolCallRequest[] = [];
     let terminal: TerminalModelStreamEvent | undefined;
+    let exposedOutput = false;
 
     try {
       // Snapshot: the port must never observe the turn mutating history under it.
@@ -575,6 +717,7 @@ export class AgentSession {
         signal,
       })) {
         if (event.type === "text_delta") {
+          exposedOutput = true;
           text += event.text;
           this.onActivity?.({
             operationId,
@@ -583,6 +726,7 @@ export class AgentSession {
             text: event.text,
           });
         } else if (event.type === "thinking_delta") {
+          exposedOutput = true;
           thinking += event.text;
           this.onActivity?.({
             operationId,
@@ -591,6 +735,7 @@ export class AgentSession {
             text: event.text,
           });
         } else if (event.type === "tool_call") {
+          exposedOutput = true;
           toolCalls.push({ callId: event.callId, name: event.name, input: event.input });
           this.onActivity?.({
             operationId,
@@ -598,15 +743,6 @@ export class AgentSession {
             type: "tool_call",
             call: { callId: event.callId, name: event.name },
           });
-        } else if (event.type === "retry_scheduled") {
-          appended.push(
-            await this.append(operationId, "model.retry_scheduled", {
-              attempt: event.attempt,
-              maxAttempts: event.maxAttempts,
-              delayMs: event.delayMs,
-              code: event.error.code,
-            }),
-          );
         }
         if (isTerminalModelStreamEvent(event)) {
           terminal = event;
@@ -639,17 +775,18 @@ export class AgentSession {
     if (text.length > 0) content.push({ type: "text", text });
 
     if (terminal.type === "completed") {
-      return { content, toolCalls, stopReason: terminal.stopReason, usage: terminal.usage };
+      return {
+        content,
+        toolCalls,
+        stopReason: terminal.stopReason,
+        usage: terminal.usage,
+        exposedOutput,
+      };
     }
     if (terminal.type === "aborted") {
-      return { content, toolCalls: [], stopReason: "aborted" };
+      return { content, toolCalls: [], stopReason: "aborted", exposedOutput };
     }
-    return {
-      content,
-      toolCalls: [],
-      stopReason: "error",
-      errorMessage: `${terminal.code}: ${terminal.message}`,
-    };
+    return { content, toolCalls: [], stopReason: "error", error: terminal, exposedOutput };
   }
 
   /** Appends daemon-owned queue lifecycle state to the canonical session log. */
