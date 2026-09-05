@@ -115,6 +115,12 @@ export interface ConversationState {
   readonly lastCompaction?: CanonicalEvent<"context.compacted">;
 }
 
+/** Status and activity without materializing the accumulated conversation collections. */
+export type ConversationOverview = Omit<
+  ConversationState,
+  "records" | "tools" | "interactions" | "operations" | "queue" | "uncertainShellOperations"
+> & { readonly recordCount: number };
+
 const MAX_PROJECTED_ACTIVITY_CHARACTERS = 131_072;
 const ACTIVITY_TRIM_BATCH_CHARACTERS = 16_384;
 
@@ -205,18 +211,26 @@ export class ConversationProjector {
   }
 
   get state(): ConversationState {
+    const { recordCount: _recordCount, ...overview } = this.overview;
     return Object.freeze({
-      ...(this.expectedSessionId === undefined ? {} : { sessionId: this.expectedSessionId }),
-      ...(this.selectedNodeId === undefined ? {} : { selectedNodeId: this.selectedNodeId }),
+      ...overview,
       records: Object.freeze([...this.records]),
       tools: Object.freeze([...this.tools.values()]),
       interactions: Object.freeze([...this.interactions.values()]),
       operations: Object.freeze([...this.operations.values()]),
+      uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
+      queue: Object.freeze([...this.queue.values()]),
+    });
+  }
+
+  get overview(): ConversationOverview {
+    return Object.freeze({
+      ...(this.expectedSessionId === undefined ? {} : { sessionId: this.expectedSessionId }),
+      ...(this.selectedNodeId === undefined ? {} : { selectedNodeId: this.selectedNodeId }),
+      recordCount: this.records.length,
       ...(this.activeOperationId === undefined
         ? {}
         : { activeOperationId: this.activeOperationId }),
-      uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
-      queue: Object.freeze([...this.queue.values()]),
       ...(this.model === undefined ? {} : { model: this.model }),
       ...(this.provider === undefined ? {} : { provider: this.provider }),
       ...(this.entitlement === undefined ? {} : { entitlement: this.entitlement }),

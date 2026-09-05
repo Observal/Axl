@@ -9,6 +9,7 @@ import {
   AUTOWRAP_OFF,
   AUTOWRAP_ON,
   DifferentialScreen,
+  clipFrame,
   linkAtCell,
   plainTextByCells,
   SYNC_BEGIN,
@@ -168,4 +169,22 @@ test("terminal sanitization removes complete DCS, C1, and bidi override controls
     wrapLine(natural, 12).every((line) => visibleLength(line) <= 12),
     true,
   );
+});
+
+test("cursor clipping retains pinned safety rows and hides a cursor outside the allocation", () => {
+  const lines = [
+    "UNSAFE: full host access",
+    ...Array.from({ length: 20 }, (_, i) => `editor ${i}`),
+  ];
+  for (const row of [1, 20]) {
+    const clipped = clipFrame(lines, 4, { row, column: 2 }, 1);
+    assert.equal(clipped.lines.length, 4);
+    assert.equal(clipped.lines[0], lines[0]);
+    assert.ok(clipped.cursor !== undefined);
+    assert.equal(clipped.lines[clipped.cursor.row], lines[row]);
+  }
+  const tiny = clipFrame(lines, 1, { row: 20, column: 2 }, 1);
+  assert.deepEqual(tiny.lines, [lines[0]]);
+  assert.equal(tiny.cursor, undefined);
+  assert.deepEqual(clipFrame(lines, 0, { row: 1, column: 2 }).lines, []);
 });

@@ -180,14 +180,14 @@ class ResumableSessionSubscription implements SessionSubscription {
       this.daemonInstanceId === undefined || this.daemonInstanceId === nextDaemonInstanceId;
     const cursorAvailable = this.options.cursorStore === undefined || this.resumableState;
     let cursor =
-      !forceSnapshot && sameLineage && cursorAvailable && this.projector.state.records.length > 0
+      !forceSnapshot && sameLineage && cursorAvailable && this.projector.overview.recordCount > 0
         ? this.acknowledgedCursor
         : undefined;
     if (
       cursor === undefined &&
       !forceSnapshot &&
       sameLineage &&
-      this.projector.state.records.length > 0 &&
+      this.projector.overview.recordCount > 0 &&
       this.options.cursorStore !== undefined &&
       this.resumableState
     ) {

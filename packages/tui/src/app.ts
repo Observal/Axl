@@ -55,7 +55,7 @@ import { decodeOneKey, LineEditor } from "./editor.ts";
 import { EditorFrameComponent } from "./editor-frame.ts";
 import { ExtensionWidgetsComponent } from "./extension-ui.ts";
 import { editPromptExternally } from "./external-editor.ts";
-import { type FullscreenMouse, FullscreenScreen } from "./fullscreen.ts";
+import { fullscreenDockHeight, type FullscreenMouse, FullscreenScreen } from "./fullscreen.ts";
 import { isMouseReport } from "./fullscreen-input.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
 import type { LoginDialogDefinition } from "./login-dialog.ts";
@@ -72,6 +72,7 @@ import { PickerOverlay } from "./picker.ts";
 import {
   AUTOWRAP_OFF,
   AUTOWRAP_ON,
+  clipFrame,
   type Component,
   type CursorPlacement,
   DifferentialScreen,
@@ -82,7 +83,6 @@ import {
   visibleWidth,
   wrapLine,
 } from "./render.ts";
-import { ComponentStack } from "./stack.ts";
 import {
   assertInteractiveTerminal,
   type TerminalInput,
@@ -106,8 +106,7 @@ import {
 import { VimModeController } from "./vim-mode.ts";
 
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
-const RESIZE_DEBOUNCE_MS = 25;
-const FULLSCREEN_INPUT_FRAME_MS = 16;
+const FRAME_INTERVAL_MS = 16;
 const SESSION_SELECTOR_WINDOW = 10;
 const MAX_EXTENSION_COMPLETIONS = 100;
 const MAX_EXTENSION_SELECTOR_ITEMS = 1_000;
@@ -519,7 +518,6 @@ export class AxlApp {
   private readonly liveAssistant: LiveAssistantComponent;
   private readonly attachmentBar: AttachmentBarComponent;
   private readonly mediaCache: MediaCache;
-  private readonly liveRoot = new ComponentStack();
   private readonly extensionHost: TerminalExtensionHost;
   private readonly extensionWidgetsAbove: ExtensionWidgetsComponent;
   private readonly extensionWidgetsBelow: ExtensionWidgetsComponent;
@@ -600,18 +598,12 @@ export class AxlApp {
   private focused = true;
   private lastAttentionAt = 0;
 
-  private resizeTimer: NodeJS.Timeout | undefined;
-  private fullscreenInputRenderTimer: NodeJS.Timeout | undefined;
-  private activityRenderTimer: NodeJS.Timeout | undefined;
+  private renderTimer: NodeJS.Timeout | undefined;
+  private immediateRenderQueued = false;
+  private lastPaint = -Infinity;
+  private renderPaused = false;
 
-  private readonly resizeListener = (): void => {
-    if (this.resizeTimer !== undefined) clearTimeout(this.resizeTimer);
-    this.resizeTimer = setTimeout(() => {
-      this.resizeTimer = undefined;
-      this.applyResize();
-    }, RESIZE_DEBOUNCE_MS);
-    this.resizeTimer.unref?.();
-  };
+  private readonly resizeListener = (): void => this.redraw();
 
   private constructor(
     options: AxlAppOptions,
@@ -728,7 +720,10 @@ export class AxlApp {
     this.terminal = new TerminalSession({
       input: options.input,
       output: options.output,
-      onInput: (sequence) => this.handleInput(sequence),
+      onInput: (sequence) => {
+        this.handleInput(sequence);
+        if (!isMouseReport(sequence)) this.redraw(true);
+      },
       onInputError: (error) => {
         this.notice = this.view.palette.error(`✖ ${error.message}`);
         this.redraw();
@@ -757,7 +752,7 @@ export class AxlApp {
         if (!this.stopped) this.commitEvent(event, !this.hydrating);
       },
       onChange: (projection: ConversationProjector) => {
-        if (this.liveAssistant.replace(projection.state.activity)) this.scheduleActivityRender();
+        if (this.liveAssistant.replace(projection.overview.activity)) this.scheduleActivityRender();
       },
       onResyncRequired: (error: Error) => {
         if (this.stopped) return;
@@ -773,7 +768,6 @@ export class AxlApp {
     const reconnectClient = this.reconnectClient;
     this.connectionState = "reconnecting";
     this.liveAssistant.reset();
-    this.cancelActivityRender();
     this.reconnectAttempts = 0;
     this.lastReconnectError = undefined;
     const generation = ++this.reconnectGeneration;
@@ -965,14 +959,14 @@ export class AxlApp {
       if (app.developerPanelEnabled) void app.refreshWorkspaceDiff();
     }
     app.hydrating = false;
-    app.setWorking(app.sessionSubscription?.projector.state.activeOperationId !== undefined);
+    app.setWorking(app.sessionSubscription?.projector.overview.activeOperationId !== undefined);
     app.openNextInteraction();
 
     try {
       await app.restartThemeWatcher(false);
       app.terminal.start();
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
-      app.redraw();
+      app.paint();
       if (initialResume) void app.openResume();
       return app;
     } catch (error) {
@@ -997,9 +991,7 @@ export class AxlApp {
     if (this.stopped) return;
     this.stopped = true;
     this.setWorking(false);
-    this.cancelResize();
-    this.cancelFullscreenInputRender();
-    this.cancelActivityRender();
+    this.cancelRender();
     this.stopThemeWatcher?.();
     this.stopThemeWatcher = undefined;
     for (const controller of this.extensionCommandControllers) controller.abort();
@@ -1074,29 +1066,20 @@ export class AxlApp {
     if (failures.length > 0) throw new AggregateError(failures, "Failed to stop Axl TUI");
   }
 
-  private applyResize(): void {
+  private applyResize(): boolean {
     const width = this.detectWidth();
     const height = this.detectHeight();
     const widthChanged = width !== this.width;
     const heightChanged = height !== this.height;
-    if (!widthChanged && !heightChanged) return;
+    if (!widthChanged && !heightChanged) return false;
     this.width = width;
     this.height = height;
     this.fullscreen.resize(width, height);
-    if (widthChanged) {
-      this.rebuildTranscript();
-    } else {
-      this.screen.setWidth(width);
-      this.view.setWidth(width);
-      if (this.tuiMode === "regular") this.repaintRegularAfterResize();
-      else this.redraw();
-    }
-  }
-
-  private cancelResize(): void {
-    if (this.resizeTimer === undefined) return;
-    clearTimeout(this.resizeTimer);
-    this.resizeTimer = undefined;
+    this.screen.setWidth(width);
+    this.screen.invalidate();
+    this.view.setWidth(width);
+    if (widthChanged) this.rebuildTranscript(false);
+    return true;
   }
 
   private detectWidth(): number {
@@ -1152,7 +1135,7 @@ export class AxlApp {
   }
 
   private liveFrame(includePendingTools = true): {
-    components: readonly Component[];
+    lines: readonly string[];
     cursor?: CursorPlacement;
   } {
     const unsafeComponents: Component[] = this.view.unsafe
@@ -1171,20 +1154,15 @@ export class AxlApp {
         ]
       : [];
     if (this.overlays.active !== undefined) {
-      this.liveRoot.replace([...unsafeComponents, this.overlays]);
-      this.liveRoot.render(this.width);
+      const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
+      const lines = [...prefix, ...this.overlays.render(this.width)];
       const cursor = this.overlays.cursorPlacement();
-      return {
-        components: [this.liveRoot],
-        ...(cursor === undefined
-          ? {}
-          : {
-              cursor: {
-                ...cursor,
-                row: this.liveRoot.offsetOf(this.overlays) + cursor.row,
-              },
-            }),
-      };
+      return clipFrame(
+        lines,
+        this.tuiMode === "regular" ? this.height : fullscreenDockHeight(this.height),
+        cursor === undefined ? undefined : { ...cursor, row: prefix.length + cursor.row },
+        prefix.length,
+      );
     }
 
     const spinner = SPINNER_FRAMES[this.spinnerIndex % SPINNER_FRAMES.length] as string;
@@ -1231,42 +1209,55 @@ export class AxlApp {
       ...(this.workspaceDiff === undefined ? {} : { diff: this.workspaceDiff }),
       ...(this.workspaceDiffError === undefined ? {} : { error: this.workspaceDiffError }),
     });
-    const tools = [this.toolTransactions];
     const fixed: Component[] = [
       ...unsafeComponents,
-      ...(includePendingTools ? [this.activity, ...tools] : []),
       this.extensionWidgetsAbove,
       this.attachmentBar,
       ...(this.developerPanelEnabled ? [this.developerPanel] : []),
       this.editorFrame,
       this.extensionWidgetsBelow,
     ];
-    const reservedRows = fixed.reduce(
-      (total, component) => total + component.render(this.width).length,
-      0,
-    );
+    const measured = fixed.map((component) => component.render(this.width));
+    const reservedRows = measured.reduce((total, lines) => total + lines.length, 0);
+    const prefixRows = measured.slice(0, unsafeComponents.length).flat();
+    const activity = includePendingTools ? this.activity.render(this.width) : [];
+    const tools = includePendingTools
+      ? this.toolTransactions.renderWindow(
+          this.width,
+          Math.max(0, this.height - reservedRows - activity.length),
+        )
+      : [];
     this.liveAssistant.setMaxRows(
-      includePendingTools ? Math.max(0, this.height - reservedRows) : undefined,
+      includePendingTools
+        ? Math.max(0, this.height - reservedRows - activity.length - tools.length)
+        : undefined,
     );
-    this.liveRoot.replace([
-      ...unsafeComponents,
-      ...(includePendingTools ? [this.activity, ...tools, this.liveAssistant] : []),
-      this.extensionWidgetsAbove,
-      this.attachmentBar,
-      ...(this.developerPanelEnabled ? [this.developerPanel] : []),
-      this.editorFrame,
-      this.extensionWidgetsBelow,
-    ]);
-    this.liveRoot.render(this.width);
+    const assistant = includePendingTools ? this.liveAssistant.render(this.width) : [];
     const editorCursor = this.editorFrame.cursorPlacement();
-    return {
-      components: [this.liveRoot],
-      cursor: {
-        row: this.liveRoot.offsetOf(this.editorFrame) + editorCursor.row,
+    const lines = [
+      ...prefixRows,
+      ...activity,
+      ...tools,
+      ...assistant,
+      ...measured.slice(unsafeComponents.length).flat(),
+    ];
+    return clipFrame(
+      lines,
+      includePendingTools ? this.height : fullscreenDockHeight(this.height),
+      {
+        row:
+          measured
+            .slice(0, fixed.indexOf(this.editorFrame))
+            .reduce((total, rows) => total + rows.length, 0) +
+          activity.length +
+          tools.length +
+          assistant.length +
+          editorCursor.row,
         column: editorCursor.column,
         visible: !this.view.working && this.connectionState === "connected",
       },
-    };
+      prefixRows.length,
+    );
   }
 
   private completionCandidates(text = this.editor.text): readonly string[] {
@@ -1388,52 +1379,54 @@ export class AxlApp {
     ];
   }
 
-  private scheduleFullscreenInputRender(): void {
-    if (this.fullscreenInputRenderTimer !== undefined) return;
-    this.fullscreenInputRenderTimer = setTimeout(() => {
-      this.fullscreenInputRenderTimer = undefined;
-      this.redraw();
-    }, FULLSCREEN_INPUT_FRAME_MS);
-    this.fullscreenInputRenderTimer.unref?.();
-  }
-
-  private cancelFullscreenInputRender(): void {
-    if (this.fullscreenInputRenderTimer !== undefined) {
-      clearTimeout(this.fullscreenInputRenderTimer);
-      this.fullscreenInputRenderTimer = undefined;
+  private redraw(immediate = false): void {
+    if (this.stopped || this.hydrating || this.renderPaused) return;
+    if (this.immediateRenderQueued) return;
+    if (immediate) {
+      if (this.renderTimer !== undefined) clearTimeout(this.renderTimer);
+      this.renderTimer = undefined;
+      this.immediateRenderQueued = true;
+      queueMicrotask(() => {
+        if (!this.immediateRenderQueued) return;
+        this.immediateRenderQueued = false;
+        this.paint();
+      });
+    } else if (this.renderTimer === undefined) {
+      this.renderTimer = setTimeout(
+        () => {
+          this.renderTimer = undefined;
+          this.paint();
+        },
+        Math.max(0, FRAME_INTERVAL_MS - (performance.now() - this.lastPaint)),
+      );
+      this.renderTimer.unref?.();
     }
   }
 
-  private redraw(): void {
-    if (this.stopped) return;
+  private cancelRender(): void {
+    if (this.renderTimer !== undefined) clearTimeout(this.renderTimer);
+    this.renderTimer = undefined;
+    this.immediateRenderQueued = false;
+  }
+
+  private paint(): void {
+    if (this.stopped || this.hydrating || this.renderPaused) return;
+    this.cancelRender();
+    this.lastPaint = performance.now();
+    const resized = this.applyResize();
+    const { lines, cursor } = this.liveFrame(this.tuiMode === "regular");
     if (this.tuiMode === "fullscreen") {
-      const width = this.detectWidth();
-      const height = this.detectHeight();
-      if (width !== this.width) {
-        this.width = width;
-        this.height = height;
-        this.fullscreen.resize(width, height);
-        this.rebuildTranscript();
-        return;
-      }
-      if (height !== this.height) {
-        this.height = height;
-        this.fullscreen.resize(width, height);
-      }
-    }
-    const { components, cursor } = this.liveFrame(this.tuiMode === "regular");
-    if (this.tuiMode === "fullscreen") {
-      const dock = components.flatMap((component) => component.render(this.width));
       this.fullscreen.render({
         document: this.fullscreenDocumentRows(),
-        dock,
+        dock: lines,
         ...(cursor === undefined ? {} : { cursor }),
         palette: this.view.palette,
         sessionId: this.sessionId,
       });
       return;
     }
-    this.options.output.write(this.screen.frame(components, cursor));
+    if (resized) this.repaintRegularTranscript(lines.length);
+    this.options.output.write(this.screen.frame([{ render: () => [...lines] }], cursor));
   }
 
   private fullscreenDocumentRows() {
@@ -1467,25 +1460,9 @@ export class AxlApp {
 
   private scheduleActivityRender(): void {
     this.invalidateFullscreenRows();
-    if (!this.liveAssistant.active) {
-      this.cancelActivityRender();
-      if (!this.sending) this.setWorking(false);
-      this.redraw();
-      return;
-    }
-    if (!this.view.working) this.setWorking(true);
-    if (this.activityRenderTimer !== undefined) return;
-    this.activityRenderTimer = setTimeout(() => {
-      this.activityRenderTimer = undefined;
-      this.redraw();
-    }, 16);
-    this.activityRenderTimer.unref?.();
-  }
-
-  private cancelActivityRender(): void {
-    if (this.activityRenderTimer === undefined) return;
-    clearTimeout(this.activityRenderTimer);
-    this.activityRenderTimer = undefined;
+    if (this.liveAssistant.active) this.setWorking(true);
+    else if (!this.sending) this.setWorking(false);
+    this.redraw();
   }
 
   private setWorking(working: boolean): void {
@@ -1569,7 +1546,6 @@ export class AxlApp {
       event.type === "assistant.message" && event.payload.stopReason !== "tool_use";
     if (event.type === "assistant.message") {
       this.liveAssistant.clear();
-      this.cancelActivityRender();
     }
 
     let absorbedSandboxViolation = false;
@@ -1720,8 +1696,6 @@ export class AxlApp {
 
   private handleInput(data: string): void {
     if (this.stopped) return;
-    const fullscreenMouseInput = this.tuiMode === "fullscreen" && isMouseReport(data);
-    if (!fullscreenMouseInput) this.cancelFullscreenInputRender();
     if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) {
       void this.handleBracketedPaste(data.slice(6, -6));
       return;
@@ -1747,13 +1721,8 @@ export class AxlApp {
       return;
     }
     if (this.tuiMode === "fullscreen" && this.overlays.active === undefined) {
-      const frame = this.liveFrame();
-      const dockHeight = frame.components.flatMap((component) =>
-        component.render(this.width),
-      ).length;
-      if (this.fullscreen.handleInput(data, this.fullscreenDocumentRows(), dockHeight)) {
-        if (fullscreenMouseInput) this.scheduleFullscreenInputRender();
-        else this.redraw();
+      if (this.fullscreen.handleInput(data)) {
+        this.redraw();
         return;
       }
     }
@@ -1797,7 +1766,7 @@ export class AxlApp {
           this.vim.handle(key, this.editor);
         } else this.openHistory();
       } else if (key.kind === "ctrl" && key.char === "l") {
-        this.screen.invalidate();
+        this.invalidateScreens();
       } else if (key.kind === "ctrl" && key.char === "z") {
         this.suspend();
       } else if (key.kind === "ctrl" && key.char === "o") {
@@ -2025,6 +1994,8 @@ export class AxlApp {
       return;
     }
     const fullscreen = this.tuiMode === "fullscreen";
+    this.renderPaused = true;
+    this.cancelRender();
     try {
       if (fullscreen) this.fullscreen.pause();
       else this.options.output.write(this.screen.clear());
@@ -2057,14 +2028,16 @@ export class AxlApp {
           `✖ ${failure instanceof Error ? failure.message : "terminal restoration failed"}`,
         );
       }
+      this.renderPaused = false;
       this.redraw();
     }
   }
 
   private suspend(): void {
     const fullscreen = this.tuiMode === "fullscreen";
+    this.renderPaused = true;
+    this.cancelRender();
     try {
-      this.cancelResize();
       if (fullscreen) this.fullscreen.pause();
       else this.options.output.write(this.screen.clear());
       this.terminal.suspend();
@@ -2084,6 +2057,7 @@ export class AxlApp {
           );
         }
       }
+      this.renderPaused = false;
       this.redraw();
     }
   }
@@ -2415,15 +2389,12 @@ export class AxlApp {
   private commitToolGroup(): void {
     const rows = this.toolTransactions.drain(this.width);
     if (rows.length === 0) return;
-    this.commitLines(
-      rows.map((row) => row.text),
-      false,
-      false,
-      {
-        ...(rows[0]?.sourceId === undefined ? {} : { sourceId: rows[0].sourceId }),
-        ...(rows[0]?.toolGroupId === undefined ? {} : { toolGroupId: rows[0].toolGroupId }),
-      },
-    );
+    this.document.appendRows(rows);
+    this.invalidateFullscreenRows();
+    if (this.tuiMode === "regular") {
+      this.options.output.write(this.screen.clear());
+      this.options.output.write(`${rows.map((row) => row.text).join("\r\n")}\r\n`);
+    }
   }
 
   private commitLines(
@@ -2445,7 +2416,7 @@ export class AxlApp {
     if (redraw) this.redraw();
   }
 
-  private rebuildTranscript(): void {
+  private rebuildTranscript(repaint = true): void {
     const previous = this.view;
     const next = new SessionView(
       this.width,
@@ -2473,13 +2444,7 @@ export class AxlApp {
     );
     const flushTools = (): void => {
       const rows = pending.drain(this.width);
-      document.append(
-        rows.map((row) => row.text),
-        {
-          ...(rows[0]?.sourceId === undefined ? {} : { sourceId: rows[0].sourceId }),
-          ...(rows[0]?.toolGroupId === undefined ? {} : { toolGroupId: rows[0].toolGroupId }),
-        },
-      );
+      document.appendRows(rows);
     };
     for (const entry of this.transcript) {
       if (entry.kind === "lines") {
@@ -2523,23 +2488,35 @@ export class AxlApp {
     this.toolTransactions.replace(pending);
     this.document.replace(document.rows);
     this.invalidateFullscreenRows();
+    if (!repaint) return;
     if (this.tuiMode === "regular") {
-      this.repaintRegularAfterResize();
+      this.repaintRegularTranscript();
       return;
     }
     this.redraw();
   }
 
-  private repaintRegularAfterResize(): void {
+  private repaintRegularTranscript(liveHeight?: number): void {
+    // Resize may reflow the hardware cursor. Move the old viewport into native
+    // history rather than guessing its position or erasing unrelated scrollback.
+    this.options.output.write(
+      liveHeight === undefined ? this.screen.clear() : "\r\n".repeat(this.height),
+    );
     this.screen.reset(this.width);
-    this.options.output.write(`${SYNC_BEGIN}${AUTOWRAP_OFF}\x1b[2J\x1b[H\x1b[3J`);
-    for (const [index, row] of this.document.rows.entries()) {
+    const rows =
+      liveHeight === undefined
+        ? this.document.rows
+        : this.document.rows.slice(
+            Math.max(0, this.document.length - Math.max(0, this.height - liveHeight)),
+          );
+    this.options.output.write(`${SYNC_BEGIN}${AUTOWRAP_OFF}`);
+    for (const [index, row] of rows.entries()) {
       if (index > 0) this.options.output.write("\r\n");
       this.options.output.write(truncateToWidth(row.text, this.width, ""));
     }
-    if (this.document.rows.length > 0) this.options.output.write("\r\n");
+    if (rows.length > 0) this.options.output.write("\r\n");
     this.options.output.write(`${AUTOWRAP_ON}${SYNC_END}`);
-    this.redraw();
+    if (liveHeight === undefined) this.redraw();
   }
 
   private setTuiMode(mode: "regular" | "fullscreen"): void {
@@ -2565,7 +2542,8 @@ export class AxlApp {
       this.screen.reset(this.width);
     }
     void this.persistPreferences({ tuiMode: mode });
-    this.rebuildTranscript();
+    this.rebuildTranscript(false);
+    this.redraw();
   }
 
   private togglePromptStash(): void {
@@ -3585,7 +3563,7 @@ export class AxlApp {
         if (!this.stopped) this.commitEvent(event, !this.hydrating);
       },
       onChange: (projector) => {
-        if (activated && this.liveAssistant.replace(projector.state.activity)) {
+        if (activated && this.liveAssistant.replace(projector.overview.activity)) {
           this.scheduleActivityRender();
         }
       },
@@ -3608,7 +3586,6 @@ export class AxlApp {
     this.connectionState = "connected";
     if (this.tuiMode === "regular") this.options.output.write(this.screen.clear());
     this.liveAssistant.reset();
-    this.cancelActivityRender();
     this.cwd = opened.cwd;
     this.sessionId = opened.sessionId;
     this.mediaCache.setSession(opened.sessionId);
@@ -3653,9 +3630,9 @@ export class AxlApp {
     }
     this.sessionSubscription = nextSubscription;
     activated = true;
-    this.liveAssistant.replace(projection.state.activity);
+    this.liveAssistant.replace(projection.overview.activity);
     this.hydrating = false;
-    this.setWorking(projection.state.activeOperationId !== undefined);
+    this.setWorking(projection.overview.activeOperationId !== undefined);
     this.editor.setText(draft);
     this.notice = this.view.palette.dim(notice);
     this.openNextInteraction();

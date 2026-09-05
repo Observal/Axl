@@ -266,3 +266,121 @@ test("clicking a tool toggles detail while dragging still selects text", async (
   assert.deepEqual(toggled, ["tool-group"]);
   screen.exit(document, "resume-hint", "123e4567-e89b-42d3-a456-426614174000");
 });
+
+test("fullscreen repairs stale dimensions and invalidation without clearing scrollback", () => {
+  const capture = output();
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden");
+  const document = rows(["original", "updated"]);
+  screen.enter();
+  screen.render(frame(document));
+  capture.terminal.columns = 23;
+  capture.terminal.rows = 6;
+  let offset = capture.text().length;
+  screen.render(frame(document));
+  const resized = capture.text().slice(offset);
+  assert.ok(resized.includes("\x1b[?7l\x1b[2J\x1b[H"));
+  assert.ok(!resized.includes("\x1b[3J"));
+  const terminal = new VirtualTerminal(23, 6);
+  terminal.write(resized);
+  assert.ok(terminal.cursorRow < 6);
+  assert.ok(terminal.rows().some((row) => row.includes("prompt")));
+  offset = capture.text().length;
+  screen.invalidate();
+  screen.render(frame(document));
+  assert.ok(capture.text().slice(offset).includes("\x1b[2J\x1b[H"));
+  screen.exit(document, "resume-hint", "fixture");
+});
+
+test("oversized docks keep early and late cursors on their actual text", () => {
+  for (const height of [1, 4, 5, 8, 12]) {
+    for (const cursorRow of [0, 3, 19]) {
+      const capture = output();
+      capture.terminal.rows = height;
+      const screen = new FullscreenScreen(capture.terminal, 40, height, "hidden");
+      screen.enter();
+      screen.render({
+        ...frame(rows(["history"])),
+        dock: Array.from({ length: 20 }, (_, index) => `editor-${index}`),
+        cursor: { row: cursorRow, column: 3 },
+      });
+      const terminal = new VirtualTerminal(40, height);
+      terminal.write(capture.text());
+      assert.ok(terminal.cursorRow < height);
+      assert.equal(terminal.cursorColumn, 3);
+      assert.equal(terminal.rows()[terminal.cursorRow], `editor-${cursorRow}`);
+      assert.equal(terminal.cursorVisible, true);
+      screen.exit([], "resume-hint", "fixture");
+    }
+  }
+});
+
+test("paused anchors survive growth before paint and newly appended content stays reachable", () => {
+  const capture = output();
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden");
+  const before = rows(Array.from({ length: 30 }, (_, index) => `line ${index}`));
+  screen.enter();
+  screen.render(frame(before));
+  screen.handleInput("\x1b[H");
+  for (let i = 0; i < 10; i++) screen.handleInput("\x1b[1;3B");
+  screen.render(frame(before));
+  const after = [
+    ...rows(["prepended"]).map((row) => ({ ...row, sourceId: "new" })),
+    ...before,
+    ...rows(["new tail"]).map((row) => ({ ...row, sourceId: "tail" })),
+  ];
+  // A navigation event during a delayed paint still uses the displayed document.
+  screen.handleInput("\x1b[1;3B");
+  let offset = capture.text().length;
+  screen.render(frame(after));
+  const terminal = new VirtualTerminal(40, 8);
+  terminal.write(capture.text());
+  assert.equal(terminal.rows()[1], "line 11");
+  assert.match(terminal.rows()[0] ?? "", /paused/);
+  screen.handleInput("\x1b[F");
+  screen.render(frame(after));
+  assert.match(capture.text().slice(offset), /new tail/);
+  offset = capture.text().length;
+  screen.render(frame([...after, ...rows(["following tail"])]));
+  assert.match(capture.text().slice(offset), /following tail/);
+  screen.exit(after, "resume-hint", "fixture");
+});
+
+test("clicks use the painted row while wheel paints are queued", () => {
+  const capture = output();
+  const toggled: string[] = [];
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden", {
+    toggleToolGroup: (id) => toggled.push(id),
+  });
+  const document = rows(Array.from({ length: 20 }, (_, index) => `tool ${index}`)).map(
+    (row, index) => ({ ...row, toolGroupId: `group-${index}` }),
+  );
+  screen.enter();
+  screen.render(frame(document));
+  screen.handleInput("\x1b[<64;2;2M");
+  screen.handleInput("\x1b[<0;2;2M");
+  screen.handleInput("\x1b[<0;2;2m");
+  assert.deepEqual(toggled, ["group-17"]);
+  screen.exit(document, "resume-hint", "fixture");
+});
+
+test("reflow retains the nearest surviving row of a paused source", () => {
+  const capture = output();
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden");
+  const source = (count: number) =>
+    Array.from({ length: count }, (_, rowInSource) => ({
+      text: `wrapped ${rowInSource}`,
+      sourceId: "wrapped",
+      rowInSource,
+      prompt: false,
+    }));
+  const tail = rows(Array.from({ length: 10 }, (_, index) => `tail ${index}`));
+  screen.enter();
+  screen.render(frame([...source(10), ...tail]));
+  screen.handleInput("\x1b[H");
+  for (let index = 0; index < 8; index++) screen.handleInput("\x1b[1;3B");
+  screen.render(frame([...source(3), ...tail]));
+  const terminal = new VirtualTerminal(40, 8);
+  terminal.write(capture.text());
+  assert.equal(terminal.rows()[1], "wrapped 2");
+  screen.exit([], "resume-hint", "fixture");
+});

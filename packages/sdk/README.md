@@ -74,6 +74,10 @@ await subscription.close();
 client.close();
 ```
 
+Use `projector.overview` for status and activity updates. It provides current metadata and
+`recordCount` without copying records, tools, interactions, operations, or queue history.
+Use `projector.state` when the UI needs those full collections.
+
 `ConversationProjector.state` is a disposable view. Canonical JSONL remains authoritative.
 
 ## Connection lifecycle

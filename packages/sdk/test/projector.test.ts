@@ -255,3 +255,36 @@ test("projects the language-neutral canonical event corpus deterministically", (
   assert.deepEqual(first.state, second.state);
   assert.equal(first.state.records.length, conformanceEvents.length);
 });
+
+test("overview reads remain history-free for a 100,000-event session", () => {
+  const projector = new ConversationProjector(sessionId);
+  const empty = projector.overview;
+  for (let index = 0; index < 100_000; index++)
+    projector.applyEvent(
+      event("user.message", { content: [{ type: "text", text: `message ${index}` }] }),
+    );
+  const full = projector.state;
+  const {
+    records,
+    tools: _tools,
+    interactions: _interactions,
+    operations: _operations,
+    queue: _queue,
+    uncertainShellOperations: _uncertain,
+    ...metadata
+  } = full;
+  assert.deepEqual(projector.overview, { ...metadata, recordCount: records.length });
+  assert.equal(empty.recordCount, 0);
+  assert.ok(Object.isFrozen(projector.overview));
+  Object.defineProperty(projector, "state", {
+    get() {
+      throw new Error("History materialized for status");
+    },
+  });
+  for (let index = 0; index < 1_000; index++) assert.equal(projector.overview.recordCount, 100_000);
+  projector.applyEvent(event("config.model", { modelId: "fixture/changed" }));
+  assert.equal(projector.overview.model, "fixture/changed");
+  projector.reset();
+  assert.equal(projector.overview.recordCount, 0);
+  assert.equal(projector.overview.model, undefined);
+});

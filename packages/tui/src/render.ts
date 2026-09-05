@@ -320,6 +320,32 @@ export function wrapLine(value: string, width: number): string[] {
   return lines;
 }
 
+/** Keep the cursor's row visible when a live region exceeds its physical allocation. */
+export function clipFrame(
+  lines: readonly string[],
+  height: number,
+  cursor?: CursorPlacement,
+  pinnedRows = 0,
+): { lines: readonly string[]; cursor?: CursorPlacement } {
+  const limit = Math.max(0, Math.floor(height));
+  if (lines.length <= limit) return { lines, ...(cursor === undefined ? {} : { cursor }) };
+  const pinned = Math.min(pinnedRows, limit);
+  const available = limit - pinned;
+  const tailStart = lines.length - available;
+  const start = Math.max(
+    pinned,
+    cursor === undefined || cursor.row >= tailStart ? tailStart : cursor.row - available + 1,
+  );
+  const row = cursor?.row;
+  const visible = row !== undefined && (row < pinned || (row >= start && row < start + available));
+  return {
+    lines: [...lines.slice(0, pinned), ...lines.slice(start, start + available)],
+    ...(visible && cursor !== undefined
+      ? { cursor: { ...cursor, row: row < pinned ? row : row - start + pinned } }
+      : {}),
+  };
+}
+
 /**
  * Main-screen renderer. Committed transcript remains terminal scrollback while
  * only the live editor/footer region is repainted.

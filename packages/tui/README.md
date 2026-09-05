@@ -7,6 +7,19 @@
 
 This package contains Axl's independently implemented interactive terminal client. Components produce lines, the differential renderer updates only the live tail, and completed output remains in normal terminal scrollback. Optional fullscreen mode uses the alternate screen, while regular mode does not. The client does not use a curses library.
 
+Rendering shares one 16 ms queue for model updates, mouse input, spinner ticks, and resize
+notifications. Keyboard input preempts that queue and coalesces within the current input burst.
+Each paint reads current terminal dimensions. Fullscreen hit testing uses the last painted
+layout; paused viewports retain per-call anchors while incoming content stays navigable.
+Oversized docks keep the editor cursor visible, and regular-mode tool previews retain the
+active tool header within the terminal's row budget. Full output remains in fullscreen and
+`/export`.
+
+Regular mode never clears native scrollback. Resize moves the old viewport into native history
+and redraws only the current viewport at its new width. Explicit presentation changes reprint
+the transcript. Earlier renderings can therefore remain in native history. Fullscreen repairs
+only its alternate-screen viewport after resize or Ctrl+L.
+
 The TUI includes:
 
 - Unicode-aware multiline editing, selection, clipboard paste, searchable history, word movement, undo, a kill ring, and external-editor handoff

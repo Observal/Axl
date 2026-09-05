@@ -43,9 +43,13 @@ export class TranscriptDocument {
     }
   }
 
+  appendRows(rows: readonly TranscriptRow[]): void {
+    for (const row of rows) this.content.push(row);
+  }
+
   replace(rows: readonly TranscriptRow[]): void {
     this.content.length = 0;
-    this.content.push(...rows);
+    this.appendRows(rows);
   }
 
   clear(): void {

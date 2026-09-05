@@ -639,6 +639,7 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
   input.write("\r");
   await until(() => app.sessionId !== sourceSessionId, "fork switch");
   const forkSessionId = app.sessionId;
+  await until(() => text().includes("forked to new session"), "forked to new session");
   assert.match(text(), /forked to new session/);
   assert.match(text(), /second prompt/);
 
@@ -652,6 +653,7 @@ test("fork, clone, and resume switch sessions through the daemon", async (contex
     () => app.sessionId !== sourceSessionId && app.sessionId !== forkSessionId,
     "clone switch",
   );
+  await until(() => text().includes("cloned to new session"), "cloned to new session");
   assert.match(text(), /cloned to new session/);
   app.stop();
 });
@@ -685,6 +687,7 @@ test("a failed target subscription leaves the current session fully active", asy
   assert.equal(app.sessionId, sourceSessionId);
   assert.equal((app as unknown as { hydrating: boolean }).hydrating, false);
   assert.equal((app as unknown as { switchingSessionId?: string }).switchingSessionId, undefined);
+  await until(() => text().includes("target subscription failed"), "target subscription failed");
   assert.match(text(), /target subscription failed/);
   app.stop();
 });
@@ -878,7 +881,7 @@ test("terminal resize coalesces bursts and leaves one live frame", async (contex
   }
   await until(() => text().length > beforeWidth, "coalesced width render");
   const widthRender = text().slice(beforeWidth);
-  assert.equal(widthRender.includes("\x1b[2J\x1b[H\x1b[3J"), true);
+  assert.equal(widthRender.includes("\x1b[3J"), false);
   const resizedTerminal = new VirtualTerminal(60, 30);
   resizedTerminal.write(widthRender);
   assert.equal(resizedTerminal.rows().filter((line) => line.includes("keep this")).length, 1);
@@ -893,7 +896,7 @@ test("terminal resize coalesces bursts and leaves one live frame", async (contex
   output.emit("resize");
   await new Promise((resolve) => setTimeout(resolve, 50));
   const heightRender = text().slice(beforeHeight);
-  assert.equal(heightRender.includes("\x1b[2J\x1b[H\x1b[3J"), true);
+  assert.equal(heightRender.includes("\x1b[3J"), false);
   const resizedHeightTerminal = new VirtualTerminal(60, 30);
   resizedHeightTerminal.write(heightRender);
   assert.equal(
@@ -909,7 +912,7 @@ test("terminal resize coalesces bursts and leaves one live frame", async (contex
     await new Promise((resolve) => setTimeout(resolve, 50));
     const resizeOutput = text().slice(before);
     latestResizeOutput = resizeOutput;
-    assert.equal(resizeOutput.includes("\x1b[2J\x1b[H\x1b[3J"), true);
+    assert.equal(resizeOutput.includes("\x1b[3J"), false);
     const resized = new VirtualTerminal(width, 30);
     resized.write(resizeOutput);
     assert.equal(resized.rows().filter((line) => line.includes("no model selected")).length, 1);
@@ -2042,11 +2045,23 @@ test("fullscreen clicks toggle one tool group without expanding the others", asy
     input.write(`\x1b[<0;4;${row + 1}M\x1b[<0;4;${row + 1}m`);
   };
   clickFirst();
+  await until(
+    () => terminal.rows().some((row) => row.includes("RESULT:first.txt")),
+    "expanded first group",
+  );
   assert.ok(terminal.rows().some((row) => row.includes("RESULT:first.txt")));
   assert.ok(!terminal.rows().some((row) => row.includes("RESULT:second.txt")));
   clickFirst();
+  await until(
+    () => !terminal.rows().some((row) => row.includes("RESULT:")),
+    "collapsed first group",
+  );
   assert.ok(!terminal.rows().some((row) => row.includes("RESULT:")));
   input.write("\x0f");
+  await until(
+    () => terminal.rows().some((row) => row.includes("RESULT:second.txt")),
+    "globally expanded groups",
+  );
   assert.ok(terminal.rows().some((row) => row.includes("RESULT:first.txt")));
   assert.ok(terminal.rows().some((row) => row.includes("RESULT:second.txt")));
 });

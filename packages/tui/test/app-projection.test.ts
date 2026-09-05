@@ -18,7 +18,12 @@ import {
   parseSessionId,
 } from "@axl/protocol";
 
-import { AxlApp } from "../src/index.ts";
+import {
+  AxlApp,
+  DifferentialScreen,
+  EditorFrameComponent,
+  FullscreenScreen,
+} from "../src/index.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
@@ -61,6 +66,14 @@ class Output extends EventEmitter {
   write(value: string): boolean {
     this.text += value;
     return true;
+  }
+}
+
+async function until(predicate: () => boolean, label: string): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `Timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 
@@ -551,8 +564,10 @@ test("prompt stash, favorites, and refocus recap stay client-local", async () =>
   });
 
   input.write("draft\x1bs");
+  await until(() => output.text.includes("prompt stashed"), "prompt stashed");
   assert.match(output.text, /prompt stashed/);
   input.write("replacement\x1bs");
+  await until(() => output.text.includes("prompt swapped with stash"), "prompt swapped with stash");
   assert.match(output.text, /prompt swapped with stash/);
   assert.match(output.text, /draft/);
 
@@ -566,6 +581,10 @@ test("prompt stash, favorites, and refocus recap stay client-local", async () =>
   );
   await new Promise((resolve) => setImmediate(resolve));
   input.write("\x1b[I");
+  await until(
+    () => output.text.includes("while away: 1 turn completed"),
+    "while away: 1 turn completed",
+  );
   assert.match(output.text, /while away: 1 turn completed/);
   app.stop();
 });
@@ -605,6 +624,7 @@ test("workspace review opens from daemon data and the developer panel is opt-in"
   assert.equal(workspaceRow > 0 && rows[workspaceRow - 1]?.trim() === "", true);
   input.write("/review working\r");
   await new Promise((resolve) => setImmediate(resolve));
+  await until(() => output.text.includes("Review · working tree"), "Review · working tree");
   assert.match(output.text, /Review · working tree/);
   assert.equal(
     requests.some(
@@ -632,9 +652,11 @@ test("fullscreen consumes mouse reports before editor input", async () => {
   });
 
   input.write("/settings\r");
+  await until(() => output.text.includes("Terminal settings"), "Terminal settings");
   assert.match(output.text, /Terminal settings/);
   input.write("\x1b[<0;4;4M");
   input.write("\x1b[<0;4;4m");
+  await until(() => output.text.includes("Terminal settings"), "Terminal settings");
   assert.match(output.text, /Terminal settings/);
   input.write("\x1b");
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -648,4 +670,155 @@ test("fullscreen consumes mouse reports before editor input", async () => {
   );
   assert.equal(send?.params.content[0]?.text, "ok");
   app.stop();
+});
+
+test("one scheduler coalesces wheel and resize bursts, while typing preempts pending paint", async (context) => {
+  const input = new Input();
+  const output = new Output();
+  const paints = context.mock.method(FullscreenScreen.prototype, "render");
+  const layouts = context.mock.method(EditorFrameComponent.prototype, "render");
+  const app = await AxlApp.start({
+    client: client([
+      event("session.created", { cwd: process.cwd() }),
+      event("assistant.message", {
+        content: [{ type: "text", text: "history paragraph\n\n".repeat(100) }],
+        stopReason: "stop",
+      }),
+    ]),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+    tuiMode: "fullscreen",
+  });
+  context.after(() => app.stop());
+  // Settle terminal negotiation before taking ownership of render timers.
+  input.write("\x1b[?1u");
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  paints.mock.resetCalls();
+  layouts.mock.resetCalls();
+  for (let i = 0; i < 20; i++) input.write("\x1b[<64;2;2M");
+  for (const width of [60, 90, 50]) {
+    output.columns = width;
+    output.emit("resize");
+  }
+  assert.equal(layouts.mock.callCount(), 0, "input must not lay out the dock");
+  assert.equal(paints.mock.callCount(), 0);
+  input.write("a");
+  input.write("b");
+  assert.equal(paints.mock.callCount(), 0, "synchronous keyboard bursts coalesce too");
+  await Promise.resolve();
+  assert.equal(paints.mock.callCount(), 1);
+  assert.equal(layouts.mock.callCount(), 1, "the dock is measured only once per paint");
+  assert.ok(paints.mock.calls[0]?.arguments[0].dock.some((line) => line.includes("ab")));
+  context.mock.timers.tick(20);
+  assert.equal(paints.mock.callCount(), 1, "keyboard cancels the delayed mouse paint");
+
+  // Missing resize notifications still converge on the terminal's current dimensions.
+  output.columns = 29;
+  output.rows = 7;
+  const offset = output.text.length;
+  input.write("c");
+  await Promise.resolve();
+  const terminal = new VirtualTerminal(29, 7);
+  terminal.write(output.text.slice(offset));
+  assert.ok(terminal.cursorRow < 7);
+  assert.ok(terminal.rows()[terminal.cursorRow]?.includes("abc"));
+  assert.ok(output.text.slice(offset).includes("\x1b[2J\x1b[H"));
+  assert.ok(paints.mock.calls.at(-1)?.arguments[0].dock.length === 3);
+
+  for (let i = 0; i < 20; i++) input.write("\x1b[<65;2;2M");
+  context.mock.timers.tick(20);
+  assert.equal(paints.mock.callCount(), 3, "ordinary wheel bursts share the same queue");
+  input.write("\x1b[<64;2;2M");
+  app.stop();
+  const stopped = output.text;
+  context.mock.timers.tick(2_000);
+  assert.equal(output.text, stopped, "no paints survive terminal shutdown");
+});
+
+test("regular mutable output stays inside the physical viewport with large tool groups", async (context) => {
+  const input = new Input();
+  const output = new Output();
+  output.rows = 12;
+  const frames = context.mock.method(DifferentialScreen.prototype, "frame");
+  const snapshot: CanonicalEvent[] = [event("session.created", { cwd: process.cwd() })];
+  for (let index = 0; index < 40; index++) {
+    snapshot.push(
+      event("tool.call", {
+        callId: `bounded-${index}`,
+        name: "bash",
+        input: { command: `printf ${index}` },
+      }),
+    );
+    if (index < 39)
+      snapshot.push(
+        event("tool.result", {
+          callId: `bounded-${index}`,
+          name: "bash",
+          content: [{ type: "text", text: "long result\n".repeat(100) }],
+          isError: false,
+        }),
+      );
+  }
+  const app = await AxlApp.start({
+    client: client(snapshot),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+    toolOutputDisplay: "full",
+  });
+  context.after(() => app.stop());
+  input.write("draft");
+  await Promise.resolve();
+  for (const call of frames.mock.calls) {
+    const [components, cursor] = call.arguments;
+    const lines = components.flatMap((component) => component.render(output.columns));
+    assert.ok(lines.length <= output.rows);
+    assert.ok(lines.some((line) => /BASH\s+pending/.test(line)));
+    assert.ok(lines.some((line) => line.includes("fullscreen or /export")));
+    assert.ok(cursor !== undefined && cursor.row < output.rows);
+  }
+  assert.match(output.text, /draft/);
+  assert.ok(!output.text.includes("\x1b[3J"));
+});
+
+test("regular resize redraws a bounded viewport instead of replaying all history", async (context) => {
+  const input = new Input();
+  const output = new Output();
+  const app = await AxlApp.start({
+    client: client([
+      event("session.created", { cwd: process.cwd() }),
+      event("assistant.message", {
+        content: [
+          {
+            type: "text",
+            text: Array.from({ length: 500 }, (_, i) => `history-${i}`).join("\n\n"),
+          },
+        ],
+        stopReason: "stop",
+      }),
+    ]),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+  });
+  context.after(() => app.stop());
+  const offset = output.text.length;
+  output.rows = 8;
+  output.columns = 60;
+  input.write("resized draft");
+  await Promise.resolve();
+  const repair = output.text.slice(offset);
+  assert.ok(
+    repair.startsWith("\r\n".repeat(8)),
+    "preserve the old physical viewport in scrollback",
+  );
+  assert.ok(!repair.includes("\x1b[3J"));
+  assert.ok(!repair.includes("history-0"));
+  assert.ok(repair.includes("history-499"));
+  assert.ok(repair.includes("resized draft"));
+  assert.ok(repair.length < 2_000, "resize output is bounded by the viewport, not session length");
 });

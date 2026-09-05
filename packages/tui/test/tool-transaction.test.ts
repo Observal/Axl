@@ -11,6 +11,7 @@ import {
   PLAIN_PALETTE,
   ToolTransactionComponent,
   ToolTransactionStore,
+  TranscriptDocument,
   type ToolOutputDisplay,
 } from "../src/index.ts";
 
@@ -125,4 +126,59 @@ test("tool groups retain call order, lifecycle counts, and full detail until dra
   assert.ok(full.indexOf("command-1") < full.indexOf("command-4"));
   assert.ok(store.drain(80).length > 0);
   assert.deepEqual(store.render(80), []);
+});
+
+test("per-call anchors survive earlier result growth and transcript commits", () => {
+  const store = new ToolTransactionStore(
+    () => PLAIN_PALETTE,
+    () => "full",
+  );
+  const first = call();
+  const second = {
+    ...first,
+    id: "00000000-0000-4000-8000-000000000003" as typeof first.id,
+    payload: { ...first.payload, callId: "call-2", input: { command: "second command" } },
+  };
+  store.start(first);
+  store.start(second);
+  const before = store.rows(80).filter((row) => row.sourceId === second.id);
+  assert.ok(before.length > 1);
+  const completed = result();
+  store.settle({
+    ...completed,
+    payload: {
+      ...completed.payload,
+      content: [{ type: "text", text: "earlier result\n".repeat(100) }],
+    },
+  });
+  const after = store.rows(80).filter((row) => row.sourceId === second.id);
+  assert.deepEqual(after, before);
+  assert.ok(after.every((row) => row.toolGroupId === first.id));
+  store.settle({ ...completed, payload: { ...completed.payload, callId: "call-2" } });
+  const rows = store.drain(80);
+  const document = new TranscriptDocument();
+  document.appendRows(rows);
+  assert.deepEqual(document.rows, rows);
+  assert.ok(document.rows.some((row) => row.sourceId === second.id));
+});
+
+test("bounded regular previews preserve the pending tool header and explain omitted output", () => {
+  const store = new ToolTransactionStore(
+    () => PLAIN_PALETTE,
+    () => "full",
+  );
+  const first = call();
+  store.start(first);
+  for (let i = 2; i <= 40; i++) {
+    store.start({ ...first, payload: { ...first.payload, callId: `call-${i}` } });
+    const completed = result();
+    store.settle({ ...completed, payload: { ...completed.payload, callId: `call-${i}` } });
+  }
+  const lines = store.renderWindow(80, 6);
+  assert.ok(lines.length <= 6);
+  assert.match(lines[0] ?? "", /SHELL\s+running/);
+  assert.match(lines.at(-1) ?? "", /fullscreen or \/export/);
+  assert.equal(store.renderWindow(80, 1).length, 1);
+  assert.deepEqual(store.renderWindow(80, 0), []);
+  assert.ok(store.rows(80).length > 100);
 });

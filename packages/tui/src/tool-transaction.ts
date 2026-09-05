@@ -232,55 +232,80 @@ export class ToolTransactionStore implements Component {
   }
 
   render(width: number): string[] {
+    return this.rows(width).map((row) => row.text);
+  }
+
+  /** Bound the mutable regular-mode tail without losing the active tool's header. */
+  renderWindow(width: number, height: number): string[] {
+    if (height <= 0) return [];
+    const lines = this.render(width);
+    if (lines.length <= height) return lines;
     const components = this.components();
-    if (components.length === 0) return [];
-    const palette = this.palette();
-    if (this.mode() !== "compact") {
-      const lines = components.flatMap((component) => component.render(width));
-      return lines.length === 0
-        ? []
-        : [
-            ...lines,
-            palette.dim(
-              truncateToWidth(
-                "  Ctrl+O for tool details · click in fullscreen to toggle",
-                width,
-                "",
-              ),
-            ),
-          ];
-    }
-    const hint = palette.dim(
-      truncateToWidth(
-        "  Ctrl+O to expand tool inputs and results · click in fullscreen to toggle",
-        width,
-        "",
-      ),
+    const active =
+      components.findLast((component) => this.pending.has(component.callId)) ?? components.at(-1);
+    if (active === undefined) return [];
+    const preview = active.render(width);
+    const start = Math.max(
+      0,
+      preview.findIndex((line) => line.trim().length > 0),
     );
-    if (components.length === 1) return [...(components[0]?.render(width) ?? []), hint];
-    const counts = new Map<ToolTransactionStatus, number>();
-    for (const component of components)
-      counts.set(component.state, (counts.get(component.state) ?? 0) + 1);
-    const status = [...counts]
-      .map(([state, count]) => `${count} ${state === "succeeded" ? "done" : state}`)
-      .join(" · ");
+    if (height === 1) return preview.slice(start, start + 1);
     return [
-      "",
-      palette.dim(truncateToWidth(`  Tools · ${components.length} calls · ${status}`, width, "…")),
-      ...(components.length > 3 ? [palette.dim(`  … ${components.length - 3} earlier calls`)] : []),
-      ...components.slice(-3).flatMap((component) => component.render(width, true)),
-      hint,
-    ].map((line) => truncateToWidth(line, width, ""));
+      ...preview.slice(start, start + height - 1),
+      this.palette().dim(
+        truncateToWidth("  … tool preview · fullscreen or /export for more", width, ""),
+      ),
+    ];
   }
 
   rows(width: number): readonly TranscriptRow[] {
-    const sourceId = this.components()[0]?.sourceId;
-    return this.render(width).map((text, rowInSource) => ({
-      text,
-      ...(sourceId === undefined ? {} : { sourceId, toolGroupId: sourceId }),
-      prompt: false,
-      rowInSource,
-    }));
+    const components = this.components();
+    const groupId = components[0]?.sourceId;
+    if (groupId === undefined) return [];
+    const palette = this.palette();
+    const rows: TranscriptRow[] = [];
+    const append = (lines: readonly string[], sourceId: string): void => {
+      for (const [rowInSource, text] of lines.entries())
+        rows.push({ text, sourceId, toolGroupId: groupId, prompt: false, rowInSource });
+    };
+    const compact = this.mode() === "compact";
+    if (compact && components.length > 1) {
+      const counts = new Map<ToolTransactionStatus, number>();
+      for (const component of components)
+        counts.set(component.state, (counts.get(component.state) ?? 0) + 1);
+      const status = [...counts]
+        .map(([state, count]) => `${count} ${state === "succeeded" ? "done" : state}`)
+        .join(" · ");
+      append(
+        [
+          "",
+          palette.dim(
+            truncateToWidth(`  Tools · ${components.length} calls · ${status}`, width, "…"),
+          ),
+          ...(components.length > 3
+            ? [palette.dim(`  … ${components.length - 3} earlier calls`)]
+            : []),
+        ],
+        `${groupId}:header`,
+      );
+    }
+    for (const component of compact ? components.slice(-3) : components)
+      append(component.render(width, compact && components.length > 1), component.sourceId);
+    append(
+      [
+        palette.dim(
+          truncateToWidth(
+            compact
+              ? "  Ctrl+O to expand tool inputs and results · click in fullscreen to toggle"
+              : "  Ctrl+O for tool details · click in fullscreen to toggle",
+            width,
+            "",
+          ),
+        ),
+      ],
+      `${groupId}:hint`,
+    );
+    return rows;
   }
 
   drain(width: number): readonly TranscriptRow[] {

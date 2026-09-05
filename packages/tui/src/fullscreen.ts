@@ -16,6 +16,7 @@ import {
   stripAnsi,
   styleCellRanges,
   truncateToWidth,
+  clipFrame,
   visibleWidth,
 } from "./render.ts";
 import type { TerminalOutput } from "./terminal.ts";
@@ -106,6 +107,11 @@ function wordRangeAt(value: string, column: number): { start: number; end: numbe
   return undefined;
 }
 
+/** Reserve transcript chrome and one visible row, except in very small terminals. */
+export function fullscreenDockHeight(height: number): number {
+  return height < 5 ? Math.max(1, height) : height - 4;
+}
+
 /** Alternate-screen transcript viewport with a fixed, visually separated dock. */
 export class FullscreenScreen {
   private readonly output: TerminalOutput;
@@ -135,9 +141,9 @@ export class FullscreenScreen {
   private searchDocument: readonly TranscriptRow[] | undefined;
   private searchQuery = "";
   private previous: string[] = [];
-  private forceClear = false;
   private lastDocument: readonly TranscriptRow[] = [];
-  private renderedDocument: readonly TranscriptRow[] | undefined;
+  private paintedScrollTop = 0;
+  private repair = true;
   private lastViewportHeight = 1;
   private viewportAnchor: { sourceId: string; rowInSource: number } | undefined;
   private selectionAnchor: SelectionPoint | undefined;
@@ -188,6 +194,7 @@ export class FullscreenScreen {
     if (this.active) return;
     this.active = true;
     this.previous = [];
+    this.repair = true;
     this.output.write(`${ENTER_SCREEN}${this.mouse === "capture" ? ENABLE_MOUSE : ""}`);
   }
 
@@ -219,15 +226,16 @@ export class FullscreenScreen {
   }
 
   resize(width: number, height: number): void {
-    this.width = Math.max(1, width);
-    this.height = Math.max(1, height);
-    this.previous = [];
-    this.forceClear = true;
+    const nextWidth = Math.max(1, width);
+    const nextHeight = Math.max(1, height);
+    if (nextWidth === this.width && nextHeight === this.height) return;
+    this.width = nextWidth;
+    this.height = nextHeight;
+    this.invalidate();
   }
 
   invalidate(): void {
-    this.previous = [];
-    this.forceClear = true;
+    this.repair = true;
   }
 
   setScrollbar(scrollbar: FullscreenScrollbar): void {
@@ -241,9 +249,15 @@ export class FullscreenScreen {
     if (mouse === "native") this.clearSelection();
   }
 
-  handleInput(data: string, document: readonly TranscriptRow[], dockHeight: number): boolean {
-    this.lastDocument = document;
-    this.lastViewportHeight = this.viewportHeight(dockHeight);
+  handleInput(data: string, document = this.lastDocument, dockHeight?: number): boolean {
+    const viewportHeight =
+      dockHeight === undefined
+        ? this.lastViewportHeight
+        : this.viewportHeight(Math.min(dockHeight, fullscreenDockHeight(this.height)));
+    if (this.previous.length === 0) {
+      this.lastDocument = document;
+      this.lastViewportHeight = viewportHeight;
+    } else this.adoptDocument(document, viewportHeight);
     const mouse = parseMouseInput(data);
     if (mouse !== undefined) {
       if (this.mouse === "capture") this.handleMouse(mouse, document, this.lastViewportHeight);
@@ -275,20 +289,11 @@ export class FullscreenScreen {
 
   render(frame: FullscreenFrame): void {
     if (!this.active) return;
-    this.lastDocument = frame.document;
-    const maximumDockHeight = Math.max(0, this.height - 4);
-    const dockStart = Math.max(0, frame.dock.length - maximumDockHeight);
-    const dock = frame.dock.slice(dockStart);
-    const viewportHeight = this.viewportHeight(dock.length);
-    this.lastViewportHeight = viewportHeight;
+    this.resize(this.output.columns || this.width, this.output.rows || this.height);
+    const dock = clipFrame(frame.dock, fullscreenDockHeight(this.height), frame.cursor);
+    const viewportHeight = this.viewportHeight(dock.lines.length);
+    this.adoptDocument(frame.document, viewportHeight);
     const max = Math.max(0, frame.document.length - viewportHeight);
-    if (this.following) this.scrollTop = max;
-    else {
-      if (this.renderedDocument !== frame.document) this.restoreViewportAnchor(frame.document);
-      this.scrollTop = Math.min(this.scrollTop, max);
-    }
-    this.renderedDocument = frame.document;
-    this.updateViewportAnchor(frame.document);
     this.refreshSearch(frame.document, false);
 
     const visible = frame.document
@@ -298,28 +303,39 @@ export class FullscreenScreen {
     const boundary = this.boundary(frame.palette);
     const rows = [header, ...visible];
     while (rows.length < viewportHeight + 1) rows.push("");
-    rows.push("", boundary, ...dock);
+    rows.push("", boundary, ...dock.lines);
+    // Very small terminals prioritize the editable dock over transcript chrome.
+    if (this.height < 5) rows.splice(0, rows.length, ...dock.lines);
     const screen = rows.slice(0, this.height).map((line) => truncateToWidth(line, this.width, ""));
-    this.applyScrollbar(screen, frame.document.length, viewportHeight, frame.palette);
+    if (this.height >= 5)
+      this.applyScrollbar(screen, frame.document.length, viewportHeight, frame.palette);
 
-    let output = `${SYNC_BEGIN}\x1b[?7l${this.forceClear ? "\x1b[2J\x1b[H" : ""}`;
+    let output = `${SYNC_BEGIN}\x1b[?7l${this.repair ? "\x1b[2J\x1b[H" : ""}`;
     for (let row = 0; row < this.height; row += 1) {
-      if (screen[row] === this.previous[row]) continue;
+      if (!this.repair && screen[row] === this.previous[row]) continue;
       output += `\x1b[${row + 1};1H\x1b[2K${screen[row] ?? ""}`;
     }
-    if (
-      frame.cursor !== undefined &&
-      !this.searchMode &&
-      frame.cursor.row >= dockStart &&
-      frame.cursor.row < dockStart + dock.length
-    ) {
-      const row = Math.min(this.height - 1, viewportHeight + 3 + frame.cursor.row - dockStart);
-      output += `\x1b[${row + 1};${Math.min(this.width - 1, frame.cursor.column) + 1}H${frame.cursor.visible === false ? "\x1b[?25l" : "\x1b[?25h"}`;
+    if (dock.cursor !== undefined && !this.searchMode) {
+      const row = (this.height < 5 ? 0 : viewportHeight + 3) + dock.cursor.row;
+      output += `\x1b[${row + 1};${Math.min(this.width - 1, dock.cursor.column) + 1}H${dock.cursor.visible === false ? "\x1b[?25l" : "\x1b[?25h"}`;
     } else output += "\x1b[?25l";
     output += SYNC_END;
     this.output.write(output);
     this.previous = screen;
-    this.forceClear = false;
+    this.paintedScrollTop = this.scrollTop;
+    this.repair = false;
+  }
+
+  private adoptDocument(document: readonly TranscriptRow[], viewport: number): void {
+    const max = Math.max(0, document.length - viewport);
+    if (this.following) this.scrollTop = max;
+    else {
+      if (document !== this.lastDocument) this.restoreViewportAnchor(document);
+      this.scrollTop = Math.min(this.scrollTop, max);
+    }
+    this.lastDocument = document;
+    this.lastViewportHeight = viewport;
+    this.updateViewportAnchor(document);
   }
 
   private header(palette: Palette, max: number): string {
@@ -524,7 +540,9 @@ export class FullscreenScreen {
       this.scrollBy(event.wheel * 3, document.length, viewport);
       return;
     }
-    if (this.handleScrollbar(event, document.length, viewport)) return;
+    if (this.handleScrollbar(event, document.length, viewport)) {
+      return;
+    }
     const point = this.documentPoint(event.column, event.row, document, viewport);
     if (point === undefined) {
       if (event.motion && this.selectionPressActive) {
@@ -577,7 +595,6 @@ export class FullscreenScreen {
               : "Cannot expand tools",
           );
         }
-        this.requestRender();
         return;
       }
       this.updateSelectionFocus(point, document);
@@ -640,9 +657,10 @@ export class FullscreenScreen {
     screenRow: number,
     document: readonly TranscriptRow[],
     viewport: number,
+    scrollTop = this.paintedScrollTop,
   ): SelectionPoint | undefined {
     if (screenRow < 1 || screenRow > viewport) return undefined;
-    const row = this.scrollTop + screenRow - 1;
+    const row = scrollTop + screenRow - 1;
     if (row < 0 || row >= document.length) return undefined;
     return { row, column: Math.min(column, visibleWidth(document[row]?.text ?? "")) };
   }
@@ -747,6 +765,7 @@ export class FullscreenScreen {
         pointer.row,
         this.lastDocument,
         this.lastViewportHeight,
+        this.scrollTop,
       );
       if (point !== undefined) this.updateSelectionFocus(point, this.lastDocument);
       if (this.scrollTop === before) this.stopSelectionAutoScroll();
@@ -774,14 +793,16 @@ export class FullscreenScreen {
     this.scrollbarTimer.unref?.();
   }
 
-  private scrollbarGeometry(documentHeight: number, viewportHeight: number): ScrollbarGeometry {
+  private scrollbarGeometry(
+    documentHeight: number,
+    viewportHeight: number,
+    scrollTop = this.scrollTop,
+  ): ScrollbarGeometry {
     const height = Math.max(1, viewportHeight);
     const thumb = Math.max(1, Math.floor((viewportHeight / Math.max(1, documentHeight)) * height));
     const maxScrollTop = Math.max(0, documentHeight - viewportHeight);
     const offset =
-      maxScrollTop === 0
-        ? 0
-        : Math.floor((this.scrollTop / maxScrollTop) * Math.max(0, height - thumb));
+      maxScrollTop === 0 ? 0 : Math.floor((scrollTop / maxScrollTop) * Math.max(0, height - thumb));
     return { top: 1 + offset, height: thumb, maxScrollTop };
   }
 
@@ -796,7 +817,7 @@ export class FullscreenScreen {
       event.column !== this.width - 1
     )
       return false;
-    const geometry = this.scrollbarGeometry(documentHeight, viewportHeight);
+    const geometry = this.scrollbarGeometry(documentHeight, viewportHeight, this.paintedScrollTop);
     if (this.scrollbarDrag !== undefined) {
       if (event.release) {
         this.scrollbarDrag = undefined;
@@ -873,6 +894,19 @@ export class FullscreenScreen {
         candidate.sourceId === anchor.sourceId && candidate.rowInSource === anchor.rowInSource,
     );
     if (row >= 0) this.scrollTop = row;
+    else {
+      let nearest = -1;
+      for (const [index, candidate] of document.entries()) {
+        if (candidate.sourceId !== anchor.sourceId) continue;
+        if (
+          nearest < 0 ||
+          Math.abs(candidate.rowInSource - anchor.rowInSource) <
+            Math.abs((document[nearest]?.rowInSource ?? 0) - anchor.rowInSource)
+        )
+          nearest = index;
+      }
+      if (nearest >= 0) this.scrollTop = nearest;
+    }
   }
 
   private applyScrollbar(
