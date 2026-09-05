@@ -119,7 +119,7 @@ Review the resulting PR for:
 - preserved DCO trailers;
 - conflict-resolution changes;
 - release-line compatibility; and
-- required changelog or release-note updates.
+- required release-note updates.
 
 Apply backports from newest to oldest supported line:
 
@@ -202,7 +202,6 @@ The PR should change only:
 ```text
 .release.json
 .github/release-notes.md
-CHANGELOG.md
 distribution/npm/package.json
 ```
 

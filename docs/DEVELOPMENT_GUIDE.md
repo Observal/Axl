@@ -1039,10 +1039,9 @@ Before opening a pull request:
 3. Run focused tests.
 4. Run the broader checks warranted by the change.
 5. Check SPDX and provenance.
-6. Update `CHANGELOG.md` for user-visible behavior.
-7. Complete every pull request template section.
-8. Disclose material AI assistance.
-9. Attach screenshots for visible TUI changes.
+6. Complete every pull request template section.
+7. Disclose material AI assistance.
+8. Attach screenshots for visible TUI changes.
 
 The pull request body must report commands actually run, their outcomes, and anything that could not be tested. Do not claim a platform check that ran only on another operating system.
 
@@ -1225,7 +1224,6 @@ Before requesting review:
 - [ ] No generated output, credentials, environment files, or screenshots were committed accidentally.
 - [ ] Every new file has correct SPDX metadata.
 - [ ] Every commit has a matching DCO sign-off.
-- [ ] User-visible changes update `CHANGELOG.md`.
 - [ ] Visible TUI changes have screenshots attached to the pull request.
 - [ ] External material has documented provenance.
 - [ ] AI assistance is disclosed with the tool and model or version.

@@ -1598,7 +1598,7 @@ Build this before product code so security and license hygiene do not become a r
 - [x] Add `NOTICE` and a process for recording external provenance.
 - [x] Add DCO sign-off enforcement.
 - [x] Add the AI contribution policy.
-- [x] Add `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `AGENTS.md`, `SETUP.md`, `ROADMAP.md`, and `CHANGELOG.md` using the project conventions in `OPEN_SOURCE.md`.
+- [x] Add `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `AGENTS.md`, `SETUP.md`, and `ROADMAP.md` using the project conventions in `OPEN_SOURCE.md`.
 - [x] Add issue forms, the pull request template, and CODEOWNERS.
 
 #### CI baseline

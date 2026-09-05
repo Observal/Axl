@@ -389,19 +389,6 @@ function latestVersionTag(tags: readonly string[], stableOnly = false): string |
     .at(-1);
 }
 
-function updateChangelog(path: string, version: string, date: string): void {
-  const source = readFileSync(path, "utf8");
-  const heading = "## Unreleased";
-  const start = source.indexOf(heading);
-  if (start < 0) throw new Error("CHANGELOG.md has no Unreleased section");
-  const contentStart = start + heading.length;
-  const nextRelease = source.indexOf("\n## [", contentStart);
-  const end = nextRelease < 0 ? source.length : nextRelease + 1;
-  const content = source.slice(contentStart, end).trim() || "No additional user-facing changes.";
-  const replacement = `## Unreleased\n\n## [${version}] - ${date}\n\n${content}\n\n`;
-  writeFileSync(path, source.slice(0, start) + replacement + source.slice(end));
-}
-
 function updateDistributionVersion(path: string, version: string): void {
   const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
   value.version = version;
@@ -444,7 +431,7 @@ No linked issue. This is a release preparation change.
 
 ## Approach
 
-Update release metadata, the npm package version, the changelog, and attached release notes. The release workflow will build one package tarball and publish the identical bytes to npm and GitHub Releases.
+Update release metadata, the npm package version, and attached release notes. The release workflow will build one package tarball and publish the identical bytes to npm and GitHub Releases.
 
 ## How was this tested?
 
@@ -466,7 +453,6 @@ ${preview}
 - [ ] I ran the relevant formatting, lint, type-check, test, boundary, and license checks. CI pending.
 - [x] Every new file has SPDX metadata, directly or through \`REUSE.toml\`.
 - [x] Every commit has a matching DCO \`Signed-off-by\` trailer.
-- [x] User-visible changes update \`CHANGELOG.md\`.
 - [ ] UI changes include screenshots attached to the pull request, not committed to the repository. Not applicable.
 
 ## AI assistance
@@ -498,11 +484,6 @@ function createReleaseWorktree(input: {
     updateDistributionVersion(join(worktree, "distribution", "npm", "package.json"), input.version);
     const notes = renderReleaseNotes(input);
     writeFileSync(join(worktree, ".github", "release-notes.md"), notes);
-    updateChangelog(
-      join(worktree, "CHANGELOG.md"),
-      input.version,
-      new Date().toISOString().slice(0, 10),
-    );
     const manifest: ReleaseManifest = {
       version: input.version,
       channel: input.channel,
@@ -519,12 +500,7 @@ function createReleaseWorktree(input: {
       ),
     };
     writeManifest(join(worktree, ".release.json"), manifest);
-    const files = [
-      ".release.json",
-      ".github/release-notes.md",
-      "CHANGELOG.md",
-      "distribution/npm/package.json",
-    ];
+    const files = [".release.json", ".github/release-notes.md", "distribution/npm/package.json"];
     run("git", ["add", ...files], { cwd: worktree });
     run("git", ["diff", "--cached", "--check"], { cwd: worktree });
     run("git", ["commit", "--signoff", "-m", `chore(release): v${input.version}`], {
@@ -671,7 +647,6 @@ Not applicable.
 - [ ] I ran the relevant formatting, lint, type-check, test, boundary, and license checks.
 - [x] Every new file has SPDX metadata, directly or through \`REUSE.toml\`.
 - [x] Every commit has a matching DCO \`Signed-off-by\` trailer.
-- [ ] User-visible changes update \`CHANGELOG.md\`.
 - [ ] UI changes include screenshots attached to the pull request, not committed to the repository.
 
 ## AI assistance

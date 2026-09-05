@@ -75,7 +75,7 @@ The public message is simple: users keep their existing setup and gain another r
 - Keep the kernel, protocol, clients, compiler, providers, and apps in one monorepo. [CODE_STRUCTURE.md](CODE_STRUCTURE.md) explains the boundaries and CI layout.
 - Keep plans in the repository so changes go through normal review.
 - Use issues, versioned architecture specifications, and public chat for decisions. Summarize any private discussion in the public record.
-- Follow semantic versioning. Before 1.0, minor releases may break compatibility, and the changelog must say so clearly.
+- Follow semantic versioning. Before 1.0, minor releases may break compatibility, and the release notes must say so clearly.
 - Treat CI as part of the product. Automated review can help, but it does not replace a human approval.
 
 ## 7. Security engineering
@@ -146,7 +146,7 @@ Each contributor document has a specific job:
 | `docs/security/assurance-case.md` | States the current security argument and residual risks. |
 | `docs/security/release-verification.md` | Explains how to verify release artifacts and tags. |
 | `CODE_OF_CONDUCT.md` | Defines expected community behavior. |
-| `ROADMAP.md` and `CHANGELOG.md` | Show current plans and user-visible changes. |
+| `ROADMAP.md` | Shows current plans. |
 | Repository policy and workflow files | Enforce licensing, secret scanning, review, and CI rules. |
 
 Documentation should describe controls that actually exist. CI checks claims such as SPDX coverage and DCO sign-offs where practical.

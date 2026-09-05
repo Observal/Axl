@@ -28,7 +28,6 @@ _Optional research, references, or reusable lessons._
 - [ ] I ran the relevant formatting, lint, type-check, test, boundary, and license checks.
 - [ ] Every new file has SPDX metadata, directly or through `REUSE.toml`.
 - [ ] Every commit has a matching DCO `Signed-off-by` trailer.
-- [ ] User-visible changes update `CHANGELOG.md`.
 - [ ] UI changes include screenshots attached to the pull request, not committed to the repository.
 
 <!-- Uncomment only when this PR introduces external material.

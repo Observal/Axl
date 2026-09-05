@@ -104,9 +104,9 @@ Use concise conventional commit subjects. Sign off every commit to certify the [
 git commit --signoff -m "feat(protocol): add event version"
 ```
 
-### Changelog
+### Release notes
 
-Add user-visible changes under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+Describe user-visible changes in the pull request. Release preparation generates GitHub Release notes from merged pull requests and commits.
 
 ## Submit a pull request
 

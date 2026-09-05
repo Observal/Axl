@@ -236,19 +236,17 @@ The command:
 9. calculates the correct npm dist-tag;
 10. writes release metadata in an isolated worktree;
 11. updates the npm distribution version;
-12. updates `CHANGELOG.md`;
-13. writes `.github/release-notes.md`;
-14. writes `.release.json`;
-15. creates a signed-off release commit;
-16. pushes `release-prep/vX.Y.Z`; and
-17. opens a release-preparation PR against the current release branch.
+12. writes `.github/release-notes.md`;
+13. writes `.release.json`;
+14. creates a signed-off release commit;
+15. pushes `release-prep/vX.Y.Z`; and
+16. opens a release-preparation PR against the current release branch.
 
 The release-preparation PR must contain only:
 
 ```text
 .release.json
 .github/release-notes.md
-CHANGELOG.md
 distribution/npm/package.json
 ```
 
@@ -763,7 +761,7 @@ Before merging release preparation:
 
 - [ ] The manifest cutoff equals the latest release-branch commit.
 - [ ] The package version matches the manifest.
-- [ ] The changelog and release notes are accurate.
+- [ ] The release notes are accurate.
 - [ ] Required checks pass against the release branch.
 - [ ] The release commit is signed off.
 
