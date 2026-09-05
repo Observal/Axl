@@ -378,7 +378,7 @@ test("internal RPC failures do not expose subsystem messages", async (context) =
   );
 });
 
-test("requires version-8 initialization before session access", async (context) => {
+test("requires current-version initialization before session access", async (context) => {
   const fixture = await startDaemon(context);
   const raw = rawConnection(fixture.socketPath);
   context.after(() => raw.socket.destroy());
@@ -1024,6 +1024,82 @@ test("creates a session, streams the live tail, and answers sends", async (conte
     }),
     (error) => error instanceof AxlClientError && error.code === "unsupported_capability",
   );
+});
+
+test("retry exhaustion leaves attached clients idle and the daemon session reusable", async (context) => {
+  let turns = 0;
+  const port: ModelPort = {
+    stream() {
+      turns += 1;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (turns === 1) {
+          yield {
+            type: "retry_scheduled",
+            attempt: 2,
+            maxAttempts: 2,
+            delayMs: 500,
+            error: {
+              code: "http_503",
+              message: "busy",
+              retryable: true,
+              requestPhase: "awaiting_response",
+            },
+          };
+          yield { type: "error", code: "http_503", message: "busy", retryable: true };
+          return;
+        }
+        yield { type: "text_delta", text: "recovered" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, port);
+  const tui = await connectUnixClient(socketPath, {
+    identity: { kind: "tui", version: "0.0.0", instanceId: randomUUID() },
+  });
+  const sdk = await connectUnixClient(socketPath, {
+    identity: { kind: "headless", version: "0.0.0", instanceId: randomUUID() },
+  });
+  context.after(() => {
+    tui.close();
+    sdk.close();
+  });
+  const created = await tui.request("session.create", { cwd });
+  const tuiSubscription = await subscribeSession(tui, created.sessionId);
+  const sdkSubscription = await subscribeSession(sdk, created.sessionId);
+  context.after(() => Promise.all([tuiSubscription.close(), sdkSubscription.close()]));
+
+  const failed = await tui.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "first" }],
+  });
+  assert.equal(failed.stopReason, "error");
+  await waitFor(
+    () =>
+      tuiSubscription.projector.state.records.some(
+        (record) => record.kind === "event" && record.event.type === "model.retry_scheduled",
+      ) && tuiSubscription.projector.state.activeOperationId === undefined,
+    "retry exhaustion",
+  );
+  assert.equal(
+    (await tui.request("session.resume", { sessionId: created.sessionId })).runtime.state,
+    "idle",
+  );
+
+  const recovered = await tui.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "second" }],
+  });
+  assert.equal(recovered.stopReason, "stop");
+  await waitFor(
+    () =>
+      sdkSubscription.projector.state.records.length ===
+      tuiSubscription.projector.state.records.length,
+    "matching retry projections",
+  );
+  assert.deepEqual(tuiSubscription.projector.state, sdkSubscription.projector.state);
 });
 
 test("freezes paged snapshots and releases the buffered tail only after acknowledgement", async (context) => {

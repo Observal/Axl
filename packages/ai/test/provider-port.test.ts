@@ -63,6 +63,7 @@ test("retries a safe terminal failure with deterministic backoff", async () => {
           code: "http_503",
           message: "busy",
           retryable: true,
+          requestPhase: "awaiting_response",
           retryAfterMs: 750,
         },
       ],
@@ -93,7 +94,13 @@ test("retries a safe terminal failure with deterministic backoff", async () => {
 });
 
 test("stops retrying after the attempt budget is exhausted", async () => {
-  const failure = { type: "error", code: "http_503", message: "busy", retryable: true } as const;
+  const failure = {
+    type: "error",
+    code: "http_503",
+    message: "busy",
+    retryable: true,
+    requestPhase: "awaiting_response",
+  } as const;
   const provider = new FakeModelProvider({ responses: [[failure], [failure], [failure]] });
   const modelPort = modelPortForSession(provider, {
     modelId: "fake-model",
@@ -113,7 +120,13 @@ test("does not retry after any model output is exposed", async () => {
     responses: [
       [
         { type: "text_delta", text: "partial" },
-        { type: "error", code: "http_503", message: "busy", retryable: true },
+        {
+          type: "error",
+          code: "http_503",
+          message: "busy",
+          retryable: true,
+          requestPhase: "awaiting_response",
+        },
       ],
     ],
   });
@@ -130,10 +143,38 @@ test("does not retry after any model output is exposed", async () => {
   assert.equal(provider.requests.length, 1);
 });
 
+test("does not retry a failure with unknown dispatch state", async () => {
+  const failure = {
+    type: "error",
+    code: "provider_request_failed",
+    message: "connection reset",
+    retryable: true,
+    requestPhase: "unknown",
+  } as const;
+  const provider = new FakeModelProvider({ responses: [[failure]] });
+  const modelPort = modelPortForSession(provider, {
+    modelId: "fake-model",
+    retry: { sleep: () => Promise.resolve() },
+  });
+
+  assert.deepEqual(await Array.fromAsync(modelPort.stream({ messages: [], tools: [] })), [failure]);
+  assert.equal(provider.requests.length, 1);
+});
+
 test("cancellation during retry backoff aborts without redispatch", async () => {
   const controller = new AbortController();
   const provider = new FakeModelProvider({
-    responses: [[{ type: "error", code: "http_503", message: "busy", retryable: true }]],
+    responses: [
+      [
+        {
+          type: "error",
+          code: "http_503",
+          message: "busy",
+          retryable: true,
+          requestPhase: "awaiting_response",
+        },
+      ],
+    ],
   });
   const modelPort = modelPortForSession(provider, {
     modelId: "fake-model",

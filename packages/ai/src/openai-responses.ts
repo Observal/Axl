@@ -4,10 +4,16 @@
 
 // Axl-native OpenAI Responses codec and transport implementation.
 
-import type { BlobReference, JsonObject, JsonValue, Usage } from "@axl/protocol";
+import type {
+  BlobReference,
+  JsonObject,
+  JsonValue,
+  ModelErrorCategory,
+  Usage,
+} from "@axl/protocol";
 
+import { AuthError, type ResolvedAuth } from "./auth.ts";
 import { assertModelSupports } from "./capabilities.ts";
-import type { ResolvedAuth } from "./auth.ts";
 import type { AuthMethod, ModelInfo, ModelRequest, ModelStreamEvent } from "./model.ts";
 import type { ModelProvider } from "./provider.ts";
 import { decodeSseStream, type SseFrame } from "./sse.ts";
@@ -20,6 +26,13 @@ const SAFE_CONNECT_FAILURES = new Set([
   "ECONNREFUSED",
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
+const RATE_LIMIT_CODES = new Set([
+  "rate_limit",
+  "rate_limited",
+  "rate_limit_exceeded",
+  "too_many_requests",
+]);
+const OVERLOADED_CODES = new Set(["overloaded", "server_error", "temporarily_unavailable"]);
 
 function retryAfterMs(headers: Headers, now = Date.now()): number | undefined {
   const value = headers.get("retry-after")?.trim();
@@ -43,18 +56,15 @@ function nestedErrorCode(error: unknown): string | undefined {
 
 function providerFailure(code: string, message: string): ModelStreamEvent {
   const normalized = code.toLowerCase();
-  const rateLimited = normalized.includes("rate_limit") || normalized.includes("too_many_requests");
-  const overloaded =
-    normalized.includes("overload") ||
-    normalized.includes("temporarily_unavailable") ||
-    normalized.includes("server_error");
+  const rateLimited = RATE_LIMIT_CODES.has(normalized);
+  const overloaded = OVERLOADED_CODES.has(normalized);
   return {
     type: "error",
     code,
     message,
     retryable: rateLimited || overloaded,
     category: rateLimited ? "rate_limit" : overloaded ? "overloaded" : "unknown",
-    requestPhase: "awaiting_response",
+    requestPhase: "streaming",
   };
 }
 
@@ -395,7 +405,18 @@ export class OpenAiResponsesProvider implements ModelProvider {
         ...(request.signal === undefined ? {} : { signal: request.signal }),
       };
     } catch (error) {
-      yield this.failure(request, error, "provider_request_setup_failed", "before_dispatch", false);
+      yield this.failure(
+        request,
+        error,
+        "provider_request_setup_failed",
+        "before_dispatch",
+        false,
+        error instanceof AuthError
+          ? "authentication"
+          : error instanceof ResponsesCodecError
+            ? "invalid_request"
+            : "unknown",
+      );
       return;
     }
 
@@ -404,24 +425,26 @@ export class OpenAiResponsesProvider implements ModelProvider {
       response = await this.fetchImpl(url, init);
     } catch (error) {
       const code = nestedErrorCode(error);
+      const safeToRetry = code !== undefined && SAFE_CONNECT_FAILURES.has(code);
       yield this.failure(
         request,
         error,
         "provider_request_failed",
-        code !== undefined && SAFE_CONNECT_FAILURES.has(code) ? "before_dispatch" : "unknown",
-        true,
+        safeToRetry ? "before_dispatch" : "unknown",
+        safeToRetry,
+        "network",
       );
       return;
     }
 
     if (!response.ok) {
-      const detail = (await response.text().catch(() => "")).slice(0, 2000);
+      await response.body?.cancel();
       const retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status);
       const retryDelay = retryable ? retryAfterMs(response.headers) : undefined;
       yield {
         type: "error",
         code: `http_${response.status}`,
-        message: `Provider ${this.id} returned ${response.status}${detail ? `: ${detail}` : ""}`,
+        message: `Provider ${this.id} returned ${response.status}`,
         retryable,
         category:
           response.status === 429
@@ -443,7 +466,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
         type: "error",
         code: "empty_response",
         message: `Provider ${this.id} returned no response body`,
-        retryable: true,
+        retryable: false,
         category: "provider_internal",
         requestPhase: "awaiting_response",
       };
@@ -453,7 +476,14 @@ export class OpenAiResponsesProvider implements ModelProvider {
     try {
       yield* decodeResponsesStream(decodeSseStream(response.body));
     } catch (error) {
-      yield this.failure(request, error, "provider_stream_failed", "streaming", true);
+      yield this.failure(
+        request,
+        error,
+        "provider_stream_failed",
+        "streaming",
+        false,
+        "stream_interrupted",
+      );
     }
   }
 
@@ -463,6 +493,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
     code: string,
     requestPhase: "before_dispatch" | "streaming" | "unknown",
     retryable: boolean,
+    category: ModelErrorCategory,
   ): ModelStreamEvent {
     if (request.signal?.aborted) return { type: "aborted" };
     return {
@@ -470,7 +501,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
       code,
       message: error instanceof Error ? error.message : "provider request failed",
       retryable,
-      category: requestPhase === "streaming" ? "stream_interrupted" : "network",
+      category,
       requestPhase,
     };
   }
