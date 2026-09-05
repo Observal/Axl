@@ -63,6 +63,7 @@ This file records notable user-facing changes.
 
 - Pending attachments show their removal command, and failed clipboard imports preserve the draft
 - Oversized tool inputs use sanitized, character- and row-bounded previews without changing canonical events
+- Fullscreen redraws now re-check terminal dimensions, repair resize-induced scroll damage, keep the composer visible when the dock exceeds the viewport, and let `/fullscreen` force a clean repaint
 - `/detach` leaves daemon-owned work running, resumed turns accept new input, and resume lists place the most recently updated session first
 - Client reconnect handling no longer races the SDK's mutation retry and leaves a resumed TUI without a live attachment
 - Rebuilding a resumed transcript retains tool-call parents, and consumed steering or follow-up notices clear from the composer
@@ -79,6 +80,7 @@ This file records notable user-facing changes.
 - Shell passthrough serializes queued prompts and responds to Escape interruption
 - The prompt keeps a stable gap from active tool output and uses a distinct orbital activity indicator
 - Fullscreen mouse reports are consumed before editor dispatch and every enabled mouse mode is disabled during exit, suspension, external editing, and mode changes
+- Fullscreen mouse and trackpad bursts coalesce redraws instead of rendering twice per event and delaying keyboard input
 - Regular-mode resize and theme rebuilds preserve native terminal scrollback instead of clearing and reprinting settled history
 - Slash suggestions support arrow-key selection and complete the highlighted action with Tab or Enter
 - Fullscreen navigation accepts Linux, xterm, and Kitty event variants, uses a clear latest or paused header, and leaves space before the composer

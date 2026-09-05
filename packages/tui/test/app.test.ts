@@ -943,11 +943,47 @@ test("fullscreen mode switches live without losing the session", async (context)
   });
 
   assert.equal(text().includes("\x1b[?1049h"), true);
+  const beforeRepair = text().length;
+  input.write("/fullscreen\r");
+  await until(
+    () => text().slice(beforeRepair).includes("\x1b[2J\x1b[H"),
+    "same-mode fullscreen repair",
+  );
   input.write("hello fullscreen\r");
   await until(() => text().includes("↑1 ↓1"), "canonical fullscreen reply");
   input.write("/regular\r");
   await until(() => text().includes("\x1b[?1049l"), "regular mode restoration");
   assert.deepEqual(preferences.at(-1), { tuiMode: "regular" });
+  app.stop();
+});
+
+test("fullscreen redraw observes the current terminal size before a delayed resize event", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    tuiMode: "fullscreen",
+  });
+
+  const beforeResize = text().length;
+  output.rows = 12;
+  input.write("x");
+  await until(() => text().length > beforeResize, "fullscreen resize-safe repaint");
+  const repaint = text().slice(beforeResize);
+  assert.equal(repaint.includes("\x1b[?2026h\x1b[?7l\x1b[2J\x1b[H"), true);
+  const terminal = new VirtualTerminal(100, 12);
+  terminal.write(repaint);
+  assert.equal(terminal.rows()[0], "Transcript · latest");
+  assert.equal(
+    terminal.rows().some((row) => row.includes("x")),
+    true,
+  );
+  assert.equal(terminal.cursorRow < 12, true);
   app.stop();
 });
 
@@ -967,6 +1003,32 @@ test("idle assembled app performs no periodic repaint", async (context) => {
   const settledLength = text().length;
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(text().length, settledLength);
+  app.stop();
+});
+
+test("fullscreen coalesces inertial scroll redraws before accepting typed input", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    tuiMode: "fullscreen",
+  });
+
+  const beforeScroll = text().length;
+  input.write("\x1b[<64;10;5M".repeat(20));
+  await until(() => text().length > beforeScroll, "coalesced fullscreen scroll repaint");
+  const scrollOutput = text().slice(beforeScroll);
+  assert.equal(scrollOutput.split("\x1b[?2026h").length - 1, 1);
+
+  const beforeTyping = text().length;
+  input.write("abc");
+  await until(() => text().length > beforeTyping, "typed input after fullscreen scroll");
+  assert.equal(text().slice(beforeTyping).includes("abc"), true);
   app.stop();
 });
 

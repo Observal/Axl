@@ -135,6 +135,7 @@ export class FullscreenScreen {
   private searchDocument: readonly TranscriptRow[] | undefined;
   private searchQuery = "";
   private previous: string[] = [];
+  private forceClear = false;
   private lastDocument: readonly TranscriptRow[] = [];
   private renderedDocument: readonly TranscriptRow[] | undefined;
   private lastViewportHeight = 1;
@@ -221,10 +222,12 @@ export class FullscreenScreen {
     this.width = Math.max(1, width);
     this.height = Math.max(1, height);
     this.previous = [];
+    this.forceClear = true;
   }
 
   invalidate(): void {
     this.previous = [];
+    this.forceClear = true;
   }
 
   setScrollbar(scrollbar: FullscreenScrollbar): void {
@@ -273,7 +276,10 @@ export class FullscreenScreen {
   render(frame: FullscreenFrame): void {
     if (!this.active) return;
     this.lastDocument = frame.document;
-    const viewportHeight = this.viewportHeight(frame.dock.length);
+    const maximumDockHeight = Math.max(0, this.height - 4);
+    const dockStart = Math.max(0, frame.dock.length - maximumDockHeight);
+    const dock = frame.dock.slice(dockStart);
+    const viewportHeight = this.viewportHeight(dock.length);
     this.lastViewportHeight = viewportHeight;
     const max = Math.max(0, frame.document.length - viewportHeight);
     if (this.following) this.scrollTop = max;
@@ -292,22 +298,28 @@ export class FullscreenScreen {
     const boundary = this.boundary(frame.palette);
     const rows = [header, ...visible];
     while (rows.length < viewportHeight + 1) rows.push("");
-    rows.push("", boundary, ...frame.dock);
+    rows.push("", boundary, ...dock);
     const screen = rows.slice(0, this.height).map((line) => truncateToWidth(line, this.width, ""));
     this.applyScrollbar(screen, frame.document.length, viewportHeight, frame.palette);
 
-    let output = SYNC_BEGIN;
+    let output = `${SYNC_BEGIN}\x1b[?7l${this.forceClear ? "\x1b[2J\x1b[H" : ""}`;
     for (let row = 0; row < this.height; row += 1) {
       if (screen[row] === this.previous[row]) continue;
       output += `\x1b[${row + 1};1H\x1b[2K${screen[row] ?? ""}`;
     }
-    if (frame.cursor !== undefined && !this.searchMode) {
-      const row = Math.min(this.height - 1, viewportHeight + 3 + frame.cursor.row);
+    if (
+      frame.cursor !== undefined &&
+      !this.searchMode &&
+      frame.cursor.row >= dockStart &&
+      frame.cursor.row < dockStart + dock.length
+    ) {
+      const row = Math.min(this.height - 1, viewportHeight + 3 + frame.cursor.row - dockStart);
       output += `\x1b[${row + 1};${Math.min(this.width - 1, frame.cursor.column) + 1}H${frame.cursor.visible === false ? "\x1b[?25l" : "\x1b[?25h"}`;
     } else output += "\x1b[?25l";
     output += SYNC_END;
     this.output.write(output);
     this.previous = screen;
+    this.forceClear = false;
   }
 
   private header(palette: Palette, max: number): string {
@@ -510,13 +522,9 @@ export class FullscreenScreen {
     if (event.motion || event.wheel !== 0) this.pressedToolGroup = undefined;
     if (event.wheel !== 0) {
       this.scrollBy(event.wheel * 3, document.length, viewport);
-      this.requestRender();
       return;
     }
-    if (this.handleScrollbar(event, document.length, viewport)) {
-      this.requestRender();
-      return;
-    }
+    if (this.handleScrollbar(event, document.length, viewport)) return;
     const point = this.documentPoint(event.column, event.row, document, viewport);
     if (point === undefined) {
       if (event.motion && this.selectionPressActive) {
@@ -524,7 +532,6 @@ export class FullscreenScreen {
         const edge = this.documentPoint(event.column, edgeRow, document, viewport);
         if (edge !== undefined) this.updateSelectionFocus(edge, document);
         this.updateSelectionAutoScroll(event.column, event.row);
-        this.requestRender();
       } else if (event.release) this.finishSelection(document);
       return;
     }
@@ -551,7 +558,6 @@ export class FullscreenScreen {
             error instanceof Error ? `Cannot open link: ${error.message}` : "Cannot open link",
           );
         }
-        this.requestRender();
         return;
       }
       if (
@@ -576,7 +582,6 @@ export class FullscreenScreen {
       }
       this.updateSelectionFocus(point, document);
       void this.copySelectedText(document);
-      this.requestRender();
       return;
     }
     if (event.motion) {
@@ -584,7 +589,6 @@ export class FullscreenScreen {
       this.pressedLink = undefined;
       this.updateSelectionFocus(point, document);
       this.updateSelectionAutoScroll(event.column, event.row);
-      this.requestRender();
       return;
     }
     if (button !== 0) return;
@@ -629,7 +633,6 @@ export class FullscreenScreen {
     this.selectionInitialRange = range;
     this.selectionAnchor = range?.start ?? point;
     this.selectionFocus = range?.end ?? point;
-    this.requestRender();
   }
 
   private documentPoint(

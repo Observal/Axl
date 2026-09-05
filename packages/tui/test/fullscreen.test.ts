@@ -80,6 +80,45 @@ test("enters alternate screen and keeps the dock fixed while scrolling", () => {
   assert.equal(capture.text().includes(" LIVE "), false);
 });
 
+test("resize clears scroll damage and repaints within the current viewport", () => {
+  const capture = output();
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden");
+  screen.enter();
+  screen.render(frame(rows(["before"])));
+  const beforeResize = capture.text().length;
+
+  screen.resize(30, 6);
+  screen.render({ ...frame(rows(["after"])), dock: ["editor", "status"] });
+  const update = capture.text().slice(beforeResize);
+  assert.equal(update.includes("\x1b[?2026h\x1b[?7l\x1b[2J\x1b[H"), true);
+
+  const terminal = new VirtualTerminal(30, 6);
+  terminal.write(capture.text());
+  assert.equal(terminal.rows()[0], "Transcript · latest");
+  assert.equal(terminal.rows().includes("editor"), true);
+  assert.equal(terminal.rows().includes("status"), true);
+});
+
+test("clips an oversized dock from the top while preserving its cursor and tail", () => {
+  const capture = output();
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden");
+  const document = rows(["latest output"]);
+  screen.enter();
+  screen.render({
+    ...frame(document),
+    dock: Array.from({ length: 10 }, (_, index) => `dock ${index}`),
+    cursor: { row: 8, column: 2 },
+  });
+
+  const terminal = new VirtualTerminal(40, 8);
+  terminal.write(capture.text());
+  assert.equal(terminal.rows()[0], "Transcript · latest");
+  assert.equal(terminal.rows().includes("dock 0"), false);
+  assert.equal(terminal.rows().includes("dock 6"), true);
+  assert.equal(terminal.rows().includes("dock 9"), true);
+  assert.equal(terminal.cursorRow < 8, true);
+});
+
 test("search highlights every match and navigates in both directions", () => {
   const capture = output();
   const screen = new FullscreenScreen(capture.terminal, 40, 8, "auto");
@@ -99,6 +138,21 @@ test("search highlights every match and navigates in both directions", () => {
   screen.render(frame(document));
   assert.match(capture.text(), /find · target · 1\/3/);
   screen.exit(document, "transcript", "123e4567-e89b-42d3-a456-426614174000");
+});
+
+test("leaves synchronous mouse repaint ownership to the app", () => {
+  const capture = output();
+  let requested = 0;
+  const screen = new FullscreenScreen(capture.terminal, 40, 8, "hidden", {
+    requestRender: () => {
+      requested += 1;
+    },
+  });
+  const document = rows(Array.from({ length: 20 }, (_, index) => `line ${index}`));
+  screen.enter();
+  screen.render(frame(document));
+  assert.equal(screen.handleInput("\x1b[<64;10;5M", document, 2), true);
+  assert.equal(requested, 0);
 });
 
 test("consumes mouse reports and copies a drag selection only after success", async () => {

@@ -107,6 +107,7 @@ import { VimModeController } from "./vim-mode.ts";
 
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 const RESIZE_DEBOUNCE_MS = 25;
+const FULLSCREEN_INPUT_FRAME_MS = 16;
 const SESSION_SELECTOR_WINDOW = 10;
 const MAX_EXTENSION_COMPLETIONS = 100;
 const MAX_EXTENSION_SELECTOR_ITEMS = 1_000;
@@ -600,6 +601,7 @@ export class AxlApp {
   private lastAttentionAt = 0;
 
   private resizeTimer: NodeJS.Timeout | undefined;
+  private fullscreenInputRenderTimer: NodeJS.Timeout | undefined;
   private activityRenderTimer: NodeJS.Timeout | undefined;
 
   private readonly resizeListener = (): void => {
@@ -996,6 +998,7 @@ export class AxlApp {
     this.stopped = true;
     this.setWorking(false);
     this.cancelResize();
+    this.cancelFullscreenInputRender();
     this.cancelActivityRender();
     this.stopThemeWatcher?.();
     this.stopThemeWatcher = undefined;
@@ -1385,8 +1388,39 @@ export class AxlApp {
     ];
   }
 
+  private scheduleFullscreenInputRender(): void {
+    if (this.fullscreenInputRenderTimer !== undefined) return;
+    this.fullscreenInputRenderTimer = setTimeout(() => {
+      this.fullscreenInputRenderTimer = undefined;
+      this.redraw();
+    }, FULLSCREEN_INPUT_FRAME_MS);
+    this.fullscreenInputRenderTimer.unref?.();
+  }
+
+  private cancelFullscreenInputRender(): void {
+    if (this.fullscreenInputRenderTimer !== undefined) {
+      clearTimeout(this.fullscreenInputRenderTimer);
+      this.fullscreenInputRenderTimer = undefined;
+    }
+  }
+
   private redraw(): void {
     if (this.stopped) return;
+    if (this.tuiMode === "fullscreen") {
+      const width = this.detectWidth();
+      const height = this.detectHeight();
+      if (width !== this.width) {
+        this.width = width;
+        this.height = height;
+        this.fullscreen.resize(width, height);
+        this.rebuildTranscript();
+        return;
+      }
+      if (height !== this.height) {
+        this.height = height;
+        this.fullscreen.resize(width, height);
+      }
+    }
     const { components, cursor } = this.liveFrame(this.tuiMode === "regular");
     if (this.tuiMode === "fullscreen") {
       const dock = components.flatMap((component) => component.render(this.width));
@@ -1686,6 +1720,8 @@ export class AxlApp {
 
   private handleInput(data: string): void {
     if (this.stopped) return;
+    const fullscreenMouseInput = this.tuiMode === "fullscreen" && isMouseReport(data);
+    if (!fullscreenMouseInput) this.cancelFullscreenInputRender();
     if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) {
       void this.handleBracketedPaste(data.slice(6, -6));
       return;
@@ -1716,7 +1752,8 @@ export class AxlApp {
         component.render(this.width),
       ).length;
       if (this.fullscreen.handleInput(data, this.fullscreenDocumentRows(), dockHeight)) {
-        this.redraw();
+        if (fullscreenMouseInput) this.scheduleFullscreenInputRender();
+        else this.redraw();
         return;
       }
     }
@@ -2507,7 +2544,13 @@ export class AxlApp {
   }
 
   private setTuiMode(mode: "regular" | "fullscreen"): void {
-    if (mode === this.tuiMode) return;
+    if (mode === this.tuiMode) {
+      if (mode === "fullscreen") {
+        this.fullscreen.invalidate();
+        this.redraw();
+      }
+      return;
+    }
     if (this.overlays.active !== undefined) {
       this.notice = this.view.palette.dim("· close the active dialog before changing display mode");
       return;
