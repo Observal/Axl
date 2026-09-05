@@ -70,6 +70,12 @@ const eventPayloads = {
       costUsd: 0.01,
     },
   },
+  "model.retry_scheduled": {
+    attempt: 2,
+    maxAttempts: 3,
+    delayMs: 500,
+    code: "http_503",
+  },
   "tool.call": { callId: "call-1", name: "read", input: { path: "README.md" } },
   "tool.result": {
     callId: "call-1",

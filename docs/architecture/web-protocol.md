@@ -12,13 +12,13 @@ This document specifies typed RPC, negotiation, errors, package ownership, and t
 
 ## Current baseline
 
-Wire version 8 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool selection, manual compaction, steering, and follow-ups.
+Wire version 9 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool selection, manual compaction, steering, follow-ups, and canonical model-retry attempts.
 
-The TUI consumes these contracts through `packages/sdk`. Version 8 preserves the required version-7 behavior while replacing untyped results, version-only negotiation, unbounded resume assumptions, and client-local projection.
+The TUI consumes these contracts through `packages/sdk`. Version 9 preserves version 8 behavior and adds `model.retry_scheduled`. The version advances because an older exact-version client cannot validate that canonical event safely.
 
 ## Versioning
 
-The current wire version is 8. Its typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence are incompatible with version 7. Compatible capability additions after version 8 do not require a bump. Pre-1.0 clients require an exact wire-version match.
+The current wire version is 9. Version 8 introduced typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence. Version 9 adds the canonical `model.retry_scheduled` event. Compatible capability additions that do not alter accepted wire data do not require a bump. Pre-1.0 clients require an exact wire-version match.
 
 The daemon sends `hello` first:
 

@@ -83,6 +83,12 @@ export type EventPayloadMap = {
     readonly usage?: Usage;
     readonly errorMessage?: string;
   };
+  "model.retry_scheduled": {
+    readonly attempt: number;
+    readonly maxAttempts: number;
+    readonly delayMs: number;
+    readonly code: string;
+  };
   "tool.call": { readonly callId: string; readonly name: string; readonly input: JsonObject };
   "tool.result": {
     readonly callId: string;
@@ -379,6 +385,17 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     optionalString(payload.errorMessage, `${path}.errorMessage`);
     if (stopReason === "error" && payload.errorMessage === undefined) {
       validationError(`${path}.errorMessage`, "is required when stopReason is error");
+    }
+    return payload;
+  },
+  "model.retry_scheduled": (payload, path) => {
+    exact(payload, path, ["attempt", "maxAttempts", "delayMs", "code"]);
+    const attempt = nonNegativeInteger(payload.attempt, `${path}.attempt`);
+    const maxAttempts = nonNegativeInteger(payload.maxAttempts, `${path}.maxAttempts`);
+    nonNegativeInteger(payload.delayMs, `${path}.delayMs`);
+    string(payload.code, `${path}.code`);
+    if (attempt < 2 || attempt > maxAttempts) {
+      validationError(`${path}.attempt`, "must be between 2 and maxAttempts");
     }
     return payload;
   },
