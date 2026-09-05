@@ -171,6 +171,8 @@ async function* streamWithRetries(
       if (
         event.type === "error" &&
         event.retryable &&
+        event.requestPhase !== undefined &&
+        event.requestPhase !== "unknown" &&
         !exposedOutput &&
         attempt < policy.maxAttempts
       ) {

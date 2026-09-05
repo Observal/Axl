@@ -109,6 +109,17 @@ test("derives operation and interaction lifecycle from canonical events", () => 
   assert.equal(projector.state.activeOperationId, operationId);
   assert.equal(projector.state.operations[0]?.status, "running");
   projector.applyEvent({
+    ...event("model.retry_scheduled", {
+      attempt: 2,
+      maxAttempts: 3,
+      delayMs: 500,
+      code: "http_503",
+    }),
+    operationId,
+  });
+  assert.equal(projector.state.activeOperationId, operationId);
+  assert.equal(projector.state.operations[0]?.status, "running");
+  projector.applyEvent({
     ...event("interaction.requested", {
       interactionId: "approval-1",
       kind: "mcp_tool",

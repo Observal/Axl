@@ -48,7 +48,7 @@ function terminalForFailure(
     type: "error",
     code,
     message,
-    retryable: true,
+    retryable: false,
     category: "stream_interrupted",
     requestPhase: "streaming",
   };

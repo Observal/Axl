@@ -337,7 +337,7 @@ export class SessionView {
       case "model.retry_scheduled":
         return this.wrap(
           dim(
-            `· model request ${event.payload.code} · retrying ${event.payload.attempt}/${event.payload.maxAttempts} in ${(event.payload.delayMs / 1_000).toFixed(event.payload.delayMs < 1_000 ? 1 : 0)}s`,
+            `· model request ${sanitizeTerminalText(event.payload.code)} · retrying ${event.payload.attempt}/${event.payload.maxAttempts} in ${(event.payload.delayMs / 1_000).toFixed(event.payload.delayMs < 1_000 ? 1 : 0)}s`,
           ),
         );
       case "session.error":

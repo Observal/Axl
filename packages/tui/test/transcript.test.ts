@@ -109,6 +109,17 @@ test("leaves tool presentation to retained transactions and renders errors loudl
     ["· model request http_503 · retrying 2/3 in 0.5s"],
   );
   assert.deepEqual(
+    view.apply(
+      makeEvent("model.retry_scheduled", {
+        attempt: 3,
+        maxAttempts: 3,
+        delayMs: 1_000,
+        code: "http_503\u001b[31m",
+      }),
+    ),
+    ["· model request http_503 · retrying 3/3 in 1s"],
+  );
+  assert.deepEqual(
     view.apply(makeEvent("session.error", { code: "x", message: "y", retryable: false })),
     ["✖ x: y"],
   );

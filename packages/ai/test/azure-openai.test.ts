@@ -262,6 +262,9 @@ test("missing configuration surfaces a typed auth state through the stream", asy
   assert.equal(terminal.type, "error");
   if (terminal.type === "error") {
     assert.equal(/not configured/.test(terminal.message), true);
+    assert.equal(terminal.retryable, false);
+    assert.equal(terminal.category, "authentication");
+    assert.equal(terminal.requestPhase, "before_dispatch");
   }
 });
 

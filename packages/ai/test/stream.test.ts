@@ -38,7 +38,7 @@ test("converts a thrown provider error into an error terminal", async () => {
     type: "error",
     code: "provider_stream_failure",
     message: "connection reset",
-    retryable: true,
+    retryable: false,
     category: "stream_interrupted",
     requestPhase: "streaming",
   });
@@ -53,7 +53,7 @@ test("converts a silently ended stream into an error terminal", async () => {
   assert.equal(terminal.type, "error");
   if (terminal.type === "error") {
     assert.equal(terminal.code, "provider_stream_truncated");
-    assert.equal(terminal.retryable, true);
+    assert.equal(terminal.retryable, false);
   }
 });
 
