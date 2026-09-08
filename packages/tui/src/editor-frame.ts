@@ -92,7 +92,9 @@ export class EditorFrameComponent implements Component {
     const body = rendered.lines.map((line, row) =>
       this.bodyLine(width, row === 0 ? prefix : " ".repeat(visibleWidth(prefix)), line),
     );
-    const topLeft = [view.usageLabel(), this.state.mode].filter(Boolean).join(" · ");
+    const topLeft = [view.working ? "running" : view.usageLabel(), this.state.mode]
+      .filter(Boolean)
+      .join(" · ");
     const lines = [
       "",
       ...(this.state.notice === undefined ? [] : [truncateToWidth(this.state.notice, width, "")]),

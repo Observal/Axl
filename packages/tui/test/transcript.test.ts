@@ -189,8 +189,17 @@ test("Ctrl+O toggles expanded and collapsed details without hiding tools", () =>
   assert.equal(view.toggleToolOutput(), "full");
 });
 
-test("reports cumulative usage, cache hit rate, cost, and local throughput", () => {
-  const view = new SessionView(120, PLAIN_PALETTE);
+test("reports cumulative usage, cache hit rate, context, and local throughput", () => {
+  const view = new SessionView(120, PLAIN_PALETTE, [
+    {
+      modelId: "gpt-5",
+      displayName: "GPT-5",
+      reasoning: true,
+      contextWindow: 64,
+      maxOutputTokens: 32,
+    },
+  ]);
+  view.apply(makeEvent("config.model", { modelId: "gpt-5" }));
   view.beginResponse();
   view.apply(
     makeEvent("assistant.message", {
@@ -206,10 +215,7 @@ test("reports cumulative usage, cache hit rate, cost, and local throughput", () 
       },
     }),
   );
-  assert.equal(
-    view.usageLabel(),
-    "turn ↑10 ↓5 R20 W2 ∴3 CH62.5% $0.125 · total ↑10 ↓5 R20 W2 CH62.5% $0.125",
-  );
+  assert.equal(view.usageLabel(), "↑10 ↓5 R20 W2 CH62.5% $0.125 50.0%/64");
   assert.match(view.tpsLabel(), /tok\/s$/);
 });
 

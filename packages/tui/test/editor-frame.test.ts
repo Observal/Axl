@@ -27,11 +27,14 @@ function fixture(width: number) {
 }
 
 test("renders one width-safe rounded Axl editor frame", () => {
-  const { frame } = fixture(80);
+  const { view, frame } = fixture(80);
+  view.inputTokens = 42;
+  frame.update({ location: "~/project  git:main" });
   const rendered = frame.render(80);
 
   assert.equal(rendered[0], "");
-  assert.match(rendered[1] ?? "", /^╭/);
+  assert.match(rendered[1] ?? "", /^╭ ↑42/);
+  assert.doesNotMatch(rendered[1] ?? "", /turn|total/);
   assert.match(rendered[2] ?? "", /^│ hello world/);
   assert.match(rendered[3] ?? "", /^╰/);
   assert.equal(
@@ -67,6 +70,16 @@ test("uses a compact borderless layout on narrow terminals", () => {
     true,
   );
   assert.deepEqual(frame.cursorPlacement(), { row: 2, column: 11 });
+});
+
+test("shows running instead of usage while the turn is active", () => {
+  const { view, frame } = fixture(80);
+  view.inputTokens = 42;
+  view.working = true;
+  frame.update({ location: "~/project  git:main" });
+
+  assert.match(frame.render(80)[1] ?? "", /^╭ running/);
+  assert.doesNotMatch(frame.render(80)[1] ?? "", /↑42/);
 });
 
 test("renders prominent activity outside the composer", () => {

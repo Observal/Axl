@@ -126,16 +126,6 @@ export class SessionView {
   cacheHitPercent: number | undefined;
   totalCostUsd = 0;
   private fallbackCostUsd = 0;
-  private lastUsage:
-    | {
-        readonly inputTokens: number;
-        readonly outputTokens: number;
-        readonly cacheReadTokens: number;
-        readonly cacheWriteTokens: number;
-        readonly reasoningTokens?: number;
-        readonly costUsd?: number;
-      }
-    | undefined;
   tokensPerSecond: number | undefined;
   elapsedSeconds = 0;
   private responseStartedAt: number | undefined;
@@ -192,53 +182,38 @@ export class SessionView {
   }
 
   usageLabel(): string {
-    const total = this.formatUsage(
-      {
-        inputTokens: this.inputTokens,
-        outputTokens: this.outputTokens,
-        cacheReadTokens: this.cacheReadTokens,
-        cacheWriteTokens: this.cacheWriteTokens,
-        costUsd: this.totalCostUsd,
-      },
-      true,
-    );
-    return this.lastUsage === undefined
-      ? total
-      : `turn ${this.formatUsage(this.lastUsage)} · total ${total}`;
+    return this.formatUsage({
+      inputTokens: this.inputTokens,
+      outputTokens: this.outputTokens,
+      cacheReadTokens: this.cacheReadTokens,
+      cacheWriteTokens: this.cacheWriteTokens,
+      costUsd: this.totalCostUsd,
+    });
   }
 
-  private formatUsage(
-    usage: {
-      readonly inputTokens: number;
-      readonly outputTokens: number;
-      readonly cacheReadTokens: number;
-      readonly cacheWriteTokens: number;
-      readonly reasoningTokens?: number;
-      readonly costUsd?: number;
-    },
-    includeContext = false,
-  ): string {
+  private formatUsage(usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheReadTokens: number;
+    readonly cacheWriteTokens: number;
+    readonly costUsd?: number;
+  }): string {
     const parts: string[] = [];
     if (usage.inputTokens) parts.push(`↑${compactNumber(usage.inputTokens)}`);
     if (usage.outputTokens) parts.push(`↓${compactNumber(usage.outputTokens)}`);
     if (usage.cacheReadTokens) parts.push(`R${compactNumber(usage.cacheReadTokens)}`);
     if (usage.cacheWriteTokens) parts.push(`W${compactNumber(usage.cacheWriteTokens)}`);
-    if (usage.reasoningTokens) parts.push(`∴${compactNumber(usage.reasoningTokens)}`);
     if ((usage.cacheReadTokens || usage.cacheWriteTokens) && this.cacheHitPercent !== undefined) {
       parts.push(`CH${this.cacheHitPercent.toFixed(1)}%`);
     }
     if (usage.costUsd) parts.push(`$${usage.costUsd.toFixed(3)}`);
 
-    const model = includeContext
-      ? this.models.find(
-          (candidate) =>
-            candidate.modelId === this.model &&
-            (candidate.providerId === undefined || candidate.providerId === this.provider),
-        )
-      : undefined;
-    if (!includeContext) {
-      if (parts.length === 0) parts.push("no usage");
-    } else if (model === undefined) {
+    const model = this.models.find(
+      (candidate) =>
+        candidate.modelId === this.model &&
+        (candidate.providerId === undefined || candidate.providerId === this.provider),
+    );
+    if (model === undefined) {
       if (parts.length === 0) parts.push("ready");
     } else {
       const percent =
@@ -247,7 +222,7 @@ export class SessionView {
           : this.contextTokens === 0
             ? "0.0%"
             : `${((this.contextTokens / model.contextWindow) * 100).toFixed(1)}%`;
-      parts.push(`${percent}/${compactNumber(model.contextWindow)} context`);
+      parts.push(`${percent}/${compactNumber(model.contextWindow)}`);
     }
     return parts.join(" ");
   }
@@ -350,10 +325,6 @@ export class SessionView {
             this.fallbackCostUsd += computedCost;
             this.totalCostUsd += computedCost;
           }
-          this.lastUsage = {
-            ...usage,
-            ...(computedCost === undefined ? {} : { costUsd: computedCost }),
-          };
           if (this.responseStartedAt !== undefined && usage.outputTokens > 0) {
             const elapsedMs = performance.now() - this.responseStartedAt;
             this.tokensPerSecond =
