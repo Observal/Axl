@@ -175,7 +175,7 @@ Build the workspace and install the `axl` executable:
 pnpm run install:cli
 ```
 
-The installer links the built CLI for local use. Run it again after changing package entry points or the installation script.
+The installer links the built CLI for local use. Run it again after changing package entry points or the installation script. If the default daemon is still running with an older wire version, the installer prints the exact safe restart command required for its current activity and attachment state.
 
 ## Running Axl
 
