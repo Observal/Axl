@@ -13,13 +13,13 @@ This document specifies typed RPC, negotiation, errors, package ownership, and t
 
 ## Current baseline
 
-Wire version 12 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool selection, manual compaction, steering, follow-ups, canonical model-retry attempts, provider management, and model-request configuration.
+Wire version 13 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool selection, manual compaction, steering, follow-ups, atomic interrupt-and-deliver, canonical model-retry attempts, provider management, and model-request configuration.
 
-The TUI consumes these contracts through `packages/sdk`. The two former branch tips both used version 11 for incompatible additions: provider management on the feature branch and daemon-owned request settings on `main`. Version 12 combines both surfaces. Host-control version 1 remains separate from session wire negotiation and is available only to trusted process hosts.
+The TUI consumes these contracts through `packages/sdk`. The two former branch tips both used version 11 for incompatible additions: provider management on the feature branch and daemon-owned request settings on `main`. Version 12 combines both surfaces. Version 13 adds atomic interrupt-and-deliver. Host-control version 1 remains separate from session wire negotiation and is available only to trusted process hosts.
 
 ## Versioning
 
-The current wire version is 12. Version 8 introduced typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence. Version 9 adds the canonical `model.retry_scheduled` event. Version 10 adds `daemon_stopping` as a pre-RPC and universal RPC error. The two incompatible version-11 development surfaces are superseded. Version 12 combines provider-management RPCs with `config.request`, `model.request_configured`, and request settings in session create and configure RPCs. Compatible capability additions that do not alter accepted wire data do not require a bump. Pre-1.0 clients require an exact wire-version match.
+The current wire version is 13. Version 8 introduced typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence. Version 9 adds the canonical `model.retry_scheduled` event. Version 10 adds `daemon_stopping` as a pre-RPC and universal RPC error. The two incompatible version-11 development surfaces are superseded. Version 12 combines provider-management RPCs with `config.request`, `model.request_configured`, and request settings in session create and configure RPCs. Version 13 adds atomic interrupt-and-deliver events and RPC. Compatible capability additions that do not alter accepted wire data do not require a bump. Pre-1.0 clients require an exact wire-version match.
 
 The daemon sends `hello` first:
 
@@ -61,8 +61,9 @@ session.resume
 session.fork
 session.clone
 session.send.prompt
-session.send.steer
-session.send.follow_up
+session.steer
+session.follow_up
+session.interrupt_deliver
 session.queue.enqueue
 session.queue.requeue
 session.shell
@@ -227,6 +228,7 @@ The following table lists the additional errors each method may return. The expo
 | `session.fork` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_fork_point`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
 | `session.clone` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `empty_session`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
 | `session.send` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
+| `session.interruptAndDeliver` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
 | `session.queue.enqueue` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
 | `session.queue.requeue` | `unknown_session`, `event_migration_required`, `unknown_queue_item`, `queue_not_paused`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
 | `session.shell` | `unknown_session`, `event_migration_required`, `operation_active`, `idempotency_conflict`, `content_too_large` |
@@ -401,7 +403,7 @@ interface SessionDisposeResult {
 
 `delivery: "prompt"` is ordinary prompt behavior. The version-7 `session.steer` and `session.followUp` methods remain available in version 8. The `session.send` delivery variants `steer` and `follow_up` remain unavailable until their separate capabilities are implemented, and clients must not simulate them.
 
-`session.send` completes when the turn reaches a canonical terminal assistant event or error. Detaching does not cancel it. `session.interrupt` is the session-operation cancellation path.
+`session.send` completes when the turn reaches a canonical terminal assistant event or error. Detaching does not cancel it. `session.interrupt` is the session-operation cancellation path. `session.interruptAndDeliver` atomically stops active work at a safe boundary and delivers its replacement content exactly once; when no operation is active, it behaves as an ordinary send.
 
 Queued prompts use `session.queue.enqueue` and `session.queue.requeue`. Enqueue records prompt content and priority in canonical history before returning. The daemon appends lifecycle events as an item is queued, started, paused after restart, and explicitly re-queued. Pending items are never executed automatically after restart. Every attachment derives the same queue from those events.
 

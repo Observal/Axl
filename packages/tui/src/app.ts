@@ -393,6 +393,7 @@ function isReservedExtensionShortcut(value: string): boolean {
     decoded.key.kind === "enter" ||
     decoded.key.kind === "newline" ||
     decoded.key.kind === "follow-up" ||
+    decoded.key.kind === "interrupt-deliver" ||
     decoded.key.kind === "escape"
   ) {
     return true;
@@ -407,6 +408,7 @@ const HOTKEYS: readonly { readonly key: string; readonly action: string }[] = [
   { key: "Shift+Enter / Ctrl+J", action: "Insert a newline" },
   { key: "\\ then Enter", action: "Insert a newline in every terminal" },
   { key: "Alt+Enter", action: "Queue a follow-up after the active turn" },
+  { key: "Ctrl+Enter", action: "Interrupt the active turn and deliver this prompt" },
   { key: "Ctrl+A", action: "Select the entire prompt" },
   { key: "Ctrl+C", action: "Copy selection or clear; press twice within 500 ms to quit" },
   { key: "Ctrl+X", action: "Cut the selection" },
@@ -442,8 +444,8 @@ const HOTKEYS: readonly { readonly key: string; readonly action: string }[] = [
 ];
 
 const KEY_HELP: readonly string[] = [
-  "Enter send/steer · Alt+Enter follow-up · Shift+Enter/Ctrl+J newline",
-  "Esc interrupts · Ctrl+C clears · Ctrl+O tool details · /hotkeys for every shortcut",
+  "Enter send/steer · Alt+Enter follow-up · Ctrl+Enter interrupt and deliver",
+  "Shift+Enter/Ctrl+J newline · Esc interrupts · Ctrl+C clears · /hotkeys for every shortcut",
 ];
 
 function themePreview(width: number, palette: Palette): readonly string[] {
@@ -633,7 +635,7 @@ export class AxlApp {
     readonly attachments: readonly BlobReference[];
   }> = [];
   private readonly pendingTurnInputs: Array<{
-    readonly mode: "steer" | "followUp";
+    readonly mode: "steer" | "followUp" | "interrupt";
     readonly contentKey: string;
     readonly text: string;
   }> = [];
@@ -1300,7 +1302,7 @@ export class AxlApp {
           const pending = orderPendingTurnInputs(this.pendingTurnInputs);
           const rows = pending.map(
             (item, index) =>
-              `${index + 1}. ${item.mode === "steer" ? "Steering" : "Follow-up"}: ${extensionSingleLine(item.text) || "[attachment]"}`,
+              `${index + 1}. ${item.mode === "steer" ? "Steering" : item.mode === "followUp" ? "Follow-up" : "Interrupt"}: ${extensionSingleLine(item.text) || "[attachment]"}`,
           );
           return [
             ...(rows.length === 0
@@ -1310,7 +1312,7 @@ export class AxlApp {
               ? [
                   this.activeRequest === "shell" || this.activeRequest === "compaction"
                     ? "Enter queues a follow-up · Esc cancels"
-                    : "Enter steers next · Alt+Enter follows up after the turn",
+                    : "Enter steers next · Alt+Enter follows up · Ctrl+Enter interrupts and delivers",
                 ]
               : []),
           ].map((line) => this.view.palette.dim(truncateToWidth(line, width, "…")));
@@ -1913,7 +1915,11 @@ export class AxlApp {
         }
       } else if (this.editorMode === "vim" && this.vim.handle(key, this.editor)) {
         this.notice = undefined;
-      } else if (key.kind === "enter" || key.kind === "follow-up") {
+      } else if (
+        key.kind === "enter" ||
+        key.kind === "follow-up" ||
+        key.kind === "interrupt-deliver"
+      ) {
         const matches = key.kind === "enter" ? this.completionMatches() : [];
         const selected = matches[this.completionIndex];
         if (selected !== undefined && selected !== this.editor.text) {
@@ -1922,7 +1928,13 @@ export class AxlApp {
         const line = this.editor.apply({ kind: "enter" });
         if (line !== undefined) {
           this.vim.reset();
-          void this.submit(line.trim(), key.kind === "follow-up").catch((error: unknown) => {
+          const delivery =
+            key.kind === "follow-up"
+              ? "followUp"
+              : key.kind === "interrupt-deliver"
+                ? "interrupt"
+                : "default";
+          void this.submit(line.trim(), delivery).catch((error: unknown) => {
             this.editor.setText([line, this.editor.text].filter(Boolean).join("\n\n"));
             this.notice = this.view.palette.error(
               `✖ ${error instanceof Error ? error.message : "submission failed"} · prompt restored`,
@@ -2317,7 +2329,10 @@ export class AxlApp {
     }
   }
 
-  private async submit(inputLine: string, prioritize = false): Promise<void> {
+  private async submit(
+    inputLine: string,
+    delivery: "default" | "followUp" | "interrupt" = "default",
+  ): Promise<void> {
     this.notice = undefined;
     if (this.clipboardBusy || this.attachmentBusy) {
       this.editor.setText([inputLine, this.editor.text].filter(Boolean).join("\n\n"));
@@ -2663,19 +2678,23 @@ export class AxlApp {
       ],
     };
     this.pendingAttachments.length = 0;
+    if (delivery === "interrupt" && (this.sending || this.view.working)) {
+      void this.queueDuringTurn(queued, "interrupt");
+      return;
+    }
     if (
       this.sessionSubscription?.projector.overview.activeOperationId !== undefined &&
       this.activeRequest !== "shell" &&
       this.activeRequest !== "compaction"
     ) {
-      void this.queueDuringTurn(queued, prioritize ? "followUp" : "steer");
+      void this.queueDuringTurn(queued, delivery === "followUp" ? "followUp" : "steer");
       return;
     }
     if (this.sending || this.view.working) {
       this.notice = this.view.palette.dim("· queueing follow-up");
       this.invalidateFullscreenRows();
       this.redraw();
-      void this.enqueuePrompt(queued, prioritize ? "front" : "back");
+      void this.enqueuePrompt(queued, delivery === "followUp" ? "front" : "back");
       return;
     }
     this.queued.push(queued);
@@ -4756,7 +4775,7 @@ export class AxlApp {
 
   private async queueDuringTurn(
     queued: { readonly text: string; readonly attachments: readonly BlobReference[] },
-    mode: "steer" | "followUp",
+    mode: "steer" | "followUp" | "interrupt",
   ): Promise<void> {
     const params = {
       sessionId: this.sessionId,
@@ -4769,7 +4788,8 @@ export class AxlApp {
     this.pendingTurnInputs.push(pending);
     try {
       if (mode === "steer") await this.client.request("session.steer", params);
-      else await this.client.request("session.followUp", params);
+      else if (mode === "followUp") await this.client.request("session.followUp", params);
+      else await this.client.request("session.interruptAndDeliver", params);
     } catch (error) {
       const pendingIndex = this.pendingTurnInputs.indexOf(pending);
       if (pendingIndex >= 0) this.pendingTurnInputs.splice(pendingIndex, 1);
@@ -4952,17 +4972,19 @@ export class AxlApp {
     if (this.interrupting) return;
     this.interrupting = true;
     try {
-      let result = await this.client.request("session.interrupt", { sessionId: this.sessionId });
-      // Working is shown optimistically before send or compaction installs daemon ownership.
-      // Preserve an immediate Escape until admission finishes or a canonical terminal event clears
-      // the optimistic state. Stopping the app also ends the retry loop.
-      while (!result.interrupted && this.view.working && !this.stopped) {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
-        result = await this.client.request("session.interrupt", { sessionId: this.sessionId });
+      const result = await this.client.request("session.interrupt", {
+        sessionId: this.sessionId,
+      });
+      if (result.interrupted) {
+        this.awaitingOperationOwnership = false;
+      } else {
+        this.notice = this.view.palette.dim("· no active operation to interrupt");
+        this.redraw();
       }
-      if (result.interrupted) this.awaitingOperationOwnership = false;
-    } catch {
-      this.notice = this.view.palette.dim("· turn already finished");
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "interrupt failed"}`,
+      );
       this.redraw();
     } finally {
       this.interrupting = false;

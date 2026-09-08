@@ -12,7 +12,7 @@ export type EditorKey =
       readonly kind: "select-left" | "select-right" | "select-word-left" | "select-word-right";
     }
   | { readonly kind: "backspace" | "delete" }
-  | { readonly kind: "enter" | "newline" | "follow-up" | "redo" }
+  | { readonly kind: "enter" | "newline" | "follow-up" | "interrupt-deliver" | "redo" }
   | { readonly kind: "tab" | "shift-tab" | "escape" }
   | { readonly kind: "paste-start" | "paste-end" }
   | { readonly kind: "ctrl" | "alt"; readonly char: string }
@@ -24,8 +24,9 @@ function kittyKey(code: number, modifier = 1): EditorKey {
   const alt = (bits & 2) !== 0;
   const ctrl = (bits & 4) !== 0;
   if (code === 13) {
+    if (ctrl) return { kind: "interrupt-deliver" };
     if (alt) return { kind: "follow-up" };
-    if (shift || ctrl) return { kind: "newline" };
+    if (shift) return { kind: "newline" };
     return { kind: "enter" };
   }
   if (ctrl && shift && code === 122) return { kind: "redo" };

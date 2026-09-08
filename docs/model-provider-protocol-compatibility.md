@@ -5,7 +5,7 @@
 
 ## Scope
 
-The issue 10 provider contract extends the in-process model stream shared by `packages/protocol`, `packages/ai`, and `packages/kernel`. Provider-management RPCs changed the daemon wire surface. Current `main` independently added model-request configuration under wire version 11. The combined surface therefore uses wire version 12. The persisted JSONL event format remains version 1.
+The issue 10 provider contract extends the in-process model stream shared by `packages/protocol`, `packages/ai`, and `packages/kernel`. Provider-management RPCs changed the daemon wire surface. Another branch independently added model-request configuration under wire version 11. Wire version 12 combines those surfaces, and version 13 adds atomic interrupt-and-deliver. The persisted JSONL event format remains version 1.
 
 ## Additive stream behavior
 

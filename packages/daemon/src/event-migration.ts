@@ -184,6 +184,7 @@ function eventBlobReferences(event: CanonicalEvent): readonly BlobReference[] {
   if (
     event.type !== "user.message" &&
     event.type !== "assistant.message" &&
+    event.type !== "interrupt.requested" &&
     event.type !== "user.shell" &&
     event.type !== "tool.result"
   ) {
@@ -199,6 +200,7 @@ function externalizeTextContent(
   if (
     event.type !== "user.message" &&
     event.type !== "assistant.message" &&
+    event.type !== "interrupt.requested" &&
     event.type !== "user.shell" &&
     event.type !== "tool.result"
   ) {

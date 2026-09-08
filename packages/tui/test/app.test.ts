@@ -1139,12 +1139,12 @@ test("Ctrl+V paste, Shift+Enter, and searchable hotkeys behave", async (context)
   app.stop();
 });
 
-test("Escape interrupts a running operation", async (context) => {
-  let operationStarted = false;
+test("Escape interrupts a running or admitted operation", async (context) => {
+  let modelCalls = 0;
   let operationAborted = false;
   const blockingPort: ModelPort = {
     stream(request) {
-      operationStarted = true;
+      modelCalls += 1;
       return (async function* (): AsyncGenerator<ModelStreamEvent> {
         await new Promise<void>((resolve) => {
           if (request.signal?.aborted) resolve();
@@ -1168,10 +1168,30 @@ test("Escape interrupts a running operation", async (context) => {
 
   await until(() => text().includes("\x1b[>4;2m"), "keyboard negotiation");
   input.write("start work\r");
-  await until(() => text().includes("Working") && operationStarted, "running model operation");
+  await until(() => text().includes("Working"), "working state");
   input.write("\x1b[27u");
-  await until(() => operationAborted, "escape interruption");
+  await until(() => text().includes("interrupted"), "escape interruption");
+  assert.equal(modelCalls === 0 || operationAborted, true);
   app.stop();
+});
+
+test("an idle Escape result is visible and is not polled", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const client = await connectUnixClient(socketPath);
+  const rpc = context.mock.method(client, "request");
+  const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
+  context.after(() => app.stop());
+  const before = rpc.mock.calls.filter((call) => call.arguments[0] === "session.interrupt").length;
+
+  await (app as unknown as { interrupt(): Promise<void> }).interrupt();
+
+  await until(() => text().includes("no active operation to interrupt"), "interrupt notice");
+  assert.equal(
+    rpc.mock.calls.filter((call) => call.arguments[0] === "session.interrupt").length,
+    before + 1,
+  );
 });
 
 for (const submission of ["local", "other attachment"] as const) {
@@ -1669,6 +1689,51 @@ test("pending steering and follow-ups display their actual injection order above
     return !terminal.rows().some((row) => row.includes("Pending from this terminal"));
   }, "consumed queue notices to clear");
   app.stop();
+});
+
+test("Ctrl+Enter interrupts the active turn and delivers replacement input", async (context) => {
+  let calls = 0;
+  const prompts: string[] = [];
+  const model: ModelPort = {
+    stream(request) {
+      calls += 1;
+      const call = calls;
+      const last = request.messages.findLast((message) => message.role === "user");
+      if (last?.role === "user") {
+        prompts.push(last.content.map((item) => (item.type === "text" ? item.text : "")).join(""));
+      }
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          await new Promise<void>((resolvePromise) => {
+            if (request.signal?.aborted) return resolvePromise();
+            request.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
+          });
+          yield { type: "aborted" };
+          return;
+        }
+        yield { type: "text_delta", text: "replacement complete" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+  context.after(() => app.stop());
+
+  await until(() => text().includes("\x1b[>4;2m"), "keyboard negotiation");
+  input.write("obsolete work\r");
+  await until(() => calls === 1, "active model call");
+  input.write("do this instead\x1b[13;5u");
+  await until(() => text().includes("replacement complete"), "interrupt replacement");
+  assert.deepEqual(prompts, ["obsolete work", "do this instead"]);
 });
 
 test("MCP interactions block the operation until the user responds", async (context) => {

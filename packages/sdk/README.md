@@ -218,4 +218,6 @@ Host messages use their own version and connection on the protected Unix socket.
 
 ## Model request configuration
 
-Wire version 11 adds `requestSettings` to session create and configure RPCs. `config.request` records the selected output and transport-idle settings. `model.request_configured` records each effective output ceiling, idle timeout, estimated input, context reserve, context window, and model maximum before dispatch. `ConversationProjector` exposes these as `requestSettings` and `lastRequest` so every client can present the same daemon-owned values.
+Wire version 11 added `requestSettings` to session create and configure RPCs. `config.request` records the selected output and transport-idle settings. `model.request_configured` records each effective output ceiling, idle timeout, estimated input, context reserve, context window, and model maximum before dispatch. `ConversationProjector` exposes these as `requestSettings` and `lastRequest` so every client can present the same daemon-owned values.
+
+Wire version 13 adds `session.interruptAndDeliver`. The idempotent operation stops active work at a safe boundary and delivers replacement content exactly once. If no operation is active, it behaves as an ordinary send. Clients must use this operation instead of composing separate interrupt and send requests.

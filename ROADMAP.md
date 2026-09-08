@@ -1837,7 +1837,7 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 - [ ] Reconcile uncertain submissions before retrying and implement provider cancellation where available.
 - [ ] Keep steering and follow-ups queued until the pending batch request reaches a terminal state.
 - [x] Implement daemon-owned steer and follow-up semantics at complete tool-call and turn boundaries.
-- [ ] Complete interrupt-and-deliver semantics.
+- [x] Complete interrupt-and-deliver semantics.
 - [x] Queue multiple follow-ups in order.
 - [x] Add `/fork` from a selected user message and `/clone` from the current tip.
 - [ ] Add in-session branch and tree navigation.

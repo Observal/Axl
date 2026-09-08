@@ -33,6 +33,7 @@ function event<Type extends EventType>(
   type: Type,
   payload: EventPayloadMap[Type],
   parentId: string | null = null,
+  operationId?: ReturnType<typeof parseOperationId>,
 ): CanonicalEvent<Type> {
   counter += 1;
   return parseEvent({
@@ -40,6 +41,7 @@ function event<Type extends EventType>(
     id: `00000000-0000-4000-8000-${counter.toString(16).padStart(12, "0")}`,
     sessionId,
     parentId,
+    ...(operationId === undefined ? {} : { operationId }),
     timestamp: counter,
     type,
     payload,
@@ -296,6 +298,7 @@ test("overview reads remain history-free for a 100,000-event session", () => {
     interactions: _interactions,
     operations: _operations,
     queue: _queue,
+    interruptDeliveries: _interruptDeliveries,
     uncertainShellOperations: _uncertain,
     ...metadata
   } = full;
@@ -337,19 +340,52 @@ test("projects compacted membership across repeated summaries without deleting r
   assert.equal(projector.isEventCompacted(old.id), false);
 });
 
-test("pending-input presentation follows steering FIFO before follow-up FIFO without mutating submissions", () => {
+test("projects canonical interrupt delivery state", () => {
+  const projector = new ConversationProjector(sessionId);
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000100");
+  const requested = event(
+    "interrupt.requested",
+    {
+      state: "queued",
+      content: [{ type: "text", text: "replace the task" }],
+    },
+    null,
+    operationId,
+  );
+  projector.applyEvent(requested);
+  assert.deepEqual(projector.state.interruptDeliveries, [
+    {
+      requestEventId: requested.id,
+      operationId,
+      content: [{ type: "text", text: "replace the task" }],
+      status: "queued",
+    },
+  ]);
+
+  const delivered = event("interrupt.updated", { state: "delivered" }, requested.id, operationId);
+  projector.applyEvent(delivered);
+  assert.deepEqual(projector.state.interruptDeliveries[0], {
+    requestEventId: requested.id,
+    operationId,
+    content: [{ type: "text", text: "replace the task" }],
+    status: "delivered",
+  });
+});
+
+test("pending-input presentation follows interruption, steering, then follow-up order", () => {
   const submitted = [
     { mode: "followUp", text: "f1" },
     { mode: "steer", text: "s1" },
+    { mode: "interrupt", text: "i1" },
     { mode: "followUp", text: "f2" },
     { mode: "steer", text: "s2" },
   ] as const;
   assert.deepEqual(
     orderPendingTurnInputs(submitted).map((item) => item.text),
-    ["s1", "s2", "f1", "f2"],
+    ["i1", "s1", "s2", "f1", "f2"],
   );
   assert.deepEqual(
     submitted.map((item) => item.text),
-    ["f1", "s1", "f2", "s2"],
+    ["f1", "s1", "i1", "f2", "s2"],
   );
 });

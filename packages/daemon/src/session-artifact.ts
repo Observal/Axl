@@ -63,6 +63,7 @@ function blobReferences(events: readonly CanonicalEvent[]): readonly BlobReferen
       event.type !== "user.message" &&
       event.type !== "assistant.message" &&
       event.type !== "queue.enqueued" &&
+      event.type !== "interrupt.requested" &&
       event.type !== "user.shell" &&
       event.type !== "tool.result"
     ) {

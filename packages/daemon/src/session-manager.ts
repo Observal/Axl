@@ -32,6 +32,7 @@ import {
   type ToolRegistry,
 } from "@axl/kernel";
 import {
+  type AssistantStopReason,
   type BlobReference,
   type CanonicalEvent,
   EVENT_FORMAT_VERSION,
@@ -176,6 +177,12 @@ interface ManagedSession {
   };
   selection: SessionConfiguration;
   activeTurn?: ActiveTurn;
+  interruptDelivery?: {
+    readonly operationId: OperationId;
+    readonly targetOperationId?: OperationId;
+  };
+  readonly interruptedForDelivery: Set<OperationId>;
+  readonly pendingInterrupts: Set<OperationId>;
   queuedInputs: Promise<void>;
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
@@ -375,6 +382,7 @@ export class SessionManager {
     if (
       event.type !== "user.message" &&
       event.type !== "assistant.message" &&
+      event.type !== "interrupt.requested" &&
       event.type !== "user.shell" &&
       event.type !== "tool.result"
     ) {
@@ -504,6 +512,8 @@ export class SessionManager {
           ? { modelId: configuredModel.payload.modelId }
           : {}),
       },
+      interruptedForDelivery: new Set(),
+      pendingInterrupts: new Set(),
       queuedInputs: Promise.resolve(),
       interactions: new Map(),
       queue: [],
@@ -606,6 +616,65 @@ export class SessionManager {
     }
     const stored = (await JsonlEventLog.open(this.logPath(target), target)).events;
     const evidence = stored.filter((event) => event.operationId === operationId);
+    if (acceptance.method === "session.interruptAndDeliver") {
+      const requested = evidence.find((event) => event.type === "interrupt.requested");
+      if (requested?.type !== "interrupt.requested") return undefined;
+      const failed = evidence.findLast(
+        (event) => event.type === "interrupt.updated" && event.payload.state === "failed",
+      );
+      if (failed !== undefined) {
+        return {
+          operationId,
+          stopReason: "error",
+          ...(requested.payload.targetOperationId === undefined
+            ? {}
+            : { targetOperationId: requested.payload.targetOperationId }),
+        };
+      }
+      await this.resume(target);
+      const managed = this.managed(target);
+      let message = managed.events.find(
+        (event) => event.operationId === operationId && event.type === "user.message",
+      );
+      let terminal = managed.events.findLast(
+        (event) =>
+          event.operationId === operationId &&
+          ((event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+            event.type === "session.error"),
+      );
+      if (message?.type !== "user.message") {
+        const recovered = await managed.session.abortRecoveredDelivery(
+          operationId,
+          requested.payload.content,
+        );
+        message = recovered.message;
+        terminal = recovered.terminal;
+      } else if (terminal === undefined) {
+        terminal = await managed.session.abortRecoveredTurn(operationId);
+      }
+      if (
+        !managed.events.some(
+          (event) =>
+            event.operationId === operationId &&
+            event.type === "interrupt.updated" &&
+            event.payload.state === "delivered",
+        )
+      ) {
+        await managed.session.recordInterruptEvent(operationId, "interrupt.updated", {
+          state: "delivered",
+          ...(requested.payload.targetOperationId === undefined
+            ? {}
+            : { targetOperationId: requested.payload.targetOperationId }),
+        });
+      }
+      return {
+        operationId,
+        stopReason: terminal?.type === "assistant.message" ? terminal.payload.stopReason : "error",
+        ...(requested.payload.targetOperationId === undefined
+          ? {}
+          : { targetOperationId: requested.payload.targetOperationId }),
+      };
+    }
     if (acceptance.method === "session.interrupt") {
       const affected =
         acceptance.affectedOperationId === undefined
@@ -706,7 +775,33 @@ export class SessionManager {
 
   activeOperationId(sessionId: unknown): OperationId | undefined {
     const parsed = parseSessionId(sessionId, "sessionId");
-    return this.sessions.get(parsed)?.activeTurn?.operationId;
+    const managed = this.sessions.get(parsed);
+    return managed?.activeTurn?.operationId ?? managed?.interruptDelivery?.operationId;
+  }
+
+  reserveInterruptDelivery(
+    sessionId: unknown,
+    operationId: OperationId,
+    targetOperationId?: OperationId,
+  ): void {
+    const managed = this.managed(sessionId);
+    if (
+      managed.interruptDelivery !== undefined &&
+      managed.interruptDelivery.operationId !== operationId
+    ) {
+      throw new DaemonError("operation_active", "Another interrupt delivery owns this branch");
+    }
+    managed.interruptDelivery = {
+      operationId,
+      ...(targetOperationId === undefined ? {} : { targetOperationId }),
+    };
+  }
+
+  releaseInterruptDelivery(sessionId: unknown, operationId: OperationId): void {
+    const managed = this.managed(sessionId);
+    if (managed.interruptDelivery?.operationId !== operationId) return;
+    delete managed.interruptDelivery;
+    this.startQueueDrain(managed);
   }
 
   describe(sessionId: unknown): SessionOpenResult {
@@ -720,7 +815,9 @@ export class SessionManager {
           ? "disposing"
           : managed.interactions.size > 0
             ? "waiting_interaction"
-            : managed.activeTurn !== undefined || managed.rebuilding !== undefined
+            : managed.activeTurn !== undefined ||
+                managed.rebuilding !== undefined ||
+                managed.interruptDelivery !== undefined
               ? "running"
               : "idle",
         ...(activeOperationId === undefined ? {} : { activeOperationId }),
@@ -771,7 +868,11 @@ export class SessionManager {
     const parsed = parseSessionId(sessionId, "sessionId");
     this.assertNotQuarantined(parsed);
     const active = this.sessions.get(parsed);
-    if (active?.activeTurn !== undefined || active?.rebuilding !== undefined) {
+    if (
+      active?.activeTurn !== undefined ||
+      active?.rebuilding !== undefined ||
+      active?.interruptDelivery !== undefined
+    ) {
       throw new DaemonError("operation_active", "Export the session after its active operation");
     }
     let events: readonly CanonicalEvent[];
@@ -859,7 +960,7 @@ export class SessionManager {
     const sourceId = parseSessionId(sessionId, "sessionId");
     await this.resume(sourceId);
     const source = this.managed(sourceId);
-    if (source.activeTurn || source.rebuilding) {
+    if (source.activeTurn || source.rebuilding || source.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this session; fork after it");
     }
     const eventId = parseEventId(fromEventId, "fromEventId");
@@ -881,7 +982,7 @@ export class SessionManager {
     const sourceId = parseSessionId(sessionId, "sessionId");
     await this.resume(sourceId);
     const source = this.managed(sourceId);
-    if (source.activeTurn || source.rebuilding) {
+    if (source.activeTurn || source.rebuilding || source.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this session; clone after it");
     }
     const tip = source.events.at(-1)?.id;
@@ -1111,7 +1212,7 @@ export class SessionManager {
     operationId?: OperationId,
   ): Promise<{ boundaryEventIds: readonly EventId[] }> {
     const managed = this.managed(sessionId);
-    if (managed.activeTurn || managed.rebuilding) {
+    if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this branch; reload after it");
     }
     if (operationId !== undefined) {
@@ -1145,7 +1246,7 @@ export class SessionManager {
       const recovered = managed.events.filter((event) => event.operationId === operationId);
       if (recovered.length > 0) return this.configurationResult(managed, recovered);
     }
-    if (managed.activeTurn || managed.rebuilding) {
+    if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
       throw new DaemonError(
         "operation_active",
         "An operation owns this branch; change configuration after it",
@@ -1333,6 +1434,163 @@ export class SessionManager {
     return this.queueInput(sessionId, content, "followUp");
   }
 
+  async interruptAndDeliver(
+    sessionId: unknown,
+    content: readonly UserContent[],
+    operationId: OperationId | undefined,
+    acceptedTargetOperationId?: OperationId,
+  ): Promise<{
+    operationId: OperationId;
+    stopReason: AssistantStopReason;
+    targetOperationId?: OperationId;
+  }> {
+    if (operationId === undefined) {
+      throw new DaemonError("internal_error", "Interrupt delivery operation ID is missing");
+    }
+    this.assertRunning();
+    const managed = this.managed(sessionId);
+    const evidence = managed.events.filter((event) => event.operationId === operationId);
+    const delivered = evidence.findLast(
+      (event) => event.type === "interrupt.updated" && event.payload.state === "delivered",
+    );
+    const terminal = evidence.findLast(
+      (event) =>
+        (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+        event.type === "session.error",
+    );
+    if (delivered?.type === "interrupt.updated" && terminal !== undefined) {
+      return {
+        operationId,
+        stopReason: terminal.type === "assistant.message" ? terminal.payload.stopReason : "error",
+        ...(acceptedTargetOperationId === undefined
+          ? {}
+          : { targetOperationId: acceptedTargetOperationId }),
+      };
+    }
+    if (
+      managed.interruptDelivery !== undefined &&
+      managed.interruptDelivery.operationId !== operationId
+    ) {
+      throw new DaemonError("operation_active", "Another interrupt delivery owns this branch");
+    }
+    for (const item of content) {
+      if (item.type !== "blob") continue;
+      try {
+        await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+      } catch (error) {
+        if (error instanceof BlobStoreError) {
+          throw new DaemonError(error.code, error.message, { cause: error });
+        }
+        throw error;
+      }
+    }
+
+    managed.interruptDelivery = {
+      operationId,
+      ...(acceptedTargetOperationId === undefined
+        ? {}
+        : { targetOperationId: acceptedTargetOperationId }),
+    };
+    let requested = evidence.find((event) => event.type === "interrupt.requested");
+    try {
+      if (requested?.type !== "interrupt.requested") {
+        requested = await managed.session.recordInterruptEvent(operationId, "interrupt.requested", {
+          state: "queued",
+          content,
+          ...(acceptedTargetOperationId === undefined
+            ? {}
+            : { targetOperationId: acceptedTargetOperationId }),
+        });
+      }
+
+      const target = acceptedTargetOperationId;
+      if (target !== undefined) {
+        const alreadyInterrupting = evidence.some(
+          (event) => event.type === "interrupt.updated" && event.payload.state === "interrupting",
+        );
+        if (!alreadyInterrupting) {
+          await managed.session.recordInterruptEvent(operationId, "interrupt.updated", {
+            state: "interrupting",
+            targetOperationId: target,
+          });
+        }
+        managed.interruptedForDelivery.add(target);
+        if (managed.activeTurn?.operationId === target) {
+          const active = managed.activeTurn;
+          active.controller.abort();
+          await active.done;
+        } else {
+          const targetEvents = managed.events.filter((event) => event.operationId === target);
+          const targetTerminal = targetEvents.some(
+            (event) =>
+              (event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+              event.type === "session.error",
+          );
+          if (!targetTerminal && targetEvents.some((event) => event.type === "user.message")) {
+            await managed.session.abortRecoveredTurn(target);
+          }
+        }
+        managed.interruptedForDelivery.delete(target);
+      }
+
+      const existingMessage = managed.events.find(
+        (event) => event.operationId === operationId && event.type === "user.message",
+      );
+      const result = await this.send(managed.session.log.sessionId, content, operationId);
+      const message =
+        existingMessage ??
+        managed.events.find(
+          (event) => event.operationId === operationId && event.type === "user.message",
+        );
+      if (message?.type !== "user.message") {
+        throw new DaemonError("corrupt_session", "Interrupt replacement message was not recorded");
+      }
+      if (
+        !managed.events.some(
+          (event) =>
+            event.type === "interrupt.updated" &&
+            event.payload.state === "delivered" &&
+            event.operationId === operationId,
+        )
+      ) {
+        await managed.session.recordInterruptEvent(operationId, "interrupt.updated", {
+          state: "delivered",
+          ...(target === undefined ? {} : { targetOperationId: target }),
+        });
+      }
+      return {
+        operationId,
+        stopReason: result.stopReason as AssistantStopReason,
+        ...(target === undefined ? {} : { targetOperationId: target }),
+      };
+    } catch (error) {
+      if (
+        requested?.type === "interrupt.requested" &&
+        !managed.events.some(
+          (event) =>
+            event.type === "interrupt.updated" &&
+            event.payload.state === "failed" &&
+            event.operationId === operationId,
+        )
+      ) {
+        await managed.session.recordInterruptEvent(operationId, "interrupt.updated", {
+          state: "failed",
+          reason: error instanceof Error ? error.message : "Interrupt delivery failed",
+          ...(acceptedTargetOperationId === undefined
+            ? {}
+            : { targetOperationId: acceptedTargetOperationId }),
+        });
+      }
+      throw error;
+    } finally {
+      managed.pendingInterrupts.delete(operationId);
+      if (acceptedTargetOperationId !== undefined) {
+        managed.interruptedForDelivery.delete(acceptedTargetOperationId);
+      }
+      this.releaseInterruptDelivery(managed.session.log.sessionId, operationId);
+    }
+  }
+
   private queueInput(
     sessionId: unknown,
     content: readonly UserContent[],
@@ -1402,11 +1660,18 @@ export class SessionManager {
     }
     this.assertRunning();
     if (managed.disposing) throw new DaemonError("cancelled", "Session is being disposed");
-    if (managed.activeTurn || managed.rebuilding) {
+    if (
+      managed.activeTurn ||
+      managed.rebuilding ||
+      (managed.interruptDelivery !== undefined &&
+        managed.interruptDelivery.operationId !== operationId &&
+        managed.interruptDelivery.targetOperationId !== operationId)
+    ) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
     const active = deferredTurn("turn", operationId);
     managed.activeTurn = active;
+    if (managed.pendingInterrupts.delete(active.operationId)) active.controller.abort();
     try {
       try {
         await this.captureWorkspaceCheckpoint(managed, active.controller.signal);
@@ -1418,12 +1683,18 @@ export class SessionManager {
         active.controller.signal,
         active.operationId,
       );
-      while (!this.stopping && !managed.disposing && managed.session.hasQueuedMessages()) {
+      while (
+        !this.stopping &&
+        !managed.disposing &&
+        !managed.interruptedForDelivery.has(active.operationId) &&
+        managed.session.hasQueuedMessages()
+      ) {
         active.controller = new AbortController();
         result = (await managed.session.continueQueued(active.controller.signal)) ?? result;
       }
       return { operationId: active.operationId, stopReason: result.stopReason };
     } finally {
+      managed.interruptedForDelivery.delete(active.operationId);
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
       this.startQueueDrain(managed);
@@ -1431,7 +1702,13 @@ export class SessionManager {
   }
 
   private startQueueDrain(managed: ManagedSession): void {
-    if (this.stopping || managed.disposing || managed.queueDraining) return;
+    if (
+      this.stopping ||
+      managed.disposing ||
+      managed.queueDraining ||
+      managed.interruptDelivery !== undefined
+    )
+      return;
     const draining = this.drainQueue(managed);
     managed.queueDrain = draining;
     // Keep the rejected promise observable by disposal, and report it immediately.
@@ -1500,7 +1777,7 @@ export class SessionManager {
 
   async compact(sessionId: unknown, customInstructions?: string): Promise<{ eventId: EventId }> {
     const managed = this.managed(sessionId);
-    if (managed.activeTurn || managed.rebuilding) {
+    if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
     const active = deferredTurn("compaction");
@@ -1564,11 +1841,12 @@ export class SessionManager {
         excluded,
       },
     });
-    if (managed.activeTurn || managed.rebuilding) {
+    if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
     const active = deferredTurn("shell", operationId);
     managed.activeTurn = active;
+    if (managed.pendingInterrupts.delete(active.operationId)) active.controller.abort();
     try {
       try {
         await this.captureWorkspaceCheckpoint(managed, active.controller.signal);
@@ -1594,7 +1872,7 @@ export class SessionManager {
     enabled: boolean,
   ): Promise<{ enabled: boolean; checkpointId?: string }> {
     const managed = this.managed(sessionId);
-    if (managed.activeTurn || managed.rebuilding) {
+    if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
       throw new DaemonError(
         "operation_active",
         "Change workspace checkpoint capture after the active operation",
@@ -1740,11 +2018,28 @@ export class SessionManager {
     }
   }
 
-  interrupt(sessionId: unknown): { interrupted: boolean; operationId?: OperationId } {
-    const active = this.managed(sessionId).activeTurn;
-    if (!active) return { interrupted: false };
-    active.controller.abort();
-    return { interrupted: true, operationId: active.operationId };
+  interrupt(
+    sessionId: unknown,
+    acceptedTargetOperationId?: OperationId,
+  ): { interrupted: boolean; operationId?: OperationId } {
+    const managed = this.managed(sessionId);
+    const target = acceptedTargetOperationId ?? managed.activeTurn?.operationId;
+    if (target === undefined) return { interrupted: false };
+    const terminal = managed.events.findLast(
+      (event) =>
+        event.operationId === target &&
+        ((event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+          event.type === "session.error" ||
+          event.type === "user.shell" ||
+          event.type === "context.compacted"),
+    );
+    if (terminal !== undefined) return { interrupted: false };
+    if (managed.activeTurn?.operationId === target) {
+      managed.activeTurn.controller.abort();
+    } else {
+      managed.pendingInterrupts.add(target);
+    }
+    return { interrupted: true, operationId: target };
   }
 
   subscribe(
@@ -2002,6 +2297,7 @@ export class SessionManager {
   private authorizeEventBlobs(sessionId: SessionId, event: CanonicalEvent): void {
     if (
       event.type !== "user.message" &&
+      event.type !== "interrupt.requested" &&
       event.type !== "user.shell" &&
       event.type !== "assistant.message" &&
       event.type !== "tool.result"
@@ -2020,6 +2316,7 @@ export class SessionManager {
       cwd: managed.cwd,
       busy:
         managed.activeTurn !== undefined ||
+        managed.interruptDelivery !== undefined ||
         managed.rebuilding !== undefined ||
         managed.disposing ||
         managed.queueDraining ||

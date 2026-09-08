@@ -15,11 +15,13 @@ import {
   ProtocolValidationError,
   parseEvent,
   parseEventId,
+  parseOperationId,
   parseSessionId,
 } from "../src/index.ts";
 
 const eventId = parseEventId("018f47a5-4f18-7cc2-8000-123456789abc");
 const secondEventId = parseEventId("018f47a5-4f18-7cc2-8000-123456789abd");
+const operationId = parseOperationId("018f47a5-4f18-7cc2-8000-123456789abe");
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
 
 const validPayloads = {
@@ -31,6 +33,15 @@ const validPayloads = {
   "queue.requeued": { queueItemId: eventId, priority: "front" },
   "queue.started": { queueItemId: eventId },
   "queue.paused": { queueItemId: eventId, reason: "daemon_restart" },
+  "interrupt.requested": {
+    state: "queued",
+    content: [{ type: "text", text: "replacement" }],
+    targetOperationId: operationId,
+  },
+  "interrupt.updated": {
+    state: "delivered",
+    targetOperationId: operationId,
+  },
   "user.shell": {
     command: "pwd",
     content: [{ type: "text", text: "/workspace" }],
@@ -156,6 +167,8 @@ test("rejects invalid event payloads", () => {
     event("assistant.message", { content: [], stopReason: "error" }),
     event("context.compacted", { summary: "empty", replacedEventIds: [] }),
     event("permission.resolved", { requestId: "not-a-uuid", decision: "deny" }),
+    event("interrupt.updated", { state: "interrupting" }),
+    event("interrupt.updated", { state: "failed" }),
     event("config.profile", { profile: "unknown" }),
     event("config.request", { maxOutputTokens: 0, httpIdleTimeoutMs: 300_000 }),
     event("model.request_configured", {

@@ -637,6 +637,7 @@ export const WIRE_CAPABILITIES = [
   "session.send.prompt",
   "session.steer",
   "session.follow_up",
+  "session.interrupt_deliver",
   "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
@@ -802,6 +803,14 @@ export interface RpcMethodMap {
     readonly params: { readonly sessionId: SessionId; readonly content: readonly UserContent[] };
     readonly result: { readonly queued: true };
   };
+  readonly "session.interruptAndDeliver": {
+    readonly params: { readonly sessionId: SessionId; readonly content: readonly UserContent[] };
+    readonly result: {
+      readonly operationId: OperationId;
+      readonly stopReason: AssistantStopReason;
+      readonly targetOperationId?: OperationId;
+    };
+  };
   readonly "session.compact": {
     readonly params: { readonly sessionId: SessionId; readonly instructions?: string };
     readonly result: { readonly eventId: EventId };
@@ -940,6 +949,7 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.clone",
   "session.import",
   "session.send",
+  "session.interruptAndDeliver",
   "session.queue.enqueue",
   "session.queue.requeue",
   "session.interrupt",
@@ -969,6 +979,7 @@ export function requiredCapability(method: RpcMethod): CapabilityId | undefined 
   }
   if (method === "session.send") return "session.send.prompt";
   if (method === "session.followUp") return "session.follow_up";
+  if (method === "session.interruptAndDeliver") return "session.interrupt_deliver";
   return method;
 }
 export type RpcResult<Method extends RpcMethod> = RpcMethodMap[Method]["result"];
@@ -1716,7 +1727,11 @@ export function parseWireRequest(value: unknown): WireRequest {
       },
     };
   }
-  if (method === "session.steer" || method === "session.followUp") {
+  if (
+    method === "session.steer" ||
+    method === "session.followUp" ||
+    method === "session.interruptAndDeliver"
+  ) {
     exact(params, "request.params", ["sessionId", "content"]);
     return {
       ...base,
@@ -2373,6 +2388,31 @@ export function parseRpcResult<Method extends RpcMethod>(
       throw new ProtocolValidationError(`${path}.queued`, "must be true");
     }
     parsed = { queued: true };
+  } else if (method === "session.interruptAndDeliver") {
+    const result = object(value, path);
+    exact(result, path, ["operationId", "stopReason", "targetOperationId"]);
+    const reasons: readonly AssistantStopReason[] = [
+      "stop",
+      "length",
+      "tool_use",
+      "error",
+      "aborted",
+    ];
+    if (!reasons.includes(result.stopReason as AssistantStopReason)) {
+      throw new ProtocolValidationError(`${path}.stopReason`, "is not a valid stop reason");
+    }
+    parsed = {
+      operationId: parseOperationId(result.operationId, `${path}.operationId`),
+      stopReason: result.stopReason,
+      ...(result.targetOperationId === undefined
+        ? {}
+        : {
+            targetOperationId: parseOperationId(
+              result.targetOperationId,
+              `${path}.targetOperationId`,
+            ),
+          }),
+    };
   } else if (method === "session.compact") {
     const result = object(value, path);
     exact(result, path, ["eventId"]);
@@ -2626,6 +2666,7 @@ export const RPC_METHODS = [
   "session.send",
   "session.steer",
   "session.followUp",
+  "session.interruptAndDeliver",
   "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
@@ -2822,6 +2863,15 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_not_owned",
     "blob_missing",
     "blob_corrupt",
+  ],
+  "session.interruptAndDeliver": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    ...MUTATION_ERRORS,
+    "blob_not_owned",
+    "blob_missing",
+    "blob_corrupt",
+    "content_too_large",
   ],
   "session.compact": [...SESSION_BASE_ERRORS, "operation_active", "content_too_large"],
   "session.queue.enqueue": [

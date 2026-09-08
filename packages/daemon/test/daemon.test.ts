@@ -142,13 +142,14 @@ async function startDaemon(
   deliveryOptions: {
     readonly cursorLifetimeMs?: number;
     readonly retry?: ModelRetryOptions | false;
+    readonly tools?: () => ToolRegistry;
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
-  const { retry, ...daemonOptions } = deliveryOptions;
+  const { retry, tools, ...daemonOptions } = deliveryOptions;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
@@ -158,7 +159,7 @@ async function startDaemon(
     ...daemonOptions,
     runtime: () => ({
       model: port,
-      tools: new ToolRegistry(),
+      tools: tools?.() ?? new ToolRegistry(),
       system: "You are Axl.",
       ...(retry === undefined ? {} : { retry }),
     }),
@@ -2199,6 +2200,313 @@ test("interrupt aborts the active operation from another connection", async (con
     sessionId: created.sessionId,
   })) as { interrupted: boolean };
   assert.equal(idle.interrupted, false);
+});
+
+test("interrupt preserves intent while a send is admitted but not yet active", async (context) => {
+  const model: ModelPort = {
+    stream(request) {
+      const last = request.messages.findLast((message) => message.role === "user");
+      const text =
+        last?.role === "user"
+          ? last.content.map((item) => (item.type === "text" ? item.text : "")).join("")
+          : "";
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (text === "stop during admission") {
+          await new Promise<void>((resolvePromise) => {
+            if (request.signal?.aborted) return resolvePromise();
+            request.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
+          });
+          yield { type: "aborted" };
+          return;
+        }
+        yield { type: "text_delta", text: "next completed" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model);
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const operationId = "00000000-0000-4000-8000-000000000128";
+
+  const sending = client.request(
+    "session.send",
+    {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "stop during admission" }],
+    },
+    { idempotencyKey: operationId },
+  );
+  const interrupted = await client.request("session.interrupt", {
+    sessionId: created.sessionId,
+  });
+
+  assert.deepEqual(interrupted, { interrupted: true, operationId });
+  assert.deepEqual(await sending, { operationId, stopReason: "aborted" });
+  assert.equal(
+    (
+      await client.request("session.send", {
+        sessionId: created.sessionId,
+        delivery: "prompt",
+        content: [{ type: "text", text: "next operation" }],
+      })
+    ).stopReason,
+    "stop",
+  );
+});
+
+test("interrupt and deliver aborts active work and starts the replacement exactly once", async (context) => {
+  let calls = 0;
+  const model: ModelPort = {
+    stream(request) {
+      calls += 1;
+      const call = calls;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          await new Promise<void>((resolvePromise) => {
+            if (request.signal?.aborted) return resolvePromise();
+            request.signal?.addEventListener("abort", () => resolvePromise(), { once: true });
+          });
+          yield { type: "aborted" };
+          return;
+        }
+        yield { type: "text_delta", text: "replacement answer" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model);
+  const sender = await connectUnixClient(socketPath);
+  const controller = await connectUnixClient(socketPath);
+  context.after(() => {
+    sender.close();
+    controller.close();
+  });
+
+  const created = await sender.request("session.create", { cwd });
+  const active = sender.request(
+    "session.send",
+    {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "obsolete work" }],
+    },
+    { idempotencyKey: "00000000-0000-4000-8000-000000000130" },
+  );
+  const key = "00000000-0000-4000-8000-000000000131";
+  const replacement = {
+    sessionId: created.sessionId,
+    content: [{ type: "text" as const, text: "do this instead" }],
+  };
+  const delivered = await controller.request("session.interruptAndDeliver", replacement, {
+    idempotencyKey: key,
+  });
+  assert.deepEqual(await active, {
+    operationId: "00000000-0000-4000-8000-000000000130",
+    stopReason: "aborted",
+  });
+  assert.deepEqual(delivered, {
+    operationId: key,
+    stopReason: "stop",
+    targetOperationId: "00000000-0000-4000-8000-000000000130",
+  });
+  assert.deepEqual(
+    await controller.request("session.interruptAndDeliver", replacement, { idempotencyKey: key }),
+    delivered,
+  );
+  assert.equal(calls, 2);
+
+  const history = await subscribeAll(controller, created.sessionId);
+  assert.deepEqual(
+    history.events.filter((event) => event.operationId === key).map((event) => event.type),
+    [
+      "interrupt.requested",
+      "interrupt.updated",
+      "user.message",
+      "assistant.message",
+      "interrupt.updated",
+    ],
+  );
+  assert.equal(
+    history.events.filter(
+      (event) =>
+        event.operationId === key &&
+        event.type === "user.message" &&
+        event.payload.content.some(
+          (item) => item.type === "text" && item.text === "do this instead",
+        ),
+    ).length,
+    1,
+  );
+});
+
+test("interrupt and deliver preserves completed tool results and closes the active call", async (context) => {
+  let modelCalls = 0;
+  let toolCalls = 0;
+  let activeToolStarted!: () => void;
+  const toolStarted = new Promise<void>((resolvePromise) => {
+    activeToolStarted = resolvePromise;
+  });
+  const model: ModelPort = {
+    stream() {
+      modelCalls += 1;
+      const call = modelCalls;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          yield { type: "tool_call", callId: "first", name: "work", input: {} };
+          yield { type: "tool_call", callId: "second", name: "work", input: {} };
+          yield { type: "completed", stopReason: "tool_use", usage };
+          return;
+        }
+        yield { type: "text_delta", text: "replacement answer" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model, "sandboxed", undefined, undefined, {
+    tools: () => {
+      const tools = new ToolRegistry();
+      tools.register({
+        name: "work",
+        description: "Controlled test work",
+        inputSchema: { type: "object" },
+        async execute(_input, signal) {
+          toolCalls += 1;
+          if (toolCalls === 1) {
+            return { content: [{ type: "text", text: "first complete" }], isError: false };
+          }
+          activeToolStarted();
+          await new Promise<void>((resolvePromise) => {
+            if (signal.aborted) return resolvePromise();
+            signal.addEventListener("abort", () => resolvePromise(), { once: true });
+          });
+          return { content: [{ type: "text", text: "second aborted" }], isError: true };
+        },
+      });
+      return tools;
+    },
+  });
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const active = client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "run both tools" }],
+  });
+  await toolStarted;
+
+  const delivered = await client.request("session.interruptAndDeliver", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "replace tool work" }],
+  });
+  assert.equal((await active).stopReason, "aborted");
+  assert.equal(delivered.stopReason, "stop");
+
+  const history = await subscribeAll(client, created.sessionId);
+  const calls = history.events.filter((event) => event.type === "tool.call");
+  const results = history.events.filter((event) => event.type === "tool.result");
+  assert.deepEqual(
+    calls.map((event) => event.payload.callId),
+    ["first", "second"],
+  );
+  assert.deepEqual(
+    results.map((event) => event.payload.callId),
+    ["first", "second"],
+  );
+  assert.equal(
+    history.events.filter(
+      (event) =>
+        event.type === "user.message" &&
+        event.payload.content.some(
+          (item) => item.type === "text" && item.text === "replace tool work",
+        ),
+    ).length,
+    1,
+  );
+});
+
+test("interrupt and deliver behaves as an ordinary send when the session is idle", async (context) => {
+  const { socketPath, cwd } = await startDaemon(context, replyPort());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const operationId = "00000000-0000-4000-8000-000000000132";
+
+  const result = await client.request(
+    "session.interruptAndDeliver",
+    {
+      sessionId: created.sessionId,
+      content: [{ type: "text", text: "start normally" }],
+    },
+    { idempotencyKey: operationId },
+  );
+  assert.deepEqual(result, { operationId, stopReason: "stop" });
+  const history = await subscribeAll(client, created.sessionId);
+  assert.deepEqual(
+    history.events.filter((event) => event.operationId === operationId).map((event) => event.type),
+    ["interrupt.requested", "user.message", "assistant.message", "interrupt.updated"],
+  );
+});
+
+test("restart recovery delivers an accepted interrupt replacement exactly once", async (context) => {
+  const fixture = await startDaemon(context, replyPort());
+  const client = await connectUnixClient(fixture.socketPath);
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const key = "00000000-0000-4000-8000-000000000133";
+  const request = {
+    sessionId: created.sessionId,
+    content: [{ type: "text" as const, text: "survive restart" }],
+  };
+  await client.request("session.interruptAndDeliver", request, { idempotencyKey: key });
+  client.close();
+  await fixture.daemon.stop();
+
+  await removeCommandCompletions(fixture.dataDirectory, new Set([key]));
+  const logPath = join(fixture.dataDirectory, "sessions", `${created.sessionId}.jsonl`);
+  const records = (await readFile(logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { type: string; operationId?: string });
+  const interruptedBeforeDelivery = records.filter(
+    (record) => record.operationId !== key || record.type === "interrupt.requested",
+  );
+  await writeFile(
+    logPath,
+    `${interruptedBeforeDelivery.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  );
+
+  const restarted = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry() }),
+  });
+  await restarted.start();
+  context.after(() => restarted.stop());
+  const recovered = await connectUnixClient(fixture.socketPath);
+  context.after(() => recovered.close());
+  assert.deepEqual(
+    await recovered.request("session.interruptAndDeliver", request, { idempotencyKey: key }),
+    { operationId: key, stopReason: "aborted" },
+  );
+  await recovered.request("session.resume", { sessionId: created.sessionId });
+  const history = await subscribeAll(recovered, created.sessionId);
+  assert.equal(
+    history.events.filter((event) => event.operationId === key && event.type === "user.message")
+      .length,
+    1,
+  );
+  assert.equal(
+    history.events.filter(
+      (event) =>
+        event.operationId === key &&
+        event.type === "interrupt.updated" &&
+        event.payload.state === "delivered",
+    ).length,
+    1,
+  );
 });
 
 test("restart recovery preserves exact interrupt results", async (context) => {

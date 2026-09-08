@@ -634,6 +634,28 @@ export class AgentSession {
     });
   }
 
+  async abortRecoveredDelivery(
+    operationId: OperationId,
+    content: readonly UserContent[],
+  ): Promise<{
+    readonly message: CanonicalEvent<"user.message">;
+    readonly terminal: CanonicalEvent<"assistant.message">;
+  }> {
+    if (this.activeOperation !== null) {
+      throw new OperationConflictError(
+        `Operation ${this.activeOperation} already owns this branch`,
+      );
+    }
+    const appended: CanonicalEvent[] = [];
+    await this.appendUserMessage(operationId, content, appended);
+    const message = appended[0];
+    if (message?.type !== "user.message") {
+      throw new Error("Recovered delivery did not append its user message");
+    }
+    const terminal = await this.abortRecoveredTurn(operationId);
+    return { message, terminal };
+  }
+
   async close(operationId: OperationId): Promise<CanonicalEvent<"session.closed">> {
     if (this.activeOperation !== null) {
       throw new OperationConflictError(
@@ -817,6 +839,15 @@ export class AgentSession {
   recordQueueEvent<
     Type extends "queue.enqueued" | "queue.requeued" | "queue.started" | "queue.paused",
   >(
+    operationId: OperationId,
+    type: Type,
+    payload: EventPayloadMap[Type],
+  ): Promise<CanonicalEvent<Type>> {
+    return this.append(operationId, type, payload);
+  }
+
+  /** Appends daemon-owned interrupt-and-deliver lifecycle state. */
+  recordInterruptEvent<Type extends "interrupt.requested" | "interrupt.updated">(
     operationId: OperationId,
     type: Type,
     payload: EventPayloadMap[Type],

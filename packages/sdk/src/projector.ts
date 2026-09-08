@@ -90,6 +90,15 @@ export interface ProjectedQueueItem {
   readonly status: "queued" | "running" | "paused" | "completed" | "failed" | "aborted";
 }
 
+export interface ProjectedInterruptDelivery {
+  readonly requestEventId: EventId;
+  readonly operationId?: OperationId;
+  readonly content: EventPayloadMap["interrupt.requested"]["content"];
+  readonly targetOperationId?: OperationId;
+  readonly reason?: string;
+  readonly status: "queued" | "interrupting" | "delivered" | "failed";
+}
+
 export interface ConversationState {
   readonly sessionId?: SessionId;
   readonly selectedNodeId?: EventId;
@@ -100,6 +109,7 @@ export interface ConversationState {
   readonly activeOperationId?: OperationId;
   readonly uncertainShellOperations: readonly UncertainShellOperation[];
   readonly queue: readonly ProjectedQueueItem[];
+  readonly interruptDeliveries: readonly ProjectedInterruptDelivery[];
   readonly model?: string;
   readonly provider?: string;
   readonly entitlement?: string;
@@ -120,16 +130,23 @@ export interface ConversationState {
 /** Status and activity without materializing the accumulated conversation collections. */
 export type ConversationOverview = Omit<
   ConversationState,
-  "records" | "tools" | "interactions" | "operations" | "queue" | "uncertainShellOperations"
+  | "records"
+  | "tools"
+  | "interactions"
+  | "operations"
+  | "queue"
+  | "interruptDeliveries"
+  | "uncertainShellOperations"
 > & { readonly recordCount: number };
 
-/** Display order for locally pending inputs under the daemon's steer-before-follow-up contract.
+/** Display order for locally pending inputs under the daemon's delivery contract.
  * This is a projection, not a queue or a complete view of inputs from other clients.
  */
-export function orderPendingTurnInputs<T extends { readonly mode: "steer" | "followUp" }>(
-  inputs: readonly T[],
-): readonly T[] {
-  return inputs.toSorted((a, b) => Number(a.mode === "followUp") - Number(b.mode === "followUp"));
+export function orderPendingTurnInputs<
+  T extends { readonly mode: "steer" | "followUp" | "interrupt" },
+>(inputs: readonly T[]): readonly T[] {
+  const rank = { interrupt: 0, steer: 1, followUp: 2 } as const;
+  return inputs.toSorted((a, b) => rank[a.mode] - rank[b.mode]);
 }
 
 const MAX_PROJECTED_ACTIVITY_CHARACTERS = 131_072;
@@ -198,6 +215,7 @@ export class ConversationProjector {
   private readonly operations = new Map<OperationId, ProjectedOperation>();
   private readonly uncertainShellOperations = new Map<OperationId, UncertainShellOperation>();
   private readonly queue = new Map<EventId, ProjectedQueueItem>();
+  private readonly interruptDeliveries = new Map<OperationId, ProjectedInterruptDelivery>();
   private activeOperationId: OperationId | undefined;
   private model: string | undefined;
   private provider: string | undefined;
@@ -239,6 +257,7 @@ export class ConversationProjector {
       operations: Object.freeze([...this.operations.values()]),
       uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
       queue: Object.freeze([...this.queue.values()]),
+      interruptDeliveries: Object.freeze([...this.interruptDeliveries.values()]),
     });
   }
 
@@ -290,6 +309,7 @@ export class ConversationProjector {
     this.activeOperationId = undefined;
     if (!keepUncertainShells) this.uncertainShellOperations.clear();
     this.queue.clear();
+    this.interruptDeliveries.clear();
     this.model = undefined;
     this.provider = undefined;
     this.entitlement = undefined;
@@ -356,6 +376,47 @@ export class ConversationProjector {
       case "queue.paused":
         this.updateQueueItem(event.payload.queueItemId, { status: "paused" });
         break;
+      case "interrupt.requested":
+        if (event.operationId === undefined) {
+          throw new ProjectionError(
+            "interrupt_identity_conflict",
+            `Interrupt request ${event.id} has no operation identity`,
+          );
+        }
+        this.interruptDeliveries.set(event.operationId, {
+          requestEventId: event.id,
+          operationId: event.operationId,
+          content: event.payload.content,
+          ...(event.payload.targetOperationId === undefined
+            ? {}
+            : { targetOperationId: event.payload.targetOperationId }),
+          status: "queued",
+        });
+        break;
+      case "interrupt.updated": {
+        if (event.operationId === undefined) {
+          throw new ProjectionError(
+            "interrupt_identity_conflict",
+            `Interrupt update ${event.id} has no operation identity`,
+          );
+        }
+        const delivery = this.interruptDeliveries.get(event.operationId);
+        if (delivery === undefined) {
+          throw new ProjectionError(
+            "interrupt_identity_conflict",
+            `Interrupt update ${event.id} has no matching request`,
+          );
+        }
+        this.interruptDeliveries.set(event.operationId, {
+          ...delivery,
+          status: event.payload.state,
+          ...(event.payload.targetOperationId === undefined
+            ? {}
+            : { targetOperationId: event.payload.targetOperationId }),
+          ...(event.payload.reason === undefined ? {} : { reason: event.payload.reason }),
+        });
+        break;
+      }
       case "user.shell":
         this.updateOperation(event.operationId, event.payload.isError ? "failed" : "succeeded");
         if (event.operationId !== undefined)

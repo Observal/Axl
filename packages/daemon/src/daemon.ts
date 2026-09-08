@@ -867,6 +867,23 @@ export class AxlDaemon {
     }
   }
 
+  private interruptTargetOperationId(
+    sessionId: SessionId,
+  ): ReturnType<typeof parseOperationId> | undefined {
+    const active = this.sessions.activeOperationId(sessionId);
+    if (active !== undefined) return active;
+    for (const request of this.admitted.values()) {
+      if (request.method === "session.send" && request.params.sessionId === sessionId) {
+        const operationId = request.idempotencyKey;
+        if (operationId !== undefined) return parseOperationId(operationId, "idempotencyKey");
+      }
+      if (request.method === "session.shell" && request.params.sessionId === sessionId) {
+        return request.params.operationId;
+      }
+    }
+    return undefined;
+  }
+
   private async executeRequest(
     request: WireRequest,
     send: (message: ServerMessage) => void,
@@ -925,25 +942,43 @@ export class AxlDaemon {
         ? parseSessionId(randomUUID(), "intendedSessionId")
         : undefined;
     const affectedOperationId =
-      normalized.method === "session.interrupt"
-        ? this.sessions.activeOperationId(normalized.params.sessionId)
+      normalized.method === "session.interrupt" ||
+      normalized.method === "session.interruptAndDeliver"
+        ? this.interruptTargetOperationId(normalized.params.sessionId)
         : undefined;
     const interactionId =
       normalized.method === "session.interaction.respond"
         ? normalized.params.interactionId
         : undefined;
-    return journal.execute(
-      {
-        idempotencyKey,
-        method: normalized.method as RetryableMutationMethod,
-        requestHash: hashCanonicalRequest(normalized.method, normalized.params as never),
-        ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
-        ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
-        ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
-        ...(interactionId === undefined ? {} : { interactionId }),
-      },
-      (acceptance) => this.dispatch(normalized, send, state, acceptance) as never,
-    );
+    const interruptDeliveryOperationId =
+      normalized.method === "session.interruptAndDeliver"
+        ? parseOperationId(idempotencyKey, "idempotencyKey")
+        : undefined;
+    if (interruptDeliveryOperationId !== undefined) {
+      this.sessions.reserveInterruptDelivery(
+        params.sessionId,
+        interruptDeliveryOperationId,
+        affectedOperationId,
+      );
+    }
+    try {
+      return await journal.execute(
+        {
+          idempotencyKey,
+          method: normalized.method as RetryableMutationMethod,
+          requestHash: hashCanonicalRequest(normalized.method, normalized.params as never),
+          ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
+          ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
+          ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
+          ...(interactionId === undefined ? {} : { interactionId }),
+        },
+        (acceptance) => this.dispatch(normalized, send, state, acceptance) as never,
+      );
+    } finally {
+      if (interruptDeliveryOperationId !== undefined) {
+        this.sessions.releaseInterruptDelivery(params.sessionId, interruptDeliveryOperationId);
+      }
+    }
   }
 
   private async dispatch(
@@ -1082,6 +1117,15 @@ export class AxlDaemon {
         return this.sessions.steer(request.params.sessionId, request.params.content);
       case "session.followUp":
         return this.sessions.followUp(request.params.sessionId, request.params.content);
+      case "session.interruptAndDeliver":
+        return this.sessions.interruptAndDeliver(
+          request.params.sessionId,
+          request.params.content,
+          this.mutationOperationId(acceptance),
+          acceptance?.affectedOperationId === undefined
+            ? undefined
+            : parseOperationId(acceptance.affectedOperationId, "affectedOperationId"),
+        );
       case "session.compact":
         return this.sessions.compact(request.params.sessionId, request.params.instructions);
       case "session.queue.enqueue":
@@ -1106,7 +1150,12 @@ export class AxlDaemon {
           request.params.excluded,
         );
       case "session.interrupt":
-        return this.sessions.interrupt(request.params.sessionId);
+        return this.sessions.interrupt(
+          request.params.sessionId,
+          acceptance?.affectedOperationId === undefined
+            ? undefined
+            : parseOperationId(acceptance.affectedOperationId, "affectedOperationId"),
+        );
       case "session.reload":
         return this.sessions.reload(request.params.sessionId, this.mutationOperationId(acceptance));
       case "session.configure": {

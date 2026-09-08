@@ -11,9 +11,11 @@ import {
   type EventId,
   type JsonObject,
   type JsonValue,
+  type OperationId,
   ProtocolValidationError,
   parseEventEnvelope,
   parseEventId,
+  parseOperationId,
   parseSessionId,
   type SessionId,
 } from "./event-envelope.ts";
@@ -79,6 +81,16 @@ export type EventPayloadMap = {
   "queue.requeued": { readonly queueItemId: EventId; readonly priority: "front" | "back" };
   "queue.started": { readonly queueItemId: EventId };
   "queue.paused": { readonly queueItemId: EventId; readonly reason: "daemon_restart" };
+  "interrupt.requested": {
+    readonly state: "queued";
+    readonly content: readonly UserContent[];
+    readonly targetOperationId?: OperationId;
+  };
+  "interrupt.updated": {
+    readonly state: "interrupting" | "delivered" | "failed";
+    readonly targetOperationId?: OperationId;
+    readonly reason?: string;
+  };
   "user.shell": {
     readonly command: string;
     readonly content: readonly UserContent[];
@@ -371,6 +383,30 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     exact(payload, path, ["queueItemId", "reason"]);
     parseEventId(payload.queueItemId, `${path}.queueItemId`);
     choice(payload.reason, `${path}.reason`, ["daemon_restart"]);
+    return payload;
+  },
+  "interrupt.requested": (payload, path) => {
+    exact(payload, path, ["state", "content"], ["targetOperationId"]);
+    choice(payload.state, `${path}.state`, ["queued"]);
+    validateContent(payload.content, `${path}.content`, false);
+    if (payload.targetOperationId !== undefined) {
+      parseOperationId(payload.targetOperationId, `${path}.targetOperationId`);
+    }
+    return payload;
+  },
+  "interrupt.updated": (payload, path) => {
+    exact(payload, path, ["state"], ["targetOperationId", "reason"]);
+    const state = choice(payload.state, `${path}.state`, ["interrupting", "delivered", "failed"]);
+    if (payload.targetOperationId !== undefined) {
+      parseOperationId(payload.targetOperationId, `${path}.targetOperationId`);
+    }
+    optionalString(payload.reason, `${path}.reason`);
+    if (state === "interrupting" && payload.targetOperationId === undefined) {
+      validationError(`${path}.targetOperationId`, "is required while interrupting");
+    }
+    if (state === "failed" && payload.reason === undefined) {
+      validationError(`${path}.reason`, "is required when failed");
+    }
     return payload;
   },
   "user.shell": (payload, path) => {

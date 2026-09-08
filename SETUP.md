@@ -66,7 +66,7 @@ axl daemon stop --interrupt --yes
 
 Use the same `--unsafe`, `--sandbox`, `--image`, or `--socket` selection as the running daemon. Status and stop do not require provider credentials. Restart refuses to switch data directories. Stop and restart refuse active work unless `--interrupt` explicitly authorizes cancellation. `--yes` confirms disconnecting clients. A changed confirmation snapshot requires a fresh command. Exit codes are 0 for success, 1 for errors, 2 for refused or stale confirmation, and 3 for a missing daemon on status or stop. Restart starts a missing daemon.
 
-An incompatible session wire fails loudly and points to these commands. No daemon is automatically replaced on a version mismatch. Host-control version 1 operates independently of session wire version 11 on a separate connection to the same owner-only Unix socket. It does not bypass the session handshake.
+An incompatible session wire fails loudly and points to these commands. No daemon is automatically replaced on a version mismatch. Host-control version 1 operates independently of session wire version 13 on a separate connection to the same owner-only Unix socket. It does not bypass the session handshake.
 
 If graceful cleanup fails or exceeds the host's ten-second wait, inspect `axl daemon status`. Shutdown can still be running. The TUI offers a separate force confirmation when available. From the CLI, explicitly request:
 

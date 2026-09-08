@@ -8,12 +8,7 @@ import test from "node:test";
 
 import { EVENT_FORMAT_VERSION, WIRE_PROTOCOL_VERSION } from "../src/index.ts";
 
-test("keeps event format 1 and combines provider management with request settings in wire protocol 12", () => {
+test("keeps event format 1 and adds interrupt delivery in wire protocol 13", () => {
   assert.equal(EVENT_FORMAT_VERSION, 1);
-  assert.equal(WIRE_PROTOCOL_VERSION, 12);
-  assert.notEqual(
-    WIRE_PROTOCOL_VERSION,
-    11,
-    "collided version 11 must be rejected by exact handshakes",
-  );
+  assert.equal(WIRE_PROTOCOL_VERSION, 13);
 });

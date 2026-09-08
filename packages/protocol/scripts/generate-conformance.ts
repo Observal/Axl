@@ -51,6 +51,15 @@ const eventPayloads = {
   "queue.requeued": { queueItemId, priority: "front" },
   "queue.started": { queueItemId },
   "queue.paused": { queueItemId, reason: "daemon_restart" },
+  "interrupt.requested": {
+    state: "queued",
+    content: [{ type: "text", text: "replacement" }],
+    targetOperationId: operationId,
+  },
+  "interrupt.updated": {
+    state: "delivered",
+    targetOperationId: operationId,
+  },
   "user.shell": {
     command: "pwd",
     content: [{ type: "text", text: "/workspace" }],
@@ -194,6 +203,10 @@ const params = {
   "session.send": { sessionId, content: [{ type: "text", text: "hello" }], delivery: "prompt" },
   "session.steer": { sessionId, content: [{ type: "text", text: "adjust" }] },
   "session.followUp": { sessionId, content: [{ type: "text", text: "then summarize" }] },
+  "session.interruptAndDeliver": {
+    sessionId,
+    content: [{ type: "text", text: "replace the current task" }],
+  },
   "session.compact": { sessionId, instructions: "Focus on code changes" },
   "session.queue.enqueue": {
     sessionId,
@@ -355,6 +368,11 @@ const results = {
   "session.send": { operationId, stopReason: "stop" },
   "session.steer": { queued: true },
   "session.followUp": { queued: true },
+  "session.interruptAndDeliver": {
+    operationId,
+    stopReason: "stop",
+    targetOperationId: operationId,
+  },
   "session.compact": { eventId },
   "session.queue.enqueue": { queueItemId: eventId, state: "queued" },
   "session.queue.requeue": { queueItemId: eventId, state: "queued" },

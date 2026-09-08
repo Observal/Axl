@@ -75,6 +75,7 @@ test("maps feature methods to negotiated capabilities", () => {
   assert.equal(requiredCapability("request.cancel"), undefined);
   assert.equal(requiredCapability("session.history"), undefined);
   assert.equal(requiredCapability("session.send"), "session.send.prompt");
+  assert.equal(requiredCapability("session.interruptAndDeliver"), "session.interrupt_deliver");
   assert.equal(requiredCapability("session.blob.abort"), "session.blob.abort");
   assert.equal(requiredCapability("provider.catalog.refresh"), "provider.catalog.refresh");
 });
@@ -183,6 +184,12 @@ test("validates every request shape", () => {
       },
     },
     { kind: "request", id: 5, method: "session.interrupt", params: { sessionId } },
+    {
+      kind: "request",
+      id: 26,
+      method: "session.interruptAndDeliver",
+      params: { sessionId, content: [{ type: "text", text: "replacement" }] },
+    },
     {
       kind: "request",
       id: 5,
