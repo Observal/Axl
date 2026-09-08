@@ -206,7 +206,14 @@ export function messagesFromCompactedLineage(
             ],
           },
         ]),
-    ...projected.groups.map((group) => group.message),
+    ...projected.groups.flatMap((group) => {
+      const message = group.message;
+      return message.role === "assistant" &&
+        message.content.length === 0 &&
+        (message.toolCalls?.length ?? 0) === 0
+        ? []
+        : [message];
+    }),
   ];
 }
 

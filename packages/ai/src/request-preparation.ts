@@ -985,8 +985,15 @@ function prepareHistory(
 
   for (const [messageIndex, message] of messages.entries()) {
     const path = `request.messages[${messageIndex}]`;
-    if (!Array.isArray(message.content) || message.content.length === 0)
-      fail(`${path}.content`, "must not be empty");
+    if (!Array.isArray(message.content)) fail(`${path}.content`, "must be an array");
+    if (
+      message.content.length === 0 &&
+      (message.role !== "assistant" ||
+        !Array.isArray(message.toolCalls) ||
+        message.toolCalls.length === 0)
+    ) {
+      fail(`${path}.content`, "must not be empty without an assistant tool call");
+    }
     if (message.role === "user") {
       exactKeys(message, ["role", "content"], path);
       if (pending.size > 0) fail(path, "appears before all preceding tool calls have results");

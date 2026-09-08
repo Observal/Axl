@@ -686,7 +686,7 @@ test("only one operation may mutate the branch at a time", async (context) => {
   assert.equal((await first).stopReason, "stop");
 });
 
-test("reconstructs interleaved results from one multi-tool assistant turn", () => {
+test("reconstructs tool-only turns and omits empty terminal assistant messages", () => {
   const operationId = parseOperationId("00000000-0000-4000-8000-000000000020");
   const events = [
     parseEvent({
@@ -748,6 +748,16 @@ test("reconstructs interleaved results from one multi-tool assistant turn", () =
         content: [{ type: "text", text: "two" }],
         isError: false,
       },
+    }),
+    parseEvent({
+      version: EVENT_FORMAT_VERSION,
+      id: "00000000-0000-4000-8000-000000000026",
+      sessionId,
+      operationId,
+      parentId: "00000000-0000-4000-8000-000000000025",
+      timestamp: 6,
+      type: "assistant.message",
+      payload: { content: [], stopReason: "aborted" },
     }),
   ];
   const messages = messagesFromLineage(events);

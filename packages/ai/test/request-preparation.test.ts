@@ -127,6 +127,39 @@ test("normalizes history tool identifiers and preserves canonical tool identity"
   assert.equal("continuation" in text, false);
 });
 
+test("accepts a tool-only assistant message", async () => {
+  const prepared = await prepareModelRequest(
+    targetModel(),
+    textRequest({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "inspect" }] },
+        {
+          role: "assistant",
+          content: [],
+          toolCalls: [{ callId: "call-1", name: "read", input: { path: "README.md" } }],
+        },
+        {
+          role: "tool",
+          callId: "call-1",
+          name: "read",
+          content: [{ type: "text", text: "contents" }],
+          isError: false,
+        },
+      ],
+    }),
+  );
+
+  assert.deepEqual(prepared.messages[1]?.content, []);
+  await assert.rejects(
+    () =>
+      prepareModelRequest(
+        targetModel(),
+        textRequest({ messages: [{ role: "assistant", content: [] }] }),
+      ),
+    /must not be empty without an assistant tool call/,
+  );
+});
+
 test("retains replay metadata only for its exact issuing model", async () => {
   const identity = {
     providerId: "target-provider",
