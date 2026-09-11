@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -355,6 +356,51 @@ test("persisted command failures use the current code-defined retryability", asy
       error.code === "checkpoint_unavailable" &&
       error.retryable === false,
   );
+});
+
+test("persisted configuration results default newly added tool flags to disabled", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-command-journal-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const idempotencyKey = "00000000-0000-4000-8000-000000000002";
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "commands.jsonl"),
+    `${JSON.stringify({
+      version: 1,
+      type: "accepted",
+      idempotencyKey,
+      method: "session.configure",
+      requestHash: "b".repeat(64),
+      operationId: idempotencyKey,
+      acceptedAt: 1,
+    })}\n${JSON.stringify({
+      version: 1,
+      type: "succeeded",
+      idempotencyKey,
+      result: {
+        modelId: "gpt-5",
+        requestedThinkingLevel: "medium",
+        effectiveThinkingLevel: "medium",
+        profile: "standard",
+        webFetch: true,
+        webSearch: true,
+        boundaryEventIds: [],
+      },
+      completedAt: 2,
+    })}\n`,
+  );
+  const journal = await CommandJournal.open(directory);
+  const result = await journal.execute(
+    {
+      idempotencyKey,
+      method: "session.configure",
+      requestHash: "b".repeat(64),
+    },
+    async () => {
+      throw new Error("persisted completion should be reused");
+    },
+  );
+  assert.equal(result.subagents, false);
 });
 
 test("the daemon response boundary enforces every method's allowed-error matrix", () => {
@@ -2128,6 +2174,85 @@ test("serves generation-checked working and last-turn workspace status and diffs
     }),
     (error) => error instanceof AxlClientError && error.code === "checkpoint_too_large",
   );
+});
+
+test("starts a durable user-authorized child session asynchronously", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const parent = await client.request("session.create", { cwd: fixture.cwd });
+
+  const started = await client.request("child.start", {
+    parentSessionId: parent.sessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+  });
+  assert.equal(started.name, "researcher");
+  assert.equal(started.parentSessionId, parent.sessionId);
+  assert.equal(started.authority, "user");
+  assert.equal(started.historyMode, "fresh");
+
+  const parentHistory = await subscribeAll(client, parent.sessionId);
+  const spawn = parentHistory.events.find((event) => event.type === "child.spawn_requested");
+  assert.equal(
+    spawn?.type === "child.spawn_requested" && spawn.payload.childSessionId,
+    started.child.sessionId,
+  );
+  assert.equal(spawn?.type === "child.spawn_requested" && spawn.payload.name, "researcher");
+
+  let childHistory = await subscribeAll(client, started.child.sessionId);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (childHistory.events.some((event) => event.type === "user.message")) break;
+    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    childHistory = await subscribeAll(client, started.child.sessionId);
+  }
+  const root = childHistory.events[0];
+  assert.equal(root?.type, "session.created");
+  assert.equal(root?.type === "session.created" && root.payload.parentSessionId, parent.sessionId);
+  assert.equal(root?.type === "session.created" && root.payload.childName, "researcher");
+  assert.equal(root?.type === "session.created" && root.payload.childTask, "Research tmux");
+  assert.equal(root?.type === "session.created" && root.payload.spawnAuthority, "user");
+  assert.ok(childHistory.events.some((event) => event.type === "user.message"));
+
+  const listed = await client.request("session.list", {
+    scope: "all_local",
+    order: "threaded",
+    pageSize: 50,
+  });
+  const summary = listed.sessions.find((session) => session.sessionId === started.child.sessionId);
+  assert.equal(summary?.parentSessionId, parent.sessionId);
+  assert.equal(summary?.childName, "researcher");
+  await waitFor(() => {
+    const events = fixture.daemon.sessions.subscribe(parent.sessionId, () => undefined).allEvents;
+    return (
+      events.some(
+        (event) =>
+          event.type === "child.result" && event.payload.childSessionId === started.child.sessionId,
+      ) && fixture.daemon.sessions.runtimeState(parent.sessionId).state === "idle"
+    );
+  }, "parent child-result turn");
+
+  const duplicate = await client.request("child.start", {
+    parentSessionId: parent.sessionId,
+    name: "researcher",
+    task: "Duplicate",
+    authority: "user",
+    historyMode: "fresh",
+  });
+  assert.equal(duplicate.name, "researcher-2");
+  await assert.rejects(
+    client.request("child.start", {
+      parentSessionId: parent.sessionId,
+      name: "worker",
+      task: "Not yet authorized",
+      authority: "goal",
+      historyMode: "fresh",
+    }),
+    (error) => error instanceof AxlClientError && error.code === "invalid_spawn_authority",
+  );
+  await client.request("session.dispose", { sessionId: parent.sessionId });
 });
 
 test("lists, forks, clones, and resumes sessions", async (context) => {

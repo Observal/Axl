@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -370,6 +371,26 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.deepEqual(events.find((event) => event.type === "config.tools")?.payload, {
     webFetch: true,
     webSearch: true,
+  });
+
+  const delegated = await client.request("session.create", {
+    cwd: workspace,
+    subagents: true,
+  });
+  const delegatedSubscription = await client.request("session.subscribe", {
+    sessionId: delegated.sessionId,
+  });
+  const delegatedEvents = delegatedSubscription.snapshot?.page.events ?? [];
+  assert.deepEqual(
+    delegatedEvents
+      .filter((event) => event.type === "tool.schema")
+      .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
+    ["bash", "read", "write", "edit", "subagent", "subagent_message", "web_fetch", "web_search"],
+  );
+  assert.deepEqual(delegatedEvents.find((event) => event.type === "config.tools")?.payload, {
+    webFetch: true,
+    webSearch: true,
+    subagents: true,
   });
 
   for (const [profile, expectedTools] of [

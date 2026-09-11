@@ -133,6 +133,18 @@ const validPayloads = {
   "sandbox.violation": { capability: "filesystem.write", reason: "outside workspace" },
   "context.compacted": { summary: "Earlier work", replacedEventIds: [secondEventId] },
   "session.error": { code: "provider_failed", message: "Provider unavailable", retryable: true },
+  "child.spawn_requested": {
+    childSessionId: sessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+  },
+  "child.started": { childSessionId: sessionId, name: "researcher" },
+  "child.input_queued": {
+    childSessionId: sessionId,
+    content: [{ type: "text", text: "Also inspect layouts" }],
+  },
   "child.result": { childSessionId: sessionId, status: "completed", result: { summary: "done" } },
 } satisfies EventPayloadMap;
 
@@ -147,6 +159,35 @@ function event(type: string, payload: unknown): Record<string, unknown> {
     payload,
   };
 }
+
+test("validates child creation metadata", () => {
+  const child = parseEvent(
+    event("session.created", {
+      cwd: "/workspace",
+      parentSessionId: sessionId,
+      childName: "researcher",
+      childTask: "Research tmux",
+      spawnAuthority: "user",
+      historyMode: "fresh",
+    }),
+  );
+  assert.equal(child.type, "session.created");
+  assert.throws(
+    () => parseEvent(event("session.created", { cwd: "/workspace", childName: "orphan" })),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseEvent(
+        event("session.created", {
+          cwd: "/workspace",
+          parentSessionId: sessionId,
+          childName: "incomplete",
+        }),
+      ),
+    ProtocolValidationError,
+  );
+});
 
 test("validates every canonical event variant", () => {
   for (const [type, payload] of Object.entries(validPayloads)) {

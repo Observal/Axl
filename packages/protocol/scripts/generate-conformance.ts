@@ -150,6 +150,18 @@ const eventPayloads = {
   "sandbox.violation": { capability: "filesystem.write", reason: "outside workspace" },
   "context.compacted": { summary: "Earlier work", replacedEventIds: [otherEventId] },
   "session.error": { code: "provider_failed", message: "Provider unavailable", retryable: true },
+  "child.spawn_requested": {
+    childSessionId: otherSessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+  },
+  "child.started": { childSessionId: otherSessionId, name: "researcher" },
+  "child.input_queued": {
+    childSessionId: otherSessionId,
+    content: [{ type: "text", text: "Also inspect layouts" }],
+  },
   "child.result": {
     childSessionId: otherSessionId,
     status: "completed",
@@ -200,6 +212,18 @@ const params = {
   "session.unsubscribe": { subscriptionId: "subscription-1" },
   "session.fork": { sessionId, fromEventId: eventId },
   "session.clone": { sessionId },
+  "child.start": {
+    parentSessionId: sessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+  },
+  "child.send": {
+    parentSessionId: sessionId,
+    child: "researcher",
+    content: [{ type: "text", text: "Also check layouts" }],
+  },
   "session.export": { sessionId, outputDirectory: "/tmp/axl-session" },
   "session.import": { inputDirectory: "/tmp/axl-session", cwd: "/workspace" },
   "session.send": { sessionId, content: [{ type: "text", text: "hello" }], delivery: "prompt" },
@@ -377,6 +401,14 @@ const results = {
   "session.unsubscribe": { unsubscribed: true },
   "session.fork": { ...opened, selectedText: "hello" },
   "session.clone": opened,
+  "child.start": {
+    child: opened,
+    name: "researcher",
+    parentSessionId: sessionId,
+    authority: "user",
+    historyMode: "fresh",
+  },
+  "child.send": { queued: true, childSessionId: otherSessionId },
   "session.export": {
     outputDirectory: "/tmp/axl-session",
     sourceSha256: digest,
@@ -407,6 +439,7 @@ const results = {
     profile: "standard",
     webFetch: true,
     webSearch: false,
+    subagents: false,
     boundaryEventIds: [eventId],
   },
   "session.interaction.respond": {

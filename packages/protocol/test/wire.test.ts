@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -192,11 +193,36 @@ test("validates every request shape", () => {
     { kind: "request", id: 19, method: "session.clone", params: { sessionId } },
     {
       kind: "request",
+
       id: 31,
       method: "session.rename",
       params: { sessionId, title: "Focused work" },
     },
     { kind: "request", id: 32, method: "session.delete", params: { sessionId } },
+    {
+      kind: "request",
+      id: 26,
+      method: "child.start",
+      params: {
+        parentSessionId: sessionId,
+        name: "researcher",
+        task: "Research tmux",
+        authority: "user",
+        historyMode: "fresh",
+        providerId: "openrouter",
+        modelId: "openai/gpt-5",
+      },
+    },
+    {
+      kind: "request",
+      id: 27,
+      method: "child.send",
+      params: {
+        parentSessionId: sessionId,
+        child: "researcher",
+        content: [{ type: "text", text: "Also check layouts" }],
+      },
+    },
     {
       kind: "request",
       id: 3,
@@ -244,6 +270,12 @@ test("validates every request shape", () => {
         requestSettings: { maxOutputTokens: null, httpIdleTimeoutMs: 300_000 },
         profile: "minimal",
       },
+    },
+    {
+      kind: "request",
+      id: 8,
+      method: "session.configure",
+      params: { sessionId, subagents: true },
     },
     {
       kind: "request",
@@ -341,6 +373,43 @@ test("validates every request shape", () => {
       : request;
     assert.deepEqual(parseWireRequest(keyed), keyed);
   }
+});
+
+test("rejects unsafe child names and empty child tasks", () => {
+  const base = {
+    kind: "request",
+    id: 1,
+    method: "child.start",
+    idempotencyKey: "00000000-0000-4000-8000-000000000001",
+  } as const;
+  assert.throws(
+    () =>
+      parseWireRequest({
+        ...base,
+        params: {
+          parentSessionId: sessionId,
+          name: "worker;quit",
+          task: "work",
+          authority: "user",
+          historyMode: "fresh",
+        },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseWireRequest({
+        ...base,
+        params: {
+          parentSessionId: sessionId,
+          name: "worker",
+          task: "   ",
+          authority: "user",
+          historyMode: "fresh",
+        },
+      }),
+    ProtocolValidationError,
+  );
 });
 
 test("requires idempotency keys only for retryable mutations", () => {

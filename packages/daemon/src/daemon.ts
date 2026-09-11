@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomUUID } from "node:crypto";
@@ -13,17 +14,16 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   type AttachmentPresence,
-  type DaemonHostStatus,
-  type HostContext,
-  type HostResponse,
-  HOST_CONTROL_VERSION,
-  parseHostRequest,
   type CanonicalEvent,
   CanonicalEventSizeError,
   type ClientIdentity,
+  type DaemonHostStatus,
   type EventCursor,
   type EventId,
   encodeWireMessage,
+  HOST_CONTROL_VERSION,
+  type HostContext,
+  type HostResponse,
   hashCanonicalRequest,
   isKnownRpcErrorCode,
   isRetryableMutationMethod,
@@ -32,6 +32,7 @@ import {
   MAX_CANONICAL_EVENT_BYTES,
   MAX_WIRE_MESSAGE_BYTES,
   ProtocolValidationError,
+  parseHostRequest,
   parseOperationId,
   parseRpcResult,
   parseSessionId,
@@ -938,11 +939,16 @@ export class AxlDaemon {
     }
     const journal = this.commandJournal;
     if (journal === undefined) throw new Error("Command journal is not open");
-    const params = normalized.params as { readonly sessionId?: SessionId };
+    const params = normalized.params as {
+      readonly sessionId?: SessionId;
+      readonly parentSessionId?: SessionId;
+    };
+    const targetSessionId = params.sessionId ?? params.parentSessionId;
     const intendedSessionId =
       normalized.method === "session.create" ||
       normalized.method === "session.fork" ||
       normalized.method === "session.clone" ||
+      normalized.method === "child.start" ||
       normalized.method === "session.import"
         ? parseSessionId(randomUUID(), "intendedSessionId")
         : undefined;
@@ -972,7 +978,7 @@ export class AxlDaemon {
           idempotencyKey,
           method: normalized.method as RetryableMutationMethod,
           requestHash: hashCanonicalRequest(normalized.method, normalized.params as never),
-          ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
+          ...(targetSessionId === undefined ? {} : { targetSessionId }),
           ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
           ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
           ...(interactionId === undefined ? {} : { interactionId }),
@@ -1038,10 +1044,11 @@ export class AxlDaemon {
           providerId,
           modelId,
           thinkingLevel,
+          requestSettings,
           webFetch,
           webSearch,
+          subagents,
           profile,
-          requestSettings,
         } = request.params;
         const reservation = this.creationReservation(acceptance);
         const created = await this.sessions.create(
@@ -1053,6 +1060,7 @@ export class AxlDaemon {
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             ...(webFetch === undefined ? {} : { webFetch }),
             ...(webSearch === undefined ? {} : { webSearch }),
+            ...(subagents === undefined ? {} : { subagents }),
             profile: profile ?? "standard",
           },
           reservation,
@@ -1091,6 +1099,7 @@ export class AxlDaemon {
           ...(cloned.selectedText === undefined ? {} : { selectedText: cloned.selectedText }),
         };
       }
+
       case "session.rename":
         return this.sessions.rename(
           request.params.sessionId,
@@ -1100,6 +1109,58 @@ export class AxlDaemon {
       case "session.delete":
         await this.sessions.delete(request.params.sessionId);
         return { deleted: true, historyPreserved: false };
+
+      case "child.start": {
+        const {
+          parentSessionId,
+          name,
+          task,
+          authority,
+          historyMode,
+          providerId,
+          modelId,
+          thinkingLevel,
+          requestSettings,
+          webFetch,
+          webSearch,
+          subagents,
+          profile,
+        } = request.params;
+        const child = await this.sessions.startChild(
+          parentSessionId,
+          {
+            name,
+            task,
+            authority,
+            historyMode,
+            selection: {
+              ...(providerId === undefined ? {} : { providerId }),
+              ...(modelId === undefined ? {} : { modelId }),
+              ...(requestSettings === undefined ? {} : { requestSettings }),
+              ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+              ...(webFetch === undefined ? {} : { webFetch }),
+              ...(webSearch === undefined ? {} : { webSearch }),
+              ...(subagents === undefined ? {} : { subagents }),
+              ...(profile === undefined ? {} : { profile }),
+            },
+          },
+          this.creationReservation(acceptance),
+        );
+        return {
+          child: this.sessions.describe(child.sessionId),
+          name: child.name,
+          parentSessionId,
+          authority,
+          historyMode,
+        };
+      }
+      case "child.send":
+        return this.sessions.sendToChild(
+          request.params.parentSessionId,
+          request.params.child,
+          request.params.content,
+          this.mutationOperationId(acceptance),
+        );
       case "session.export":
         return this.sessions.exportArtifact(
           request.params.sessionId,
@@ -1180,10 +1241,11 @@ export class AxlDaemon {
           providerId,
           modelId,
           thinkingLevel,
+          requestSettings,
           webFetch,
           webSearch,
+          subagents,
           profile,
-          requestSettings,
         } = request.params;
         return this.sessions.configure(
           sessionId,
@@ -1194,6 +1256,7 @@ export class AxlDaemon {
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             ...(webFetch === undefined ? {} : { webFetch }),
             ...(webSearch === undefined ? {} : { webSearch }),
+            ...(subagents === undefined ? {} : { subagents }),
             ...(profile === undefined ? {} : { profile }),
           },
           this.mutationOperationId(acceptance),

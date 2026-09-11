@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
@@ -35,15 +36,15 @@ import {
   type AssistantStopReason,
   type BlobReference,
   type CanonicalEvent,
+  DEFAULT_MODEL_REQUEST_SETTINGS,
   EVENT_FORMAT_VERSION,
   type EventId,
   type EventPayloadMap,
   encodeCanonicalEvent,
-  DEFAULT_MODEL_REQUEST_SETTINGS,
-  type ModelRequestSettings,
   type InteractionAction,
   type JsonObject,
   type JsonValue,
+  type ModelRequestSettings,
   type OperationId,
   parseEvent,
   parseEventId,
@@ -113,6 +114,19 @@ export type SessionRuntimeBoundary =
   | "tool_change"
   | "config_change";
 
+export interface ChildRuntimeContext {
+  readonly name: string;
+  readonly task: string;
+  readonly authority: "user" | "script" | "goal" | "system";
+  readonly historyMode: "fresh" | "fork";
+}
+
+export interface ModelChildStartInput {
+  readonly name: string;
+  readonly task: string;
+  readonly historyMode?: "fresh" | "fork";
+}
+
 export interface SessionInteractionRequest {
   readonly kind: EventPayloadMap["interaction.requested"]["kind"];
   readonly source: string;
@@ -130,11 +144,19 @@ export type SessionRuntimeFactory = (input: {
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
   readonly selection: SessionConfiguration;
+  readonly child?: ChildRuntimeContext;
   readonly interact: (
     request: SessionInteractionRequest,
     signal?: AbortSignal,
   ) => Promise<SessionInteractionResponse>;
   readonly readBlob: (reference: BlobReference) => Promise<Uint8Array>;
+  readonly startChild?: (
+    input: ModelChildStartInput,
+  ) => Promise<{ readonly sessionId: SessionId; readonly name: string }>;
+  readonly sendToChild?: (
+    child: string,
+    content: readonly UserContent[],
+  ) => Promise<{ readonly childSessionId: SessionId }>;
 }) => SessionRuntime | Promise<SessionRuntime>;
 
 export interface SessionManagerOptions {
@@ -191,6 +213,8 @@ interface ManagedSession {
   readonly queue: QueuedTurn[];
   queueDraining: boolean;
   queueDrain?: Promise<void>;
+  readonly child?: ChildRuntimeContext;
+  childDeliveries: Promise<void>;
   disposing: boolean;
   checkpointError?: WorkspaceCheckpointError;
   workspaceCheckpointsEnabled: boolean;
@@ -218,6 +242,25 @@ function userMessageText(event: CanonicalEvent): string | undefined {
 }
 
 export type StoredSessionSummary = Omit<SessionSummary, "runtime" | "attachmentCount">;
+
+export interface ChildStartInput {
+  readonly name: string;
+  readonly task: string;
+  readonly authority: "user" | "script" | "goal" | "system";
+  readonly historyMode: "fresh" | "fork";
+  readonly selection: SessionConfiguration;
+}
+
+export interface ChildStartResult {
+  readonly sessionId: SessionId;
+  readonly events: readonly CanonicalEvent[];
+  readonly name: string;
+}
+
+export interface SessionCreationReservation {
+  readonly sessionId: SessionId;
+  readonly operationId: OperationId;
+}
 
 function summarizeSession(events: readonly CanonicalEvent[]): StoredSessionSummary {
   const created = events[0];
@@ -248,6 +291,7 @@ function summarizeSession(events: readonly CanonicalEvent[]): StoredSessionSumma
     ...(created.payload.parentSessionId === undefined
       ? {}
       : { parentSessionId: created.payload.parentSessionId }),
+    ...(created.payload.childName === undefined ? {} : { childName: created.payload.childName }),
     ...(sandbox?.type !== "sandbox.configured"
       ? {}
       : {
@@ -292,6 +336,11 @@ export async function listStoredSessions(
 }
 
 /** Owns every live session. Clients never receive a mutable kernel object. */
+const MAX_CHILD_DEPTH = 3;
+const MAX_DIRECT_CHILDREN = 4;
+const MAX_TREE_DESCENDANTS = 12;
+const MAX_CHILD_NOTIFICATION_CHARACTERS = 32_768;
+
 export class SessionManager {
   private readonly options: SessionManagerOptions;
   private readonly sessions = new Map<SessionId, ManagedSession>();
@@ -302,6 +351,9 @@ export class SessionManager {
   private readonly workspaceCheckpoints: WorkspaceCheckpointStore;
   private readonly workspace: WorkspaceService;
   private readonly blobs: BlobStore;
+  private readonly modelChildSequence = new Map<SessionId, Promise<void>>();
+  private readonly childTasks = new Map<SessionId, Promise<void>>();
+  private childTreeMutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: SessionManagerOptions) {
     this.options = { ...options, dataDirectory: resolve(options.dataDirectory) };
@@ -453,12 +505,39 @@ export class SessionManager {
     selection: SessionConfiguration,
     boundaryOperationId?: OperationId,
     creationOperationId?: OperationId,
+    creationPayload?: Omit<EventPayloadMap["session.created"], "cwd">,
   ): Promise<AgentSession> {
     const runtime = await this.options.runtime({
       sessionId,
       cwd,
       boundary,
       selection,
+      ...(creationPayload?.childName === undefined ||
+      creationPayload.childTask === undefined ||
+      creationPayload.spawnAuthority === undefined ||
+      creationPayload.historyMode === undefined
+        ? {}
+        : {
+            child: {
+              name: creationPayload.childName,
+              task: creationPayload.childTask,
+              authority: creationPayload.spawnAuthority,
+              historyMode: creationPayload.historyMode,
+            },
+          }),
+      ...(selection.subagents !== true
+        ? {}
+        : {
+            startChild: (input: ModelChildStartInput) =>
+              this.startModelChild(sessionId, input, selection),
+            sendToChild: (child: string, content: readonly UserContent[]) =>
+              this.sendToChild(
+                sessionId,
+                child,
+                content,
+                parseOperationId(randomUUID(), "operationId"),
+              ),
+          }),
       interact: (request, signal) => this.interact(sessionId, request, signal),
       readBlob: (reference) => this.blobs.readAll(sessionId, reference),
     });
@@ -488,6 +567,7 @@ export class SessionManager {
       ...(runtime.configDialect === undefined ? {} : { configDialect: runtime.configDialect }),
       ...(boundaryOperationId === undefined ? {} : { boundaryOperationId }),
       ...(creationOperationId === undefined ? {} : { creationOperationId }),
+      ...(creationPayload === undefined ? {} : { creationPayload }),
       onEvent: (event) => {
         events.push(event);
         this.authorizeEventBlobs(sessionId, event);
@@ -519,6 +599,7 @@ export class SessionManager {
     cwd: string,
     selection: SessionConfiguration,
     creationOperationId?: OperationId,
+    creationPayload?: Omit<EventPayloadMap["session.created"], "cwd">,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [];
     const listeners = new Set<(event: CanonicalEvent) => void>();
@@ -539,6 +620,7 @@ export class SessionManager {
       selection,
       undefined,
       creationOperationId,
+      creationPayload,
     );
     const stored = await session.log.read();
     events.length = 0;
@@ -568,6 +650,20 @@ export class SessionManager {
       interactions: new Map(),
       queue: [],
       queueDraining: false,
+      ...(creationPayload?.childName === undefined ||
+      creationPayload.childTask === undefined ||
+      creationPayload.spawnAuthority === undefined ||
+      creationPayload.historyMode === undefined
+        ? {}
+        : {
+            child: {
+              name: creationPayload.childName,
+              task: creationPayload.childTask,
+              authority: creationPayload.spawnAuthority,
+              historyMode: creationPayload.historyMode,
+            },
+          }),
+      childDeliveries: Promise.resolve(),
       disposing: false,
       workspaceCheckpointsEnabled: false,
     };
@@ -581,6 +677,7 @@ export class SessionManager {
     cwd: string,
     selection: SessionConfiguration = {},
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+    creationPayload?: Omit<EventPayloadMap["session.created"], "cwd">,
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     this.assertRunning();
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
@@ -595,7 +692,13 @@ export class SessionManager {
         root !== undefined &&
         (root.type !== "session.created" ||
           root.operationId !== reservation.operationId ||
-          root.payload.cwd !== canonicalCwd)
+          root.payload.cwd !== canonicalCwd ||
+          (creationPayload !== undefined &&
+            (root.payload.parentSessionId !== creationPayload.parentSessionId ||
+              root.payload.childName !== creationPayload.childName ||
+              root.payload.childTask !== creationPayload.childTask ||
+              root.payload.spawnAuthority !== creationPayload.spawnAuthority ||
+              root.payload.historyMode !== creationPayload.historyMode)))
       ) {
         throw new DaemonError(
           "corrupt_session",
@@ -603,8 +706,472 @@ export class SessionManager {
         );
       }
     }
-    const managed = await this.open(sessionId, canonicalCwd, selection, reservation?.operationId);
+    const managed = await this.open(
+      sessionId,
+      canonicalCwd,
+      selection,
+      reservation?.operationId,
+      creationPayload,
+    );
     return { sessionId, events: [...managed.events] };
+  }
+
+  private serializeChildTreeMutation<Result>(operation: () => Promise<Result>): Promise<Result> {
+    const result = this.childTreeMutationTail.then(operation);
+    this.childTreeMutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private startModelChild(
+    parentSessionId: SessionId,
+    input: ModelChildStartInput,
+    selection: SessionConfiguration,
+  ): Promise<{ readonly sessionId: SessionId; readonly name: string }> {
+    const previous = this.modelChildSequence.get(parentSessionId) ?? Promise.resolve();
+    let resolveResult!: (value: { readonly sessionId: SessionId; readonly name: string }) => void;
+    let rejectResult!: (reason: unknown) => void;
+    const result = new Promise<{ readonly sessionId: SessionId; readonly name: string }>(
+      (resolvePromise, rejectPromise) => {
+        resolveResult = resolvePromise;
+        rejectResult = rejectPromise;
+      },
+    );
+    const next = previous.then(async () => {
+      try {
+        const child = await this.startChild(
+          parentSessionId,
+          {
+            ...input,
+            authority: "user",
+            historyMode: "fresh",
+            selection: this.childSelection(selection, {}),
+          },
+          {
+            sessionId: parseSessionId(randomUUID(), "childSessionId"),
+            operationId: parseOperationId(randomUUID(), "operationId"),
+          },
+          true,
+        );
+        resolveResult({ sessionId: child.sessionId, name: child.name });
+      } catch (error) {
+        rejectResult(error);
+      }
+    });
+    this.modelChildSequence.set(
+      parentSessionId,
+      next.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return result;
+  }
+
+  private childSelection(
+    parent: SessionConfiguration,
+    requested: SessionConfiguration,
+  ): SessionConfiguration {
+    const profileTools: Record<NonNullable<SessionConfiguration["profile"]>, readonly string[]> = {
+      chat: [],
+      exec: ["bash"],
+      minimal: ["bash", "edit"],
+      standard: ["bash", "edit", "read", "write", "ask_user_question"],
+    };
+    const parentProfile = parent.profile ?? "standard";
+    const childProfile = requested.profile ?? parentProfile;
+    const parentTools = new Set(profileTools[parentProfile]);
+    if (profileTools[childProfile].some((tool) => !parentTools.has(tool))) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        "A child profile cannot add tools that are unavailable to its parent",
+      );
+    }
+    if (requested.webFetch === true && parent.webFetch !== true) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        "A child cannot enable parent-disabled web fetch",
+      );
+    }
+    if (requested.webSearch === true && parent.webSearch !== true) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        "A child cannot enable parent-disabled web search",
+      );
+    }
+    if (requested.subagents === true && parent.subagents !== true) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        "A child cannot add descendant spawn authority unavailable to its parent",
+      );
+    }
+    const subagents = parent.subagents === true && requested.subagents !== false;
+    return { ...parent, ...requested, subagents };
+  }
+
+  private childTreePosition(
+    parentSessionId: SessionId,
+    summaries: readonly StoredSessionSummary[],
+  ): { readonly depth: number; readonly directChildren: number; readonly descendants: number } {
+    const byId = new Map(summaries.map((summary) => [summary.sessionId, summary]));
+    let rootId = parentSessionId;
+    let depth = 0;
+    let current = byId.get(parentSessionId);
+    const ancestry = new Set<SessionId>();
+    while (current?.childName !== undefined && current.parentSessionId !== undefined) {
+      if (ancestry.has(current.sessionId)) {
+        throw new DaemonError(
+          "corrupt_session",
+          `Child-session ancestry cycle includes ${current.sessionId}`,
+        );
+      }
+      ancestry.add(current.sessionId);
+      depth += 1;
+      rootId = current.parentSessionId;
+      const parent = byId.get(current.parentSessionId);
+      if (parent === undefined) {
+        throw new DaemonError(
+          "corrupt_session",
+          `Child session ${current.sessionId} references missing parent ${current.parentSessionId}`,
+        );
+      }
+      current = parent;
+    }
+    const directChildren = summaries.filter(
+      (summary) => summary.childName !== undefined && summary.parentSessionId === parentSessionId,
+    ).length;
+    const pending = [rootId];
+    const descendants = new Set<SessionId>();
+    while (pending.length > 0) {
+      const parentId = pending.shift() as SessionId;
+      for (const summary of summaries) {
+        if (
+          summary.childName !== undefined &&
+          summary.parentSessionId === parentId &&
+          !descendants.has(summary.sessionId)
+        ) {
+          descendants.add(summary.sessionId);
+          pending.push(summary.sessionId);
+        }
+      }
+    }
+    return { depth, directChildren, descendants: descendants.size };
+  }
+
+  startChild(
+    parentSessionId: unknown,
+    input: ChildStartInput,
+    reservation: SessionCreationReservation | undefined,
+    allowActiveParent = false,
+  ): Promise<ChildStartResult> {
+    return this.serializeChildTreeMutation(() =>
+      this.startChildUnserialized(parentSessionId, input, reservation, allowActiveParent),
+    );
+  }
+
+  private async startChildUnserialized(
+    parentSessionId: unknown,
+    input: ChildStartInput,
+    reservation: SessionCreationReservation | undefined,
+    allowActiveParent: boolean,
+  ): Promise<ChildStartResult> {
+    this.assertRunning();
+    if (reservation === undefined) {
+      throw new DaemonError("invalid_idempotency_key", "Child creation requires a reservation");
+    }
+    if (input.authority !== "user") {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        "The first child-session slice accepts only explicit user authority",
+      );
+    }
+    const parentId = parseSessionId(parentSessionId, "parentSessionId");
+    await this.resume(parentId);
+    const parent = this.managed(parentId);
+    if (parent.disposing) {
+      throw new DaemonError("operation_active", "The parent session is being disposed");
+    }
+    if ((!allowActiveParent && parent.activeTurn) || parent.rebuilding) {
+      throw new DaemonError(
+        "operation_active",
+        "An operation owns the parent session; start the child after it",
+      );
+    }
+    const summaries = await this.list();
+    const position = this.childTreePosition(parentId, summaries);
+    if (position.depth >= MAX_CHILD_DEPTH) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        `Child depth limit ${MAX_CHILD_DEPTH} reached`,
+      );
+    }
+    if (position.directChildren >= MAX_DIRECT_CHILDREN) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        `Direct child limit ${MAX_DIRECT_CHILDREN} reached`,
+      );
+    }
+    if (position.descendants >= MAX_TREE_DESCENDANTS) {
+      throw new DaemonError(
+        "invalid_spawn_authority",
+        `Descendant limit ${MAX_TREE_DESCENDANTS} reached`,
+      );
+    }
+    const childSelection = this.childSelection(parent.selection, input.selection);
+    const forkPoint = input.historyMode === "fork" ? parent.events.at(-1)?.id : undefined;
+    if (input.historyMode === "fork" && forkPoint === undefined) {
+      throw new DaemonError("empty_session", "Parent has no history to fork");
+    }
+    const siblingNames = new Set(
+      summaries
+        .filter((summary) => summary.parentSessionId === parentId)
+        .flatMap((summary) => (summary.childName === undefined ? [] : [summary.childName])),
+    );
+    let name = input.name;
+    for (let suffix = 2; siblingNames.has(name); suffix += 1) name = `${input.name}-${suffix}`;
+    const priorSpawn = parent.events.find(
+      (event) =>
+        event.type === "child.spawn_requested" && event.operationId === reservation.operationId,
+    );
+    if (priorSpawn?.type === "child.spawn_requested") {
+      if (priorSpawn.payload.childSessionId !== reservation.sessionId) {
+        throw new DaemonError(
+          "corrupt_session",
+          "Child reservation does not match its parent event",
+        );
+      }
+    } else {
+      await parent.session.recordChildSpawnRequested(reservation.operationId, {
+        childSessionId: reservation.sessionId,
+        name,
+        task: input.task,
+        authority: input.authority,
+        historyMode: input.historyMode,
+      });
+    }
+    if (input.historyMode === "fork") {
+      const forked = await this.copySession(
+        parentId,
+        forkPoint as EventId,
+        true,
+        undefined,
+        reservation,
+        {
+          childName: name,
+          childTask: input.task,
+          spawnAuthority: input.authority,
+          historyMode: input.historyMode,
+        },
+        childSelection,
+      );
+      await parent.session.recordChildStarted(reservation.operationId, {
+        childSessionId: forked.sessionId,
+        name,
+      });
+      this.startChildTask(forked.sessionId, input.task);
+      return { ...forked, name };
+    }
+    const child = await this.create(parent.cwd, childSelection, reservation, {
+      parentSessionId: parentId,
+      childName: name,
+      childTask: input.task,
+      spawnAuthority: input.authority,
+      historyMode: input.historyMode,
+    });
+    await parent.session.recordChildStarted(reservation.operationId, {
+      childSessionId: child.sessionId,
+      name,
+    });
+    this.startChildTask(child.sessionId, input.task);
+    return { ...child, name };
+  }
+
+  async sendToChild(
+    parentSessionId: unknown,
+    childNameOrId: string,
+    content: readonly UserContent[],
+    operationId: OperationId | undefined,
+  ): Promise<{ readonly queued: true; readonly childSessionId: SessionId }> {
+    if (operationId === undefined) {
+      throw new DaemonError("internal_error", "Child message operation ID is missing");
+    }
+    const parentId = parseSessionId(parentSessionId, "parentSessionId");
+    await this.resume(parentId);
+    const childSummary = (await this.list()).find(
+      (summary) =>
+        summary.parentSessionId === parentId &&
+        (summary.sessionId === childNameOrId || summary.childName === childNameOrId),
+    );
+    if (childSummary === undefined) {
+      throw new DaemonError(
+        "unknown_child",
+        `No child named ${childNameOrId} belongs to this parent`,
+      );
+    }
+    await this.resume(childSummary.sessionId);
+    const parent = this.managed(parentId);
+    const prior = parent.events.find(
+      (event) => event.type === "child.input_queued" && event.operationId === operationId,
+    );
+    if (prior?.type === "child.input_queued") {
+      await this.enqueue(prior.payload.childSessionId, prior.payload.content, "back", operationId);
+      return { queued: true, childSessionId: prior.payload.childSessionId };
+    }
+    await parent.session.recordChildInputQueued(operationId, {
+      childSessionId: childSummary.sessionId,
+      content,
+    });
+    await this.enqueue(childSummary.sessionId, content, "back", operationId);
+    return { queued: true, childSessionId: childSummary.sessionId };
+  }
+
+  private startChildTask(childSessionId: SessionId, task: string): void {
+    if (this.childTasks.has(childSessionId)) return;
+    const running = this.runChildTask(childSessionId, task).finally(() => {
+      if (this.childTasks.get(childSessionId) === running) this.childTasks.delete(childSessionId);
+    });
+    this.childTasks.set(childSessionId, running);
+    void running;
+  }
+
+  private async waitForDescendantTasks(parentSessionId: SessionId): Promise<void> {
+    for (;;) {
+      const directTasks = [...this.childTasks.entries()].flatMap(([sessionId, task]) => {
+        const managed = this.sessions.get(sessionId);
+        const created = managed?.events[0];
+        return created?.type === "session.created" &&
+          created.payload.parentSessionId === parentSessionId
+          ? [task]
+          : [];
+      });
+      if (directTasks.length === 0) break;
+      await Promise.allSettled(directTasks);
+    }
+    await this.sessions.get(parentSessionId)?.childDeliveries;
+  }
+
+  private async runChildTask(childSessionId: SessionId, task: string): Promise<void> {
+    let status: EventPayloadMap["child.result"]["status"] = "completed";
+    let result: JsonValue | undefined;
+    try {
+      const outcome = await this.send(childSessionId, [{ type: "text", text: task }]);
+      await this.waitForDescendantTasks(childSessionId);
+      const child = this.sessions.get(childSessionId);
+      const assistant = child?.events.findLast(
+        (event) => event.type === "assistant.message" && event.payload.stopReason !== "tool_use",
+      );
+      const stopReason =
+        assistant?.type === "assistant.message" ? assistant.payload.stopReason : outcome.stopReason;
+      status =
+        stopReason === "aborted" ? "aborted" : stopReason === "error" ? "failed" : "completed";
+      if (assistant?.type === "assistant.message") {
+        result = {
+          content: assistant.payload.content,
+          stopReason: assistant.payload.stopReason,
+          ...(assistant.payload.errorMessage === undefined
+            ? {}
+            : { errorMessage: assistant.payload.errorMessage }),
+        };
+      }
+    } catch (error) {
+      status = "failed";
+      result = { message: error instanceof Error ? error.message : "Child task failed" };
+      const child = this.sessions.get(childSessionId);
+      if (child !== undefined) {
+        await child.session.recordSessionError(parseOperationId(randomUUID(), "operationId"), {
+          code: "child_task_failed",
+          message: error instanceof Error ? error.message : "Child task failed",
+          retryable: false,
+        });
+      }
+    }
+    const child = this.sessions.get(childSessionId);
+    const root = child?.events[0];
+    const parentSessionId =
+      root?.type === "session.created" ? root.payload.parentSessionId : undefined;
+    if (parentSessionId === undefined) return;
+    try {
+      await this.resume(parentSessionId);
+      const parent = this.managed(parentSessionId);
+      const name = root?.type === "session.created" ? root.payload.childName : undefined;
+      const resultObject =
+        result !== undefined &&
+        typeof result === "object" &&
+        result !== null &&
+        !Array.isArray(result)
+          ? (result as JsonObject)
+          : undefined;
+      const resultContent = resultObject?.content;
+      const resultText = Array.isArray(resultContent)
+        ? resultContent
+            .flatMap((item: JsonValue) => {
+              if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+              const block = item as JsonObject;
+              return block.type === "text" && typeof block.text === "string" ? [block.text] : [];
+            })
+            .join("\n")
+        : undefined;
+      const notificationResult =
+        resultText === undefined || resultText.length <= MAX_CHILD_NOTIFICATION_CHARACTERS
+          ? resultText
+          : `${resultText.slice(0, MAX_CHILD_NOTIFICATION_CHARACTERS)}\n\n[Subagent result truncated; inspect child session ${childSessionId} for complete output.]`;
+      const notification = [
+        `[Subagent result: ${name ?? childSessionId}]`,
+        `Status: ${status}`,
+        ...(notificationResult === undefined || notificationResult.length === 0
+          ? []
+          : ["", notificationResult]),
+      ].join("\n");
+      const delivery = parent.childDeliveries.then(async () => {
+        await parent.session.recordChildResult(undefined, {
+          childSessionId,
+          status,
+          ...(result === undefined ? {} : { result }),
+        });
+        await this.deliverChildNotification(parentSessionId, notification);
+      });
+      parent.childDeliveries = delivery.then(
+        () => undefined,
+        () => undefined,
+      );
+      await delivery;
+    } catch (error) {
+      if (error instanceof DaemonError && error.code === "unknown_session") return;
+      if (child !== undefined) {
+        await child.session.recordSessionError(parseOperationId(randomUUID(), "operationId"), {
+          code: "child_result_delivery_failed",
+          message: error instanceof Error ? error.message : "Could not deliver child result",
+          retryable: false,
+        });
+      }
+    }
+  }
+
+  private async deliverChildNotification(
+    parentSessionId: SessionId,
+    notification: string,
+  ): Promise<void> {
+    const parent = this.managed(parentSessionId);
+    if (parent.activeTurn?.kind === "turn" && !parent.rebuilding) {
+      await this.steer(parentSessionId, [{ type: "text", text: notification }]);
+      return;
+    }
+    if (parent.activeTurn !== undefined || parent.rebuilding) {
+      await this.enqueue(
+        parentSessionId,
+        [{ type: "text", text: notification }],
+        "back",
+        parseOperationId(randomUUID(), "operationId"),
+      );
+      return;
+    }
+    await this.send(
+      parentSessionId,
+      [{ type: "text", text: notification }],
+      parseOperationId(randomUUID(), "operationId"),
+    );
   }
 
   async reconcileAcceptedMutation(acceptance: {
@@ -620,6 +1187,7 @@ export class SessionManager {
       acceptance.method === "session.create" ||
       acceptance.method === "session.fork" ||
       acceptance.method === "session.clone" ||
+      acceptance.method === "child.start" ||
       acceptance.method === "session.import"
     ) {
       const intended = acceptance.intendedSessionId;
@@ -642,6 +1210,37 @@ export class SessionManager {
       }
       await this.resume(intended);
       const result = this.describe(intended);
+      if (acceptance.method === "child.start") {
+        const parentSessionId = root.payload.parentSessionId;
+        const name = root.payload.childName;
+        const task = root.payload.childTask;
+        const authority = root.payload.spawnAuthority;
+        const historyMode = root.payload.historyMode;
+        if (
+          parentSessionId === undefined ||
+          name === undefined ||
+          task === undefined ||
+          authority === undefined ||
+          historyMode === undefined
+        ) {
+          throw new DaemonError(
+            "corrupt_session",
+            `Child session ${intended} lacks creation metadata`,
+          );
+        }
+        if (
+          !events.some(
+            (event) =>
+              event.type === "user.message" &&
+              event.payload.content.some(
+                (content) => content.type === "text" && content.text === task,
+              ),
+          )
+        ) {
+          this.startChildTask(intended, task);
+        }
+        return { child: result, name, parentSessionId, authority, historyMode };
+      }
       if (acceptance.method !== "session.fork") return result;
       const sourceId = root.payload.parentSessionId;
       const sourceEventId = root.payload.sourceEventId;
@@ -813,6 +1412,12 @@ export class SessionManager {
       const requeued = evidence.find((event) => event.type === "queue.requeued");
       return requeued?.type === "queue.requeued"
         ? { queueItemId: requeued.payload.queueItemId, state: "queued" }
+        : undefined;
+    }
+    if (acceptance.method === "child.send") {
+      const queued = evidence.find((event) => event.type === "child.input_queued");
+      return queued?.type === "child.input_queued"
+        ? { queued: true, childSessionId: queued.payload.childSessionId }
         : undefined;
     }
     if (acceptance.method === "session.send") {
@@ -1113,6 +1718,11 @@ export class SessionManager {
     includeTarget: boolean,
     selectedText?: string,
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+    childMetadata?: Pick<
+      EventPayloadMap["session.created"],
+      "childName" | "childTask" | "spawnAuthority" | "historyMode"
+    >,
+    targetSelection?: SessionConfiguration,
   ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
@@ -1124,7 +1734,13 @@ export class SessionManager {
     const targetOperationId = lineage.at(-1)?.operationId;
     const copied = (includeTarget ? lineage.slice(1) : lineage.slice(1, -1)).filter(
       (event) =>
-        includeTarget || targetOperationId === undefined || event.operationId !== targetOperationId,
+        event.type !== "child.spawn_requested" &&
+        event.type !== "child.started" &&
+        event.type !== "child.input_queued" &&
+        event.type !== "child.result" &&
+        (includeTarget ||
+          targetOperationId === undefined ||
+          event.operationId !== targetOperationId),
     );
     const sessionId = reservation?.sessionId ?? parseSessionId(randomUUID(), "sessionId");
     const path = this.logPath(sessionId);
@@ -1158,7 +1774,15 @@ export class SessionManager {
             `Reserved session ${sessionId} has conflicting history`,
           );
         }
-        const managed = await this.open(sessionId, source.cwd, source.selection);
+        const managed = await this.open(
+          sessionId,
+          source.cwd,
+          targetSelection ?? source.selection,
+          undefined,
+          childMetadata === undefined
+            ? undefined
+            : { parentSessionId: sourceId, sourceEventId: targetId, ...childMetadata },
+        );
         return {
           sessionId,
           events: [...managed.events],
@@ -1178,7 +1802,12 @@ export class SessionManager {
         parentId: null,
         timestamp: startedAt,
         type: "session.created",
-        payload: { cwd: source.cwd, parentSessionId: sourceId, sourceEventId: targetId },
+        payload: {
+          cwd: source.cwd,
+          parentSessionId: sourceId,
+          sourceEventId: targetId,
+          ...childMetadata,
+        },
       });
       eventIds.set(sourceRoot.id, root.id);
       let parentId = root.id;
@@ -1241,7 +1870,15 @@ export class SessionManager {
           await directory.close();
         }
       }
-      const managed = await this.open(sessionId, source.cwd, source.selection);
+      const managed = await this.open(
+        sessionId,
+        source.cwd,
+        targetSelection ?? source.selection,
+        undefined,
+        childMetadata === undefined
+          ? undefined
+          : { parentSessionId: sourceId, sourceEventId: targetId, ...childMetadata },
+      );
       return {
         sessionId,
         events: [...managed.events],
@@ -1275,6 +1912,7 @@ export class SessionManager {
     let requestSettings: ModelRequestSettings | undefined;
     let webFetch: boolean | undefined;
     let webSearch: boolean | undefined;
+    let subagents: boolean | undefined;
     let profile: SessionConfiguration["profile"] = created.payload.profile;
     for (const event of events) {
       if (event.type === "config.provider") providerId = event.payload.providerId;
@@ -1285,19 +1923,43 @@ export class SessionManager {
       else if (event.type === "config.tools") {
         webFetch = event.payload.webFetch;
         webSearch = event.payload.webSearch;
+        subagents = event.payload.subagents;
       }
     }
-    return this.open(sessionId, created.payload.cwd, {
-      // Event-format v1 sessions created before provider selection was logged
-      // always used Azure OpenAI Responses.
-      providerId: providerId ?? "azure-openai-responses",
-      ...(requestSettings === undefined ? {} : { requestSettings }),
-      ...(modelId === undefined ? {} : { modelId }),
-      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-      ...(webFetch === undefined ? {} : { webFetch }),
-      ...(webSearch === undefined ? {} : { webSearch }),
-      profile: profile ?? "standard",
-    });
+    return this.open(
+      sessionId,
+      created.payload.cwd,
+      {
+        // Event-format v1 sessions created before provider selection was logged
+        // always used Azure OpenAI Responses.
+        providerId: providerId ?? "azure-openai-responses",
+        ...(requestSettings === undefined ? {} : { requestSettings }),
+        ...(modelId === undefined ? {} : { modelId }),
+        ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+        ...(webFetch === undefined ? {} : { webFetch }),
+        ...(webSearch === undefined ? {} : { webSearch }),
+        ...(subagents === undefined ? {} : { subagents }),
+        profile: profile ?? "standard",
+      },
+      undefined,
+      created.payload.childName === undefined ||
+        created.payload.childTask === undefined ||
+        created.payload.spawnAuthority === undefined ||
+        created.payload.historyMode === undefined
+        ? undefined
+        : {
+            ...(created.payload.parentSessionId === undefined
+              ? {}
+              : { parentSessionId: created.payload.parentSessionId }),
+            ...(created.payload.sourceEventId === undefined
+              ? {}
+              : { sourceEventId: created.payload.sourceEventId }),
+            childName: created.payload.childName,
+            childTask: created.payload.childTask,
+            spawnAuthority: created.payload.spawnAuthority,
+            historyMode: created.payload.historyMode,
+          },
+    );
   }
 
   async reload(
@@ -1332,6 +1994,7 @@ export class SessionManager {
     webFetch: boolean;
     webSearch: boolean;
     requestSettings: ModelRequestSettings;
+    subagents: boolean;
     boundaryEventIds: readonly EventId[];
   }> {
     const managed = this.managed(sessionId);
@@ -1374,7 +2037,8 @@ export class SessionManager {
       (update.modelId !== undefined && update.modelId !== managed.selection.modelId)
         ? "model_switch"
         : (update.webFetch !== undefined && update.webFetch !== managed.selection.webFetch) ||
-            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch)
+            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch) ||
+            (update.subagents !== undefined && update.subagents !== managed.selection.subagents)
           ? "tool_change"
           : "config_change";
     const before = managed.events.length;
@@ -1406,6 +2070,7 @@ export class SessionManager {
     webFetch: boolean;
     webSearch: boolean;
     requestSettings: ModelRequestSettings;
+    subagents: boolean;
     boundaryEventIds: readonly EventId[];
   } {
     const providerId = managed.selection.providerId;
@@ -1435,6 +2100,7 @@ export class SessionManager {
       profile: managed.selection.profile ?? "standard",
       webFetch: tools?.type === "config.tools" ? tools.payload.webFetch : false,
       webSearch: tools?.type === "config.tools" ? tools.payload.webSearch : false,
+      subagents: tools?.type === "config.tools" ? (tools.payload.subagents ?? false) : false,
       boundaryEventIds: boundaryEvents.map((event) => event.id),
     };
   }
@@ -2118,24 +2784,50 @@ export class SessionManager {
     sessionId: unknown,
     acceptedTargetOperationId?: OperationId,
   ): { interrupted: boolean; operationId?: OperationId } {
-    const managed = this.managed(sessionId);
-    const target = acceptedTargetOperationId ?? managed.activeTurn?.operationId;
-    if (target === undefined) return { interrupted: false };
-    const terminal = managed.events.findLast(
-      (event) =>
-        event.operationId === target &&
-        ((event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
-          event.type === "session.error" ||
-          event.type === "user.shell" ||
-          event.type === "context.compacted"),
-    );
-    if (terminal !== undefined) return { interrupted: false };
-    if (managed.activeTurn?.operationId === target) {
-      managed.activeTurn.controller.abort();
-    } else {
-      managed.pendingInterrupts.add(target);
+    const rootId = parseSessionId(sessionId, "sessionId");
+    const root = this.managed(rootId);
+    const target = acceptedTargetOperationId ?? root.activeTurn?.operationId;
+    let interrupted = false;
+    if (target !== undefined) {
+      const terminal = root.events.findLast(
+        (event) =>
+          event.operationId === target &&
+          ((event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+            event.type === "session.error" ||
+            event.type === "user.shell" ||
+            event.type === "context.compacted"),
+      );
+      if (terminal === undefined) {
+        if (root.activeTurn?.operationId === target) root.activeTurn.controller.abort();
+        else root.pendingInterrupts.add(target);
+        interrupted = true;
+      }
     }
-    return { interrupted: true, operationId: target };
+    const pending = [rootId];
+    const visited = new Set<SessionId>();
+    while (pending.length > 0) {
+      const parentId = pending.shift() as SessionId;
+      if (visited.has(parentId)) continue;
+      visited.add(parentId);
+      for (const candidate of this.sessions.values()) {
+        const created = candidate.events[0];
+        if (
+          created?.type === "session.created" &&
+          created.payload.parentSessionId === parentId &&
+          !visited.has(candidate.session.log.sessionId)
+        ) {
+          pending.push(candidate.session.log.sessionId);
+          if (candidate.activeTurn !== undefined) {
+            candidate.activeTurn.controller.abort();
+            interrupted = true;
+          }
+        }
+      }
+    }
+    return {
+      interrupted,
+      ...(target === undefined ? {} : { operationId: target }),
+    };
   }
 
   subscribe(
@@ -2298,6 +2990,15 @@ export class SessionManager {
         boundary,
         selection,
         operationId,
+        undefined,
+        managed.child === undefined
+          ? undefined
+          : {
+              childName: managed.child.name,
+              childTask: managed.child.task,
+              spawnAuthority: managed.child.authority,
+              historyMode: managed.child.historyMode,
+            },
       );
       await previous.dispose();
       managed.session = next;
@@ -2345,8 +3046,30 @@ export class SessionManager {
     this.options.onSessionMetadataChange?.();
   }
 
-  async dispose(sessionId: unknown, operationId?: OperationId): Promise<void> {
+  dispose(sessionId: unknown, operationId?: OperationId): Promise<void> {
     const parsed = parseSessionId(sessionId, "sessionId");
+    return this.serializeChildTreeMutation(() => this.disposeTree(parsed, operationId, new Set()));
+  }
+
+  private async disposeTree(
+    parsed: SessionId,
+    operationId: OperationId | undefined,
+    visited: Set<SessionId>,
+  ): Promise<void> {
+    if (visited.has(parsed)) {
+      throw new DaemonError("corrupt_session", `Child-session cycle includes ${parsed}`);
+    }
+    visited.add(parsed);
+    const children = (await this.list()).filter(
+      (summary) => summary.parentSessionId === parsed && summary.childName !== undefined,
+    );
+    for (const child of children) {
+      await this.disposeTree(
+        child.sessionId,
+        parseOperationId(randomUUID(), "childDisposeOperationId"),
+        visited,
+      );
+    }
     let managed = this.sessions.get(parsed);
     if (!managed && operationId !== undefined) {
       try {
@@ -2459,12 +3182,28 @@ export class SessionManager {
 
   async disposeAll(): Promise<void> {
     this.beginShutdown();
-    const results = await Promise.allSettled(
-      [...this.sessions.keys()].map((sessionId) => this.dispose(sessionId)),
+    const summaries = await this.list();
+    const open = new Set(this.sessions.keys());
+    const roots = summaries.filter(
+      (summary) =>
+        open.has(summary.sessionId) &&
+        (summary.parentSessionId === undefined || !open.has(summary.parentSessionId)),
     );
-    const failures = results.flatMap((result) =>
-      result.status === "rejected" ? [result.reason] : [],
-    );
+    const failures: unknown[] = [];
+    for (const root of roots) {
+      try {
+        await this.dispose(root.sessionId);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    for (const sessionId of [...this.sessions.keys()]) {
+      try {
+        await this.dispose(sessionId);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
     if (failures.length) throw new AggregateError(failures, "Session cleanup failed");
   }
 

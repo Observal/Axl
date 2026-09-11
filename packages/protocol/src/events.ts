@@ -71,6 +71,10 @@ export type EventPayloadMap = {
     readonly profile?: SessionProfile;
     readonly parentSessionId?: SessionId;
     readonly sourceEventId?: EventId;
+    readonly childName?: string;
+    readonly childTask?: string;
+    readonly spawnAuthority?: "user" | "script" | "goal" | "system";
+    readonly historyMode?: "fresh" | "fork";
   };
   "session.resumed": Record<string, never>;
   "session.renamed": { readonly title: string };
@@ -133,6 +137,7 @@ export type EventPayloadMap = {
   "config.tools": {
     readonly webFetch: boolean;
     readonly webSearch: boolean;
+    readonly subagents?: boolean;
   };
   "config.dialect": {
     readonly dialectId: string;
@@ -186,6 +191,21 @@ export type EventPayloadMap = {
     readonly message: string;
     readonly retryable: boolean;
     readonly details?: JsonValue;
+  };
+  "child.spawn_requested": {
+    readonly childSessionId: SessionId;
+    readonly name: string;
+    readonly task: string;
+    readonly authority: "user" | "script" | "goal" | "system";
+    readonly historyMode: "fresh" | "fork";
+  };
+  "child.started": {
+    readonly childSessionId: SessionId;
+    readonly name: string;
+  };
+  "child.input_queued": {
+    readonly childSessionId: SessionId;
+    readonly content: readonly UserContent[];
   };
   "child.result": {
     readonly childSessionId: SessionId;
@@ -342,7 +362,20 @@ function validateEventIds(value: JsonValue | undefined, path: string): void {
 
 const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
   "session.created": (payload, path) => {
-    exact(payload, path, ["cwd"], ["profile", "parentSessionId", "sourceEventId"]);
+    exact(
+      payload,
+      path,
+      ["cwd"],
+      [
+        "profile",
+        "parentSessionId",
+        "sourceEventId",
+        "childName",
+        "childTask",
+        "spawnAuthority",
+        "historyMode",
+      ],
+    );
     string(payload.cwd, `${path}.cwd`);
     if (payload.profile !== undefined) {
       choice(payload.profile, `${path}.profile`, ["minimal", "standard", "chat", "exec"]);
@@ -351,6 +384,32 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
       parseSessionId(payload.parentSessionId, `${path}.parentSessionId`);
     if (payload.sourceEventId !== undefined)
       parseEventId(payload.sourceEventId, `${path}.sourceEventId`);
+    optionalString(payload.childName, `${path}.childName`);
+    optionalString(payload.childTask, `${path}.childTask`);
+    if (payload.spawnAuthority !== undefined)
+      choice(payload.spawnAuthority, `${path}.spawnAuthority`, [
+        "user",
+        "script",
+        "goal",
+        "system",
+      ]);
+    if (payload.historyMode !== undefined)
+      choice(payload.historyMode, `${path}.historyMode`, ["fresh", "fork"]);
+    const childFields = [
+      ["childName", payload.childName],
+      ["childTask", payload.childTask],
+      ["spawnAuthority", payload.spawnAuthority],
+      ["historyMode", payload.historyMode],
+    ] as const;
+    const hasChildMetadata = childFields.some(([, value]) => value !== undefined);
+    if (hasChildMetadata && payload.parentSessionId === undefined) {
+      validationError(`${path}.parentSessionId`, "is required for child metadata");
+    }
+    if (hasChildMetadata) {
+      for (const [field, value] of childFields) {
+        if (value === undefined) validationError(`${path}.${field}`, "is required for a child");
+      }
+    }
     return payload;
   },
   "session.resumed": (payload, path) => {
@@ -507,9 +566,10 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "config.tools": (payload, path) => {
-    exact(payload, path, ["webFetch", "webSearch"]);
+    exact(payload, path, ["webFetch", "webSearch"], ["subagents"]);
     boolean(payload.webFetch, `${path}.webFetch`);
     boolean(payload.webSearch, `${path}.webSearch`);
+    if (payload.subagents !== undefined) boolean(payload.subagents, `${path}.subagents`);
     return payload;
   },
   "config.dialect": (payload, path) => {
@@ -615,6 +675,27 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.code, `${path}.code`);
     string(payload.message, `${path}.message`);
     boolean(payload.retryable, `${path}.retryable`);
+    return payload;
+  },
+  "child.spawn_requested": (payload, path) => {
+    exact(payload, path, ["childSessionId", "name", "task", "authority", "historyMode"]);
+    parseSessionId(payload.childSessionId, `${path}.childSessionId`);
+    string(payload.name, `${path}.name`);
+    string(payload.task, `${path}.task`);
+    choice(payload.authority, `${path}.authority`, ["user", "script", "goal", "system"]);
+    choice(payload.historyMode, `${path}.historyMode`, ["fresh", "fork"]);
+    return payload;
+  },
+  "child.started": (payload, path) => {
+    exact(payload, path, ["childSessionId", "name"]);
+    parseSessionId(payload.childSessionId, `${path}.childSessionId`);
+    string(payload.name, `${path}.name`);
+    return payload;
+  },
+  "child.input_queued": (payload, path) => {
+    exact(payload, path, ["childSessionId", "content"]);
+    parseSessionId(payload.childSessionId, `${path}.childSessionId`);
+    validateContent(payload.content, `${path}.content`, false);
     return payload;
   },
   "child.result": (payload, path) => {

@@ -183,6 +183,8 @@ export interface AgentSessionOptions {
   readonly configDialect?: EventPayloadMap["config.dialect"];
   /** Canonical operation that durably reserved a newly created session. */
   readonly creationOperationId?: OperationId;
+  /** Optional relationship metadata for a newly created child session. */
+  readonly creationPayload?: Omit<EventPayloadMap["session.created"], "cwd">;
   /** Canonical operation owning configuration events emitted at this boundary. */
   readonly boundaryOperationId?: OperationId;
   /** Live tail: invoked after each event is durably appended, in append order. */
@@ -320,7 +322,10 @@ export class AgentSession {
       });
     }
     if (opened.events.length === 0) {
-      await session.append(options.creationOperationId, "session.created", { cwd: options.cwd });
+      await session.append(options.creationOperationId, "session.created", {
+        cwd: options.cwd,
+        ...options.creationPayload,
+      });
       // The stable prompt freezes at session start; its sections are logged once.
       for (const section of options.prompt?.sections ?? []) {
         await session.append(undefined, "prompt.section", section);
@@ -869,6 +874,37 @@ export class AgentSession {
     return this.append(operationId, "session.error", payload);
   }
 
+  /** Appends a daemon-owned child spawn request to the parent session log. */
+  recordChildSpawnRequested(
+    operationId: OperationId,
+    payload: EventPayloadMap["child.spawn_requested"],
+  ): Promise<CanonicalEvent<"child.spawn_requested">> {
+    return this.append(operationId, "child.spawn_requested", payload);
+  }
+
+  recordChildStarted(
+    operationId: OperationId,
+    payload: EventPayloadMap["child.started"],
+  ): Promise<CanonicalEvent<"child.started">> {
+    return this.append(operationId, "child.started", payload);
+  }
+
+  /** Appends parent-to-child input ownership before dispatching it to the child. */
+  recordChildInputQueued(
+    operationId: OperationId,
+    payload: EventPayloadMap["child.input_queued"],
+  ): Promise<CanonicalEvent<"child.input_queued">> {
+    return this.append(operationId, "child.input_queued", payload);
+  }
+
+  /** Appends a daemon-owned child lifecycle result to the parent session log. */
+  recordChildResult(
+    operationId: OperationId | undefined,
+    payload: EventPayloadMap["child.result"],
+  ): Promise<CanonicalEvent<"child.result">> {
+    return this.append(operationId, "child.result", payload);
+  }
+
   /** Executes each call, appending paired call/result events. Returns true when aborted. */
   private async executeToolCalls(
     operationId: OperationId,
@@ -944,24 +980,33 @@ export class AgentSession {
     }
   }
 
-  private async append<Type extends EventType>(
+  private appendTail: Promise<void> = Promise.resolve();
+
+  private append<Type extends EventType>(
     operationId: OperationId | undefined,
     type: Type,
     payload: EventPayloadMap[Type],
   ): Promise<CanonicalEvent<Type>> {
-    const event = parseEvent({
-      version: EVENT_FORMAT_VERSION,
-      id: randomUUID(),
-      sessionId: this.log.sessionId,
-      ...(operationId === undefined ? {} : { operationId }),
-      parentId: this.tip,
-      timestamp: Date.now(),
-      type,
-      payload,
+    const append = this.appendTail.then(async () => {
+      const event = parseEvent({
+        version: EVENT_FORMAT_VERSION,
+        id: randomUUID(),
+        sessionId: this.log.sessionId,
+        ...(operationId === undefined ? {} : { operationId }),
+        parentId: this.tip,
+        timestamp: Date.now(),
+        type,
+        payload,
+      });
+      const stored = await this.log.append(event);
+      this.tip = stored.id;
+      this.onEvent?.(stored);
+      return stored as CanonicalEvent<Type>;
     });
-    const stored = await this.log.append(event);
-    this.tip = stored.id;
-    this.onEvent?.(stored);
-    return stored as CanonicalEvent<Type>;
+    this.appendTail = append.then(
+      () => undefined,
+      () => undefined,
+    );
+    return append;
   }
 }

@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -7,16 +8,16 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  type CanonicalEvent,
   ConversationProjector,
-  orderPendingTurnInputs,
   EVENT_FORMAT_VERSION,
+  type EventPayloadMap,
+  type EventType,
+  orderPendingTurnInputs,
   ProjectionError,
   parseEvent,
   parseOperationId,
   parseSessionId,
-  type CanonicalEvent,
-  type EventPayloadMap,
-  type EventType,
 } from "../src/index.ts";
 
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
@@ -130,6 +131,46 @@ test("classifies first-party tool presentation intents", () => {
     projector.state.tools.map((tool) => tool.renderIntent),
     ["shell", "read", "edit", "edit"],
   );
+});
+
+test("projects child lifecycle from canonical parent events", () => {
+  const projector = new ConversationProjector(sessionId);
+  const childSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174001");
+  const spawned = event("child.spawn_requested", {
+    childSessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+  });
+  projector.applyEvent(spawned);
+  projector.applyEvent(event("child.started", { childSessionId, name: "researcher" }, spawned.id));
+  assert.deepEqual(projector.state.children, [
+    {
+      sessionId: childSessionId,
+      name: "researcher",
+      task: "Research tmux",
+      authority: "user",
+      historyMode: "fresh",
+      status: "running",
+    },
+  ]);
+  projector.applyEvent(
+    event(
+      "child.result",
+      { childSessionId, status: "completed", result: { summary: "done" } },
+      spawned.id,
+    ),
+  );
+  assert.deepEqual(projector.state.children[0], {
+    sessionId: childSessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+    status: "completed",
+    result: { summary: "done" },
+  });
 });
 
 test("derives operation and interaction lifecycle from canonical events", () => {
@@ -318,6 +359,7 @@ test("overview reads remain history-free for a 100,000-event session", () => {
     queue: _queue,
     interruptDeliveries: _interruptDeliveries,
     uncertainShellOperations: _uncertain,
+    children: _children,
     ...metadata
   } = full;
   assert.deepEqual(projector.overview, { ...metadata, recordCount: records.length });

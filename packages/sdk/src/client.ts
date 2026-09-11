@@ -1,31 +1,32 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  type BlobReference,
+  type CapabilityId,
+  type ClientIdentity,
+  type ConnectionInitializeResult,
   encodeWireMessage,
   isKnownRpcErrorCode,
   isProviderRpcErrorCode,
   isRetryableMutationMethod,
   isRpcErrorAllowed,
-  parseServerMessage,
-  parseWireRequest,
-  requiredCapability,
-  WIRE_PROTOCOL_VERSION,
-  type BlobReference,
-  type CapabilityId,
-  type ClientIdentity,
-  type ConnectionInitializeResult,
   type OperationId,
   type PresenceDelivery,
   type ProviderRpcErrorCode,
   type ProviderRpcErrorDetails,
+  parseServerMessage,
+  parseWireRequest,
   type RpcMethod,
   type RpcParams,
   type RpcResult,
+  requiredCapability,
   type ServerMessage,
   type SessionId,
   type SessionsChangedDelivery,
+  WIRE_PROTOCOL_VERSION,
   type WireActivity,
   type WireEvent,
 } from "@axl/protocol";
@@ -349,6 +350,21 @@ export class AxlClient {
       }
     }
     return bytes;
+  }
+
+  /** Starts a daemon-owned child session. Presentation clients may attach after this resolves. */
+  startChild(
+    params: RpcParams<"child.start">,
+    options: RequestOptions = {},
+  ): Promise<RpcResult<"child.start">> {
+    return this.request("child.start", params, options);
+  }
+
+  sendToChild(
+    params: RpcParams<"child.send">,
+    options: RequestOptions = {},
+  ): Promise<RpcResult<"child.send">> {
+    return this.request("child.send", params, options);
   }
 
   async shell(
