@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 Kaushik Kumar -->
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # `@axl/tui`
@@ -84,6 +85,10 @@ Select a theme with `/theme <id>` or the `/theme` picker. Changes in existing th
 The TUI attaches to an injected daemon client. It does not construct providers, tools, extensions, sandboxing, the model loop, or canonical session state. The `@axl/cli` executable handles process startup, while `@axl/runtime` assembles the local backend. Startup displays an immediate progress line. Set `AXL_STARTUP_TIMING=1` to add a local phase breakdown after first paint when diagnosing a slow launch.
 
 Terminal extensions declare capabilities before activation. Every registration returns a disposer, and `/reload` removes all extension-owned UI, listeners, and tracked work before activating a fresh instance. MCP and Agent Skills use the public tool-renderer registration. Renderer output is sanitized and bounded, and failures remain visible while the built-in generic renderer preserves the canonical tool transaction.
+
+Start Axl inside tmux with `axl --subagent-panes tmux`. `auto` selects tmux when the current terminal is inside a supported active tmux session. Pane mode explicitly enables model-visible `subagent` and `subagent_message` tools for that session tree. Granted children may create descendants through the same daemon, bounded to three levels, four direct children per node, and twelve total descendants. Each child has a separate durable transcript. Results move to the immediate parent as attributed messages, and each parent waits for descendant results before returning its synthesis upward. Completed and failed panes close automatically; explicitly aborted panes remain open for inspection. Shutting down the parent daemon closes every verified managed pane in the tmux window. tmux reapplies a tiled grid after each spawn and close, using both rows and columns as the tree grows. `/subagents` displays the descendant tree and supports `start`, `send`, `open`, `focus`, `interrupt`, and `dispose` operations.
+
+Without `--subagent-panes`, the model receives no subagent tools or delegation instructions. Child pane attachments do not reconfigure an already active child session or its workspace checkpoints. See [`docs/guides/interactive-subagents.md`](../../docs/guides/interactive-subagents.md) for a recursive test prompt, expected behavior, controls, and troubleshooting. Ctrl plus C interrupts the active session tree, and a second press closes managed panes and detaches.
 
 Consecutive tool calls retain an individual shaded block for every call, with group counts and per-call status. Read results start collapsed. Edit and write diffs stay visible without duplicate argument JSON or success acknowledgements. Press Ctrl plus O to expand the calls with their inputs and results, or click a tool group in fullscreen mode to toggle only that group. Dragging still selects text. Oversized inputs show bounded beginning/end previews and their approximate character count; full mode increases the preview budget, while `/export` retains the complete input.
 
