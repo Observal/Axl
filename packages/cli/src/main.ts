@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from "node:child_process";
@@ -42,6 +43,14 @@ import { inspectLegacyDaemon, type LegacyDaemonStatus, stopLegacyDaemon } from "
 import { createTerminalProviderLoginAdapter } from "./provider-auth-ui.ts";
 import { providerErrorMessage, runProviderCommand, usageLine } from "./provider-cli.ts";
 import { loadTuiSettings, saveTuiSettings, type TuiSettings } from "./settings.ts";
+import {
+  closeTmuxManagedPanes,
+  closeTmuxPane,
+  createTmuxChildPane,
+  diagnoseTmux,
+  focusTmuxPane,
+  type SubagentPaneMode,
+} from "./tmux.ts";
 
 const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
 const WEB_ASSET_RELATIVE_PATH = process.env.AXL_WEB_ASSET_PATH ?? "../../web/dist";
@@ -71,6 +80,7 @@ Options:
   --profile <name>   Select the standard or Bash-only exec profile
   --theme <name>     Select the terminal theme
   --tui-mode <mode>  Use regular or fullscreen terminal mode
+  --subagent-panes <mode> Use off, auto, or tmux child panes
   --socket <path>    Use a custom daemon socket
   --sandbox <kind>   Use native, podman, or docker isolation
   -p, --print        Print one response and exit
@@ -132,6 +142,8 @@ interface CliArguments {
   webSearch?: boolean;
   theme?: string;
   tuiMode?: "regular" | "fullscreen";
+  subagentPanes: SubagentPaneMode;
+  childPane: boolean;
   image?: string;
   sandbox: SandboxChoice;
   cwd: string;
@@ -150,6 +162,8 @@ function parseArguments(argv: readonly string[]): CliArguments {
     cwd: process.cwd(),
     prompt: [],
     sandbox: "native",
+    subagentPanes: "off",
+    childPane: false,
     unsafe: false,
     resume: false,
     noOpen: false,
@@ -247,7 +261,14 @@ function parseArguments(argv: readonly string[]): CliArguments {
         throw new Error("--tui-mode requires regular or fullscreen");
       }
       parsed.tuiMode = mode;
-    } else if (argument === "--image") parsed.image = next();
+    } else if (argument === "--subagent-panes") {
+      const mode = next();
+      if (mode !== "off" && mode !== "auto" && mode !== "tmux") {
+        throw new Error("--subagent-panes requires off, auto, or tmux");
+      }
+      parsed.subagentPanes = mode;
+    } else if (argument === "--child-pane") parsed.childPane = true;
+    else if (argument === "--image") parsed.image = next();
     else if (argument === "--resume" || argument === "-r") parsed.resume = true;
     else if (argument === "--sandbox") {
       const sandbox = next();
@@ -320,6 +341,12 @@ function parseArguments(argv: readonly string[]): CliArguments {
   }
   if (parsed.resume && parsed.command !== undefined) {
     throw new Error("--resume cannot be combined with a command");
+  }
+  if (parsed.subagentPanes !== "off" && parsed.command !== undefined) {
+    throw new Error("--subagent-panes is only valid for the interactive terminal client");
+  }
+  if (parsed.childPane && parsed.command !== undefined) {
+    throw new Error("--child-pane is only valid for an interactive child attachment");
   }
   if (
     (parsed.command === "json" || parsed.command === "print" || parsed.command === "rpc") &&
@@ -808,7 +835,10 @@ async function main(): Promise<void> {
   const tuiModule = cli.command === undefined ? import("@axl/tui") : undefined;
   const axlHome = join(homedir(), ".axl");
   if (cli.command === "doctor") {
-    process.stdout.write(`${JSON.stringify(await diagnoseLocalSandboxes(), null, 2)}\n`);
+    const [sandboxes, tmux] = await Promise.all([diagnoseLocalSandboxes(), diagnoseTmux()]);
+    process.stdout.write(
+      `${JSON.stringify({ ...sandboxes, interactiveSubagentPanes: { tmux } }, null, 2)}\n`,
+    );
     return;
   }
   const sandbox: LocalSandboxSelection =
@@ -1061,6 +1091,32 @@ async function main(): Promise<void> {
     process.stdout.write(`Started daemon at ${socketPath}.\n`);
     return;
   }
+  const tmux =
+    cli.command === undefined && cli.subagentPanes !== "off" ? await diagnoseTmux() : undefined;
+  const useSubagentPanes = cli.subagentPanes !== "off" && tmux?.usable === true;
+  if (cli.subagentPanes !== "off" && !useSubagentPanes) {
+    client.close();
+    throw new Error(
+      `tmux subagent panes are unavailable: ${tmux?.reason ?? "no active tmux session"}`,
+    );
+  }
+  const cliEntryPoint = process.argv[1];
+  if (useSubagentPanes && cliEntryPoint === undefined) {
+    client.close();
+    throw new Error("Cannot resolve the current Axl executable for child panes");
+  }
+  const resolvedCliEntryPoint = cliEntryPoint === undefined ? undefined : resolve(cliEntryPoint);
+  let paneOperationTail: Promise<void> = Promise.resolve();
+  const tmuxPaneTitles = new Map<string, string>();
+  const enqueuePaneOperation = <Result>(operation: () => Promise<Result>): Promise<Result> => {
+    const result = paneOperationTail.then(operation);
+    paneOperationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
   if (cli.command === "rpc") {
     client.close();
     await bridgeRpc(socketPath);
@@ -1198,6 +1254,69 @@ async function main(): Promise<void> {
     cwd: cli.cwd,
     listResumeSessions: loadResumeSessions,
     openResumeSession,
+    ...(useSubagentPanes
+      ? {
+          openChildPane: (child: {
+            readonly sessionId: import("@axl/protocol").SessionId;
+            readonly name: string;
+            readonly cwd: string;
+          }) =>
+            enqueuePaneOperation(async () => {
+              const pane = await createTmuxChildPane({
+                childSessionId: child.sessionId,
+                childName: child.name,
+                cwd: child.cwd,
+                socketPath,
+                serverSocket: tmux?.serverSocket as string,
+                windowId: tmux?.windowId as string,
+                parentPaneId: tmux?.paneId as string,
+                executable: process.execPath,
+                executableArguments: [
+                  ...process.execArgv,
+                  resolvedCliEntryPoint as string,
+                  ...(cli.unsafe ? ["--unsafe"] : []),
+                  ...(cli.sandbox === "native" ? [] : ["--sandbox", cli.sandbox]),
+                  ...(cli.image === undefined ? [] : ["--image", cli.image]),
+                  "--child-pane",
+                  "--subagent-panes",
+                  "tmux",
+                ],
+              });
+              tmuxPaneTitles.set(pane.paneId, pane.title);
+              return pane;
+            }),
+          focusChildPane: (paneId: string) =>
+            enqueuePaneOperation(() =>
+              focusTmuxPane(
+                paneId,
+                tmux?.serverSocket as string,
+                undefined,
+                tmuxPaneTitles.get(paneId),
+                tmux?.windowId as string,
+              ),
+            ),
+          closeAllChildPanes: () =>
+            enqueuePaneOperation(() =>
+              closeTmuxManagedPanes(
+                tmux?.serverSocket as string,
+                tmux?.windowId as string,
+                tmux?.paneId as string,
+              ),
+            ),
+          closeChildPane: (paneId: string) =>
+            enqueuePaneOperation(async () => {
+              await closeTmuxPane(
+                paneId,
+                tmux?.serverSocket as string,
+                undefined,
+                tmux?.paneId as string,
+                tmux?.windowId as string,
+                tmuxPaneTitles.get(paneId),
+              );
+              tmuxPaneTitles.delete(paneId);
+            }),
+        }
+      : {}),
     initialResume: cli.resume,
     ...((cli.theme ?? settings.theme) === undefined ? {} : { theme: cli.theme ?? settings.theme }),
     ...(settings.toolOutputDisplay === undefined
@@ -1216,7 +1335,7 @@ async function main(): Promise<void> {
     refocusRecap: settings.refocusRecap ?? false,
     developerPanel: settings.developerPanel ?? false,
     diffLayout: settings.diffLayout ?? "unified",
-    workspaceReview: settings.workspaceReview ?? false,
+    ...(cli.childPane ? {} : { workspaceReview: settings.workspaceReview ?? false }),
     imageDisplay: settings.imageDisplay ?? "auto",
     globalThemeDirectory: join(axlHome, "themes"),
     extensions: [
@@ -1236,6 +1355,7 @@ async function main(): Promise<void> {
     ...(cli.profile === undefined ? {} : { profile: cli.profile }),
     webFetch: active.webFetch,
     webSearch: active.webSearch,
+    ...(cli.childPane ? {} : { subagents: useSubagentPanes }),
     ...(cli.sessionId === undefined ? {} : { sessionId: cli.sessionId }),
     onExit: () => {
       void settingsWrite.finally(() => process.exit(0));

@@ -121,6 +121,7 @@ import { VimModeController } from "./vim-mode.ts";
 
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 const FRAME_INTERVAL_MS = 16;
+const DOUBLE_INTERRUPT_MS = 1_500;
 const SESSION_SELECTOR_WINDOW = 10;
 const MAX_EXTENSION_COMPLETIONS = 100;
 const MAX_EXTENSION_SELECTOR_ITEMS = 1_000;
@@ -357,6 +358,7 @@ const CLIENT_COMMANDS: readonly { readonly name: string; readonly summary: strin
   { name: "/status", summary: "show session, display, and queue state" },
   { name: "/usage", summary: "show session token, cache, cost, and speed totals" },
   { name: "/requeue", summary: "re-queue a paused prompt by queue item ID" },
+  { name: "/subagents", summary: "start or list interactive child sessions" },
   { name: "/stash", summary: "stash, restore, swap, or clear the prompt" },
   { name: "/favorite", summary: "toggle a model in the favorites list" },
   { name: "/developer", summary: "toggle the optional developer panel" },
@@ -473,6 +475,11 @@ export interface ResumeSessionConnection {
   readonly daemonHost?: DaemonHostControl;
 }
 
+export interface ChildPaneAttachment {
+  readonly multiplexer: string;
+  readonly paneId: string;
+}
+
 export interface AxlAppOptions {
   readonly requestSettings?: ModelRequestSettings;
   readonly client: AxlClient;
@@ -480,6 +487,14 @@ export interface AxlAppOptions {
   readonly reconnectClient?: () => Promise<AxlClient>;
   readonly listResumeSessions?: () => Promise<readonly ResumeSessionEntry[]>;
   readonly openResumeSession?: (session: ResumeSessionEntry) => Promise<ResumeSessionConnection>;
+  readonly openChildPane?: (child: {
+    readonly sessionId: SessionId;
+    readonly name: string;
+    readonly cwd: string;
+  }) => Promise<ChildPaneAttachment>;
+  readonly focusChildPane?: (paneId: string) => Promise<void>;
+  readonly closeChildPane?: (paneId: string) => Promise<void>;
+  readonly closeAllChildPanes?: () => Promise<void>;
   readonly initialResume?: boolean;
   readonly input: TerminalInput;
   readonly output: TerminalOutput;
@@ -496,6 +511,7 @@ export interface AxlAppOptions {
   readonly profile?: SessionProfile;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly subagents?: boolean;
   readonly toolOutputDisplay?: ToolOutputDisplay;
   readonly thinkingDisplay?: "show" | "compact" | "hide";
   readonly tuiMode?: "regular" | "fullscreen";
@@ -647,6 +663,10 @@ export class AxlApp {
   private stopThemeWatcher: (() => void) | undefined;
   private themeReloadGeneration = 0;
   private readonly seenEventIds = new Set<string>();
+  private readonly childPanes = new Map<SessionId, ChildPaneAttachment>();
+  private readonly childPanesOpening = new Set<SessionId>();
+  private readonly completedChildren = new Set<SessionId>();
+  private childPaneCleanup: Promise<void> | undefined;
   private hydrating = true;
   private readonly interactionQueue: EventPayloadMap["interaction.requested"][] = [];
   private activeInteractionId: string | undefined;
@@ -811,8 +831,9 @@ export class AxlApp {
         this.connectionState = "detached";
         this.setWorking(false);
         this.notice = this.view.palette.dim(
-          "· daemon shut down; /detach to exit, then restart Axl to resume",
+          "· daemon shut down; closing managed panes before detaching",
         );
+        void this.closeAllManagedChildPanes();
         if (!this.stopped) this.redraw();
       } else if (!this.stopped && !this.quitting) void this.reconnect(error);
     });
@@ -824,7 +845,21 @@ export class AxlApp {
       ...(projector === undefined ? {} : { projector }),
       onEvent: async (event: CanonicalEvent) => {
         await this.prepareEventMedia(event);
-        if (!this.stopped) this.commitEvent(event, !this.hydrating);
+        if (!this.stopped) {
+          this.commitEvent(event, !this.hydrating);
+          if (event.type === "child.started" && !this.hydrating) {
+            void this.openSpawnedChildPane({
+              childSessionId: event.payload.childSessionId,
+              name: event.payload.name,
+            });
+          } else if (
+            event.type === "child.result" &&
+            event.payload.status !== "aborted" &&
+            !this.hydrating
+          ) {
+            void this.closeCompletedChildPane(event.payload.childSessionId);
+          }
+        }
       },
       onChange: (projection: ConversationProjector) => this.syncProjection(projection),
       onResyncRequired: (error: Error) => {
@@ -969,8 +1004,15 @@ export class AxlApp {
             ...(options.profile === undefined ? {} : { profile: options.profile }),
             ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
             ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+            ...(options.subagents === undefined ? {} : { subagents: options.subagents }),
           })
         : await resumeSessionMetadata(options.client, options.sessionId);
+    if (options.sessionId !== undefined && options.subagents !== undefined) {
+      await options.client.request("session.configure", {
+        sessionId: opened?.sessionId ?? parseSessionId(options.sessionId),
+        subagents: options.subagents,
+      });
+    }
     const cwd = opened?.cwd ?? options.cwd;
 
     const width =
@@ -1902,7 +1944,9 @@ export class AxlApp {
       } else if (key.kind === "tab") {
         if (!this.acceptCompletion()) this.editor.apply(key);
       } else if (key.kind === "escape") {
-        if (this.providerOperation !== undefined) {
+        if (this.tuiMode === "fullscreen" && !this.fullscreen.isFollowingLatest()) {
+          this.fullscreen.followLatest();
+        } else if (this.providerOperation !== undefined) {
           this.providerOperation.abort();
           this.notice = this.view.palette.dim("· provider operation cancelled");
         } else if (
@@ -2208,7 +2252,24 @@ export class AxlApp {
       return;
     }
     const now = Date.now();
-    if (now - this.lastInterrupt < 500) void this.quit();
+    if (this.editor.text.length > 0) {
+      this.editor.clear();
+      this.lastInterrupt = now;
+      this.notice = this.view.palette.dim("· Ctrl+C again to quit");
+      return;
+    }
+    if (this.view.working) {
+      if (now - this.lastInterrupt < DOUBLE_INTERRUPT_MS) {
+        void this.closeManagedChildPanesAndQuit();
+      } else {
+        this.lastInterrupt = now;
+        this.notice = this.view.palette.dim("· interrupting session tree · Ctrl+C again to quit");
+        void this.interrupt();
+        this.redraw();
+      }
+      return;
+    }
+    if (now - this.lastInterrupt < DOUBLE_INTERRUPT_MS) void this.closeManagedChildPanesAndQuit();
     else {
       this.editor.clear();
       this.lastInterrupt = now;
@@ -2296,6 +2357,7 @@ export class AxlApp {
       this.notice = this.view.palette.dim("· interrupting work and shutting down daemon…");
       this.redraw();
       await host.shutdown(status, { ...context, interrupt: true, confirmed });
+      await this.closeAllManagedChildPanes();
       this.stop();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Daemon shutdown failed";
@@ -2319,6 +2381,7 @@ export class AxlApp {
             ]))
           ) {
             await host.force(current.instanceId);
+            await this.closeAllManagedChildPanes();
             this.stop();
           }
         } catch (forceError) {
@@ -2379,6 +2442,14 @@ export class AxlApp {
       } else if (command === "/resume") void this.openResume();
       else if (command === "/fork") this.openFork();
       else void this.cloneSession();
+      return;
+    }
+    if (command === "/subagents") {
+      if (this.view.working) {
+        this.notice = this.view.palette.dim("· finish or interrupt the turn first");
+      } else {
+        void this.handleSubagentsCommand(argument);
+      }
       return;
     }
     if (command === "/import") {
@@ -4053,6 +4124,284 @@ export class AxlApp {
       );
       this.redraw();
     }
+  }
+
+  private async openSpawnedChildPane(
+    child: Pick<EventPayloadMap["child.spawn_requested"], "childSessionId" | "name">,
+    cwd?: string,
+  ): Promise<void> {
+    if (
+      this.options.openChildPane === undefined ||
+      this.childPanes.has(child.childSessionId) ||
+      this.childPanesOpening.has(child.childSessionId)
+    ) {
+      return;
+    }
+    this.childPanesOpening.add(child.childSessionId);
+    try {
+      const openedCwd =
+        cwd ??
+        (
+          await this.client.request("session.resume", {
+            sessionId: child.childSessionId,
+          })
+        ).cwd;
+      const pane = await this.options.openChildPane({
+        sessionId: child.childSessionId,
+        name: child.name,
+        cwd: openedCwd,
+      });
+      this.childPanes.set(child.childSessionId, pane);
+      if (this.completedChildren.has(child.childSessionId)) {
+        await this.closeCompletedChildPane(child.childSessionId);
+      } else {
+        this.notice = this.view.palette.dim(
+          `· ${sanitizeTerminalText(child.name)} running in ${sanitizeTerminalText(pane.multiplexer)} pane ${sanitizeTerminalText(pane.paneId)}`,
+        );
+      }
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "could not open subagent pane"}`,
+      );
+    } finally {
+      this.childPanesOpening.delete(child.childSessionId);
+    }
+    if (!this.stopped) this.redraw();
+  }
+
+  private closeAllManagedChildPanes(): Promise<void> {
+    if (this.childPaneCleanup !== undefined) return this.childPaneCleanup;
+    this.childPaneCleanup = (async () => {
+      if (this.options.closeAllChildPanes !== undefined) {
+        try {
+          await this.options.closeAllChildPanes();
+          this.childPanes.clear();
+        } catch (error) {
+          this.notice = this.view.palette.error(
+            `✖ ${error instanceof Error ? error.message : "could not close managed subagent panes"}`,
+          );
+        }
+        return;
+      }
+      const close = this.options.closeChildPane;
+      if (close !== undefined) {
+        await Promise.allSettled([...this.childPanes.values()].map((pane) => close(pane.paneId)));
+        this.childPanes.clear();
+      }
+    })();
+    return this.childPaneCleanup;
+  }
+
+  private async closeManagedChildPanesAndQuit(): Promise<void> {
+    await this.quit();
+  }
+
+  private async closeCompletedChildPane(childSessionId: SessionId): Promise<void> {
+    this.completedChildren.add(childSessionId);
+    const pane = this.childPanes.get(childSessionId);
+    if (pane === undefined || this.options.closeChildPane === undefined) return;
+    try {
+      await this.options.closeChildPane(pane.paneId);
+      this.childPanes.delete(childSessionId);
+      const child = this.sessionSubscription?.projector.state.children.find(
+        (candidate) => candidate.sessionId === childSessionId,
+      );
+      this.notice = this.view.palette.dim(
+        `· ${sanitizeTerminalText(child?.name ?? childSessionId.slice(0, 8))} completed · pane closed`,
+      );
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "could not close completed subagent pane"}`,
+      );
+      if (!this.stopped) this.redraw();
+    }
+  }
+
+  private async handleSubagentsCommand(argument: string): Promise<void> {
+    const [action = "list", name, ...taskParts] = argument.split(/\s+/).filter(Boolean);
+    if (action === "open") {
+      const child = this.sessionSubscription?.projector.state.children.find(
+        (candidate) => candidate.name === name || candidate.sessionId === name,
+      );
+      if (child === undefined) {
+        this.notice = this.view.palette.error("✖ unknown subagent name or session ID");
+      } else {
+        try {
+          const opened = await this.client.request("session.resume", {
+            sessionId: child.sessionId,
+          });
+          if (this.options.openChildPane === undefined) {
+            this.notice = this.view.palette.error("✖ no subagent pane adapter is active");
+          } else {
+            const pane = await this.options.openChildPane({
+              sessionId: child.sessionId,
+              name: child.name,
+              cwd: opened.cwd,
+            });
+            this.childPanes.set(child.sessionId, pane);
+            this.notice = this.view.palette.dim(
+              `· opened ${sanitizeTerminalText(child.name)} in ${sanitizeTerminalText(pane.multiplexer)} pane ${sanitizeTerminalText(pane.paneId)}`,
+            );
+          }
+        } catch (error) {
+          this.notice = this.view.palette.error(
+            `✖ ${error instanceof Error ? error.message : "could not open subagent pane"}`,
+          );
+        }
+      }
+      this.redraw();
+      return;
+    }
+    if (action === "focus") {
+      const child = this.sessionSubscription?.projector.state.children.find(
+        (candidate) => candidate.name === name || candidate.sessionId === name,
+      );
+      const pane = child === undefined ? undefined : this.childPanes.get(child.sessionId);
+      if (child === undefined) {
+        this.notice = this.view.palette.error("✖ unknown subagent name or session ID");
+      } else if (pane === undefined || this.options.focusChildPane === undefined) {
+        this.notice = this.view.palette.error("✖ subagent has no managed pane to focus");
+      } else {
+        try {
+          await this.options.focusChildPane(pane.paneId);
+          this.notice = this.view.palette.dim(`· focused ${sanitizeTerminalText(child.name)}`);
+        } catch (error) {
+          this.notice = this.view.palette.error(
+            `✖ ${error instanceof Error ? error.message : "could not focus subagent pane"}`,
+          );
+        }
+      }
+      this.redraw();
+      return;
+    }
+    if (action === "interrupt" || action === "dispose") {
+      const child = this.sessionSubscription?.projector.state.children.find(
+        (candidate) => candidate.name === name || candidate.sessionId === name,
+      );
+      if (child === undefined) {
+        this.notice = this.view.palette.error("✖ unknown subagent name or session ID");
+      } else {
+        try {
+          if (action === "interrupt") {
+            const result = await this.client.request("session.interrupt", {
+              sessionId: child.sessionId,
+            });
+            this.notice = this.view.palette.dim(
+              result.interrupted
+                ? `· interrupted ${sanitizeTerminalText(child.name)}`
+                : `· ${sanitizeTerminalText(child.name)} has no active operation`,
+            );
+          } else {
+            await this.client.request("session.dispose", { sessionId: child.sessionId });
+            this.notice = this.view.palette.dim(`· disposed ${sanitizeTerminalText(child.name)}`);
+          }
+        } catch (error) {
+          this.notice = this.view.palette.error(
+            `✖ ${error instanceof Error ? error.message : `could not ${action} subagent`}`,
+          );
+        }
+      }
+      this.redraw();
+      return;
+    }
+    if (action === "send") {
+      if (name === undefined || taskParts.length === 0) {
+        this.notice = this.view.palette.dim("· use /subagents send <name> <message>");
+      } else {
+        try {
+          await this.client.sendToChild({
+            parentSessionId: this.sessionId,
+            child: name,
+            content: [{ type: "text", text: taskParts.join(" ") }],
+          });
+          this.notice = this.view.palette.dim(`· message queued for ${sanitizeTerminalText(name)}`);
+        } catch (error) {
+          this.notice = this.view.palette.error(
+            `✖ ${error instanceof Error ? error.message : "could not message subagent"}`,
+          );
+        }
+      }
+      this.redraw();
+      return;
+    }
+    if (action === "list") {
+      try {
+        const listed = await this.client.request("session.list", {
+          scope: "all_local",
+          order: "threaded",
+          pageSize: 200,
+        });
+        const rows: string[] = [];
+        const directStatuses = new Map(
+          (this.sessionSubscription?.projector.state.children ?? []).map((child) => [
+            child.sessionId,
+            child.status,
+          ]),
+        );
+        const visited = new Set<SessionId>([this.sessionId]);
+        const appendChildren = (parentSessionId: SessionId, depth: number): void => {
+          for (const child of listed.sessions.filter(
+            (candidate) =>
+              candidate.parentSessionId === parentSessionId && candidate.childName !== undefined,
+          )) {
+            if (visited.has(child.sessionId)) {
+              rows.push(`${"  ".repeat(depth + 1)}cycle detected · ${child.sessionId}`);
+              continue;
+            }
+            visited.add(child.sessionId);
+            const status = directStatuses.get(child.sessionId) ?? child.runtime.state;
+            rows.push(
+              `${"  ".repeat(depth + 1)}${this.view.palette.accent(child.childName as string)}  ${status}  ${child.sessionId}`,
+            );
+            appendChildren(child.sessionId, depth + 1);
+          }
+        };
+        appendChildren(this.sessionId, 0);
+        this.commitLines([
+          this.view.palette.accent("Subagents"),
+          ...(rows.length === 0 ? [this.view.palette.dim("  none")] : rows),
+        ]);
+      } catch (error) {
+        this.notice = this.view.palette.error(
+          `✖ ${error instanceof Error ? error.message : "could not list subagents"}`,
+        );
+      }
+      this.redraw();
+      return;
+    }
+    if (action !== "start" || name === undefined || taskParts.length === 0) {
+      this.notice = this.view.palette.dim(
+        "· use /subagents or /subagents start|send|open|focus|interrupt|dispose <name> [text]",
+      );
+      this.redraw();
+      return;
+    }
+    this.notice = this.view.palette.dim(`· starting ${sanitizeTerminalText(name)}…`);
+    this.redraw();
+    try {
+      const started = await this.client.startChild({
+        parentSessionId: this.sessionId,
+        name,
+        task: taskParts.join(" "),
+        authority: "user",
+        historyMode: "fresh",
+      });
+      if (this.options.openChildPane === undefined) {
+        this.notice = this.view.palette.dim(
+          `· ${sanitizeTerminalText(started.name)} running · ${started.child.sessionId}`,
+        );
+      } else {
+        await this.openSpawnedChildPane(
+          { childSessionId: started.child.sessionId, name: started.name },
+          started.child.cwd,
+        );
+      }
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "could not start subagent"}`,
+      );
+    }
+    this.redraw();
   }
 
   private async importSession(path: string): Promise<void> {

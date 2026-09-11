@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -232,6 +233,9 @@ test("doctor reports native, Podman, and Docker capabilities without credentials
   assert.equal(typeof report.native, "object");
   assert.equal(typeof report.podman, "object");
   assert.equal(typeof report.docker, "object");
+  assert.equal(typeof report.interactiveSubagentPanes, "object");
+  const paneReport = report.interactiveSubagentPanes as Record<string, unknown>;
+  assert.equal(typeof paneReport.tmux, "object");
 });
 
 test("--unsafe starts a separate unenforced daemon and records the warning state", async (context) => {

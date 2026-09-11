@@ -109,7 +109,7 @@ async function startStack(
     await daemon.stop();
     await rm(directory, { recursive: true, force: true });
   });
-  return { socketPath, directory: await realpath(directory) };
+  return { daemon, socketPath, directory: await realpath(directory) };
 }
 
 function captureOutput(): {
@@ -1155,7 +1155,7 @@ test("Escape interrupts a running or admitted operation", async (context) => {
       })();
     },
   };
-  const { socketPath, directory } = await startStack(context, blockingPort);
+  const { daemon, socketPath, directory } = await startStack(context, blockingPort);
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const app = await AxlApp.start({
@@ -1173,6 +1173,7 @@ test("Escape interrupts a running or admitted operation", async (context) => {
   await until(() => text().includes("interrupted"), "escape interruption");
   assert.equal(modelCalls === 0 || operationAborted, true);
   app.stop();
+  await daemon.stop();
 });
 
 test("an idle Escape result is visible and is not polled", async (context) => {
@@ -1290,6 +1291,49 @@ for (const submission of ["local", "other attachment"] as const) {
     });
   }
 }
+test("Escape returns a paused fullscreen transcript to latest without interrupting", async (context) => {
+  let operationStarted = false;
+  let operationAborted = false;
+  const blockingPort: ModelPort = {
+    stream(request) {
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        operationStarted = true;
+        await new Promise<void>((resolve) => {
+          if (request.signal?.aborted) resolve();
+          else request.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        operationAborted = request.signal?.aborted ?? false;
+        yield { type: "completed", stopReason: "aborted", usage };
+      })();
+    },
+  };
+  const { daemon, socketPath, directory } = await startStack(context, blockingPort);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 8;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    tuiMode: "fullscreen",
+  });
+
+  await until(() => text().includes("\x1b[>4;2m"), "keyboard negotiation");
+  input.write("start work\r");
+  await until(() => operationStarted, "working state");
+  input.write("\x1b[5~");
+  await until(() => text().includes("Transcript · paused"), "paused transcript");
+  const beforeEscape = text().length;
+  input.write("\x1b");
+  await until(() => text().slice(beforeEscape).includes("Transcript · latest"), "return to latest");
+  assert.equal(operationAborted, false);
+  input.write("\x03");
+  await until(() => operationAborted, "cleanup interruption");
+  app.stop();
+  await daemon.stop();
+});
 
 test("terminal extensions cannot replace encoded safety shortcuts", async (context) => {
   const { socketPath, directory } = await startStack(context);
@@ -1599,6 +1643,7 @@ test("editing, /quit, and busy notices behave", async (context) => {
 
   input.write("helXX\x7f\x7flo\r"); // backspace editing before submit
   await until(() => text().includes("│ hello"), "edited send");
+  await until(() => text().includes("the answer"), "completed edited send");
 
   input.write("/quit\r");
   await until(() => exited, "quit");
@@ -2563,6 +2608,7 @@ test("Escape cancels compaction without replacing context", async (context) => {
 test("quit interrupts without a preliminary Escape and shared clients must confirm", async (context) => {
   let began = false;
   let aborted = false;
+  let paneCleanup = 0;
   const model: ModelPort = {
     stream: async function* (request) {
       began = true;
@@ -2583,6 +2629,9 @@ test("quit interrupts without a preliminary Escape and shared clients must confi
   const app = await AxlApp.start({
     client: await connectUnixClient(socketPath),
     daemonHost: host,
+    closeAllChildPanes: async () => {
+      paneCleanup += 1;
+    },
     input,
     output: output.output,
     cwd: directory,
@@ -2608,6 +2657,7 @@ test("quit interrupts without a preliminary Escape and shared clients must confi
   input.write("/quit\r");
   await until(() => exited, "unshared quit");
   assert.equal(aborted, true);
+  assert.equal(paneCleanup, 1);
   assert.equal(input.isRaw, false);
 });
 

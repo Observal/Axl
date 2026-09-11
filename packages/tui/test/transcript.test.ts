@@ -133,6 +133,29 @@ test("leaves tool presentation to retained transactions and renders errors loudl
   );
 });
 
+test("renders child spawn and completion status", () => {
+  const view = new SessionView(100, PLAIN_PALETTE);
+  const childSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174001");
+  assert.deepEqual(
+    view.apply(
+      makeEvent("child.spawn_requested", {
+        childSessionId,
+        name: "researcher",
+        task: "Research tmux",
+        authority: "user",
+        historyMode: "fresh",
+      }),
+    ),
+    ["· subagent researcher starting · fresh"],
+  );
+  assert.deepEqual(view.apply(makeEvent("child.started", { childSessionId, name: "researcher" })), [
+    "· subagent researcher running",
+  ]);
+  assert.deepEqual(view.apply(makeEvent("child.result", { childSessionId, status: "completed" })), [
+    "✓ subagent 123e4567 completed",
+  ]);
+});
+
 test("tracks profile, model, thinking, and sandbox without noisy startup rows", () => {
   const view = new SessionView(220, PLAIN_PALETTE);
   assert.deepEqual(view.apply(makeEvent("config.profile", { profile: "exec" })), []);
