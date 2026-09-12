@@ -7,7 +7,7 @@ Status: architecture review checkpoint
 
 ## Integration base
 
-The private implementation branch is `feature/e2ee-transport`, created from clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687`.
+The private implementation branch is `feature/e2ee-transport`. It was created from clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687` and rebased for integration onto clean `main` commit `57bd31b7e718a125fc51a0fcf3a554cb100ea708`.
 
 ## Scope
 

@@ -2358,7 +2358,7 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 The transport-first remote-control slice is an approved exception to phase ordering. It may establish service boundaries, opaque framing, one-use ticket admission, bounded relay routing, daemon authorization behind a test-only fake E2EE adapter, and reusable SDK delivery machinery. It must not implement cryptography, select production identity or storage infrastructure, enable ordinary-session remote access, or advertise production remote control.
 
-The integration base for this private slice is clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687` on `feature/e2ee-transport`. Stop for architecture review after the documentation, separate service boundaries, versioned fixture contract, atomic ticket-consumption path, and first bounded relay slice land.
+The private slice was created from clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687` and rebased for integration onto clean `main` commit `57bd31b7e718a125fc51a0fcf3a554cb100ea708` on `feature/e2ee-transport`. Stop for architecture review after the documentation, separate service boundaries, versioned fixture contract, atomic ticket-consumption path, and first bounded relay slice land.
 
 #### Remote transport preflight
 
