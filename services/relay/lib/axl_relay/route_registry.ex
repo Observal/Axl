@@ -90,7 +90,7 @@ defmodule AxlRelay.RouteRegistry do
       ) do
     source = state.routes[source_route_id]
     destination = state.routes[destination_route_id]
-    queued_bytes = byte_size(payload) + 42
+    queued_bytes = byte_size(payload) + 38
 
     cond do
       source == nil ->

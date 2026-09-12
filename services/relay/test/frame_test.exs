@@ -28,6 +28,31 @@ defmodule AxlRelay.FrameTest do
     end
   end
 
+  test "keeps failure byte assignments stable" do
+    codes = [
+      bad_frame: 1,
+      unsupported_transport_version: 2,
+      unauthorized: 3,
+      forbidden_route: 4,
+      ticket_expired: 5,
+      ticket_consumed: 6,
+      destination_offline: 7,
+      rate_limited: 8,
+      queue_full: 9,
+      slow_consumer: 10,
+      service_unavailable: 11
+    ]
+
+    for {code, value} <- codes do
+      assert {:ok, <<"AXLR", 1, 4, _attempt::binary-size(16), ^value>>} =
+               Frame.encode(%{
+                 kind: :failure,
+                 attempt_id: "11111111-1111-4111-8111-111111111111",
+                 code: code
+               })
+    end
+  end
+
   test "rejects an oversized frame before parsing" do
     assert {:error, :bad_frame} = Frame.decode(:binary.copy(<<0>>, Frame.max_frame_bytes() + 1))
   end

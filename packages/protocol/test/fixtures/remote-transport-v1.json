@@ -3,7 +3,7 @@
   "accepted": [
     {
       "name": "send",
-      "base64": "QVhMUgEBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAAAIAAEC/0FYTFI=",
+      "base64": "QVhMUgEBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAQL/QVhMUg==",
       "frame": {
         "kind": "send",
         "attemptId": "11111111-1111-4111-8111-111111111111",
@@ -13,7 +13,7 @@
     },
     {
       "name": "delivery",
-      "base64": "QVhMUgECERERERERQRGBERERERERETMzMzMzM0MzgzMzMzMzMzMAAAAIAAEC/0FYTFI=",
+      "base64": "QVhMUgECERERERERQRGBERERERERETMzMzMzM0MzgzMzMzMzMzMAAQL/QVhMUg==",
       "frame": {
         "kind": "delivery",
         "attemptId": "11111111-1111-4111-8111-111111111111",
@@ -43,12 +43,12 @@
   "rejected": [
     {
       "name": "wrong-magic",
-      "base64": "QlhMUgEBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAAAIAAEC/0FYTFI=",
+      "base64": "QlhMUgEBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAQL/QVhMUg==",
       "errorPath": "frame.magic"
     },
     {
       "name": "unsupported-version",
-      "base64": "QVhMUgIBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAAAIAAEC/0FYTFI=",
+      "base64": "QVhMUgIBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAQL/QVhMUg==",
       "errorPath": "frame.transportVersion"
     },
     {
@@ -57,13 +57,13 @@
       "errorPath": "frame"
     },
     {
-      "name": "payload-length-mismatch",
-      "base64": "QVhMUgEBERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAAAJAAEC/0FYTFI=",
-      "errorPath": "frame.opaquePayload"
+      "name": "invalid-attempt-id",
+      "base64": "QVhMUgEBERERERERARGBERERERERESIiIiIiIkIigiIiIiIiIiIAAQL/QVhMUg==",
+      "errorPath": "frame.attemptId"
     },
     {
       "name": "unknown-kind",
-      "base64": "QVhMUgEJERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAAAIAAEC/0FYTFI=",
+      "base64": "QVhMUgEJERERERERQRGBERERERERESIiIiIiIkIigiIiIiIiIiIAAQL/QVhMUg==",
       "errorPath": "frame"
     }
   ]

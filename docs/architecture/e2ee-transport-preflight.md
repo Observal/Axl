@@ -40,7 +40,17 @@ The relay sends `POST /internal/v1/relay/tickets/consume` once during admission.
 
 The control plane sends `POST /internal/v1/revocations` to the relay. The same fixture defines its versioned request and response. Notifications are best effort. The daemon will still recheck current authority before durable command acceptance.
 
-Both HTTP boundaries require injected service authentication and fail closed when it is absent or rejects the request. This checkpoint does not select the production authentication mechanism. Tickets and internal credentials are forbidden in URLs, logs, metrics, and canonical events.
+Both HTTP boundaries require injected service authentication and fail closed when it is absent or rejects the request. Tickets and internal credentials are forbidden in URLs, logs, metrics, and canonical events.
+
+Production service authentication is distinct from user authentication and ticket proof. It answers whether this exact relay instance may consume tickets and whether this exact control-plane instance may revoke routes. TLS without client authentication protects bytes in transit but does not establish that caller authority. The production mechanism remains an owner decision because it depends on deployment identity:
+
+- Prefer mutually authenticated TLS with short-lived workload certificates when both services have stable workload identities.
+- A cloud-native signed workload token is acceptable when the selected platform provides audience-bound, short-lived service identities.
+- Do not use a long-lived static bearer secret as the production design.
+- Bind credentials to service role, environment, and endpoint audience. Rotate them without reconnecting existing leased clients.
+- Authenticate the exact request body before parsing it, reject replays within the chosen mechanism, and redact all credential material.
+
+The current code therefore injects authentication on both sides and provides no production credential implementation. Selecting mTLS, SPIFFE, or a cloud IAM mechanism waits for the deployment decision. Tests use obvious fixture credentials only.
 
 If the control plane is unavailable, new admissions fail. Existing connections continue only through their consumed-ticket lease.
 
@@ -75,23 +85,39 @@ Send and delivery continue with:
 
 ```text
 22     16    destination route for send; source route for delivery
-38     4     opaque payload length
-42     n     opaque payload
+38     n     opaque payload through the end of the WebSocket message
 ```
 
-Receipt and failure frames instead contain one byte at offset 22. Receipt values are `admitted=1` and `forwarded=2`. Failure values follow the order of `RELAY_FAILURE_CODES` in `packages/protocol/src/remote-transport.ts`, starting at 1.
+The revised encoding deliberately has no inner payload-length field. One binary WebSocket message is exactly one relay frame, so the WebSocket message boundary is authoritative. Removing the duplicate untrusted length avoids a second allocation decision and one class of inconsistent-length input.
 
-A complete WebSocket message, including this framing, is at most 65,535 bytes. Therefore the largest opaque payload is 65,493 bytes. The relay rejects oversized messages through the WebSocket parser ceiling and checks negotiated limits again before parsing or enqueueing.
+Receipt and failure frames instead contain one byte at offset 22. Receipt values are `admitted=1` and `forwarded=2`. Failure values are permanently assigned as follows:
+
+```text
+1  bad_frame                       7  destination_offline
+2  unsupported_transport_version   8  rate_limited
+3  unauthorized                    9  queue_full
+4  forbidden_route                10  slow_consumer
+5  ticket_expired                 11  service_unavailable
+6  ticket_consumed
+```
+
+These assignments must not be reordered. A new failure receives a new number or requires a transport-version change.
+
+A complete WebSocket message, including this framing, is at most 65,535 bytes. Therefore the largest opaque payload is 65,497 bytes. The relay rejects oversized messages through the WebSocket parser ceiling and checks negotiated limits again before parsing or enqueueing.
 
 `attemptId` is transport-local. Retrying exact opaque bytes uses a new attempt ID while retaining the encrypted request and daemon idempotency identifiers inside the opaque payload. The relay does not define or inspect that payload.
 
 ## Receipt meaning
 
 - `admitted`: the relay accepted one valid bounded frame.
-- `forwarded`: the relay handed the bytes to the destination socket path.
+- `forwarded`: the relay enqueued the bytes into the destination WebSocket process after route and queue checks. It does not prove a network write, endpoint receipt, parsing, decryption, or daemon acceptance.
 - `daemon_accepted`: not a relay receipt. It is produced only after daemon authorization and durable acceptance.
 
 A client may remove a mutation from its durable outbox only after `daemon_accepted`.
+
+## Approved relay dependencies
+
+The first relay slice uses pinned Bandit, Plug, and WebSock Adapter production dependencies. They are approved for this boundary. Cowboy was evaluated and rejected after its locked version reported active security advisories. Credo, Dialyxir, and mix_audit are development-only checks.
 
 ## Reviewed limits
 

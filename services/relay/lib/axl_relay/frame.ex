@@ -7,21 +7,21 @@ defmodule AxlRelay.Frame do
   @magic "AXLR"
   @transport_version 1
   @max_frame_bytes 65_535
-  @routed_header_bytes 42
+  @routed_header_bytes 38
   @max_payload_bytes @max_frame_bytes - @routed_header_bytes
-  @failure_codes [
-    :bad_frame,
-    :unsupported_transport_version,
-    :unauthorized,
-    :forbidden_route,
-    :ticket_expired,
-    :ticket_consumed,
-    :destination_offline,
-    :rate_limited,
-    :queue_full,
-    :slow_consumer,
-    :service_unavailable
-  ]
+  @failure_codes %{
+    1 => :bad_frame,
+    2 => :unsupported_transport_version,
+    3 => :unauthorized,
+    4 => :forbidden_route,
+    5 => :ticket_expired,
+    6 => :ticket_consumed,
+    7 => :destination_offline,
+    8 => :rate_limited,
+    9 => :queue_full,
+    10 => :slow_consumer,
+    11 => :service_unavailable
+  }
 
   @type relay_frame ::
           %{
@@ -51,9 +51,9 @@ defmodule AxlRelay.Frame do
 
   defp decode_bounded(
          <<@magic, @transport_version, kind, attempt::binary-size(16), route::binary-size(16),
-           payload_size::unsigned-big-32, payload::binary>>
+           payload::binary>>
        )
-       when kind in [1, 2] and payload_size == byte_size(payload) do
+       when kind in [1, 2] do
     with {:ok, attempt_id} <- decode_uuid(attempt),
          {:ok, route_id} <- decode_uuid(route) do
       {:ok,
@@ -92,8 +92,7 @@ defmodule AxlRelay.Frame do
       kind_byte = if kind == :send, do: 1, else: 2
 
       {:ok,
-       <<@magic, @transport_version, kind_byte, attempt::binary, route::binary,
-         byte_size(payload)::unsigned-big-32, payload::binary>>}
+       <<@magic, @transport_version, kind_byte, attempt::binary, route::binary, payload::binary>>}
     end
   end
 
@@ -121,16 +120,17 @@ defmodule AxlRelay.Frame do
   defp encode_status(:forwarded), do: {:ok, 2}
   defp encode_status(_status), do: {:error, :bad_frame}
 
-  defp decode_failure(value) when value in 1..length(@failure_codes)//1 do
-    {:ok, Enum.fetch!(@failure_codes, value - 1)}
+  defp decode_failure(value) do
+    case Map.fetch(@failure_codes, value) do
+      {:ok, code} -> {:ok, code}
+      :error -> {:error, :bad_frame}
+    end
   end
 
-  defp decode_failure(_value), do: {:error, :bad_frame}
-
   defp encode_failure(code) do
-    case Enum.find_index(@failure_codes, &(&1 == code)) do
+    case Enum.find(@failure_codes, fn {_value, candidate} -> candidate == code end) do
       nil -> {:error, :bad_frame}
-      index -> {:ok, index + 1}
+      {value, _candidate} -> {:ok, value}
     end
   end
 

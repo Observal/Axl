@@ -20,6 +20,7 @@ import {
   parseRelayBinaryFrame,
   parseRelayRevocationNotification,
   ProtocolValidationError,
+  RELAY_FAILURE_CODE_VALUES,
   REMOTE_TRANSPORT_VERSION,
   type RelayBinaryFrame,
 } from "../src/index.ts";
@@ -88,6 +89,22 @@ test("rejects every malformed canonical relay frame", () => {
       fixture.name,
     );
   }
+});
+
+test("keeps relay failure byte assignments stable", () => {
+  assert.deepEqual(RELAY_FAILURE_CODE_VALUES, {
+    bad_frame: 1,
+    unsupported_transport_version: 2,
+    unauthorized: 3,
+    forbidden_route: 4,
+    ticket_expired: 5,
+    ticket_consumed: 6,
+    destination_offline: 7,
+    rate_limited: 8,
+    queue_full: 9,
+    slow_consumer: 10,
+    service_unavailable: 11,
+  });
 });
 
 test("enforces the complete frame bound before encoding", () => {

@@ -7,7 +7,7 @@ const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}
 const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const methodPattern = /^[a-z][a-z0-9]*(?:[._-][a-zA-Z0-9]+)*$/;
 const frameMagic = Uint8Array.of(0x41, 0x58, 0x4c, 0x52);
-const routedFrameHeaderBytes = 42;
+const routedFrameHeaderBytes = 38;
 const shortFrameBytes = 23;
 
 declare const installationIdBrand: unique symbol;
@@ -109,21 +109,24 @@ export interface RelayReceipt {
   readonly status: RelayReceiptStatus;
 }
 
-export const RELAY_FAILURE_CODES = [
-  "bad_frame",
-  "unsupported_transport_version",
-  "unauthorized",
-  "forbidden_route",
-  "ticket_expired",
-  "ticket_consumed",
-  "destination_offline",
-  "rate_limited",
-  "queue_full",
-  "slow_consumer",
-  "service_unavailable",
-] as const;
+export const RELAY_FAILURE_CODE_VALUES = Object.freeze({
+  bad_frame: 1,
+  unsupported_transport_version: 2,
+  unauthorized: 3,
+  forbidden_route: 4,
+  ticket_expired: 5,
+  ticket_consumed: 6,
+  destination_offline: 7,
+  rate_limited: 8,
+  queue_full: 9,
+  slow_consumer: 10,
+  service_unavailable: 11,
+} as const);
 
-export type RelayFailureCode = (typeof RELAY_FAILURE_CODES)[number];
+export type RelayFailureCode = keyof typeof RELAY_FAILURE_CODE_VALUES;
+export const RELAY_FAILURE_CODES = Object.freeze(
+  Object.keys(RELAY_FAILURE_CODE_VALUES) as RelayFailureCode[],
+);
 
 export interface RelayFailure {
   readonly transportVersion: typeof REMOTE_TRANSPORT_VERSION;
@@ -557,7 +560,6 @@ function encodeRoutedFrame(
   const output = new Uint8Array(routedFrameHeaderBytes + payload.byteLength);
   writePrefix(output, kind, attemptId);
   output.set(uuidBytes(routeId), 22);
-  new DataView(output.buffer).setUint32(38, payload.byteLength, false);
   output.set(payload, routedFrameHeaderBytes);
   return output;
 }
@@ -597,9 +599,9 @@ export function encodeRelayBinaryFrame(frame: RelayBinaryFrame): Uint8Array {
     case "failure": {
       const output = new Uint8Array(shortFrameBytes);
       writePrefix(output, 4, frame.attemptId);
-      const failureIndex = RELAY_FAILURE_CODES.indexOf((frame as RelayFailure).code);
-      if (failureIndex < 0) fail("frame.code", "is invalid");
-      output[22] = failureIndex + 1;
+      const failureCode = RELAY_FAILURE_CODE_VALUES[(frame as RelayFailure).code];
+      if (failureCode === undefined) fail("frame.code", "is invalid");
+      output[22] = failureCode;
       return output;
     }
   }
@@ -619,13 +621,6 @@ export function parseRelayBinaryFrame(value: Uint8Array): RelayBinaryFrame {
   if (kind === 1 || kind === 2) {
     if (value.byteLength < routedFrameHeaderBytes) fail("frame", "has a truncated routed header");
     const routeId = parseRouteId(bytesUuid(value, 22, "frame.routeId"));
-    const payloadLength = new DataView(value.buffer, value.byteOffset, value.byteLength).getUint32(
-      38,
-      false,
-    );
-    if (payloadLength !== value.byteLength - routedFrameHeaderBytes) {
-      fail("frame.opaquePayload", "length does not match the frame size");
-    }
     const opaquePayload = value.slice(routedFrameHeaderBytes);
     return kind === 1
       ? {
@@ -650,7 +645,9 @@ export function parseRelayBinaryFrame(value: Uint8Array): RelayBinaryFrame {
   if (kind === 4) {
     const failureByte = value[22];
     if (failureByte === undefined) fail("frame.code", "is missing");
-    const code = RELAY_FAILURE_CODES[failureByte - 1];
+    const code = RELAY_FAILURE_CODES.find(
+      (candidate) => RELAY_FAILURE_CODE_VALUES[candidate] === failureByte,
+    );
     if (code === undefined) fail("frame.code", "is invalid");
     return { transportVersion: REMOTE_TRANSPORT_VERSION, attemptId, code };
   }

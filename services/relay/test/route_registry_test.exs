@@ -42,12 +42,12 @@ defmodule AxlRelay.RouteRegistryTest do
   test "routes only inside one installation and bounds pending bytes", %{registry: registry} do
     assert :ok = RouteRegistry.forward(registry, @source, @destination, @attempt, <<1, 2, 3>>)
 
-    assert_receive {:destination, {:relay_delivery, @source, @attempt, <<1, 2, 3>>, 45}}
+    assert_receive {:destination, {:relay_delivery, @source, @attempt, <<1, 2, 3>>, 41}}
 
     assert {:error, :queue_full} =
              RouteRegistry.forward(registry, @source, @destination, @attempt, <<1, 2, 3>>)
 
-    RouteRegistry.delivered(registry, @destination, 45)
+    RouteRegistry.delivered(registry, @destination, 41)
 
     assert_eventually(fn ->
       RouteRegistry.snapshot(registry).routes[@destination].queued_bytes == 0
