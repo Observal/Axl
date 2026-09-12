@@ -56,7 +56,17 @@ export class BrowserWebSocketTransportFactory implements AxlTransportFactory<nev
             socket.send(message);
           },
           onMessage(listener) {
-            const receive = (event: SocketEventMap["message"]) => listener(event.data);
+            const receive = (event: SocketEventMap["message"]): void => {
+              if (typeof event.data !== "string") {
+                listener(event.data);
+                return;
+              }
+              try {
+                listener(JSON.parse(event.data) as unknown);
+              } catch {
+                listener(event.data);
+              }
+            };
             socket.addEventListener("message", receive);
             return () => socket.removeEventListener("message", receive);
           },

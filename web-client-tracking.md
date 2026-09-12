@@ -35,20 +35,18 @@ The branch now contains the first complete local-session slice:
 - The composer loads a cached daemon provider directory and configures provider-qualified model and thinking choices. A live `/reload` boundary invalidates that cache.
 - Reusable theme, syntax, diff, and React conversation presentation lives in `packages/ui`.
 - The SDK exhaustively classifies canonical events for presentation, and immutable projections expose compacted-event membership to every renderer.
-- Staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, and final parity validation remain.
+- Staged Chat/Code creation, the remaining shared-command migration, and paused-item requeue remain.
 
 The previous PR #386 implementation was discarded when this branch was reset to `upstream/main`. Its tests and findings remain design evidence only.
 
 ## Progress snapshot
 
-The visual foundation and ordinary local conversation path are mostly complete. The full tracker is not: the remaining work is primarily command architecture and capability workflows rather than base rendering.
+The visual foundation, ordinary local conversation path, provider authentication, and final package/browser validation are complete. The full tracker is not: remaining work is limited to the shared-command migration, paused-item requeue, staged Chat/Code creation, and documented CLI follow-ups.
 
-1. Finish and verify the current UI wave, including browser smoke, installed-package smoke, mobile review, and licensing checks.
-2. Implement the shared human-command plane and migrate `/reload`, `/model`, `/thinking`, and the remaining commands.
-3. Add staged Chat/Code creation and complete provider configuration and authentication flows.
-4. Add steer, follow-up, queue, and interrupt-and-deliver flows.
-5. Add attachment upload, remaining session lifecycle operations, import/export, shell, workspace browsing, and checkpoints.
-6. Finish accessibility focus behavior and parity tests.
+1. Finish replacing the TUI static shared-command dispatcher with the SDK controller.
+2. Add explicit paused-item requeue controls.
+3. Add staged Chat/Code creation.
+4. Implement the explicitly deferred `axl web --dev` gateway and CLI option renames before stable release.
 
 ## Active rendering completion scratchpad
 
@@ -108,8 +106,8 @@ The normal local chat path is available. These items close the remaining gap bet
 
 ### Completion gate
 
-21. [ ] Run focused workflow tests for every action and failure path, then desktop and mobile browser smoke tests.
-22. [ ] Run installed-package verification, the Impeccable detector, `pnpm check`, and an authorized real-provider smoke test before declaring full first-party parity.
+21. [x] Run focused workflow and failure-path tests, then desktop and mobile browser smoke tests against the installed production package.
+22. [x] Run installed-package verification, the Impeccable detector, `pnpm check`, and an authorized real-provider browser smoke test. The smoke used Azure OpenAI Responses and returned the expected exact response without exposing credentials to browser JavaScript.
 
 ## CLI contract
 
@@ -493,10 +491,11 @@ Do not request a capability before its interaction, error behavior, and security
 
 - [x] Run the smallest focused tests for each implemented vertical slice.
 - [x] Run the web package tests.
-- [ ] Run production-package and development-gateway browser smoke tests.
+- [x] Run the production-package browser smoke test at desktop and mobile sizes.
+- [ ] Run the development-gateway browser smoke test after `axl web --dev` is implemented.
 - [x] Run `pnpm check` after the current UI wave. Run it again before publication.
-- [ ] Run `reuse lint` when available.
-- [ ] Run a live provider smoke only when credentials and external effects are explicitly authorized.
+- [x] Run `reuse lint`.
+- [x] Run an authorized live-provider prompt through the installed browser client.
 
 ## Required issue alignment
 

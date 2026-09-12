@@ -45,7 +45,7 @@ class FakeSocket {
   }
 }
 
-test("browser transport forwards text and reports close details", async () => {
+test("browser transport decodes JSON and reports close details", async () => {
   const connecting = new BrowserWebSocketTransportFactory(
     "ws://127.0.0.1/socket",
     FakeSocket as never,
@@ -55,21 +55,22 @@ test("browser transport forwards text and reports close details", async () => {
   socket.emit("open", {});
   const transport = await connecting;
 
-  let received: unknown;
+  const received: unknown[] = [];
   let closed: Error | undefined;
   transport.onMessage((message) => {
-    received = message;
+    received.push(message);
   });
   transport.onClose((cause) => {
     closed = cause;
   });
 
   transport.send("request\n");
-  socket.emit("message", { data: "response" });
+  socket.emit("message", { data: '{"type":"response"}' });
+  socket.emit("message", { data: "invalid" });
   socket.emit("close", { code: 1008, reason: "rejected" });
 
   assert.deepEqual(socket.sent, ["request\n"]);
-  assert.equal(received, "response");
+  assert.deepEqual(received, [{ type: "response" }, "invalid"]);
   assert.equal(closed?.message, "rejected");
   assert.deepEqual((closed as { details?: unknown }).details, { code: 1008 });
 });

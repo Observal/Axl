@@ -93,7 +93,7 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
     encoding: "utf8",
   }).trim();
 
-  execFileSync("pnpm", ["--filter", "@axl/web", "build"], {
+  execFileSync("pnpm", ["build"], {
     cwd: ROOT,
     stdio: "inherit",
     env: {
