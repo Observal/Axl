@@ -584,6 +584,48 @@ export function parseRelayRevocationNotification(value: unknown): RelayRevocatio
   };
 }
 
+export function parseOpaqueOutboxRecord(value: unknown): OpaqueOutboxRecord {
+  const candidate = object(value, "outboxRecord");
+  exact(candidate, "outboxRecord", [
+    "requestId",
+    "idempotencyKey",
+    "destinationRouteId",
+    "opaqueEnvelope",
+    "createdAt",
+    "state",
+  ]);
+  if (!(candidate.opaqueEnvelope instanceof Uint8Array)) {
+    fail("outboxRecord.opaqueEnvelope", "must be bytes");
+  }
+  if (
+    candidate.opaqueEnvelope.byteLength === 0 ||
+    candidate.opaqueEnvelope.byteLength > MAX_RELAY_OPAQUE_PAYLOAD_BYTES
+  ) {
+    fail(
+      "outboxRecord.opaqueEnvelope",
+      `must contain 1 through ${MAX_RELAY_OPAQUE_PAYLOAD_BYTES} bytes`,
+    );
+  }
+  if (
+    candidate.state !== "queued_local" &&
+    candidate.state !== "sending" &&
+    candidate.state !== "daemon_accepted"
+  ) {
+    fail("outboxRecord.state", "is invalid");
+  }
+  return {
+    requestId: parseRemoteRequestId(candidate.requestId, "outboxRecord.requestId"),
+    idempotencyKey: parseIdempotencyKey(candidate.idempotencyKey, "outboxRecord.idempotencyKey"),
+    destinationRouteId: parseRouteId(
+      candidate.destinationRouteId,
+      "outboxRecord.destinationRouteId",
+    ),
+    opaqueEnvelope: candidate.opaqueEnvelope.slice(),
+    createdAt: timestamp(candidate.createdAt, "outboxRecord.createdAt"),
+    state: candidate.state,
+  };
+}
+
 export function parseRelayRevocationResult(value: unknown): RelayRevocationResult {
   const candidate = object(value, "result");
   exact(candidate, "result", ["version", "accepted"]);

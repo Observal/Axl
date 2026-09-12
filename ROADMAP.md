@@ -2384,6 +2384,15 @@ The transport checkpoint was approved. The next private slice remains disabled f
 - [ ] Implement the reviewed permission-action events and RPC after protocol review.
 - [ ] Keep relay, runtime, CLI, SDK, and ordinary-session wiring disabled until their later gates.
 
+#### Remote SDK delivery checkpoint
+
+- [x] Add an injected atomic durable-outbox interface for opaque encrypted requests.
+- [x] Retry byte-identical opaque envelopes with new transport attempt IDs.
+- [x] Keep relay admission and forwarding receipts diagnostic only.
+- [x] Permit removal only after daemon acceptance.
+- [x] Reset uncertain sending state to queued on reconnect without re-encryption.
+- [ ] Connect the opaque outbox to a reviewed real-E2EE transactional sealing API.
+
 #### Mobile clients
 
 - [ ] Choose mobile implementation stacks when work begins, based on concrete platform and product requirements.
