@@ -207,9 +207,9 @@ Clients may format those items for their platform. They must not maintain a seco
 
 ## Authentication
 
-The SDK defines a generic credential-provider hook for transports that require authentication. It does not implement Azure OpenAI authentication and never receives model-provider secrets.
+The SDK defines transport authentication separately from model-provider authentication. It never receives model-provider secrets.
 
-For the local product, the CLI gathers provider configuration, `packages/ai` validates and stores it, and `packages/runtime` resolves it inside the daemon process. A future browser gateway can supply its own transport authentication without changing model-provider authentication.
+`TrustedProviderHost` carries only provider ID, login method, cancellation, and validated safe status between a presentation and its trusted process host. For the local product, the CLI gathers provider credentials through its terminal adapter, `packages/ai` validates and stores them, and `packages/runtime` resolves them inside the daemon process. The authenticated browser gateway implements the host contract without exposing credential values to browser JavaScript.
 
 ## Specifications and tests
 

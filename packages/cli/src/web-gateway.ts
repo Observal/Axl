@@ -10,13 +10,17 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   MAX_WIRE_MESSAGE_BYTES,
-  WIRE_PROTOCOL_VERSION,
+  type ProviderLoginMethod,
+  parseProviderAuthenticationStatus,
+  parseProviderIdParam,
+  parseProviderLoginMethod,
   parseSessionId,
   type SessionOpenResult,
+  WIRE_PROTOCOL_VERSION,
 } from "@axl/protocol";
-import { AxlClientError } from "@axl/sdk";
+import { AxlClientError, type TrustedProviderHost } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
-import { WebSocketServer, type WebSocket } from "ws";
+import { type WebSocket, WebSocketServer } from "ws";
 
 const SECURITY_HEADERS = {
   "cache-control": "no-store",
@@ -43,6 +47,7 @@ export interface WebGatewayOptions {
   readonly stateDirectory: string;
   readonly cwd: string;
   readonly packageVersion: string;
+  readonly providerHost?: TrustedProviderHost;
   readonly launchToken?: Buffer;
   readonly pathToken?: Buffer;
 }
@@ -249,6 +254,53 @@ async function requestBody(request: IncomingMessage, maximumBytes: number): Prom
   return Buffer.concat(chunks);
 }
 
+function providerLoginRequestId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+  ) {
+    throw new Error("Invalid provider login request");
+  }
+  return value;
+}
+
+function providerLoginRequest(bytes: Buffer): {
+  readonly requestId: string;
+  readonly providerId: string;
+  readonly method: ProviderLoginMethod;
+} {
+  const value = JSON.parse(bytes.toString("utf8")) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Invalid provider login request");
+  }
+  const request = value as Record<string, unknown>;
+  if (
+    Object.keys(request).length !== 3 ||
+    !Object.hasOwn(request, "requestId") ||
+    !Object.hasOwn(request, "providerId") ||
+    !Object.hasOwn(request, "method")
+  ) {
+    throw new Error("Invalid provider login request");
+  }
+  return {
+    requestId: providerLoginRequestId(request.requestId),
+    providerId: parseProviderIdParam(request.providerId, "providerId"),
+    method: parseProviderLoginMethod(request.method, "method"),
+  };
+}
+
+function providerLoginCancellation(bytes: Buffer): string {
+  const value = JSON.parse(bytes.toString("utf8")) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Invalid provider login cancellation");
+  }
+  const request = value as Record<string, unknown>;
+  if (Object.keys(request).length !== 1 || !Object.hasOwn(request, "requestId")) {
+    throw new Error("Invalid provider login cancellation");
+  }
+  return providerLoginRequestId(request.requestId);
+}
+
 function send(
   response: ServerResponse,
   status: number,
@@ -347,6 +399,9 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
       throw error;
     });
   let preferenceWrites = Promise.resolve();
+  let providerLogin:
+    | { readonly requestId: string; readonly controller: AbortController }
+    | undefined;
   let expectedHost = "";
   let expectedOrigin = "";
   const sockets = new Set<Socket>();
@@ -413,9 +468,51 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
         return send(
           response,
           200,
-          JSON.stringify({ cwd: options.cwd, webSocketPath: `${prefix}ws`, preferences }),
+          JSON.stringify({
+            cwd: options.cwd,
+            webSocketPath: `${prefix}ws`,
+            preferences,
+            hostCapabilities: options.providerHost === undefined ? [] : ["provider.auth.login"],
+          }),
           "application/json; charset=utf-8",
         );
+      }
+      if (request.method === "POST" && relative === "host/provider/login/cancel") {
+        if (!validOrigin(request) || !authorized(request))
+          return send(response, 401, "Authentication required");
+        if (options.providerHost === undefined)
+          return send(response, 403, "Provider login is unavailable in this host");
+        const cancellation = providerLoginCancellation(await requestBody(request, 4096));
+        const activeLogin = providerLogin;
+        const cancelled = activeLogin?.requestId === cancellation;
+        if (cancelled) activeLogin?.controller.abort();
+        return send(
+          response,
+          200,
+          JSON.stringify({ cancelled }),
+          "application/json; charset=utf-8",
+        );
+      }
+      if (request.method === "POST" && relative === "host/provider/login") {
+        if (!validOrigin(request) || !authorized(request))
+          return send(response, 401, "Authentication required");
+        if (options.providerHost === undefined)
+          return send(response, 403, "Provider login is unavailable in this host");
+        const login = providerLoginRequest(await requestBody(request, 4096));
+        if (providerLogin !== undefined)
+          return send(response, 409, "Another provider login is active");
+        const controller = new AbortController();
+        providerLogin = { requestId: login.requestId, controller };
+        try {
+          const result = parseProviderAuthenticationStatus(
+            await options.providerHost.loginProvider(login, { signal: controller.signal }),
+            "providerLogin",
+          );
+          if (controller.signal.aborted || response.destroyed) return;
+          return send(response, 200, JSON.stringify(result), "application/json; charset=utf-8");
+        } finally {
+          if (providerLogin?.controller === controller) providerLogin = undefined;
+        }
       }
       if (request.method === "POST" && relative === "artifact/export") {
         if (!validOrigin(request) || !authorized(request))
@@ -496,7 +593,10 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
       response.writeHead(200, { ...SECURITY_HEADERS, "content-type": mime(path) });
       response.end(data);
     } catch (error) {
+      if (response.destroyed) return;
       if (error instanceof RangeError) return send(response, 413, error.message);
+      if (relative === "host/provider/login")
+        return send(response, 400, "Provider login failed. Check the trusted host terminal.");
       if (error instanceof AxlClientError) {
         const action = relative === "artifact/export" ? "export" : "import";
         return send(response, 400, `Session ${action} failed (${error.code})`);
@@ -586,6 +686,7 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
     launchUrl: `${expectedOrigin}${prefix}#token=${launchToken.toString("base64url")}`,
     close: () =>
       new Promise((resolvePromise, reject) => {
+        providerLogin?.controller.abort();
         for (const ws of webSockets) ws.close(1001, "Gateway stopped");
         for (const socket of sockets) socket.destroy();
         wss.close();

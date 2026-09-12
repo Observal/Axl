@@ -140,6 +140,8 @@ Static production assets use content hashes, but authenticated responses and HTM
 
 Session import and export use authenticated same-origin `POST` endpoints under the process-random path prefix. The browser exchanges a portable `axl.web-session` JSON envelope capped at 64 MiB. The gateway validates its exact file list, manifest-declared content, canonical base64, and size before handing a private temporary directory to the daemon's typed artifact RPCs. Temporary files use owner-only permissions and are removed after every success or failure. Browser JavaScript never receives or chooses a daemon host filesystem path.
 
+Provider login is a separate trusted-host operation. Bootstrap advertises it only when `axl web` has an attached interactive terminal. The authenticated browser may submit only a validated provider ID, login method, and random request ID used to correlate cancellation. The gateway serializes login requests and collects API keys, manual codes, and OAuth answers through the terminal adapter. A correlated cancellation request aborts only its matching terminal prompt. Browser JavaScript receives only validated authentication status. Credential values never enter request bodies, responses, browser storage, URLs, logs, daemon events, or SDK projections. Without an interactive terminal, the operation is absent and the browser offers a copyable CLI command instead of weakening the boundary.
+
 ## WebSocket limits
 
 Initial limits are:
@@ -242,3 +244,4 @@ Automated tests must prove:
 16. Logs and errors contain no token, cookie, protected content, or rejected secret value.
 17. Closing the gateway or tab does not interrupt or dispose sessions.
 18. Missing required controls fail startup rather than downgrade.
+19. Provider login accepts only provider ID, method, and cancellation request ID; rejects secret-bearing fields; aborts only the matching login when the browser cancels; and never returns or logs host credential values.

@@ -6,11 +6,21 @@ import {
   HOST_CONTROL_VERSION,
   type HostContext,
   type HostRequest,
+  type ProviderAuthenticationStatus,
+  type ProviderLoginParams,
   parseHostRequest,
   parseHostResponse,
 } from "@axl/protocol";
 
 import { AxlClientError, type AxlTransport, type AxlTransportFactory } from "./client.ts";
+
+/** Provider login intent only. Credential prompts stay inside the trusted process host. */
+export interface TrustedProviderHost {
+  loginProvider(
+    params: ProviderLoginParams,
+    options?: { readonly signal?: AbortSignal },
+  ): Promise<ProviderAuthenticationStatus>;
+}
 
 /** Host intent only. Presentation code receives this from its trusted process host. */
 export interface DaemonHostControl {

@@ -167,4 +167,4 @@ Every new client transport must pass shared protocol and SDK conformance tests. 
 
 ## Current gaps
 
-The shared SDK currently includes the transport-independent client, subscription manager, projector, provider-neutral model metadata, and Unix socket transport. The CLI process host supplies provider-specific login behavior to the TUI through a neutral dialog contract. Browser WebSocket and desktop IPC adapters are not implemented yet.
+The shared SDK includes the transport-independent client, subscription manager, projector, provider-neutral model metadata, Unix socket transport, and browser WebSocket transport. The CLI process host supplies provider-specific login behavior to the TUI and local browser gateway through `TrustedProviderHost`; credential prompts remain in the terminal. Desktop IPC adapters are not implemented yet.

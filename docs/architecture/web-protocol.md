@@ -101,6 +101,8 @@ A capability means the daemon understands and authorizes that contract. Session 
 
 Unknown capabilities are ignored. A required missing capability fails connection or disables the relevant control with an explicit reason. A client never invokes a feature method it was not granted.
 
+The local browser attachment intentionally does not request `provider.auth.login`. Interactive credential acquisition is a typed trusted-host operation advertised separately by bootstrap only when the `axl web` process has an attached terminal. The browser sends provider ID and login method to that authenticated host operation and receives only validated authentication status. Other provider RPCs, including status, logout, and catalog refresh, remain ordinary daemon capabilities.
+
 ## Connection initialization
 
 After hello, the client must initialize:

@@ -94,6 +94,8 @@ Mobile has two product modes. Chat uses a tool-free daemon-owned session through
 
 Transport and authentication are adapters. RPC typing, canonical projection, cursors, idempotency, and capability behavior do not depend on Unix sockets, browser cookies, origins, Tauri, Swift, or Kotlin. Client identity is diagnostic and extensible; authenticated scope alone grants authority. Browser controls derive from granted capabilities and injected host operations rather than hardcoded `local_control` assumptions.
 
+Model-provider login uses a narrow injected trusted-host contract. The browser submits only provider identity and login method through its authenticated gateway. API keys, manual codes, and OAuth interaction remain in the terminal attached to `axl web`; the browser receives only validated safe authentication status. A gateway without an interactive terminal does not advertise login and the client offers the explicit CLI command instead.
+
 ## Protocol decisions
 
 The detailed protocol is specified in [web-protocol.md](web-protocol.md) and [web-delivery.md](web-delivery.md).

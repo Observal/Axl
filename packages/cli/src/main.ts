@@ -1075,6 +1075,16 @@ async function main(): Promise<void> {
       cwd: cli.cwd,
       assetDirectory: resolve(dirname(fileURLToPath(import.meta.url)), WEB_ASSET_RELATIVE_PATH),
       packageVersion: AXL_VERSION,
+      ...(process.stdin.isTTY === true && process.stdout.isTTY === true
+        ? {
+            providerHost: {
+              loginProvider: (
+                { providerId, method }: { providerId: string; method: ProviderLoginMethod },
+                options: { readonly signal?: AbortSignal } = {},
+              ) => loginFromThisHost(providerId, method, options.signal),
+            },
+          }
+        : {}),
     });
     process.stdout.write(`Axl web: ${gateway.origin}\n`);
     if (!cli.noOpen) {

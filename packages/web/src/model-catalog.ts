@@ -24,19 +24,32 @@ export function loadProviderDirectory(
   if (refresh) cache.delete(client);
   const cached = cache.get(client);
   if (cached !== undefined) return cached;
-  const loading = client.listProviders().then(({ providers }) => ({
-    providers,
-    models: providers
-      .filter((provider) => provider.enabled)
-      .flatMap((provider) => provider.models)
-      .filter((model) => model.availability.status !== "unavailable")
-      .map((model) => ({
-        providerId: model.providerId,
-        modelId: model.modelId,
-        displayName: model.displayName,
-        thinkingLevels: model.supportedThinkingLevels,
-      })),
-  }));
+  const loading = (async () => {
+    const statuses = client.connection.grantedCapabilities.includes("provider.auth.status")
+      ? await client.providerAuthenticationStatus()
+      : { providers: [] };
+    const listed = await client.listProviders();
+    const statusByProvider = new Map(
+      statuses.providers.map((status) => [status.providerId, status]),
+    );
+    const providers = listed.providers.map((provider) => ({
+      ...provider,
+      authentication: statusByProvider.get(provider.providerId) ?? provider.authentication,
+    }));
+    return {
+      providers,
+      models: providers
+        .filter((provider) => provider.enabled)
+        .flatMap((provider) => provider.models)
+        .filter((model) => model.availability.status !== "unavailable")
+        .map((model) => ({
+          providerId: model.providerId,
+          modelId: model.modelId,
+          displayName: model.displayName,
+          thinkingLevels: model.supportedThinkingLevels,
+        })),
+    };
+  })();
   cache.set(client, loading);
   return loading;
 }

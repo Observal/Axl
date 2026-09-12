@@ -35,7 +35,7 @@ The branch now contains the first complete local-session slice:
 - The composer loads a cached daemon provider directory and configures provider-qualified model and thinking choices. A live `/reload` boundary invalidates that cache.
 - Reusable theme, syntax, diff, and React conversation presentation lives in `packages/ui`.
 - The SDK exhaustively classifies canonical events for presentation, and immutable projections expose compacted-event membership to every renderer.
-- Provider auth, staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, and full protocol capability parity remain.
+- Staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, and final parity validation remain.
 
 The previous PR #386 implementation was discarded when this branch was reset to `upstream/main`. Its tests and findings remain design evidence only.
 
@@ -103,8 +103,8 @@ The normal local chat path is available. These items close the remaining gap bet
 
 ### Provider credentials
 
-19. [ ] Complete issue #372's trusted-process-host credential interaction contract.
-20. [ ] Add provider login and reauthentication UI only after the trusted host can collect secrets without exposing them to browser JavaScript, storage, URLs, logs, or canonical events.
+19. [x] Complete issue #372's trusted-process-host credential interaction contract.
+20. [x] Add provider login and reauthentication UI only after the trusted host can collect secrets without exposing them to browser JavaScript, storage, URLs, logs, or canonical events.
 
 ### Completion gate
 
@@ -154,10 +154,10 @@ The web client is a static single-page application. It has no server-side render
 - [x] Emit content-hashed JavaScript and CSS.
 - [x] Emit validated metadata containing package, source, web-asset, and wire versions plus asset hashes.
 - [x] Load a small validated bootstrap document before constructing application state.
-- [ ] Have bootstrap supply an initialized SDK transport and only the trusted host operations available in the current environment.
+- [x] Have bootstrap supply an initialized SDK transport and only the trusted host operations available in the current environment.
 - [x] Keep React code independent of loopback hostname, selected port, cookie format, process path prefix, and Unix socket details.
 - [x] Do not let React launch or stop a process, acquire credentials, or infer authority from its environment name.
-- [ ] Drive controls from granted protocol capabilities and injected host operations.
+- [x] Drive controls from granted protocol capabilities and injected host operations.
 - [x] Keep browser preferences independent of the gateway's random origin where persistence across launches is required.
 - [ ] Add an IndexedDB cursor-store adapter. Cursor-store failure must remain visible and fall back to a fresh snapshot.
 - [x] Avoid a service worker initially. Entry documents use `no-store`; hashed assets may be immutable.
@@ -383,8 +383,8 @@ The browser should support every capability granted to its connection.
 
 - [x] `provider.list`
 - [x] `provider.catalog.refresh`
-- [ ] `provider.auth.status`
-- [ ] `provider.auth.login`
+- [x] `provider.auth.status`
+- [x] `provider.auth.login` is intentionally declined by the browser attachment; login uses the typed trusted-host operation instead.
 - [x] `provider.auth.logout`
 
 Do not request a capability before its interaction, error behavior, and security boundary are implemented. Missing capability UI must fail explicitly rather than provide a local fallback.
@@ -392,12 +392,12 @@ Do not request a capability before its interaction, error behavior, and security
 ## Provider management
 
 - [ ] Add `/providers` with provider, authentication, catalog, region, enabled, and model availability state. The web provider status surface covers authentication, catalog, enabled state, and model counts; shared command routing and region detail remain.
-- [ ] Refresh inventory after login, logout, catalog refresh, settings changes, and reconnect. Web refreshes after logout and catalog refresh; login and reconnect invalidation remain.
+- [x] Refresh inventory after login, logout, catalog refresh, settings changes, and reconnect.
 - [ ] Add per-provider progress, cancellation, result, and retry. Web shows bounded refresh progress and retry controls; cancellation remains.
 - [x] Preserve usable provider groups when one provider fails.
 - [x] Present errors beside the owning provider.
-- [ ] Acquire credentials only through an injected trusted-process-host interaction.
-- [ ] Keep credential values out of React, browser storage, URLs, logs, and canonical events.
+- [x] Acquire credentials only through an injected trusted-process-host interaction.
+- [x] Keep credential values out of React, browser storage, URLs, logs, and canonical events.
 
 ## Conversation and workspace presentation
 

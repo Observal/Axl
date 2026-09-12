@@ -1,7 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import { AxlClient, parseRpcResult, type SessionId, type SessionOpenResult } from "@axl/sdk";
+import {
+  AxlClient,
+  parseProviderAuthenticationStatus,
+  parseRpcResult,
+  type SessionId,
+  type SessionOpenResult,
+  type TrustedProviderHost,
+  WIRE_CAPABILITIES,
+} from "@axl/sdk";
 import { BrowserWebSocketTransportFactory } from "@axl/sdk/browser";
 
 export interface WebPreferences {
@@ -11,10 +19,17 @@ export interface WebPreferences {
   readonly changesView: "files" | "all";
 }
 
+export type WebHostCapability = "provider.auth.login";
+
+export const WEB_REQUESTED_CAPABILITIES = Object.freeze(
+  WIRE_CAPABILITIES.filter((capability) => capability !== "provider.auth.login"),
+);
+
 export interface WebBootstrap {
   readonly cwd: string;
   readonly webSocketPath: string;
   readonly preferences: WebPreferences;
+  readonly hostCapabilities: readonly WebHostCapability[];
 }
 
 function fragment(): { readonly token?: string; readonly sessionId?: string } {
@@ -57,14 +72,69 @@ export function parseBootstrap(value: unknown): WebBootstrap {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     throw new Error("Invalid web bootstrap response");
   const record = value as Record<string, unknown>;
-  if (typeof record.cwd !== "string" || typeof record.webSocketPath !== "string")
+  if (
+    typeof record.cwd !== "string" ||
+    typeof record.webSocketPath !== "string" ||
+    !Array.isArray(record.hostCapabilities) ||
+    record.hostCapabilities.some((capability) => capability !== "provider.auth.login") ||
+    new Set(record.hostCapabilities).size !== record.hostCapabilities.length
+  )
     throw new Error("Invalid web bootstrap response");
   return {
     cwd: record.cwd,
     webSocketPath: record.webSocketPath,
     preferences: parseWebPreferences(record.preferences),
+    hostCapabilities: record.hostCapabilities as readonly WebHostCapability[],
   };
 }
+
+export const browserProviderHost: TrustedProviderHost = {
+  loginProvider: async (params, options = {}) => {
+    options.signal?.throwIfAborted();
+    const requestId = crypto.randomUUID();
+    const login = json<unknown>("host/provider/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requestId, ...params }),
+    }).then((result) => parseProviderAuthenticationStatus(result, "providerLogin"));
+    if (options.signal === undefined) return login;
+    const signal = options.signal;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (result?: Awaited<typeof login>, error?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", cancel);
+        if (error !== undefined) reject(error);
+        else if (result !== undefined) resolve(result);
+      };
+      const cancel = (): void => {
+        void json<unknown>("host/provider/login/cancel", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ requestId }),
+        }).then(
+          () => finish(undefined, new DOMException("Provider login cancelled", "AbortError")),
+          (cause: unknown) =>
+            finish(
+              undefined,
+              new Error("Could not cancel provider login; check the terminal", { cause }),
+            ),
+        );
+      };
+      signal.addEventListener("abort", cancel, { once: true });
+      void login.then(
+        (result) => {
+          if (!signal.aborted) finish(result);
+        },
+        (error: unknown) => {
+          if (!signal.aborted) finish(undefined, error);
+        },
+      );
+      if (signal.aborted) cancel();
+    });
+  },
+};
 
 export async function saveWebPreferences(preferences: WebPreferences): Promise<void> {
   await json("preferences", {
@@ -120,6 +190,7 @@ export async function connectWebEnvironment(): Promise<{
     ),
     identity: { kind: "web", version: "0.0.0", instanceId: crypto.randomUUID() },
     idempotencyKeys: { create: () => crypto.randomUUID() },
+    requestedCapabilities: WEB_REQUESTED_CAPABILITIES,
   });
   return {
     client,

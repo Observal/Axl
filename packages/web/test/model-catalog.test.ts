@@ -8,7 +8,22 @@ import { loadProviderDirectory } from "../src/model-catalog.ts";
 
 test("caches the daemon model directory until an explicit refresh", async () => {
   let calls = 0;
+  let statusCalls = 0;
   const client = {
+    connection: { grantedCapabilities: ["provider.auth.status"] },
+    providerAuthenticationStatus: async () => {
+      statusCalls += 1;
+      return {
+        providers: [
+          {
+            providerId: "anthropic",
+            phase: "authenticated" as const,
+            method: "oauth" as const,
+            source: "Anthropic OAuth",
+          },
+        ],
+      };
+    },
     listProviders: async () => {
       calls += 1;
       return {
@@ -19,8 +34,8 @@ test("caches the daemon model directory until an explicit refresh", async () => 
             enabled: true,
             authMethods: [],
             loginMethods: [],
-            authentication: { status: "authenticated" },
-            catalog: { status: "ready" },
+            authentication: { providerId: "anthropic", phase: "idle" },
+            catalog: { refreshable: false },
             models: [
               {
                 providerId: "anthropic",
@@ -43,9 +58,12 @@ test("caches the daemon model directory until an explicit refresh", async () => 
 
   const directory = await loadProviderDirectory(client);
   assert.equal(directory.providers[0]?.providerId, "anthropic");
+  assert.equal(directory.providers[0]?.authentication.phase, "authenticated");
   assert.equal(directory.models[0]?.modelId, "claude-sonnet-4-6");
   await loadProviderDirectory(client);
   assert.equal(calls, 1);
+  assert.equal(statusCalls, 1);
   await loadProviderDirectory(client, true);
   assert.equal(calls, 2);
+  assert.equal(statusCalls, 2);
 });

@@ -104,12 +104,47 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
   context.after(() => new Promise<void>((resolve) => daemon.close(() => resolve())));
 
   const launchToken = Buffer.alloc(32, 1);
+  const providerLogins: Array<{ providerId: string; method: string }> = [];
+  let resolveSlowLoginStarted = (): void => undefined;
+  const slowLoginStarted = new Promise<void>((resolve) => {
+    resolveSlowLoginStarted = resolve;
+  });
+  let slowLoginAborted = false;
   const gateway = await startWebGateway({
     socketPath,
     assetDirectory: directory,
     stateDirectory: directory,
     cwd: "/workspace",
     packageVersion: "0.0.0-test",
+    providerHost: {
+      loginProvider: ({ providerId, method }, options = {}) => {
+        const signal = options.signal ?? new AbortController().signal;
+        signal.throwIfAborted();
+        providerLogins.push({ providerId, method });
+        if (providerId === "secret-provider") {
+          throw new Error("credential secret-value was rejected");
+        }
+        if (providerId === "slow-provider") {
+          resolveSlowLoginStarted();
+          return new Promise<never>((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => {
+                slowLoginAborted = true;
+                reject(new DOMException("cancelled", "AbortError"));
+              },
+              { once: true },
+            );
+          });
+        }
+        return Promise.resolve({
+          providerId,
+          phase: "authenticated",
+          method,
+          source: "Test host",
+        });
+      },
+    },
     launchToken,
     pathToken: Buffer.alloc(16, 2),
   });
@@ -148,6 +183,7 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
       sidebarCollapsed: false,
       changesView: "files",
     },
+    hostCapabilities: ["provider.auth.login"],
   });
   const preferences = await fetch(new URL("preferences", gateway.origin), {
     method: "POST",
@@ -166,6 +202,76 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     sidebarCollapsed: true,
     changesView: "all",
   });
+
+  const loginUrl = new URL("host/provider/login", gateway.origin);
+  const loginRequestId = "123e4567-e89b-42d3-a456-426614174010";
+  const login = await fetch(loginUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ requestId: loginRequestId, providerId: "openai", method: "oauth" }),
+  });
+  assert.equal(login.status, 200);
+  assert.deepEqual(await login.json(), {
+    providerId: "openai",
+    phase: "authenticated",
+    method: "oauth",
+    source: "Test host",
+  });
+  assert.deepEqual(providerLogins, [{ providerId: "openai", method: "oauth" }]);
+
+  const secretField = await fetch(loginUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: loginRequestId,
+      providerId: "openai",
+      method: "api_key",
+      credential: "secret-value",
+    }),
+  });
+  assert.equal(secretField.status, 400);
+  assert.equal((await secretField.text()).includes("secret-value"), false);
+  assert.equal(providerLogins.length, 1);
+
+  const failedLogin = await fetch(loginUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: "123e4567-e89b-42d3-a456-426614174011",
+      providerId: "secret-provider",
+      method: "api_key",
+    }),
+  });
+  assert.equal(failedLogin.status, 400);
+  assert.equal(await failedLogin.text(), "Provider login failed. Check the trusted host terminal.");
+
+  const slowRequestId = "123e4567-e89b-42d3-a456-426614174012";
+  const cancelledLogin = fetch(loginUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({
+      requestId: slowRequestId,
+      providerId: "slow-provider",
+      method: "oauth",
+    }),
+  });
+  await slowLoginStarted;
+  const unrelatedCancel = await fetch(new URL("host/provider/login/cancel", gateway.origin), {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ requestId: "123e4567-e89b-42d3-a456-426614174099" }),
+  });
+  assert.deepEqual(await unrelatedCancel.json(), { cancelled: false });
+  assert.equal(slowLoginAborted, false);
+  const cancelLogin = await fetch(new URL("host/provider/login/cancel", gateway.origin), {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ requestId: slowRequestId }),
+  });
+  assert.equal(cancelLogin.status, 200);
+  assert.deepEqual(await cancelLogin.json(), { cancelled: true });
+  assert.equal((await cancelledLogin).status, 400);
+  assert.equal(slowLoginAborted, true);
 
   const socket = new WebSocket(new URL("ws", gateway.origin), {
     headers: { origin, cookie: cookieHeader },
