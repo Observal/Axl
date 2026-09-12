@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan
+# SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
 node_modules/
@@ -7,6 +8,8 @@ dist/
 # Read-only reference checkouts (see AGENTS.md). Never tracked.
 .reference/
 coverage/
+services/relay/_build/
+services/relay/deps/
 docs/screenshots/
 *.tsbuildinfo
 .env

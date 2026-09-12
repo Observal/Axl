@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -23,4 +24,15 @@ test("requires generated files to name an existing passing generator", () => {
     checkGenerated(root, () => undefined),
     [],
   );
+});
+
+test("ignores dependency builds and directory symlinks", () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-generated-builds-"));
+  mkdirSync(join(root, "deps"));
+  mkdirSync(join(root, "_build"));
+  writeFileSync(join(root, "deps", "ignored.generated.ts"), "");
+  writeFileSync(join(root, "_build", "ignored.generated.ts"), "");
+  symlinkSync(join(root, "deps"), join(root, "linked-deps"));
+
+  assert.deepEqual(checkGenerated(root), []);
 });

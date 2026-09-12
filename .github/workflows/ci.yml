@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan
+# SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
 name: CI
@@ -27,6 +28,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       workflows: ${{ steps.filter.outputs.workflows }}
+      relay: ${{ steps.filter.outputs.relay }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
@@ -35,6 +37,7 @@ jobs:
           filters: |
             code:
               - 'packages/**'
+              - 'services/**'
               - 'distribution/**'
               - 'scripts/**'
               - 'package.json'
@@ -46,6 +49,12 @@ jobs:
               - '.github/workflows/ci.yml'
             workflows:
               - '.github/workflows/**'
+            relay:
+              - 'services/relay/**'
+              - 'packages/protocol/src/remote-transport.ts'
+              - 'packages/protocol/test/fixtures/remote-transport-v1.json'
+              - 'packages/protocol/test/fixtures/internal-relay-api-v1.json'
+              - '.github/workflows/ci.yml'
 
   quality:
     name: Build and test
@@ -73,6 +82,41 @@ jobs:
       - name: Format, lint, type-check, test, and build
         if: needs.changes.outputs.code == 'true'
         run: pnpm check
+
+  relay:
+    name: Relay build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    steps:
+      - name: No relay changes
+        if: needs.changes.outputs.relay != 'true'
+        run: echo "No relay changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.relay == 'true'
+      - name: Set up Erlang and Elixir
+        if: needs.changes.outputs.relay == 'true'
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: 27.3.4.17
+          elixir-version: 1.18.5
+      - name: Restore Mix caches
+        if: needs.changes.outputs.relay == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            services/relay/deps
+            services/relay/_build
+            ~/.mix
+          key: relay-${{ runner.os }}-${{ hashFiles('services/relay/mix.lock') }}
+      - name: Fetch relay dependencies
+        if: needs.changes.outputs.relay == 'true'
+        working-directory: services/relay
+        run: mix deps.get --check-locked
+      - name: Format, compile, test, analyze, and audit relay
+        if: needs.changes.outputs.relay == 'true'
+        working-directory: services/relay
+        run: mix format --check-formatted && mix compile --warnings-as-errors && mix test && mix credo --strict && mix dialyzer && mix deps.audit
 
   licenses:
     name: REUSE licenses
