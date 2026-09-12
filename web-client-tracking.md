@@ -7,6 +7,8 @@ Status: active local planning document
 
 Branch base: `upstream/main` at `ea906d0`
 
+Checklist convention: `[x]` means implemented or verified on this branch. `[ ]` means remaining work. Items marked **Deferred**, **Before stable release**, or **Blocked** are not part of the next active slice.
+
 This file is the implementation checklist for the web rebuild branch.
 
 ## Scope
@@ -35,18 +37,23 @@ The branch now contains the first complete local-session slice:
 - The composer loads a cached daemon provider directory and configures provider-qualified model and thinking choices. A live `/reload` boundary invalidates that cache.
 - Reusable theme, syntax, diff, and React conversation presentation lives in `packages/ui`.
 - The SDK exhaustively classifies canonical events for presentation, and immutable projections expose compacted-event membership to every renderer.
-- Staged Chat/Code creation, the remaining shared-command migration, and paused-item requeue remain.
+- Ordinary session creation works. Staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, presence presentation, and several hardening tests remain.
 
 The previous PR #386 implementation was discarded when this branch was reset to `upstream/main`. Its tests and findings remain design evidence only.
 
 ## Progress snapshot
 
-The visual foundation, ordinary local conversation path, provider authentication, and final package/browser validation are complete. The full tracker is not: remaining work is limited to the shared-command migration, paused-item requeue, staged Chat/Code creation, and documented CLI follow-ups.
+The visual foundation, ordinary local conversation path, provider authentication, and package/browser validation are complete. The web client is usable for ordinary new and resumed sessions, but this tracker is not complete.
 
-1. Finish replacing the TUI static shared-command dispatcher with the SDK controller.
-2. Add explicit paused-item requeue controls.
-3. Add staged Chat/Code creation.
-4. Implement the explicitly deferred `axl web --dev` gateway and CLI option renames before stable release.
+Active remaining work:
+
+1. Finish replacing the TUI static shared-command dispatcher with the SDK controller and remove duplicated browser command routing.
+2. Add explicit paused-item requeue controls and browser presence presentation.
+3. Add staged Chat/Code creation, including explicit workspace and tool-profile semantics.
+4. Move the provider directory and remaining configuration sequencing into reusable SDK controllers.
+5. Complete the unchecked security, cross-client, capability, and accessibility verification gates below.
+
+Deferred work is labeled in place. It includes extension-driven command invalidation, `axl web --dev`, IndexedDB cursor persistence, localization, long-session React measurement, and pre-stable CLI flag renames.
 
 ## Active rendering completion scratchpad
 
@@ -72,7 +79,7 @@ The normal local chat path is available. These items close the remaining gap bet
 2. [x] Add the reusable SDK command controller that validates, merges, searches, and maps catalog entries to existing typed RPCs or focused workflows.
 3. [ ] Finish replacing the TUI static shared-command dispatcher with the SDK controller. Daemon-backed shared metadata and refresh are implemented; trusted-host and remaining workflow commands still need migration.
 4. [x] Add the web command palette and slash discovery UI. It searches the effective daemon directory, explains unavailable commands, collects bounded arguments, and opens focused interfaces without duplicating command metadata.
-5. [ ] Add dynamic catalog invalidation when daemon extension registration exists. Connection, reconnection, session replacement, explicit palette opening, and configuration changes already refresh the current static catalog.
+5. [ ] **Deferred:** add dynamic catalog invalidation when daemon extension registration exists. Connection, reconnection, session replacement, explicit palette opening, and configuration changes already refresh the current static catalog.
 
 ### Prompt delivery
 
@@ -104,7 +111,7 @@ The normal local chat path is available. These items close the remaining gap bet
 19. [x] Complete issue #372's trusted-process-host credential interaction contract.
 20. [x] Add provider login and reauthentication UI only after the trusted host can collect secrets without exposing them to browser JavaScript, storage, URLs, logs, or canonical events.
 
-### Completion gate
+### Validation completed for the implemented scope
 
 21. [x] Run focused workflow and failure-path tests, then desktop and mobile browser smoke tests against the installed production package.
 22. [x] Run installed-package verification, the Impeccable detector, `pnpm check`, and an authorized real-provider browser smoke test. The smoke used Azure OpenAI Responses and returned the expected exact response without exposing credentials to browser JavaScript.
@@ -116,8 +123,8 @@ The normal local chat path is available. These items close the remaining gap bet
 - [x] `axl web` starts the local gateway and opens the browser without importing or launching the TUI.
 - [x] `axl web <session-id>` opens that session in the browser without launching the TUI.
 - [x] `axl web --no-open` starts the gateway and prints the safe token-free origin.
-- [ ] `axl web --dev` uses the explicit same-origin development proxy.
-- [ ] Rename the ambiguous model-tool flags `--web` and `--no-web` to `--web-tools` and `--no-web-tools` before stable release. Keep `--web-search` and `--web-fetch` explicit.
+- [ ] **Deferred:** `axl web --dev` uses the explicit same-origin development proxy.
+- [ ] **Before stable release:** rename the ambiguous model-tool flags `--web` and `--no-web` to `--web-tools` and `--no-web-tools`. Keep `--web-search` and `--web-fetch` explicit.
 - [x] Make command parsing distinguish the `web` subcommand from session IDs before any daemon or TUI startup work.
 - [x] Keep gateway shutdown distinct from browser detach, operation interrupt, session disposal, and daemon shutdown.
 
@@ -157,9 +164,9 @@ The web client is a static single-page application. It has no server-side render
 - [x] Do not let React launch or stop a process, acquire credentials, or infer authority from its environment name.
 - [x] Drive controls from granted protocol capabilities and injected host operations.
 - [x] Keep browser preferences independent of the gateway's random origin where persistence across launches is required.
-- [ ] Add an IndexedDB cursor-store adapter. Cursor-store failure must remain visible and fall back to a fresh snapshot.
+- [ ] **Deferred:** add an IndexedDB cursor-store adapter. Cursor-store failure must remain visible and fall back to a fresh snapshot.
 - [x] Avoid a service worker initially. Entry documents use `no-store`; hashed assets may be immutable.
-- [ ] Test the application with fake environment adapters so presentation code is not coupled to the loopback gateway.
+- [ ] Add tracked tests for the fake environment adapter so presentation behavior is not verified only by ignored local preview fixtures.
 
 ## Trusted local gateway
 
@@ -174,12 +181,12 @@ The web client is a static single-page application. It has no server-side render
 - [x] Require cookie, exact origin, exact host, and random process path for each WebSocket upgrade.
 - [x] Keep browser credentials out of JavaScript, URLs, persistent storage, and logs.
 - [x] Apply CSP, frame denial, nosniff, no-referrer, no-store, and cross-origin isolation headers.
-- [ ] Bound handshakes, requests, frames, assembled messages, rates, queues, and attachment count.
+- [ ] Finish gateway bounds. Request bodies, WebSocket frames, assembled daemon messages, message rate, buffered output, artifact size, and attachment count are bounded; HTTP handshake/request timeouts and remaining queue bounds still need explicit coverage.
 - [x] Reject binary frames and disable compression.
 - [x] Evict a slow browser attachment without blocking another attachment.
 - [x] Open one independent daemon connection per browser attachment.
 - [x] Stop only gateway attachments when the gateway exits. Leave daemon sessions and accepted work running.
-- [ ] Keep development browser traffic on the authenticated gateway origin while proxying only approved Vite paths.
+- [ ] **Deferred with `axl web --dev`:** keep development browser traffic on the authenticated gateway origin while proxying only approved Vite paths.
 
 ## Shared human-command plane
 
@@ -189,16 +196,16 @@ Tracking issue: [#389](https://github.com/Observal/Axl/issues/389)
 
 Do not recreate separate hardcoded TUI and browser command tables.
 
-- [ ] Add a daemon-owned, session-aware command registry for shared first-party and extension commands.
-- [ ] Add typed protocol discovery and SDK execution over existing typed RPC operations.
-- [ ] Include command name, description, aliases, input hint, input requirement, capability requirements, and current availability.
-- [ ] Publish command-catalog invalidation when session composition or extension registration changes.
-- [ ] Execute commands against the exact target session without converting them into model messages.
-- [ ] Preserve cancellation and structured failures.
-- [ ] Record shared command invocation and outcome durably when the result affects shared state.
-- [ ] Let clients merge honest presentation-only commands into the shared directory.
-- [ ] Keep terminal-only mechanics local to the TUI and define browser-native semantics where a command is shared.
-- [ ] Delete duplicated browser command switches after migration.
+- [x] Add a daemon-owned, session-aware registry for shared first-party commands. Extension-contributed commands remain deferred until daemon extension registration exists.
+- [x] Add typed protocol discovery and SDK execution over existing typed RPC operations.
+- [x] Include command name, description, aliases, input hint, input requirement, capability requirements, and current availability.
+- [ ] Publish command-catalog invalidation when session composition or extension registration changes. Clients currently refresh on connection, reconnection, session replacement, explicit palette opening, and configuration changes.
+- [x] Execute commands against the exact target session without converting them into model messages.
+- [x] Preserve typed structured failures and cancellation through the underlying RPC operations.
+- [x] Record command effects through the canonical events emitted by their typed operations rather than a generic invocation event.
+- [x] Let clients merge honest presentation-only commands into the shared directory.
+- [x] Keep terminal-only mechanics local to the TUI and define browser-native semantics where a command is shared.
+- [ ] Delete duplicated browser command routing after the remaining migration.
 
 This is a protocol and ownership change and requires architecture review before implementation.
 
@@ -206,15 +213,16 @@ This is a protocol and ownership change and requires architecture review before 
 
 `RpcMethodMap` types the current RPC surface, but the generic request method is not enough for consistent first-party clients.
 
-- [ ] Add command discovery, execution, invalidation, and outcome projection.
-- [ ] Add a provider directory with observable loading, ready, partial-failure, refresh, auth-change, reconnect, and disposal states.
+- [x] Add command discovery, execution, explicit refresh, and typed outcome projection.
+- [ ] Add event-driven command-catalog invalidation when daemon extension registration exists.
+- [ ] Move the provider directory into the SDK with observable loading, ready, partial-failure, refresh, auth-change, reconnect, and disposal states. The current web-owned directory preserves partial results and supports explicit refresh.
 - [ ] Add staged new-session intent shared by direct controls and slash commands.
 - [ ] Add session-configuration mutation ordering, optimistic intent, effective values, and field-scoped failures.
 - [x] Add attachment upload, abort, retry, and retrieval helpers over blob RPCs.
-- [ ] Add high-level steer, follow-up, interrupt, and interrupt-and-deliver methods with draft-safe semantics.
+- [x] Add high-level steer, follow-up, interrupt, and interrupt-and-deliver methods with draft-safe semantics.
 - [x] Keep direct shell's explicit uncertain-outcome behavior.
-- [ ] Move reusable client behavior out of the React shell.
-- [ ] Keep SDK caches disposable and daemon state authoritative.
+- [ ] Move remaining reusable provider and configuration behavior out of the React shell.
+- [x] Keep SDK caches disposable and daemon state authoritative.
 
 ## Staged new-session composition
 
@@ -244,14 +252,14 @@ web tool configuration
 - [x] Load one provider/model directory for the active daemon generation.
 - [ ] Share one focused picker between `/model`, composer controls, and new-session creation. The composer picker is implemented.
 - [ ] Group searchable model rows by provider.
-- [ ] Show provider-local errors without erasing usable providers.
+- [x] Show provider-local errors without erasing usable providers.
 - [ ] Disable unavailable models and explain why. Unavailable models are currently omitted.
-- [ ] Reject ambiguous bare model IDs.
+- [x] Reject ambiguous bare model IDs.
 - [x] Derive thinking choices from the selected model's supported levels.
 - [x] Preserve the daemon thinking default until the user explicitly changes it.
 - [ ] Stage model and thinking choices before creation and configure them after creation.
 - [x] Show effective clamped thinking values.
-- [ ] Remove model and thinking controls from generic Settings.
+- [x] Keep model and thinking controls out of generic Web settings.
 
 ## Honest Search and Fetch controls
 
@@ -260,24 +268,24 @@ web tool configuration
 - [ ] Label them as configuration, not immediate tool actions.
 - [ ] Show explicit enabled and disabled state derived from canonical effective configuration.
 - [ ] Show runtime rebuild progress and field-scoped failure.
-- [ ] Remove fake Plan and Web buttons that only open Settings.
+- [x] Remove fake Plan and Web buttons that only open Settings.
 - [ ] Add deterministic browser coverage for enabling, disabling, invocation, tool-card rendering, and results.
 
 ## Active-turn input semantics
 
 Expose four distinct actions:
 
-- [ ] **Steer:** default active-turn input delivered at the next safe model boundary.
-- [ ] **Follow-up:** explicit next-turn delivery after current work completes.
-- [ ] **Interrupt:** stop active work without replacement input.
-- [ ] **Interrupt and deliver:** atomically stop and deliver replacement input.
+- [x] **Steer:** default active-turn input delivered at the next safe model boundary.
+- [x] **Follow-up:** explicit next-turn delivery after current work completes.
+- [x] **Interrupt:** stop active work without replacement input.
+- [x] **Interrupt and deliver:** atomically stop and deliver replacement input.
 
 Also:
 
-- [ ] Do not make Send and Queue perform the same operation.
-- [ ] Preserve drafts across failed send, queue, steer, follow-up, and interrupt-and-deliver calls.
-- [ ] Show accepted, delivered, queued, paused, rejected, interrupted, and uncertain outcomes accurately. Canonical queue and interrupt delivery states are rendered; remaining delivery actions and uncertain outcomes remain.
-- [ ] Never simulate atomic interrupt-and-deliver with Stop followed by Send.
+- [x] Keep ordinary send, steer, follow-up, queued delivery, and interrupt-and-deliver as distinct operations.
+- [x] Preserve drafts across failed send, queue, steer, follow-up, and interrupt-and-deliver calls.
+- [x] Show accepted, delivered, queued, paused, rejected, interrupted, and uncertain outcomes accurately.
+- [x] Never simulate atomic interrupt-and-deliver with Stop followed by Send.
 
 ## Slash-command coverage
 
@@ -327,7 +335,7 @@ Additional input forms:
 - [x] `!command` executes through `session.shell` and includes output in model context.
 - [x] `!!command` executes through `session.shell` and excludes output from model context.
 - [x] Shell uncertainty is visible and never automatically retried.
-- [ ] Choosing an argument-requiring command enters argument mode instead of executing malformed input.
+- [x] Choosing an argument-requiring command enters argument mode instead of executing malformed input.
 
 ## Protocol capability adoption
 
@@ -345,10 +353,10 @@ The browser should support every capability granted to its connection.
 - [x] `session.export`
 - [x] `session.import`
 - [x] `session.send.prompt`
-- [ ] `session.steer`
-- [ ] `session.follow_up`
-- [ ] `session.interrupt_deliver`
-- [ ] `session.queue.enqueue`
+- [x] `session.steer`
+- [x] `session.follow_up`
+- [x] `session.interrupt_deliver`
+- [x] `session.queue.enqueue`
 - [ ] `session.queue.requeue`
 - [x] `session.interrupt`
 - [x] `session.dispose`
@@ -357,7 +365,7 @@ The browser should support every capability granted to its connection.
 
 - [x] `session.compact`
 - [x] `session.shell`
-- [ ] `session.reload`
+- [x] `session.reload`
 - [x] `session.configure`
 - [x] `session.interaction.respond` for explicit MCP interactions, not routine sandboxed tool approval
 - [x] `session.subscribe`
@@ -391,7 +399,7 @@ Do not request a capability before its interaction, error behavior, and security
 
 - [ ] Add `/providers` with provider, authentication, catalog, region, enabled, and model availability state. The web provider status surface covers authentication, catalog, enabled state, and model counts; shared command routing and region detail remain.
 - [x] Refresh inventory after login, logout, catalog refresh, settings changes, and reconnect.
-- [ ] Add per-provider progress, cancellation, result, and retry. Web shows bounded refresh progress and retry controls; cancellation remains.
+- [ ] Add per-provider catalog-refresh cancellation. Web already shows bounded refresh progress, results, and retry; trusted-host login has correlated cancellation.
 - [x] Preserve usable provider groups when one provider fails.
 - [x] Present errors beside the owning provider.
 - [x] Acquire credentials only through an injected trusted-process-host interaction.
@@ -415,7 +423,7 @@ Do not request a capability before its interaction, error behavior, and security
 - [x] Add message copy and fork actions. Do not add response ratings without a daemon-owned feedback contract and a real consumer.
 - [x] Clear conversation, workspace, queue, dialog, and selection state before loading another session.
 - [x] Keep generation checks for implemented workspace status and diff views.
-- [ ] Measure long-session rendering before adding optimization abstractions.
+- [ ] **Deferred until profiling is needed:** measure long-session React rendering before adding optimization abstractions. The SDK projector already has a 100,000-event bounded-history test.
 
 ## Browser state and settings
 
@@ -423,12 +431,14 @@ Do not request a capability before its interaction, error behavior, and security
 - [x] Define durable preference storage that survives random local gateway ports without placing authority credentials in application storage.
 - [x] Expose browser-owned layout and change-review preferences through a focused Web settings surface.
 - [x] Refresh session catalog metadata after another client changes it.
-- [ ] Replace hardcoded English copy with a typed localization owner when the first second locale is implemented.
+- [ ] **Deferred until a second locale:** replace hardcoded English copy with a typed localization owner.
 - [ ] Show errors inside the dialog or picker that initiated the action.
 - [ ] Keep disabled features absent from menus, empty states, prompts, and background work.
-- [ ] Replace visual components with Linear UI Kit only after its exact source and license are approved.
+- [ ] **Blocked on an approved source and license:** replace visual components with Linear UI Kit only if that migration is still desired.
 
-## Implementation order
+## Original implementation order
+
+This sequence is historical planning context, not a completion checklist. Current status is recorded in the checklists above and verification gates below.
 
 1. Add the shared human-command contract and SDK controller.
 2. Add the static web package, validated bootstrap boundary, and fake environment adapter.
@@ -453,18 +463,18 @@ Do not request a capability before its interaction, error behavior, and security
 - [x] React consumes the public SDK projector instead of reducing canonical events.
 - [ ] The same browser behavior suite passes through fake and loopback gateway environments.
 - [ ] Missing capabilities remove or disable controls with an explicit reason.
-- [ ] Detaching the browser never interrupts daemon-owned work.
+- [x] Detaching the browser never interrupts daemon-owned work.
 
 ### Behavior
 
 - [ ] TUI and browser converge on one session under simultaneous use.
-- [ ] Reconnect neither loses nor duplicates canonical events.
+- [x] Reconnect neither loses nor duplicates canonical events through SDK cursor and snapshot replacement semantics.
 - [x] Session switching cannot display state from the prior session.
 - [ ] Chat has no workspace or tool interface.
 - [ ] Code requires an explicit workspace.
 - [x] Model identity remains provider-qualified.
 - [x] Thinking choices match model support.
-- [ ] Active-turn delivery modes remain distinct.
+- [x] Active-turn delivery modes remain distinct.
 - [x] Ordinary failed prompt sends preserve drafts and show visible errors. Other delivery modes remain.
 - [ ] Attachments survive upload, reload, retrieval, and second-client projection.
 
@@ -473,7 +483,7 @@ Do not request a capability before its interaction, error behavior, and security
 - [ ] Gateway security acceptance tests in `docs/architecture/web-gateway-security.md` pass.
 - [x] Production assets fail closed when missing, altered, or incompatible.
 - [ ] Development mode keeps one authenticated browser origin.
-- [ ] The installed package works without the repository, Vite, or pnpm.
+- [x] The installed package works without the repository, Vite, or pnpm.
 - [x] No source maps ship unless separately approved.
 - [x] No browser credential appears in logs, URLs, storage, fixtures, or errors.
 
@@ -483,21 +493,23 @@ Do not request a capability before its interaction, error behavior, and security
 - [x] Focus restoration and Escape behavior are deterministic for Web settings, provider status, transcript search, and the mobile session drawer.
 - [x] Connection and action outcomes use accessible status regions.
 - [x] Reduced motion and no-color-only meaning are supported.
-- [ ] Wide and narrow viewport layouts receive one bounded browser inspection and one correction pass.
-- [ ] Run the Impeccable detector once over changed web targets after behavior is complete.
-- [ ] Do not commit screenshots or generated review artifacts unless explicitly requested.
+- [x] Wide and narrow viewport layouts received bounded Firefox inspection with no horizontal overflow.
+- [x] Run the Impeccable detector once over changed web targets after behavior is complete.
+- [x] Keep screenshots and generated review artifacts untracked.
 
 ### Repository checks
 
 - [x] Run the smallest focused tests for each implemented vertical slice.
 - [x] Run the web package tests.
 - [x] Run the production-package browser smoke test at desktop and mobile sizes.
-- [ ] Run the development-gateway browser smoke test after `axl web --dev` is implemented.
+- [ ] **Deferred with `axl web --dev`:** run the development-gateway browser smoke test.
 - [x] Run `pnpm check` after the current UI wave. Run it again before publication.
 - [x] Run `reuse lint`.
 - [x] Run an authorized live-provider prompt through the installed browser client.
 
 ## Required issue alignment
+
+These checkboxes track GitHub issue closure, not whether an individual implementation slice exists. All listed issues remain open until their full acceptance criteria are reviewed and closed.
 
 - [ ] #389 shared human-command plane
 - [ ] #101 browser WebSocket SDK adapter
