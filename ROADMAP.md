@@ -1366,7 +1366,7 @@ Requirements:
 
 The current mobile plan favors SwiftUI on iOS and Jetpack Compose on Android because native code supports Live Activities, Android foreground services, notification actions, widgets, share sheets, and efficient streaming text. This is not a binding stack decision. Choose the implementation when mobile work begins and its requirements are concrete.
 
-Remote transport uses pairwise application-level E2EE in addition to TLS. The approved direction is PQXDH for asynchronous session establishment and Triple Ratchet for ongoing messages. This direction supersedes any earlier Noise selection. Production cryptography remains blocked on Person 1's security RFC, exact suite, reviewed library, secure-state design, interoperability fixtures, and independent security review. Transport code treats encrypted envelopes and public prekey bundles as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic.
+Remote transport uses pairwise application-level E2EE in addition to TLS. The approved direction is PQXDH for asynchronous session establishment and Triple Ratchet for ongoing messages. This direction supersedes any earlier Noise selection. Production cryptography remains blocked on Person 1's security RFC, exact suite, reviewed library, secure-state design, interoperability fixtures, and independent security review. Transport code treats encrypted envelopes and public prekey bundles as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic. The proposed remote action-binding and approval rules are in [`docs/architecture/remote-permission-authorization.md`](docs/architecture/remote-permission-authorization.md); that draft does not enable remote approval.
 
 The managed path uses two separately deployable services: the TypeScript control plane owns hosted state and one-use admission, while the Elixir/OTP relay owns bounded in-memory WebSocket routing. The daemon remains the command and session authority. Transport proof uses only disposable sessions, a deterministic fake provider, opaque fixtures, and a test-only fake E2EE adapter. Ordinary-session steering and remote permission approval remain disabled until the E2EE and release gates pass.
 
@@ -2367,6 +2367,7 @@ The integration base for this private slice is clean `main` commit `ea906d0295ba
 - [x] Add the separately deployable Elixir/OTP relay under `services/relay/` with authenticated admission, opaque bounded framing, in-memory installation-scoped routing, backpressure, heartbeat, lease, revocation, and draining behavior.
 - [x] Publish language-neutral admission, revocation, and exact binary accept/reject fixtures consumed by both implementations.
 - [x] Run TypeScript and Mix formatting, compilation, tests, static analysis, dependency auditing, package-boundary, and SPDX/REUSE checks in CI.
+- [x] Draft the daemon-owned remote permission action-binding contract without enabling it.
 - [x] Stop at the architecture checkpoint before daemon, SDK, prekey, attachment, or production integration work.
 
 #### Mobile clients
