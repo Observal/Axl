@@ -5,11 +5,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  type AxlClient,
   CommandController,
+  type CommandListResult,
   mergeCommandDirectory,
   parseSessionId,
-  type AxlClient,
-  type CommandListResult,
 } from "../src/index.ts";
 
 const sessionId = parseSessionId("00000000-0000-4000-8000-000000000001");
@@ -118,6 +118,13 @@ test("command controller loads, searches, and invokes typed operations", async (
     },
     { method: "session.rename", params: { sessionId, title: "Focused work" } },
   ]);
+});
+
+test("command invocation rejects malformed names without ambiguous parsing", async () => {
+  const commands = new CommandController({} as AxlClient);
+  for (const input of ["/reload\nagain", "/bad--name", "/bad-", "/9bad", "/"]) {
+    await assert.rejects(commands.invoke(input, sessionId), /Invalid command syntax/);
+  }
 });
 
 test("command directory rejects aliases that shadow another command", () => {

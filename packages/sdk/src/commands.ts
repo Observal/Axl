@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  parseCommandListResult,
-  THINKING_LEVELS,
   type CommandDescriptor,
   type CommandListResult,
   type EventId,
+  parseCommandListResult,
   type SessionForkResult,
   type SessionId,
+  THINKING_LEVELS,
   type ThinkingLevel,
 } from "@axl/protocol";
 
@@ -126,10 +126,17 @@ export class CommandController {
   }
 
   async invoke(input: string, sessionId?: SessionId): Promise<CommandOutcome> {
-    const match = /^\/?([a-z][a-z0-9]*(?:-[a-z0-9]+)*)(?:\s+(.*))?$/u.exec(input.trim());
-    if (match === null) throw new AxlClientError("invalid_command", "Invalid command syntax");
-    const name = match[1] ?? "";
-    const argument = match[2]?.trim();
+    const text = input.trim();
+    if (text.includes("\n") || text.includes("\r")) {
+      throw new AxlClientError("invalid_command", "Invalid command syntax");
+    }
+    const invocation = text.startsWith("/") ? text.slice(1) : text;
+    const separator = invocation.search(/\s/u);
+    const name = separator < 0 ? invocation : invocation.slice(0, separator);
+    if (!/^[a-z][a-z0-9-]*$/u.test(name) || name.endsWith("-") || name.includes("--")) {
+      throw new AxlClientError("invalid_command", "Invalid command syntax");
+    }
+    const argument = separator < 0 ? undefined : invocation.slice(separator).trim() || undefined;
     const command = this.commands.find(
       (candidate) => candidate.name === name || candidate.aliases.includes(name),
     );
