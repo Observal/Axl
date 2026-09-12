@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "consumeTicket": {
+    "request": {
+      "version": 1,
+      "ticket": "fixture-ticket-never-valid-outside-tests",
+      "relayInstanceId": "relay-fixture-1",
+      "connectionNonce": "fixture-connection-nonce",
+      "possessionProof": "AAECA/8="
+    },
+    "result": {
+      "version": 1,
+      "installationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "sourceRouteId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "role": "device",
+      "leaseExpiresAt": 2000000000000,
+      "limits": {
+        "maxFrameBytes": 65535,
+        "maxQueuedBytes": 524288,
+        "heartbeatIntervalMs": 20000,
+        "idleTimeoutMs": 60000
+      }
+    }
+  },
+  "revocation": {
+    "request": {
+      "version": 1,
+      "installationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "generation": 7,
+      "effectiveAt": 1900000000000
+    },
+    "result": {
+      "version": 1,
+      "accepted": true
+    }
+  }
+}
