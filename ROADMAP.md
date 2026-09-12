@@ -2370,6 +2370,20 @@ The private slice was created from clean `main` commit `ea906d0295ba67f833c49ace
 - [x] Draft the daemon-owned remote permission action-binding contract without enabling it.
 - [x] Stop at the architecture checkpoint before daemon, SDK, prekey, attachment, or production integration work.
 
+#### Remote daemon authority checkpoint
+
+The transport checkpoint was approved. The next private slice remains disabled for ordinary sessions and uses only the test fake E2EE adapter.
+
+- [x] Define independent `observe`, `steer`, `approve_within_policy`, and `manage_sessions` scopes.
+- [x] Persist installation-bound local device grants and hosted narrowing generations in the daemon data directory.
+- [x] Authorize from the intersection of current local and hosted grants.
+- [x] Make local and hosted revocation terminal for one device identity.
+- [x] Reject stale and conflicting hosted generations atomically.
+- [x] Verify authorization before the existing durable command-idempotency path with fake E2EE fixtures.
+- [x] Map each remotely callable daemon RPC to an explicit scope and connect the internal dispatcher.
+- [ ] Implement the reviewed permission-action events and RPC after protocol review.
+- [ ] Keep relay, runtime, CLI, SDK, and ordinary-session wiring disabled until their later gates.
+
 #### Mobile clients
 
 - [ ] Choose mobile implementation stacks when work begins, based on concrete platform and product requirements.

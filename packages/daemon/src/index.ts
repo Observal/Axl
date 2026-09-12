@@ -9,4 +9,6 @@ export * from "./event-migration.ts";
 export * from "./extension-management.ts";
 export * from "./mcp-configuration.ts";
 export * from "./provider-management.ts";
+export * from "./remote-authority.ts";
+export * from "./remote-rpc.ts";
 export * from "./session-manager.ts";

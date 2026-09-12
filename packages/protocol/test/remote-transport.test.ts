@@ -20,6 +20,7 @@ import {
   parseRelayBinaryFrame,
   parseRelayDiscoveryMessage,
   parseRelayRevocationNotification,
+  parseRemoteDeviceScopes,
   ProtocolValidationError,
   RELAY_FAILURE_CODE_VALUES,
   REMOTE_TRANSPORT_VERSION,
@@ -139,6 +140,18 @@ test("validates role-scoped route discovery messages", () => {
         peers: [],
       }),
     (error) => error instanceof ProtocolValidationError && error.path === "discovery.sourceRoute",
+  );
+});
+
+test("validates and canonicalizes remote device scopes", () => {
+  assert.deepEqual(parseRemoteDeviceScopes(["steer", "observe"]), ["observe", "steer"]);
+  assert.throws(
+    () => parseRemoteDeviceScopes(["observe", "observe"]),
+    (error) => error instanceof ProtocolValidationError && error.path === "scopes",
+  );
+  assert.throws(
+    () => parseRemoteDeviceScopes(["unsafe"]),
+    (error) => error instanceof ProtocolValidationError && error.path === "scopes[0]",
   );
 });
 

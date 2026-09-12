@@ -138,6 +138,15 @@ export interface RelayFailure {
 
 export type RelayBinaryFrame = RelaySendFrame | RelayDelivery | RelayReceipt | RelayFailure;
 
+export const REMOTE_DEVICE_SCOPES = [
+  "observe",
+  "steer",
+  "approve_within_policy",
+  "manage_sessions",
+] as const;
+
+export type RemoteDeviceScope = (typeof REMOTE_DEVICE_SCOPES)[number];
+
 export interface AuthenticatedRemoteRequest {
   readonly deviceId: DeviceId;
   readonly requestId: RequestId;
@@ -583,6 +592,24 @@ export function parseRelayRevocationResult(value: unknown): RelayRevocationResul
   }
   if (candidate.accepted !== true) fail("result.accepted", "must be true");
   return { version: INTERNAL_RELAY_API_VERSION, accepted: true };
+}
+
+export function parseRemoteDeviceScopes(
+  value: unknown,
+  path = "scopes",
+): readonly RemoteDeviceScope[] {
+  if (!Array.isArray(value)) fail(path, "must be an array");
+  const scopes = value.map((candidate, index) => {
+    if (
+      typeof candidate !== "string" ||
+      !(REMOTE_DEVICE_SCOPES as readonly string[]).includes(candidate)
+    ) {
+      fail(`${path}[${index}]`, "is not a known remote device scope");
+    }
+    return candidate as RemoteDeviceScope;
+  });
+  if (new Set(scopes).size !== scopes.length) fail(path, "must not contain duplicate scopes");
+  return [...scopes].sort();
 }
 
 export function parseAuthenticatedRemoteRequest(value: unknown): AuthenticatedRemoteRequest {
