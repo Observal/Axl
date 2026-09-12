@@ -1,0 +1,25 @@
+{
+  "name": "@axl/control-plane",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Hosted Axl control-plane service",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json --force",
+    "test": "pnpm --filter @axl/protocol build && node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@axl/protocol": "workspace:*"
+  }
+}
