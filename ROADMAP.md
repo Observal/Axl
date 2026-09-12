@@ -1366,6 +1366,10 @@ Requirements:
 
 The current mobile plan favors SwiftUI on iOS and Jetpack Compose on Android because native code supports Live Activities, Android foreground services, notification actions, widgets, share sheets, and efficient streaming text. This is not a binding stack decision. Choose the implementation when mobile work begins and its requirements are concrete.
 
+Remote transport uses pairwise application-level E2EE in addition to TLS. The approved direction is PQXDH for asynchronous session establishment and Triple Ratchet for ongoing messages. This direction supersedes any earlier Noise selection. Production cryptography remains blocked on Person 1's security RFC, exact suite, reviewed library, secure-state design, interoperability fixtures, and independent security review. Transport code treats encrypted envelopes and public prekey bundles as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic.
+
+The managed path uses two separately deployable services: the TypeScript control plane owns hosted state and one-use admission, while the Elixir/OTP relay owns bounded in-memory WebSocket routing. The daemon remains the command and session authority. Transport proof uses only disposable sessions, a deterministic fake provider, opaque fixtures, and a test-only fake E2EE adapter. Ordinary-session steering and remote permission approval remain disabled until the E2EE and release gates pass.
+
 #### 16.4 Headless and automation
 
 The same daemon serves non-interactive callers:
@@ -2351,6 +2355,19 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 - [ ] List installations through the control plane, but obtain sessions, transcripts, and live state only from the selected daemon after encrypted attachment.
 - [ ] Keep disconnected input as an explicit draft until the daemon durably accepts it; do not create a browser-authoritative prompt queue.
 - [ ] Support existing-session observation and steering first. Require a daemon-owned approved workspace identifier before creating a remote Code session.
+
+The transport-first remote-control slice is an approved exception to phase ordering. It may establish service boundaries, opaque framing, one-use ticket admission, bounded relay routing, daemon authorization behind a test-only fake E2EE adapter, and reusable SDK delivery machinery. It must not implement cryptography, select production identity or storage infrastructure, enable ordinary-session remote access, or advertise production remote control.
+
+The integration base for this private slice is clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687` on `feature/e2ee-transport`. Stop for architecture review after the documentation, separate service boundaries, versioned fixture contract, atomic ticket-consumption path, and first bounded relay slice land.
+
+#### Remote transport preflight
+
+- [x] Record PQXDH plus Triple Ratchet as the approved direction and keep exact production cryptography blocked on Person 1's reviewed contract and library.
+- [x] Add the separately deployable TypeScript control plane under `services/control-plane/` with authenticated ticket issuance and atomic one-use consumption through injected interfaces.
+- [x] Add the separately deployable Elixir/OTP relay under `services/relay/` with authenticated admission, opaque bounded framing, in-memory installation-scoped routing, backpressure, heartbeat, lease, revocation, and draining behavior.
+- [x] Publish language-neutral admission, revocation, and exact binary accept/reject fixtures consumed by both implementations.
+- [x] Run TypeScript and Mix formatting, compilation, tests, static analysis, dependency auditing, package-boundary, and SPDX/REUSE checks in CI.
+- [x] Stop at the architecture checkpoint before daemon, SDK, prekey, attachment, or production integration work.
 
 #### Mobile clients
 

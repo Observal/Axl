@@ -7,7 +7,7 @@
 
 Status: working plan. This document accompanies [ROADMAP.md](ROADMAP.md) and [OPEN_SOURCE.md](OPEN_SOURCE.md).
 
-Updated: 2026-08-28
+Updated: 2026-09-12
 
 ## 1. Keep everything in one repository
 
@@ -29,7 +29,8 @@ Codex offers a useful contrast. Its CLI and Rust core share a repository, while 
 
 ## 2. Languages
 
-- Use **TypeScript** for the kernel, protocol, daemon, adoption compiler, terminal client, web client, and extensions. It matches the ecosystems and standards Axl integrates with.
+- Use **TypeScript** for the kernel, protocol, daemon, adoption compiler, terminal client, web client, extensions, and hosted control plane. It matches the ecosystems and standards Axl integrates with.
+- Use **Elixir/OTP only for the hosted ciphertext relay** under `services/relay/`. The relay is a bounded transport process and must not own daemon, RPC, account, persistence, or cryptographic behavior.
 - Use **Kotlin with Jetpack Compose** for Android and **Swift with SwiftUI** for iOS. Choose protocol code generation when the first of these clients is built.
 - Do not add another application language. Tooling should use TypeScript or POSIX shell.
 
@@ -51,6 +52,9 @@ axl/
     ui/                # shared presentation tokens and React renderers
     sdk/               # shared TypeScript client SDK when multiple clients need it
     extensions/        # first-party extensions, one package per feature (roadmap §2.9)
+  services/
+    control-plane/     # separately deployable TypeScript hosted control plane
+    relay/             # separately deployable Elixir/OTP opaque WebSocket relay
   apps/
     android/           # Gradle project using the generated Kotlin SDK
     ios/               # Xcode project using the generated Swift SDK
@@ -65,8 +69,11 @@ These rules keep package ownership clear:
 - `packages/protocol` has no runtime dependencies.
 - `packages/kernel` depends only on `packages/protocol` and Node.js built-ins.
 - First-party extensions use the same public extension API as third-party extensions.
-- `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript client creates a real need for generation.
+- `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript presentation client creates a real need for generation. The Elixir relay implements only its narrow transport and internal-service framing against canonical byte and JSON fixtures; it is not a daemon-protocol client.
 - Apps use the public protocol SDK rather than package internals.
+- `services/control-plane` may depend on `packages/protocol`. It owns hosted account, installation, device, ticket, prekey, grant, upload-reservation, quota, and security-audit mutation. Identity providers, persistent datastores, and production service authentication stay behind injected interfaces until approved.
+- `services/relay` consumes versioned language-neutral fixtures. It must not import TypeScript package internals, access the control-plane datastore, decrypt envelopes, interpret daemon RPC, persist canonical history, or store attachment bodies. It calls the authenticated control-plane admission API once per new connection and accepts authenticated revocation notifications.
+- The control plane and relay are separate deployables. They share no private implementation imports and communicate only through their versioned internal HTTP contract.
 - `packages/runtime` assembles providers, tools, extensions, sandboxing, and the authoritative daemon without importing a presentation client.
 - `packages/tui` is a daemon client projection. It does not construct the runtime or depend at runtime on sandbox, kernel, or concrete extension implementations. It may depend on the dependency-free public `@axl/extension-api` for client-local presentation customization.
 - `packages/ui` owns shared presentation tokens and React renderers. It may depend only on `packages/sdk` and presentation libraries. It owns no daemon or process authority.
@@ -80,7 +87,7 @@ The protocol package owns the contract between the daemon and every client.
 
 - TypeScript definitions are authoritative while all clients use TypeScript.
 - A schema change requires prior design discussion and compatibility notes.
-- The first Swift or Kotlin client triggers a decision on the schema language and generator.
+- The first Swift or Kotlin client triggers a decision on the schema language and generator. The relay's bounded outer-frame parser does not trigger client SDK generation because it does not parse daemon RPC or canonical events.
 - Generated SDKs then ship through their native package systems so external and in-tree clients use the same contract.
 
 ## 5. Independent implementation
@@ -91,8 +98,8 @@ Any approved adaptation records its source, commit, and changes in an SPDX heade
 
 ## 6. Build tools
 
-- Use pnpm workspaces for package management. Add a task runner with remote caching only when repository scale justifies it.
-- Keep Gradle and Xcode native. CI coordinates the build systems but the JavaScript toolchain does not wrap them.
+- Use pnpm workspaces for TypeScript package and service management. Add a task runner with remote caching only when repository scale justifies it.
+- Keep Mix native for `services/relay`, and keep Gradle and Xcode native. CI coordinates the build systems but the JavaScript toolchain does not wrap them.
 - Version packages in `packages/` together. Mobile apps keep their own store versions.
 
 Bazel would add more contributor cost than value at the current scale.
@@ -110,6 +117,8 @@ Bazel would add more contributor cost than value at the current scale.
 Every required check reports a result. Path filters decide whether the full job runs or a small gate job reports that no relevant files changed.
 
 - Kernel, protocol, and SDK changes run all builds, including both mobile apps.
+- Control-plane changes run the root TypeScript checks and package-boundary checks.
+- Relay or shared remote-fixture changes run Mix formatting, compilation with warnings as errors, tests, Credo, Dialyzer, dependency audit, cross-language fixture checks, package-boundary checks, and REUSE.
 - App-only changes run that app and lint checks.
 - Documentation and plan changes run formatting, link checking, and REUSE checks.
 - CodeQL, Gitleaks, and dependency review run for every merge candidate.
