@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -127,7 +128,7 @@ const darwin = await detectSeatbelt();
 const integration = { skip: darwin.available ? false : "seatbelt unavailable on this host" };
 
 async function makeLayout(context: TestContext) {
-  const root = await mkdtemp(join(tmpdir(), "axl-seatbelt-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-seatbelt-")));
   context.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
   const axlHome = join(root, "axl-home");
@@ -170,8 +171,25 @@ test(
     );
     assert.equal(text(secret).includes("topsecret"), false);
 
+    const server = createServer((socket) => socket.destroy());
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    context.after(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          server.close((error) => (error === undefined ? resolve() : reject(error)));
+        }),
+    );
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("local network test server has no TCP address");
+    }
     const network = await tool.execute(
-      { command: "(exec 3<>/dev/tcp/127.0.0.1/1 && echo CONNECTED) 2>&1 || true" },
+      {
+        command: `(exec 3<>/dev/tcp/127.0.0.1/${address.port} && echo CONNECTED) 2>&1 || true`,
+      },
       signal,
     );
     assert.equal(text(network).includes("CONNECTED"), false);
