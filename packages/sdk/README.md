@@ -27,6 +27,7 @@ The SDK owns:
 - validated command discovery, collision checks, search, and typed command workflows
 - explicit prompt delivery outcomes across send, steer, follow-up, queue, and interrupt workflows
 - bounded, content-verified blob uploads with progress and cancellation
+- generation-checked workspace browsing, file reads, diffs, and checkpoint controls
 
 The SDK does not own:
 
@@ -116,6 +117,10 @@ A platform adapter may establish Unix sockets, WebSockets, or native IPC. It own
 `CommandController` loads the daemon's capability-filtered `command.list` catalog, merges presentation-only descriptors with collision checks, and gives clients one searchable command directory. Supported shared command invocation maps back to existing typed RPCs or returns a focused surface for the client to render. It does not use a generic command execution RPC.
 
 Clients granted `session.list` can register `onSessionsChanged`. The notification is an invalidation signal, so clients coalesce updates and fetch fresh typed summaries instead of treating notification payloads as session state.
+
+## Workspace access
+
+`WorkspaceController` binds bounded list, read, status, diff, and checkpoint requests to one session. It carries the daemon workspace generation across requests, uses file revisions for continued reads, and rejects inconsistent response generations. `reset()` explicitly starts a fresh workspace view after a change error or reconnect.
 
 ## Requests and capabilities
 

@@ -11,4 +11,5 @@ export * from "./models.ts";
 export * from "./presentation.ts";
 export * from "./projector.ts";
 export * from "./subscription.ts";
+export * from "./workspace.ts";
 export * from "./host.ts";

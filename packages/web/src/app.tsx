@@ -25,8 +25,9 @@ import {
   type SessionSummary,
   type ThinkingLevel,
   type UserContent,
-  type WorkspaceDiffResult,
-  type WorkspaceStatusResult,
+  WorkspaceController,
+  type WorkspaceOperations,
+  type WorkspaceReviewSnapshot,
   type WorkspaceStatusScope,
   orderPendingTurnInputs,
   subscribeSession,
@@ -60,7 +61,11 @@ import {
   transcriptPromptBreakpoints,
   type PendingPromptDelivery,
 } from "./view-state.ts";
-import { WorkspaceChanges, type WorkspaceReview } from "./workspace-changes.tsx";
+import {
+  WorkspacePanel,
+  type WorkspaceBrowserState,
+  type WorkspacePanelTab,
+} from "./workspace-changes.tsx";
 
 const ControlCenter = lazy(() => import("./control-center.tsx").then((module) => ({ default: module.ControlCenter })));
 const Conversation = lazy(() => import("@axl/ui/react").then((module) => ({ default: module.Conversation })));
@@ -182,7 +187,8 @@ export interface WebPreview {
   readonly exportSession?: () => Promise<Blob>;
   readonly importSession?: (file: File) => Promise<SessionOpenResult>;
   readonly commands?: readonly EffectiveCommand[];
-  readonly workspace?: WorkspaceReview;
+  readonly workspace?: WorkspaceReviewSnapshot;
+  readonly workspaceClient?: WorkspaceOperations;
 }
 
 export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): React.JSX.Element {
@@ -210,6 +216,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [changesWidth, setChangesWidth] = useState(initialLayout.changesWidth);
   const [changesView, setChangesView] = useState<"files" | "all">(initialLayout.changesView);
   const [changesOpen, setChangesOpen] = useState(false);
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspacePanelTab>("changes");
+  const [workspaceScope, setWorkspaceScope] = useState<WorkspaceStatusScope>("working");
   const [transcriptSearchOpen, setTranscriptSearchOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
   const [controlCenter, setControlCenter] = useState<ControlCenterTab>();
@@ -222,10 +230,15 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [activePromptId, setActivePromptId] = useState<string>();
   const [modelCatalog, setModelCatalog] = useState<readonly ModelChoice[]>(preview?.modelCatalog ?? []);
   const [providerInventory, setProviderInventory] = useState<readonly ProviderInventoryGroup[]>(preview?.providers ?? []);
-  const [workspaceReview, setWorkspaceReview] = useState<WorkspaceReview | undefined>(preview?.workspace);
+  const [workspaceReview, setWorkspaceReview] = useState<WorkspaceReviewSnapshot | undefined>(preview?.workspace);
+  const [workspaceBrowser, setWorkspaceBrowser] = useState<WorkspaceBrowserState>({
+    path: "",
+    entries: [],
+    loaded: false,
+  });
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceError, setWorkspaceError] = useState<string>();
-  const [workspaceAvailable, setWorkspaceAvailable] = useState(preview?.workspace !== undefined);
+  const [workspaceCheckpointEnabled, setWorkspaceCheckpointEnabled] = useState<boolean>();
   const [connection, setConnection] = useState<ConnectionState>(preview ? "connected" : "connecting");
   const [error, setError] = useState<string>();
   const [actionNotice, setActionNotice] = useState<string>();
@@ -235,12 +248,13 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [modelPickerOpenRequest, setModelPickerOpenRequest] = useState(0);
   const [blobUrls, setBlobUrls] = useState<ReadonlyMap<string, string>>(new Map());
   const commandController = useRef<CommandController | undefined>(undefined);
+  const workspaceController = useRef<WorkspaceController | undefined>(undefined);
   const subscription = useRef<SessionSubscription | undefined>(undefined);
   const blobUrlCache = useRef(new Map<string, string>());
   const blobUrlSession = useRef<string | undefined>(undefined);
   const openedSessionId = useRef<SessionId | undefined>(preview?.opened.sessionId);
   const selectionGeneration = useRef(0);
-  const workspaceGeneration = useRef(0);
+  const workspaceRequestGeneration = useRef(0);
   const transcript = useRef<HTMLDivElement>(null);
   const transcriptNavigationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const actionNoticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -271,12 +285,14 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       return;
     }
     selectionGeneration.current += 1;
-    workspaceGeneration.current += 1;
+    workspaceRequestGeneration.current += 1;
     await subscription.current?.close();
     subscription.current = undefined;
+    workspaceController.current = undefined;
     openedSessionId.current = undefined;
     setOpened(undefined);
     setConversation(EMPTY_STATE);
+    setChangesOpen(false);
     setSessionLifecycleOpen(false);
     setError("This session was deleted by another attached client");
   };
@@ -293,8 +309,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     resumed?: SessionOpenResult,
   ): Promise<void> => {
     const generation = ++selectionGeneration.current;
-    workspaceGeneration.current += 1;
-    setBusy(true); setDirectOperation(undefined); setError(undefined); setSidebarOpen(false); setChangesOpen(false); setTranscriptSearchOpen(false); setUsageOpen(false); setControlCenter(undefined); setSessionLifecycleOpen(false); setTranscriptQuery(""); setActivePromptId(undefined); setWorkspaceReview(undefined); setWorkspaceError(undefined); setOpened(undefined); setConversation(EMPTY_STATE);
+    workspaceRequestGeneration.current += 1;
+    workspaceController.current = undefined;
+    setBusy(true); setDirectOperation(undefined); setError(undefined); setSidebarOpen(false); setChangesOpen(false); setTranscriptSearchOpen(false); setUsageOpen(false); setControlCenter(undefined); setSessionLifecycleOpen(false); setTranscriptQuery(""); setActivePromptId(undefined); setWorkspaceReview(undefined); setWorkspaceBrowser({ path: "", entries: [], loaded: false }); setWorkspaceScope("working"); setWorkspaceCheckpointEnabled(undefined); setWorkspaceError(undefined); setOpened(undefined); setConversation(EMPTY_STATE);
     const previous = subscription.current;
     subscription.current = undefined;
     try {
@@ -302,6 +319,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (generation !== selectionGeneration.current) return;
       const next = resumed ?? await current.request("session.resume", { sessionId });
       if (generation !== selectionGeneration.current) return;
+      workspaceController.current = new WorkspaceController(current, next.sessionId);
       let live = false;
       const nextSubscription = await subscribeSession(current, next.sessionId, {
         onEvent: (event) => {
@@ -336,8 +354,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         setError(cause instanceof Error ? cause.message : "Could not load commands"),
       );
     } catch (cause) {
-      if (generation === selectionGeneration.current)
+      if (generation === selectionGeneration.current) {
+        workspaceController.current = undefined;
         setError(cause instanceof Error ? cause.message : "Could not open the session");
+      }
     } finally {
       if (generation === selectionGeneration.current) setBusy(false);
     }
@@ -360,10 +380,6 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       setChangesWidth(environment.bootstrap.preferences.changesWidth);
       setChangesView(environment.bootstrap.preferences.changesView);
       setSidebarCollapsed(environment.bootstrap.preferences.sidebarCollapsed);
-      setWorkspaceAvailable(
-        environment.client.connection.grantedCapabilities.includes("session.workspace.status") &&
-          environment.client.connection.grantedCapabilities.includes("session.workspace.diff"),
-      );
       if (environment.client.connection.grantedCapabilities.includes("provider.list")) {
         void loadProviderDirectory(environment.client).then((directory) => {
           if (!disposed) {
@@ -409,12 +425,13 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     return () => {
       disposed = true;
       selectionGeneration.current += 1;
-      workspaceGeneration.current += 1;
+      workspaceRequestGeneration.current += 1;
       removeStateListener();
       removeCatalogListener();
       if (catalogRefreshTimer !== undefined) clearTimeout(catalogRefreshTimer);
       subscription.current?.detach();
       commandController.current = undefined;
+      workspaceController.current = undefined;
       activeClient?.close();
     };
   }, [preview]);
@@ -547,8 +564,13 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       setSessionLifecycleOpen(false);
       if (client !== undefined) await openSession(client, cloned.sessionId, cloned);
       else {
+        workspaceRequestGeneration.current += 1;
         setOpened(cloned);
         setConversation(EMPTY_STATE);
+        setChangesOpen(false);
+        setWorkspaceBrowser({ path: "", entries: [], loaded: false });
+        setWorkspaceReview(undefined);
+        setWorkspaceCheckpointEnabled(undefined);
         setSessions((current) => [{
           sessionId: cloned.sessionId,
           cwd: cloned.cwd,
@@ -600,8 +622,13 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (client !== undefined) await refreshSessions(client);
       if (client !== undefined) await openSession(client, imported.sessionId, imported);
       else {
+        workspaceRequestGeneration.current += 1;
         setOpened(imported);
         setConversation(EMPTY_STATE);
+        setChangesOpen(false);
+        setWorkspaceBrowser({ path: "", entries: [], loaded: false });
+        setWorkspaceReview(undefined);
+        setWorkspaceCheckpointEnabled(undefined);
         setSessions((current) => [{
           sessionId: imported.sessionId,
           cwd: imported.cwd,
@@ -639,6 +666,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       setOpened((current) => current === undefined ? current : { ...current, runtime: { state: "inactive" } });
       if (client !== undefined) await refreshSessions(client);
       setSessionLifecycleOpen(false);
+      setChangesOpen(false);
       showActionNotice("Runtime ended. Durable history was preserved.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not end the session runtime");
@@ -659,6 +687,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       selectionGeneration.current += 1;
       await subscription.current?.close();
       subscription.current = undefined;
+      workspaceController.current = undefined;
+      workspaceRequestGeneration.current += 1;
       openedSessionId.current = undefined;
       setOpened(undefined);
       setConversation(EMPTY_STATE);
@@ -1020,6 +1050,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       await client.reconnect();
       await refreshSessions(client);
       await refreshCommandDirectory(opened?.sessionId);
+      workspaceController.current?.reset();
+      if (workspaceCheckpointEnabled === true) {
+        await workspaceController.current?.checkpoint(true);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not reconnect to the daemon");
     }
@@ -1035,36 +1069,128 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     }
   };
 
+  const workspaceOperations = (): WorkspaceOperations | undefined =>
+    preview?.workspaceClient ?? workspaceController.current;
+
   const loadWorkspaceChanges = async (scope: WorkspaceStatusScope = "working"): Promise<void> => {
-    if (preview?.workspace !== undefined) {
+    setWorkspaceScope(scope);
+    if (preview?.workspace !== undefined && preview.workspaceClient === undefined) {
       setWorkspaceReview(preview.workspace);
       return;
     }
-    if (!client || !opened) return;
-    const generation = ++workspaceGeneration.current;
-    setWorkspaceLoading(true); setWorkspaceError(undefined);
+    const operations = workspaceOperations();
+    if (operations === undefined) return;
+    const generation = ++workspaceRequestGeneration.current;
+    setWorkspaceLoading(true);
+    setWorkspaceError(undefined);
     try {
-      const status: WorkspaceStatusResult = await client.request("session.workspace.status", {
-        sessionId: opened.sessionId,
-        scope,
-      });
-      const diffs: WorkspaceDiffResult[] = [];
-      for (const entry of status.entries.slice(0, 100)) {
-        diffs.push(await client.request("session.workspace.diff", {
-          sessionId: opened.sessionId,
-          entryId: entry.entryId,
-          contextLines: 3,
-          repositoryGeneration: status.repositoryGeneration,
-          maxBytes: 512 * 1024,
-        }));
-        if (generation !== workspaceGeneration.current) return;
-      }
-      setWorkspaceReview({ status, diffs, ...(status.entries.length > 100 ? { truncated: true } : {}) });
+      const review = await operations.review(scope);
+      if (generation === workspaceRequestGeneration.current) setWorkspaceReview(review);
     } catch (cause) {
-      if (generation === workspaceGeneration.current)
-        setWorkspaceError(cause instanceof Error ? cause.message : "Could not load workspace changes");
+      if (generation === workspaceRequestGeneration.current)
+        setWorkspaceError(
+          cause instanceof Error ? cause.message : "Could not load workspace changes",
+        );
     } finally {
-      if (generation === workspaceGeneration.current) setWorkspaceLoading(false);
+      if (generation === workspaceRequestGeneration.current) setWorkspaceLoading(false);
+    }
+  };
+
+  const loadWorkspaceDirectory = async (path: string, append = false): Promise<void> => {
+    const operations = workspaceOperations();
+    if (operations === undefined) return;
+    const cursor = append && workspaceBrowser.path === path
+      ? workspaceBrowser.nextPageCursor
+      : undefined;
+    if (append && cursor === undefined) return;
+    const generation = ++workspaceRequestGeneration.current;
+    setWorkspaceLoading(true);
+    setWorkspaceError(undefined);
+    if (!append) setWorkspaceBrowser({ path, entries: [], loaded: false });
+    try {
+      const result = await operations.list(path, cursor);
+      if (generation !== workspaceRequestGeneration.current) return;
+      setWorkspaceBrowser((current) => ({
+        path,
+        entries: append && current.path === path
+          ? [...current.entries, ...result.entries]
+          : result.entries,
+        loaded: true,
+        ...(result.nextPageCursor === undefined
+          ? {}
+          : { nextPageCursor: result.nextPageCursor }),
+      }));
+    } catch (cause) {
+      if (generation === workspaceRequestGeneration.current)
+        setWorkspaceError(cause instanceof Error ? cause.message : "Could not list workspace files");
+    } finally {
+      if (generation === workspaceRequestGeneration.current) setWorkspaceLoading(false);
+    }
+  };
+
+  const loadWorkspaceFile = async (path: string, append = false): Promise<void> => {
+    const operations = workspaceOperations();
+    if (operations === undefined) return;
+    const previous = append && workspaceBrowser.file?.path === path
+      ? workspaceBrowser.file
+      : undefined;
+    if (append && (previous === undefined || !previous.truncated)) return;
+    const generation = ++workspaceRequestGeneration.current;
+    setWorkspaceLoading(true);
+    setWorkspaceError(undefined);
+    try {
+      const result = await operations.read(
+        path,
+        previous === undefined ? 1 : previous.endLine + 1,
+        previous?.fileRevision,
+      );
+      if (generation !== workspaceRequestGeneration.current) return;
+      setWorkspaceBrowser((current) => ({
+        ...current,
+        file: previous === undefined
+          ? result
+          : {
+              ...result,
+              startLine: previous.startLine,
+              text: previous.text + result.text,
+            },
+      }));
+    } catch (cause) {
+      if (generation === workspaceRequestGeneration.current)
+        setWorkspaceError(cause instanceof Error ? cause.message : "Could not read workspace file");
+    } finally {
+      if (generation === workspaceRequestGeneration.current) setWorkspaceLoading(false);
+    }
+  };
+
+  const refreshWorkspace = (): void => {
+    workspaceOperations()?.reset();
+    if (workspaceTab === "files") void loadWorkspaceDirectory(workspaceBrowser.path);
+    else void loadWorkspaceChanges(workspaceScope);
+  };
+
+  const configureWorkspaceCheckpoint = async (enabled: boolean): Promise<void> => {
+    const operations = workspaceOperations();
+    if (operations === undefined) return;
+    const generation = ++workspaceRequestGeneration.current;
+    setWorkspaceLoading(true);
+    setWorkspaceError(undefined);
+    try {
+      const result = await operations.checkpoint(enabled);
+      if (generation !== workspaceRequestGeneration.current) return;
+      setWorkspaceCheckpointEnabled(result.enabled);
+      showActionNotice(enabled ? "Workspace checkpoints started" : "Workspace checkpoints stopped");
+      if (enabled) {
+        setWorkspaceScope("last-turn");
+        await loadWorkspaceChanges("last-turn");
+      }
+    } catch (cause) {
+      if (generation === workspaceRequestGeneration.current)
+        setWorkspaceError(
+          cause instanceof Error ? cause.message : "Could not configure workspace checkpoints",
+        );
+    } finally {
+      if (generation === workspaceRequestGeneration.current) setWorkspaceLoading(false);
     }
   };
 
@@ -1146,6 +1272,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       } else if (outcome.surface === "dispose" || outcome.surface === "delete") {
         setSessionLifecycleOpen(true);
       } else {
+        setWorkspaceTab("changes");
         setChangesOpen(true);
         await loadWorkspaceChanges((outcome.argument ?? "working") as WorkspaceStatusScope);
       }
@@ -1196,13 +1323,15 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     void runCommand(`/${command.name}`);
   };
 
-  const toggleChanges = (): void => {
-    if (changesOpen) {
+  const toggleWorkspace = (tab: WorkspacePanelTab): void => {
+    if (changesOpen && workspaceTab === tab) {
       setChangesOpen(false);
       return;
     }
+    setWorkspaceTab(tab);
     setChangesOpen(true);
-    if (workspaceReview === undefined) void loadWorkspaceChanges();
+    if (tab === "files" && !workspaceBrowser.loaded) void loadWorkspaceDirectory("");
+    if (tab === "changes" && workspaceReview === undefined) void loadWorkspaceChanges();
   };
 
   const persistLayout = (preferences: WebPreferences): void => {
@@ -1340,6 +1469,16 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const canUpload = preview?.uploadBlob !== undefined || client?.connection.grantedCapabilities.includes("session.blob.start") === true;
   const canShell = preview?.shell !== undefined || client?.connection.grantedCapabilities.includes("session.shell") === true;
   const canConfigure = preview !== undefined || client?.connection.grantedCapabilities.includes("session.configure") === true;
+  const canBrowseWorkspace = preview?.workspaceClient !== undefined || (
+    client?.connection.grantedCapabilities.includes("session.workspace.list") === true &&
+    client.connection.grantedCapabilities.includes("session.workspace.read")
+  );
+  const canReviewWorkspace = preview?.workspace !== undefined || preview?.workspaceClient !== undefined || (
+    client?.connection.grantedCapabilities.includes("session.workspace.status") === true &&
+    client.connection.grantedCapabilities.includes("session.workspace.diff")
+  );
+  const canCheckpointWorkspace = preview?.workspaceClient !== undefined ||
+    client?.connection.grantedCapabilities.includes("session.workspace.checkpoint") === true;
   const lifecycleCapabilities = new Set<string>(preview === undefined
     ? client?.connection.grantedCapabilities ?? []
     : [
@@ -1396,7 +1535,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       {!sidebarCollapsed && <div className="panel-resizer left" role="separator" aria-orientation="vertical" aria-label="Resize session sidebar" aria-valuemin={200} aria-valuemax={420} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={(event) => resizePanel("left", event)} onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); resizePanelBy("left", event.key === "ArrowLeft" ? -16 : 16); } }} />}
     </aside>
     <section className="workspace">
-      <header className="topbar"><div><span className="crumb">Sessions</span><span className="separator">›</span><strong>{opened ? currentTitle : "Select a session"}</strong></div><div className="top-actions"><button className="command-toggle" aria-label="Open command palette" title="Commands (Ctrl+K)" onClick={() => { setCommandPaletteOpen(true); void refreshCommandDirectory(opened?.sessionId).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not refresh commands")); }}>/</button><button className={controlCenter === "settings" ? "settings-toggle active" : "settings-toggle"} aria-label="Web settings" aria-expanded={controlCenter !== undefined} onClick={() => { setUsageOpen(false); setTranscriptSearchOpen(false); setControlCenter("settings"); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.25" /><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M12.4 3.6l-1.05 1.05M4.65 11.35 3.6 12.4" /></svg></button>{opened && canManageSession && <button className={sessionLifecycleOpen ? "session-manage active" : "session-manage"} aria-label="Manage session" aria-expanded={sessionLifecycleOpen} onClick={() => { setControlCenter(undefined); setSessionLifecycleOpen(true); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1" /><circle cx="8" cy="8" r="1" /><circle cx="13" cy="8" r="1" /></svg></button>}{opened && <button className={usageOpen ? "usage-toggle active" : "usage-toggle"} aria-label="Show session usage" aria-expanded={usageOpen} onClick={() => { setControlCenter(undefined); setTranscriptSearchOpen(false); setUsageOpen((open) => !open); }}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12V8M8 12V4M13 12V6" /></svg><span>Usage</span></button>}{opened && <button className={transcriptSearchOpen ? "transcript-search-toggle active" : "transcript-search-toggle"} aria-label="Search transcript" aria-expanded={transcriptSearchOpen} onClick={() => { setControlCenter(undefined); setUsageOpen(false); setTranscriptSearchOpen((open) => !open); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg></button>}{workspaceAvailable && opened && <button className={changesOpen ? "changes-toggle active" : "changes-toggle"} onClick={toggleChanges} aria-expanded={changesOpen}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 8h10M3 12.5h10M5 2v3M11 6.5v3M7 11v3" /></svg><span>Changes</span>{workspaceReview && <b>{workspaceReview.status.entries.length}</b>}</button>}</div></header>
+      <header className="topbar"><div><span className="crumb">Sessions</span><span className="separator">›</span><strong>{opened ? currentTitle : "Select a session"}</strong></div><div className="top-actions"><button className="command-toggle" aria-label="Open command palette" title="Commands (Ctrl+K)" onClick={() => { setCommandPaletteOpen(true); void refreshCommandDirectory(opened?.sessionId).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Could not refresh commands")); }}>/</button><button className={controlCenter === "settings" ? "settings-toggle active" : "settings-toggle"} aria-label="Web settings" aria-expanded={controlCenter !== undefined} onClick={() => { setUsageOpen(false); setTranscriptSearchOpen(false); setControlCenter("settings"); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.25" /><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.05 1.05M11.35 11.35l1.05 1.05M12.4 3.6l-1.05 1.05M4.65 11.35 3.6 12.4" /></svg></button>{opened && canManageSession && <button className={sessionLifecycleOpen ? "session-manage active" : "session-manage"} aria-label="Manage session" aria-expanded={sessionLifecycleOpen} onClick={() => { setControlCenter(undefined); setSessionLifecycleOpen(true); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1" /><circle cx="8" cy="8" r="1" /><circle cx="13" cy="8" r="1" /></svg></button>}{opened && <button className={usageOpen ? "usage-toggle active" : "usage-toggle"} aria-label="Show session usage" aria-expanded={usageOpen} onClick={() => { setControlCenter(undefined); setTranscriptSearchOpen(false); setUsageOpen((open) => !open); }}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12V8M8 12V4M13 12V6" /></svg><span>Usage</span></button>}{opened && <button className={transcriptSearchOpen ? "transcript-search-toggle active" : "transcript-search-toggle"} aria-label="Search transcript" aria-expanded={transcriptSearchOpen} onClick={() => { setControlCenter(undefined); setUsageOpen(false); setTranscriptSearchOpen((open) => !open); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg></button>}{canBrowseWorkspace && opened && <button className={changesOpen && workspaceTab === "files" ? "changes-toggle active" : "changes-toggle"} onClick={() => toggleWorkspace("files")} aria-label="Browse workspace files" aria-expanded={changesOpen && workspaceTab === "files"}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h4l1.2 1.5h5.8v7h-11z" /></svg><span>Files</span></button>}{canReviewWorkspace && opened && <button className={changesOpen && workspaceTab === "changes" ? "changes-toggle active" : "changes-toggle"} onClick={() => toggleWorkspace("changes")} aria-expanded={changesOpen && workspaceTab === "changes"}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 8h10M3 12.5h10M5 2v3M11 6.5v3M7 11v3" /></svg><span>Changes</span>{workspaceReview && <b>{workspaceReview.status.entries.length}</b>}</button>}</div></header>
       {opened && conversation.sandbox?.enforced === false && <div className="unsafe-banner" role="alert"><strong>Unsafe session</strong><span>Sandbox enforcement is disabled. Tools run with your host permissions.</span></div>}
       {usageOpen && <section className="session-usage" aria-label="Session usage"><header><strong>Session usage</strong><button type="button" aria-label="Close session usage" onClick={() => setUsageOpen(false)}>×</button></header><p>{conversation.provider && conversation.model ? `${conversation.provider} / ${conversation.model}` : conversation.model ?? "No model selected"}{conversation.thinking ? ` · ${conversation.thinking}` : ""}</p><dl><div><dt>Input</dt><dd>{compactNumber(conversation.usage.inputTokens)}</dd></div><div><dt>Output</dt><dd>{compactNumber(conversation.usage.outputTokens)}</dd></div><div><dt>Cache read</dt><dd>{compactNumber(conversation.usage.cacheReadTokens)}</dd></div><div><dt>Cache hit</dt><dd>{usageStats.cacheHitPercent.toFixed(1)}%</dd></div><div><dt>Reasoning</dt><dd>{compactNumber(conversation.usage.reasoningTokens)}</dd></div><div><dt>Throughput</dt><dd>{usageStats.tokensPerSecond === undefined ? "Unknown" : `${usageStats.tokensPerSecond.toFixed(1)} tok/s`}</dd></div><div><dt>Recorded cost</dt><dd>${conversation.usage.costUsd.toFixed(4)}</dd></div></dl>{usageStats.unknownCostResponses > 0 && <small>{usageStats.unknownCostResponses} response{usageStats.unknownCostResponses === 1 ? " has" : "s have"} no cost data.</small>}{stateHistory.length > 0 && <details className="state-history"><summary>Configuration history</summary><ol>{stateHistory.map((entry) => <li key={entry.id}><span><strong>{entry.label}</strong><small>{entry.detail}</small></span><time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></li>)}</ol></details>}</section>}
       {transcriptSearchOpen && <div className="transcript-search" role="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg><input autoFocus type="search" aria-label="Search transcript" placeholder="Search transcript" value={transcriptQuery} onChange={(event) => setTranscriptQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); moveTranscriptMatch(event.shiftKey ? -1 : 1); } }} /><span>{transcriptQuery.trim() ? `${transcriptMatches.length === 0 ? 0 : Math.max(0, transcriptMatch + 1)} / ${transcriptMatches.length}` : ""}</span><button type="button" aria-label="Previous result" disabled={transcriptMatches.length === 0} onClick={() => moveTranscriptMatch(-1)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4" /></svg></button><button type="button" aria-label="Next result" disabled={transcriptMatches.length === 0} onClick={() => moveTranscriptMatch(1)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><button type="button" aria-label="Close transcript search" onClick={() => { setTranscriptSearchOpen(false); setTranscriptQuery(""); }}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>}
@@ -1410,7 +1549,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       {directOperation && <div className="direct-operation" role="status" aria-live="polite"><progress aria-label={directOperation.kind === "compaction" ? "Compaction progress" : "Shell command progress"} /><span><strong>{directOperation.kind === "compaction" ? "Compacting context" : "Running shell command"}</strong><small>{directOperation.kind === "compaction" ? "Summarizing older context into a durable checkpoint." : "The sandboxed command result will appear in the transcript."}</small></span><button type="button" disabled={directOperation.cancelling} onClick={() => void cancelDirectOperation()}>{directOperation.cancelling ? "Cancelling…" : "Cancel"}</button></div>}
       {opened && <form className="composer" onSubmit={(event) => { event.preventDefault(); void send(); }}>{slashCommands.length > 0 && <div className="slash-commands" role="listbox" aria-label="Slash commands">{slashCommands.map((command) => <button key={command.id} type="button" role="option" aria-selected={command === slashCommands[slashCommandIndex]} disabled={command.availability.state === "unavailable"} onClick={() => selectCommand(command)}><strong>/{command.name}</strong><span>{command.availability.state === "unavailable" ? command.availability.reason : command.description}</span></button>)}</div>}<input ref={fileInput} className="attachment-input" type="file" multiple tabIndex={-1} aria-hidden="true" onChange={(event) => { attachFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments" aria-label="Prompt attachments">{attachments.map((attachment) => <div key={attachment.id} className={`composer-attachment ${attachment.status}`}><span className="attachment-glyph" aria-hidden="true">◇</span><span className="attachment-copy"><strong title={attachment.file.name}>{attachment.file.name}</strong><small>{attachment.status === "uploading" ? `Uploading ${Math.round(attachment.progress * 100)}%` : attachment.status === "failed" ? attachment.error : `${Math.ceil(attachment.file.size / 1024)} KB · Ready`}</small></span>{attachment.status === "failed" && <button type="button" onClick={() => void uploadAttachment(attachment)}>Retry</button>}<button type="button" aria-label={attachment.status === "uploading" ? `Cancel upload ${attachment.file.name}` : `Remove ${attachment.file.name}`} onClick={() => removeAttachment(attachment.id)}>×</button></div>)}</div>}{orderedPendingInputs.length > 0 && <div className="pending-inputs" role="status" aria-label="Pending prompt delivery">{orderedPendingInputs.map((pending) => <div key={pending.id}><strong>{pending.mode === "steer" ? "Steering" : pending.mode === "follow_up" ? "Follow-up" : "Interrupting"}</strong><span>{pending.text}</span></div>)}</div>}<textarea ref={composer} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (slashCommands.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setSlashCommandIndex((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + slashCommands.length) % slashCommands.length); } else if (slashCommands.length > 0 && (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))) { event.preventDefault(); selectCommand(slashCommands[slashCommandIndex] as EffectiveCommand); } else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(promptDeliveryShortcut(event)); } }} placeholder="Ask Axl…" aria-label="Message" aria-keyshortcuts="Enter Alt+Enter Control+Enter Meta+Enter" aria-expanded={slashCommands.length > 0} rows={3} disabled={busy} /><div className="composer-footer"><button type="button" className="attach-button" aria-label="Attach files" title="Attach files" disabled={!canUpload || busy || !connected} onClick={() => fileInput.current?.click()}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 8.5 4.2-4.2a2.1 2.1 0 0 1 3 3l-5.5 5.5a3.5 3.5 0 0 1-5-5l5.4-5.4" /></svg></button>{canShell && <button type="button" className="shell-button" aria-label="Run shell command" title="Run shell command (! includes output, !! excludes it)" disabled={busy || !connected} onClick={() => { setDraft((current) => current || "! "); queueMicrotask(() => composer.current?.focus()); }}>&gt;_</button>}<span className="delivery-hint" title="Enter sends or steers · Alt+Enter follows up · Ctrl/Cmd+Enter interrupts">{deliveryActive ? "↵ steer" : "↵ send"} · Alt ↵ follow up · Ctrl/⌘ ↵ interrupt</span>{pendingDeliveries > 0 && <span className="delivery-status" role="status">Delivering {pendingDeliveries}</span>}<ModelPicker choices={modelCatalog} provider={conversation.provider} model={conversation.model} thinking={conversation.thinking} openRequest={modelPickerOpenRequest} disabled={!canConfigure || busy || (preview === undefined && conversation.activeOperationId !== undefined) || !connected} onModel={(choice) => void configureModel(choice)} onThinking={(level) => void configureThinking(level)} />{conversation.activeOperationId && directOperation === undefined && <button type="button" className="composer-submit stop" aria-label="Stop response" onClick={() => void interrupt()} disabled={!connected}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.75" y="3.75" width="8.5" height="8.5" rx="1.25" /></svg></button>}<button className="composer-submit send" aria-label={deliveryActive ? "Deliver during active response" : "Send message"} disabled={(!draft.trim() && readyAttachmentCount === 0) || attachmentUploading || busy || !connected}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 2 8.5 14 6.4 9.6 2 7.5 14 2Z M6.4 9.6 10 6" /></svg></button></div></form>}
     </section>
-    {changesOpen && <><div className="panel-resizer right" role="separator" aria-orientation="vertical" aria-label="Resize changes panel" aria-valuemin={420} aria-valuemax={900} aria-valuenow={changesWidth} tabIndex={0} onPointerDown={(event) => resizePanel("right", event)} onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); resizePanelBy("right", event.key === "ArrowLeft" ? 16 : -16); } }} /><WorkspaceChanges review={workspaceReview} loading={workspaceLoading} error={workspaceError} view={changesView} onViewChange={(view) => { setChangesView(view); persistLayout({ sidebarWidth, changesWidth, sidebarCollapsed, changesView: view }); }} onClose={() => setChangesOpen(false)} onRetry={() => void loadWorkspaceChanges()} /></>}
+    {changesOpen && <><div className="panel-resizer right" role="separator" aria-orientation="vertical" aria-label="Resize workspace panel" aria-valuemin={420} aria-valuemax={900} aria-valuenow={changesWidth} tabIndex={0} onPointerDown={(event) => resizePanel("right", event)} onKeyDown={(event) => { if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); resizePanelBy("right", event.key === "ArrowLeft" ? 16 : -16); } }} /><WorkspacePanel tab={workspaceTab} canBrowse={canBrowseWorkspace} canReview={canReviewWorkspace} canCheckpoint={canCheckpointWorkspace} browser={workspaceBrowser} review={workspaceReview} scope={workspaceScope} checkpointEnabled={workspaceCheckpointEnabled} checkpointDisabled={busy || conversation.activeOperationId !== undefined} loading={workspaceLoading} error={workspaceError} view={changesView} onTab={(tab) => { setWorkspaceTab(tab); setWorkspaceError(undefined); if (tab === "files" && !workspaceBrowser.loaded) void loadWorkspaceDirectory(""); if (tab === "changes" && workspaceReview === undefined) void loadWorkspaceChanges(workspaceScope); }} onOpenDirectory={(path) => void loadWorkspaceDirectory(path)} onOpenFile={(path) => void loadWorkspaceFile(path)} onLoadMoreEntries={() => void loadWorkspaceDirectory(workspaceBrowser.path, true)} onLoadMoreFile={() => { if (workspaceBrowser.file) void loadWorkspaceFile(workspaceBrowser.file.path, true); }} onScope={(scope) => void loadWorkspaceChanges(scope)} onCheckpoint={(enabled) => void configureWorkspaceCheckpoint(enabled)} onViewChange={(view) => { setChangesView(view); persistLayout({ sidebarWidth, changesWidth, sidebarCollapsed, changesView: view }); }} onClose={() => setChangesOpen(false)} onRetry={refreshWorkspace} /></>}
     {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={{ sidebarWidth, changesWidth, sidebarCollapsed, changesView }} providers={providerInventory} providerLoading={providerLoading} providerError={providerError} canRefresh={preview !== undefined || client?.connection.grantedCapabilities.includes("provider.catalog.refresh") === true} canLogout={preview !== undefined || client?.connection.grantedCapabilities.includes("provider.auth.logout") === true} onTab={setControlCenter} onPreferences={applyWebPreferences} onRefresh={(providerId) => void refreshProviders(providerId)} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId) => void copyProviderLogin(providerId)} onClose={() => setControlCenter(undefined)} /></Suspense>}
     {sessionLifecycleOpen && selectedSummary && <SessionLifecycle session={selectedSummary} busy={busy} capabilities={lifecycleCapabilities} onRename={(title) => void renameSession(title)} onClone={() => void cloneSession()} onExport={() => void exportArtifact()} onDispose={() => void disposeSession()} onDelete={() => void deleteSession()} onClose={() => setSessionLifecycleOpen(false)} />}
   </main>;

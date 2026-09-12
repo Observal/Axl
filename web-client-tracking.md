@@ -35,7 +35,7 @@ The branch now contains the first complete local-session slice:
 - The composer loads a cached daemon provider directory and configures provider-qualified model and thinking choices. A live `/reload` boundary invalidates that cache.
 - Reusable theme, syntax, diff, and React conversation presentation lives in `packages/ui`.
 - The SDK exhaustively classifies canonical events for presentation, and immutable projections expose compacted-event membership to every renderer.
-- Provider auth, staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, workspace workflows, and full protocol capability parity remain.
+- Provider auth, staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, and full protocol capability parity remain.
 
 The previous PR #386 implementation was discarded when this branch was reset to `upstream/main`. Its tests and findings remain design evidence only.
 
@@ -98,8 +98,8 @@ The normal local chat path is available. These items close the remaining gap bet
 
 ### Workspace authority
 
-17. [ ] Add capability-gated workspace list and read interfaces using daemon generation checks.
-18. [ ] Add checkpoint enablement and inspection without exposing browser filesystem authority.
+17. [x] Add capability-gated workspace list and read interfaces using daemon generation checks.
+18. [x] Add checkpoint enablement and inspection without exposing browser filesystem authority.
 
 ### Provider credentials
 
@@ -373,11 +373,11 @@ The browser should support every capability granted to its connection.
 - [x] `session.blob.commit`
 - [x] `session.blob.abort`
 - [x] `session.blob.read`
-- [ ] `session.workspace.list`
-- [ ] `session.workspace.read`
+- [x] `session.workspace.list`
+- [x] `session.workspace.read`
 - [x] `session.workspace.status`
 - [x] `session.workspace.diff`
-- [ ] `session.workspace.checkpoint`
+- [x] `session.workspace.checkpoint`
 
 ### Providers
 
