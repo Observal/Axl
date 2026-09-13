@@ -3853,7 +3853,7 @@ export class AxlApp {
 
   private async openResume(): Promise<void> {
     try {
-      const sessions: readonly ResumeSessionEntry[] =
+      const listedSessions: readonly ResumeSessionEntry[] =
         this.options.listResumeSessions === undefined
           ? (
               await this.client.request("session.list", {
@@ -3871,6 +3871,9 @@ export class AxlApp {
               unsafe: session.securityMode === "unsafe",
             }))
           : await this.options.listResumeSessions();
+      const sessions = listedSessions.filter(
+        (session) => this.initialResumePending || session.sessionId !== this.sessionId,
+      );
       if (sessions.length === 0) {
         this.notice = this.view.palette.dim("· no saved sessions");
         if (this.initialResumePending) this.stop();

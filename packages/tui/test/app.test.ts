@@ -481,6 +481,61 @@ test("initial resume opens the all-session picker without creating a throwaway s
   app.stop();
 });
 
+test("resume hides the active session to avoid replaying its transcript", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const seed = await connectUnixClient(socketPath);
+  const target = await seed.request("session.create", { cwd: directory });
+  seed.close();
+
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    listResumeSessions: async () => [
+      {
+        sessionId: target.sessionId,
+        cwd: directory,
+        createdAt: 1,
+        updatedAt: 1,
+        userMessageCount: 0,
+        runtime: target.runtime,
+        attachmentCount: 0,
+        resumeKey: target.sessionId,
+        title: "available session",
+        placementLabel: "SANDBOXED · native",
+        unsafe: false,
+      },
+      {
+        sessionId: app.sessionId,
+        cwd: directory,
+        createdAt: 2,
+        updatedAt: 2,
+        userMessageCount: 1,
+        runtime: { state: "idle" },
+        attachmentCount: 1,
+        resumeKey: app.sessionId,
+        title: "active session duplicate",
+        placementLabel: "SANDBOXED · native",
+        unsafe: false,
+      },
+    ],
+  });
+
+  input.write("/resume\r");
+  await until(() => text().includes("Resume Session (Current Folder)"), "resume selector");
+  const rendered = stripAnsi(text());
+  assert.match(rendered, /available session/);
+  assert.doesNotMatch(rendered, /active session duplicate/);
+
+  input.write("\r");
+  await until(() => app.sessionId === target.sessionId, "inactive session resume");
+  app.stop();
+});
+
 test("resume selects the most recently updated session first", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const seed = await connectUnixClient(socketPath);
