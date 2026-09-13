@@ -53,6 +53,9 @@ export const EVENT_PRESENTATION_SURFACES = Object.freeze({
   "sandbox.violation": "transcript",
   "context.compacted": "transcript",
   "session.error": "transcript",
+  "child.spawn_requested": "transcript",
+  "child.started": "transcript",
+  "child.input_queued": "transcript",
   "child.result": "transcript",
 } as const satisfies Readonly<Record<EventType, EventPresentationSurface>>);
 

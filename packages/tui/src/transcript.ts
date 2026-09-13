@@ -299,7 +299,6 @@ export class SessionView {
       case "context.extension":
       case "interaction.requested":
       case "interaction.resolved":
-      case "child.result":
         return EMPTY_ROWS;
       case "user.message":
         return [

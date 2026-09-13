@@ -286,6 +286,12 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
       return <SystemNotice title={item.event.payload.message} detail={item.event.payload.retryable ? "Retry the request." : item.event.payload.code} tone="error" alert />;
     case "session.closed":
       return <SystemNotice title={`Session ${item.event.payload.reason}`} />;
+    case "child.spawn_requested":
+      return <SystemNotice title={`Starting child session ${item.event.payload.name}`} detail={item.event.payload.task} />;
+    case "child.started":
+      return <SystemNotice title={`Child session ${item.event.payload.name} started`} detail={item.event.payload.childSessionId} />;
+    case "child.input_queued":
+      return <SystemNotice title="Child session input queued" detail={item.event.payload.childSessionId} />;
     case "child.result":
       return <SystemNotice title={`Child session ${item.event.payload.status}`} detail={item.event.payload.childSessionId} tone={item.event.payload.status === "failed" ? "error" : "neutral"} />;
     case "unknown_event":
