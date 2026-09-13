@@ -6,10 +6,11 @@ import test from "node:test";
 
 import type { ConversationState } from "@axl/sdk";
 import {
-  MIN_PANE_HEIGHT,
   closePane,
   createPaneLayout,
+  MIN_PANE_HEIGHT,
   openPane,
+  paneChoices,
   paneFractions,
   parseBrowserTarget,
   parsePaneIds,
@@ -34,6 +35,31 @@ test("panes open in canonical tiling order regardless of toggle order", () => {
 test("default layout tiles the browser above files", () => {
   assert.deepEqual(createPaneLayout().panes, ["browser", "files"]);
   assert.deepEqual(paneFractions(createPaneLayout()), [0.5, 0.5]);
+});
+
+test("four open panes partition the complete dock in canonical order", () => {
+  const layout = createPaneLayout(["terminal", "changes", "files", "browser"]);
+  assert.deepEqual(layout.panes, ["browser", "files", "changes", "terminal"]);
+  assert.deepEqual(paneFractions(layout), [0.25, 0.25, 0.25, 0.25]);
+  assert.deepEqual(paneFractions(resizePane(layout, 1, 40, 800)), [0.25, 0.3, 0.2, 0.25]);
+});
+
+test("pane choices expose open, closed, and unavailable states", () => {
+  const choices = paneChoices(["browser", "files"], {
+    browser: undefined,
+    files: "Workspace access unavailable",
+    changes: undefined,
+    terminal: "Shell access unavailable",
+  });
+  assert.deepEqual(
+    choices.map(({ id, open, disabled, state }) => ({ id, open, disabled, state })),
+    [
+      { id: "browser", open: true, disabled: false, state: "Open" },
+      { id: "files", open: true, disabled: false, state: "Open · unavailable" },
+      { id: "changes", open: false, disabled: false, state: "Closed" },
+      { id: "terminal", open: false, disabled: true, state: "Unavailable" },
+    ],
+  );
 });
 
 test("persisted pane lists are validated and normalized", () => {

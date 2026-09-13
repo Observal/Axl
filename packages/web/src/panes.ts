@@ -29,6 +29,41 @@ export interface PaneLayout {
 
 export const DEFAULT_PANES: readonly PaneId[] = ["browser", "files"];
 
+export interface PaneChoice {
+  readonly id: PaneId;
+  readonly label: string;
+  readonly open: boolean;
+  /** Unavailable open panes stay enabled so the user can close stale persisted state. */
+  readonly disabled: boolean;
+  readonly state: "Open" | "Closed" | "Open · unavailable" | "Unavailable";
+  readonly unavailableReason?: string;
+}
+
+export function paneChoices(
+  openPanes: readonly PaneId[],
+  unavailableReasons: Readonly<Record<PaneId, string | undefined>>,
+): readonly PaneChoice[] {
+  return PANE_IDS.map((id) => {
+    const open = openPanes.includes(id);
+    const unavailableReason = unavailableReasons[id];
+    return {
+      id,
+      label: PANE_LABELS[id],
+      open,
+      disabled: unavailableReason !== undefined && !open,
+      state:
+        unavailableReason === undefined
+          ? open
+            ? "Open"
+            : "Closed"
+          : open
+            ? "Open · unavailable"
+            : "Unavailable",
+      ...(unavailableReason === undefined ? {} : { unavailableReason }),
+    };
+  });
+}
+
 export function isPaneId(value: unknown): value is PaneId {
   return typeof value === "string" && (PANE_IDS as readonly string[]).includes(value);
 }
