@@ -51,6 +51,7 @@ export function Dock({ layout, onLayout, renderPane, renderControls }: DockProps
   const dock = useRef<HTMLElement>(null);
   const tabList = useRef<HTMLDivElement>(null);
   const previousPanes = useRef(layout.panes);
+  const restoreTabFocus = useRef(false);
   const [activePane, setActivePane] = useState<PaneId>(() => layout.panes[0] ?? "browser");
   const [mounted, setMounted] = useState<ReadonlySet<PaneId>>(() => new Set(layout.panes));
   const [entered, setEntered] = useState<ReadonlySet<PaneId>>(() => new Set(layout.panes));
@@ -107,10 +108,20 @@ export function Dock({ layout, onLayout, renderPane, renderControls }: DockProps
   useEffect(() => {
     const opened = layout.panes.find((pane) => !previousPanes.current.includes(pane));
     previousPanes.current = layout.panes;
-    setActivePane((current) =>
-      opened ?? (layout.panes.includes(current) ? current : (layout.panes[0] ?? "browser")),
-    );
-  }, [layout.panes]);
+    const next = opened ?? (layout.panes.includes(activePane) ? activePane : (layout.panes[0] ?? "browser"));
+    if (next !== activePane) setActivePane(next);
+    if (restoreTabFocus.current) {
+      restoreTabFocus.current = false;
+      requestAnimationFrame(() => {
+        const target = tabbed
+          ? tabList.current?.querySelector<HTMLButtonElement>(`[data-pane="${next}"]`)
+          : dock.current?.querySelector<HTMLButtonElement>(
+              `[data-pane="${next}"] .pane-header button`,
+            );
+        target?.focus();
+      });
+    }
+  }, [layout.panes, activePane, tabbed]);
 
   const fractions = new Map<PaneId, number>();
   paneFractions(layout).forEach((fraction, index) => {
@@ -245,7 +256,10 @@ export function Dock({ layout, onLayout, renderPane, renderControls }: DockProps
                     type="button"
                     className="icon-button"
                     aria-label={`Close ${PANE_LABELS[pane]} pane`}
-                    onClick={() => onLayout(closePane(layout, pane))}
+                    onClick={() => {
+                      restoreTabFocus.current = true;
+                      onLayout(closePane(layout, pane));
+                    }}
                   >
                     <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
                   </button>
@@ -258,16 +272,26 @@ export function Dock({ layout, onLayout, renderPane, renderControls }: DockProps
                 className="pane-resizer"
                 role="separator"
                 aria-orientation="horizontal"
-                aria-label={`Resize ${PANE_LABELS[pane]} pane`}
+                aria-label={`Resize ${PANE_LABELS[pane]} and ${PANE_LABELS[tiled[tileIndex + 1] as PaneId]} panes`}
                 aria-valuemin={0}
                 aria-valuemax={100}
                 aria-valuenow={Math.round((fractions.get(pane) ?? 0) * 100)}
+                aria-valuetext={`${Math.round((fractions.get(pane) ?? 0) * 100)} percent of the dock`}
+                aria-keyshortcuts="ArrowUp ArrowDown Home End"
                 tabIndex={0}
                 onPointerDown={(event) => startResize(tileIndex, event)}
                 onKeyDown={(event) => {
-                  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                  if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
-                  onLayout(resizePane(layout, tileIndex, event.key === "ArrowUp" ? -24 : 24, dockHeight()));
+                  const height = dockHeight();
+                  const delta = event.key === "Home"
+                    ? -height
+                    : event.key === "End"
+                      ? height
+                      : event.key === "ArrowUp"
+                        ? -24
+                        : 24;
+                  onLayout(resizePane(layout, tileIndex, delta, height));
                 }}
               />
             )}

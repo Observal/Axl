@@ -20,7 +20,7 @@
   --text: #f4f4f5;
   --text-soft: #dedee3;
   --muted: #a1a1aa;
-  --subtle: #7b7b85;
+  --subtle: #90909a;
   --accent: #6d70c9;
   --accent-strong: #a6a8eb;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -60,7 +60,7 @@
   --text: #202126;
   --text-soft: #34353b;
   --muted: #60616a;
-  --subtle: #7b7c85;
+  --subtle: #63646d;
   --accent: #575bb6;
   --accent-strong: #4f53a9;
   --green: #188653;

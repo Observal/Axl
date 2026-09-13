@@ -15,7 +15,13 @@ test("dialog focus wraps in both keyboard directions", () => {
   const first = focusable("first", focused);
   const middle = focusable("middle", focused);
   const last = focusable("last", focused);
-  const root = { querySelectorAll: () => [first, middle, last] };
+  let selector = "";
+  const root = {
+    querySelectorAll: (value: string) => {
+      selector = value;
+      return [first, middle, last];
+    },
+  };
   let prevented = 0;
 
   trapDialogFocus({ key: "Tab", shiftKey: false, preventDefault: () => prevented++ }, root, last);
@@ -24,4 +30,6 @@ test("dialog focus wraps in both keyboard directions", () => {
 
   assert.deepEqual(focused, ["first", "last"]);
   assert.equal(prevented, 2);
+  assert.match(selector, /\[tabindex\]/u);
+  assert.match(selector, /type="hidden"/u);
 });

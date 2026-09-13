@@ -11,6 +11,7 @@ export interface SplitState {
 
 export const MIN_SPLIT_PRIMARY = 140;
 const MIN_SPLIT_SECONDARY = 220;
+const MAX_SPLIT_PRIMARY = 1_000;
 
 export function clampSplit(size: number, containerWidth: number): number {
   if (containerWidth <= 0) return Math.max(MIN_SPLIT_PRIMARY, size);
@@ -78,18 +79,22 @@ export function SplitPane({
           aria-orientation="vertical"
           aria-label={`Resize ${label}`}
           aria-valuemin={MIN_SPLIT_PRIMARY}
+          aria-valuemax={MAX_SPLIT_PRIMARY}
           aria-valuenow={state.size}
+          aria-valuetext={`${state.size} pixels wide`}
+          aria-keyshortcuts="ArrowLeft ArrowRight Home End"
           tabIndex={0}
           onPointerDown={startDrag}
           onDoubleClick={() => onState({ ...state, collapsed: true })}
           onKeyDown={(event) => {
-            if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
-              event.preventDefault();
-              onState({
-                size: clampSplit(state.size + (event.key === "ArrowLeft" ? -16 : 16), containerWidth()),
-                collapsed: false,
-              });
-            }
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const size = event.key === "Home"
+              ? MIN_SPLIT_PRIMARY
+              : event.key === "End"
+                ? Number.MAX_SAFE_INTEGER
+                : state.size + (event.key === "ArrowLeft" ? -16 : 16);
+            onState({ size: clampSplit(size, containerWidth()), collapsed: false });
           }}
         />
       )}

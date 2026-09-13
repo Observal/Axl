@@ -16,7 +16,7 @@ interface DialogRoot {
 }
 
 const FOCUSABLE =
-  "button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, a[href]";
+  'button:not(:disabled):not([tabindex="-1"]), input:not(:disabled):not([tabindex="-1"]):not([type="hidden"]), select:not(:disabled):not([tabindex="-1"]), textarea:not(:disabled):not([tabindex="-1"]), summary:not([tabindex="-1"]), a[href]:not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
 
 export function trapDialogFocus(
   event: DialogKeyEvent,
@@ -24,7 +24,12 @@ export function trapDialogFocus(
   active: unknown = document.activeElement,
 ): void {
   if (event.key !== "Tab" || root === null) return;
-  const controls = Array.from(root.querySelectorAll<Focusable>(FOCUSABLE));
+  const controls = Array.from(root.querySelectorAll<Focusable>(FOCUSABLE)).filter(
+    (control) =>
+      typeof HTMLElement === "undefined" ||
+      !(control instanceof HTMLElement) ||
+      (control.closest("[inert]") === null && control.getClientRects().length > 0),
+  );
   const first = controls[0];
   const last = controls.at(-1);
   if (first === undefined || last === undefined) return;
