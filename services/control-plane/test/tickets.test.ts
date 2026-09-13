@@ -36,15 +36,17 @@ const fixture = JSON.parse(
 
 function createTicketService(
   clock: { now(): number } = { now: () => 1_900_000_000_000 },
+  currentGeneration: () => number | undefined = () => 1,
 ): RelayTicketService {
   let routeCounter = 0;
   return new RelayTicketService({
     store: new InMemoryRelayTicketStore(),
     authorizer: {
-      async authorize(principal, request) {
-        return (
-          principal.accountId === "account-fixture" && request.installationId === installationId
-        );
+      async currentGeneration(principal, request) {
+        return principal.accountId === "account-fixture" &&
+          request.installationId === installationId
+          ? currentGeneration()
+          : undefined;
       },
     },
     proofVerifier: {
@@ -121,6 +123,25 @@ test("rejects unauthorized issuance, invalid proof, and expired tickets", async 
   );
 });
 
+test("rejects a ticket when its grant generation changes before consumption", async () => {
+  let generation: number | undefined = 7;
+  const service = createTicketService(undefined, () => generation);
+  const issued = await service.issue(
+    { accountId: "account-fixture" },
+    { installationId, deviceId, role: "device" },
+  );
+  generation = 8;
+  await assert.rejects(
+    service.consume({
+      ticket: issued.ticket,
+      relayInstanceId: "relay-fixture-1",
+      connectionNonce: "fixture-nonce",
+      possessionProof: Uint8Array.of(0, 1, 2, 3, 255),
+    }),
+    (error) => error instanceof RelayTicketError && error.code === "ticket_revoked",
+  );
+});
+
 test("serves authenticated public issuance and internal consumption without URL credentials", async (context) => {
   const service = createTicketService();
   const handler = createControlPlaneHandler({
@@ -187,6 +208,7 @@ test("serves authenticated public issuance and internal consumption without URL 
     deviceId,
     sourceRouteId: "cccccccc-cccc-4ccc-8ccc-000000000001",
     role: "device",
+    grantGeneration: 1,
     leaseExpiresAt: 1_900_000_060_000,
     limits: DEFAULT_RELAY_LIMITS,
   });

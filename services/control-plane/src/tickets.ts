@@ -26,7 +26,10 @@ export interface Clock {
 }
 
 export interface RelayTicketAuthorizer {
-  authorize(principal: AccountPrincipal, request: IssueRelayTicketRequest): Promise<boolean>;
+  currentGeneration(
+    principal: AccountPrincipal,
+    request: IssueRelayTicketRequest,
+  ): Promise<number | undefined>;
 }
 
 export interface RelayTicketProofVerifier {
@@ -34,6 +37,8 @@ export interface RelayTicketProofVerifier {
 }
 
 export interface RelayTicketRecord extends IssueRelayTicketRequest {
+  readonly accountId: string;
+  readonly grantGeneration: number;
   readonly ticketDigest: string;
   readonly sourceRouteId: ConsumeRelayTicketResult["sourceRouteId"];
   readonly issuedAt: number;
@@ -59,6 +64,7 @@ export type RelayTicketErrorCode =
   | "forbidden_route"
   | "ticket_expired"
   | "ticket_consumed"
+  | "ticket_revoked"
   | "service_unavailable";
 
 export class RelayTicketError extends Error {
@@ -148,13 +154,19 @@ export class RelayTicketService {
 
   async issue(principal: AccountPrincipal, value: unknown): Promise<IssueRelayTicketResult> {
     const request = parseIssueRelayTicketRequest(value);
-    if (!(await this.options.authorizer.authorize(principal, request))) {
+    const grantGeneration = await this.options.authorizer.currentGeneration(principal, request);
+    if (grantGeneration === undefined) {
       throw new RelayTicketError("forbidden_route", "Principal cannot access this route", 403);
+    }
+    if (!Number.isSafeInteger(grantGeneration) || grantGeneration <= 0) {
+      throw new Error("Grant generation must be a positive safe integer");
     }
     const now = this.clock.now();
     const ticket = this.randomToken();
     const record: RelayTicketRecord = {
       ...request,
+      accountId: principal.accountId,
+      grantGeneration,
       ticketDigest: digestTicket(ticket),
       sourceRouteId: parseRouteId(this.randomId(), "sourceRouteId"),
       issuedAt: now,
@@ -180,6 +192,13 @@ export class RelayTicketService {
     if (!(await this.options.proofVerifier.verify(candidate, request))) {
       throw new RelayTicketError("unauthorized", "Possession proof is invalid", 401);
     }
+    const currentGeneration = await this.options.authorizer.currentGeneration(
+      { accountId: candidate.accountId },
+      candidate,
+    );
+    if (currentGeneration === undefined || currentGeneration !== candidate.grantGeneration) {
+      throw new RelayTicketError("ticket_revoked", "Relay ticket grant is no longer current", 401);
+    }
     const consumed = await this.options.store.consume(
       ticketDigest,
       request.relayInstanceId,
@@ -190,6 +209,7 @@ export class RelayTicketService {
       ...(consumed.deviceId === undefined ? {} : { deviceId: consumed.deviceId }),
       sourceRouteId: consumed.sourceRouteId,
       role: consumed.role,
+      grantGeneration: consumed.grantGeneration,
       leaseExpiresAt: consumed.expiresAt,
       limits: consumed.limits,
     };

@@ -83,6 +83,7 @@ export interface ConsumeRelayTicketResult {
   readonly deviceId?: DeviceId;
   readonly sourceRouteId: RouteId;
   readonly role: "daemon" | "device";
+  readonly grantGeneration: number;
   readonly leaseExpiresAt: number;
   readonly limits: RelayLimits;
 }
@@ -121,6 +122,7 @@ export const RELAY_FAILURE_CODE_VALUES = Object.freeze({
   queue_full: 9,
   slow_consumer: 10,
   service_unavailable: 11,
+  ticket_revoked: 12,
 } as const);
 
 export type RelayFailureCode = keyof typeof RELAY_FAILURE_CODE_VALUES;
@@ -161,6 +163,19 @@ export interface OpaqueOutboxRecord {
   readonly opaqueEnvelope: Uint8Array;
   readonly createdAt: number;
   readonly state: "queued_local" | "sending" | "daemon_accepted";
+}
+
+export interface RelayPeerRoute {
+  readonly routeId: RouteId;
+  readonly role: "daemon" | "device";
+  readonly deviceId?: DeviceId;
+}
+
+export interface RelayDiscoveryMessage {
+  readonly version: typeof REMOTE_TRANSPORT_VERSION;
+  readonly type: "route_snapshot" | "route_available" | "route_unavailable";
+  readonly sourceRoute?: RelayPeerRoute;
+  readonly peers: readonly RelayPeerRoute[];
 }
 
 export interface RelayRevocationNotification {
@@ -444,7 +459,15 @@ export function parseInternalConsumeRelayTicketResult(value: unknown): ConsumeRe
   exact(
     candidate,
     "result",
-    ["version", "installationId", "sourceRouteId", "role", "leaseExpiresAt", "limits"],
+    [
+      "version",
+      "installationId",
+      "sourceRouteId",
+      "role",
+      "grantGeneration",
+      "leaseExpiresAt",
+      "limits",
+    ],
     ["deviceId"],
   );
   if (candidate.version !== INTERNAL_RELAY_API_VERSION) {
@@ -462,6 +485,12 @@ export function parseInternalConsumeRelayTicketResult(value: unknown): ConsumeRe
     ...(deviceId === undefined ? {} : { deviceId }),
     sourceRouteId: parseRouteId(candidate.sourceRouteId, "result.sourceRouteId"),
     role: parsedRole,
+    grantGeneration: integer(
+      candidate.grantGeneration,
+      "result.grantGeneration",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
     leaseExpiresAt: timestamp(candidate.leaseExpiresAt, "result.leaseExpiresAt"),
     limits: parseRelayLimits(candidate.limits, "result.limits"),
   };
@@ -471,6 +500,57 @@ export function encodeInternalConsumeRelayTicketResult(
   result: ConsumeRelayTicketResult,
 ): InternalConsumeRelayTicketWireResult {
   return { version: INTERNAL_RELAY_API_VERSION, ...result };
+}
+
+function parseRelayPeerRoute(value: unknown, path: string): RelayPeerRoute {
+  const candidate = object(value, path);
+  exact(candidate, path, ["routeId", "role"], ["deviceId"]);
+  const parsedRole = role(candidate.role, `${path}.role`);
+  const deviceId =
+    candidate.deviceId === undefined
+      ? undefined
+      : parseDeviceId(candidate.deviceId, `${path}.deviceId`);
+  if (parsedRole === "device" && deviceId === undefined) fail(`${path}.deviceId`, "is required");
+  if (parsedRole === "daemon" && deviceId !== undefined) fail(`${path}.deviceId`, "is not allowed");
+  return {
+    routeId: parseRouteId(candidate.routeId, `${path}.routeId`),
+    role: parsedRole,
+    ...(deviceId === undefined ? {} : { deviceId }),
+  };
+}
+
+export function parseRelayDiscoveryMessage(value: unknown): RelayDiscoveryMessage {
+  const candidate = object(value, "discovery");
+  exact(candidate, "discovery", ["version", "type", "peers"], ["sourceRoute"]);
+  if (candidate.version !== REMOTE_TRANSPORT_VERSION) {
+    fail("discovery.version", `must equal ${REMOTE_TRANSPORT_VERSION}`);
+  }
+  if (
+    candidate.type !== "route_snapshot" &&
+    candidate.type !== "route_available" &&
+    candidate.type !== "route_unavailable"
+  ) {
+    fail("discovery.type", "is invalid");
+  }
+  if (!Array.isArray(candidate.peers) || candidate.peers.length > 256) {
+    fail("discovery.peers", "must be an array of at most 256 routes");
+  }
+  if (candidate.type === "route_snapshot" && candidate.sourceRoute === undefined) {
+    fail("discovery.sourceRoute", "is required for a snapshot");
+  }
+  if (candidate.type !== "route_snapshot" && candidate.sourceRoute !== undefined) {
+    fail("discovery.sourceRoute", "is allowed only for a snapshot");
+  }
+  return {
+    version: REMOTE_TRANSPORT_VERSION,
+    type: candidate.type,
+    ...(candidate.sourceRoute === undefined
+      ? {}
+      : { sourceRoute: parseRelayPeerRoute(candidate.sourceRoute, "discovery.sourceRoute") }),
+    peers: candidate.peers.map((peer, index) =>
+      parseRelayPeerRoute(peer, `discovery.peers[${index}]`),
+    ),
+  };
 }
 
 export function parseRelayRevocationNotification(value: unknown): RelayRevocationNotification {

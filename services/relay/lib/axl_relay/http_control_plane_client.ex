@@ -74,7 +74,8 @@ defmodule AxlRelay.HttpControlPlaneClient do
              %{
                "unauthorized" => :unauthorized,
                "ticket_expired" => :ticket_expired,
-               "ticket_consumed" => :ticket_consumed
+               "ticket_consumed" => :ticket_consumed,
+               "ticket_revoked" => :ticket_revoked
              },
              code
            ) do
@@ -92,6 +93,7 @@ defmodule AxlRelay.HttpControlPlaneClient do
         "installationId",
         "sourceRouteId",
         "role",
+        "grantGeneration",
         "leaseExpiresAt",
         "limits"
       ])
@@ -105,6 +107,7 @@ defmodule AxlRelay.HttpControlPlaneClient do
          true <- uuid?(result["sourceRouteId"]),
          role when role in ["daemon", "device"] <- result["role"],
          true <- valid_device?(role, result["deviceId"]),
+         generation when is_integer(generation) and generation > 0 <- result["grantGeneration"],
          lease when is_integer(lease) and lease >= 0 <- result["leaseExpiresAt"],
          {:ok, limits} <- validate_limits(result["limits"]) do
       {:ok,
@@ -113,6 +116,7 @@ defmodule AxlRelay.HttpControlPlaneClient do
          device_id: result["deviceId"],
          source_route_id: result["sourceRouteId"],
          role: String.to_existing_atom(role),
+         grant_generation: generation,
          lease_expires_at: lease,
          limits: limits
        }}

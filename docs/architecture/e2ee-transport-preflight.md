@@ -69,6 +69,10 @@ Clients connect to `/v1/connect` with compression disabled. They do not put a ti
 
 The relay adds its own instance ID and calls the control plane. Proof bytes and proof verification are fake and test-only in this checkpoint. No production proof construction is implied.
 
+After admission, the relay sends a `route_snapshot` control message with the connection's ephemeral source route and only opposite-role peers from the same installation. A device sees at most the current daemon route. The daemon sees authorized device routes and their opaque device IDs. `route_available` and `route_unavailable` messages update this view after reconnects. Devices never enumerate other devices.
+
+One daemon route is active per installation and one route is active per device ID. A newer authenticated connection replaces the older same-identity route. Routing permits only `device -> daemon` and `daemon -> device`; same-role and cross-installation delivery returns `forbidden_route`.
+
 ## Binary relay framing
 
 `packages/protocol/test/fixtures/remote-transport-v1.json` is the byte-level cross-language fixture. Every integer is unsigned big-endian. UUIDs use their 16 RFC 9562 bytes.
@@ -98,7 +102,7 @@ Receipt and failure frames instead contain one byte at offset 22. Receipt values
 3  unauthorized                    9  queue_full
 4  forbidden_route                10  slow_consumer
 5  ticket_expired                 11  service_unavailable
-6  ticket_consumed
+6  ticket_consumed                12  ticket_revoked
 ```
 
 These assignments must not be reordered. A new failure receives a new number or requires a transport-version change.
@@ -119,6 +123,18 @@ A client may remove a mutation from its durable outbox only after `daemon_accept
 
 The first relay slice uses pinned Bandit, Plug, and WebSock Adapter production dependencies. They are approved for this boundary. Cowboy was evaluated and rejected after its locked version reported active security advisories. Credo, Dialyxir, and mix_audit are development-only checks.
 
+## Heartbeats and half-open connections
+
+The relay sends a ping every 20 seconds and records inbound activity with a monotonic clock. A valid binary frame, ping, or pong updates liveness. Outbound pings do not. A connection closes with `idle_timeout` after 60 seconds without valid inbound activity. Ticket lease expiry is an independent hard deadline and is never extended by heartbeat traffic.
+
+## Slow consumers
+
+Each route has a 512 KiB application queue ceiling. Reaching the ceiling starts a 10-second saturation timer and further enqueue attempts fail with `queue_full`. If queued bytes do not fall to 256 KiB or less before the timer fires, the relay evicts the destination with `slow_consumer`. Bytes remain charged until the WebSocket adapter accepts the push. `forwarded` still does not prove endpoint or network receipt. Deployment must separately bound kernel socket buffers, and load tests must measure them.
+
+## Revocation races
+
+Every ticket stores the hosted grant generation observed at issuance. Atomic consumption rechecks the current generation and rejects a missing or changed grant with `ticket_revoked`. The admission result carries that generation. Relay revocation notifications close routes admitted at or before the revoked generation and prevent their stale re-registration. A missed relay notification still cannot authorize a daemon command because the daemon rechecks current grants before durable acceptance.
+
 ## Reviewed limits
 
 ```text
@@ -128,6 +144,10 @@ heartbeat interval:           20 seconds
 idle timeout:                 60 seconds
 maximum ticket lifetime:      60 seconds
 ```
+
+## Review resolutions
+
+The architecture review selected role-filtered relay discovery, strict opposite-role topology, monotonic inbound-idle tracking, timed slow-consumer eviction, and grant-generation-bound ticket consumption. The implementation and cross-language fixtures now enforce those decisions. Socket-adapter acceptance remains distinct from network or endpoint receipt, and production socket-memory bounds remain a deployment and load-test requirement.
 
 ## Review boundary
 

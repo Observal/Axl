@@ -20,7 +20,8 @@ defmodule AxlRelay.Frame do
     8 => :rate_limited,
     9 => :queue_full,
     10 => :slow_consumer,
-    11 => :service_unavailable
+    11 => :service_unavailable,
+    12 => :ticket_revoked
   }
 
   @type relay_frame ::

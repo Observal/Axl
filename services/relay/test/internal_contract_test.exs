@@ -20,8 +20,18 @@ defmodule AxlRelay.InternalContractTest do
     assert parsed.device_id == result["deviceId"]
     assert parsed.source_route_id == result["sourceRouteId"]
     assert parsed.role == :device
+    assert parsed.grant_generation == result["grantGeneration"]
     assert parsed.limits.max_frame_bytes == 65_535
     assert parsed.limits.max_queued_bytes == 524_288
+  end
+
+  test "accepts the role-filtered discovery fixture" do
+    snapshot = @fixtures["discovery"]["deviceSnapshot"]
+    assert snapshot["version"] == 1
+    assert snapshot["type"] == "route_snapshot"
+    assert snapshot["sourceRoute"]["role"] == "device"
+    assert [%{"role" => "daemon"}] = snapshot["peers"]
+    refute Map.has_key?(hd(snapshot["peers"]), "deviceId")
   end
 
   test "forms the admitted WebSocket message without relay-owned fields" do

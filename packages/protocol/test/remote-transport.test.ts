@@ -18,6 +18,7 @@ import {
   parseInternalConsumeRelayTicketResult,
   parseIssueRelayTicketRequest,
   parseRelayBinaryFrame,
+  parseRelayDiscoveryMessage,
   parseRelayRevocationNotification,
   ProtocolValidationError,
   RELAY_FAILURE_CODE_VALUES,
@@ -46,6 +47,7 @@ const internalFixtures = JSON.parse(
   readFileSync(new URL("./fixtures/internal-relay-api-v1.json", import.meta.url), "utf8"),
 ) as {
   readonly consumeTicket: { readonly request: unknown; readonly result: unknown };
+  readonly discovery: { readonly deviceSnapshot: unknown };
   readonly revocation: { readonly request: unknown; readonly result: unknown };
 };
 
@@ -104,6 +106,7 @@ test("keeps relay failure byte assignments stable", () => {
     queue_full: 9,
     slow_consumer: 10,
     service_unavailable: 11,
+    ticket_revoked: 12,
   });
 });
 
@@ -119,6 +122,23 @@ test("enforces the complete frame bound before encoding", () => {
   assert.throws(
     () => encodeRelayBinaryFrame(frame),
     (error) => error instanceof ProtocolValidationError && error.path === "frame.opaquePayload",
+  );
+});
+
+test("validates role-scoped route discovery messages", () => {
+  assert.deepEqual(
+    parseRelayDiscoveryMessage(internalFixtures.discovery.deviceSnapshot),
+    internalFixtures.discovery.deviceSnapshot,
+  );
+  assert.throws(
+    () =>
+      parseRelayDiscoveryMessage({
+        version: 1,
+        type: "route_available",
+        sourceRoute: { routeId: "11111111-1111-4111-8111-111111111111", role: "daemon" },
+        peers: [],
+      }),
+    (error) => error instanceof ProtocolValidationError && error.path === "discovery.sourceRoute",
   );
 });
 
@@ -174,6 +194,7 @@ test("validates ticket roles and the language-neutral internal contract", () => 
     deviceId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     sourceRouteId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     role: "device",
+    grantGeneration: 7,
     leaseExpiresAt: 2_000_000_000_000,
     limits: DEFAULT_RELAY_LIMITS,
   });

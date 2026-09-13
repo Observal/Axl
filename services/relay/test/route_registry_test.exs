@@ -24,6 +24,8 @@ defmodule AxlRelay.RouteRegistryTest do
              RouteRegistry.register(registry, source, %{
                installation_id: @installation,
                device_id: nil,
+               role: :daemon,
+               grant_generation: 1,
                source_route_id: @source,
                limits: limits
              })
@@ -32,6 +34,8 @@ defmodule AxlRelay.RouteRegistryTest do
              RouteRegistry.register(registry, destination, %{
                installation_id: @installation,
                device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+               role: :device,
+               grant_generation: 1,
                source_route_id: @destination,
                limits: limits
              })
@@ -60,13 +64,93 @@ defmodule AxlRelay.RouteRegistryTest do
     assert :ok =
              RouteRegistry.register(registry, other, %{
                installation_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-               device_id: nil,
+               device_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+               role: :device,
+               grant_generation: 1,
                source_route_id: other_route,
                limits: %{max_queued_bytes: 50}
              })
 
     assert {:error, :forbidden_route} =
              RouteRegistry.forward(registry, @source, other_route, @attempt, <<1>>)
+  end
+
+  test "rejects same-role routing and replaces an older device identity", %{registry: registry} do
+    parent = self()
+    second_device = spawn_link(fn -> forward_messages(parent, :second_device) end)
+    second_route = "66666666-6666-4666-8666-666666666666"
+
+    assert :ok =
+             RouteRegistry.register(registry, second_device, %{
+               installation_id: @installation,
+               device_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+               role: :device,
+               grant_generation: 1,
+               source_route_id: second_route,
+               limits: %{max_queued_bytes: 50}
+             })
+
+    assert {:error, :forbidden_route} =
+             RouteRegistry.forward(registry, @destination, second_route, @attempt, <<1>>)
+
+    replacement = spawn_link(fn -> forward_messages(parent, :replacement) end)
+    replacement_route = "77777777-7777-4777-8777-777777777777"
+
+    assert :ok =
+             RouteRegistry.register(registry, replacement, %{
+               installation_id: @installation,
+               device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+               role: :device,
+               grant_generation: 1,
+               source_route_id: replacement_route,
+               limits: %{max_queued_bytes: 50}
+             })
+
+    assert_receive {:destination, :route_replaced}
+    refute Map.has_key?(RouteRegistry.snapshot(registry).routes, @destination)
+    assert Map.has_key?(RouteRegistry.snapshot(registry).routes, replacement_route)
+  end
+
+  test "evicts a queue that remains above half after saturation" do
+    registry =
+      start_supervised!(
+        Supervisor.child_spec(
+          {RouteRegistry, name: nil, slow_consumer_grace_ms: 10},
+          id: make_ref()
+        )
+      )
+
+    parent = self()
+    daemon = spawn_link(fn -> forward_messages(parent, :slow_daemon) end)
+    device = spawn_link(fn -> forward_messages(parent, :slow_device) end)
+
+    assert :ok =
+             RouteRegistry.register(registry, daemon, %{
+               installation_id: @installation,
+               device_id: nil,
+               role: :daemon,
+               grant_generation: 1,
+               source_route_id: @source,
+               limits: %{max_queued_bytes: 50}
+             })
+
+    assert :ok =
+             RouteRegistry.register(registry, device, %{
+               installation_id: @installation,
+               device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+               role: :device,
+               grant_generation: 1,
+               source_route_id: @destination,
+               limits: %{max_queued_bytes: 50}
+             })
+
+    assert :ok = RouteRegistry.forward(registry, @source, @destination, @attempt, <<1, 2, 3>>)
+
+    assert {:error, :queue_full} =
+             RouteRegistry.forward(registry, @source, @destination, @attempt, <<4>>)
+
+    assert_receive {:slow_device, :slow_consumer}, 100
+    refute Map.has_key?(RouteRegistry.snapshot(registry).routes, @destination)
   end
 
   test "revocation closes matching routes and draining rejects admission", %{registry: registry} do
@@ -80,6 +164,16 @@ defmodule AxlRelay.RouteRegistryTest do
     assert_receive {:destination, :route_revoked}
     refute Map.has_key?(RouteRegistry.snapshot(registry).routes, @destination)
 
+    assert {:error, :ticket_revoked} =
+             RouteRegistry.register(registry, self(), %{
+               installation_id: @installation,
+               device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+               role: :device,
+               grant_generation: 1,
+               source_route_id: "88888888-8888-4888-8888-888888888888",
+               limits: %{max_queued_bytes: 50}
+             })
+
     assert :ok = RouteRegistry.drain(registry)
     assert_receive {:source, :relay_draining}
 
@@ -87,6 +181,8 @@ defmodule AxlRelay.RouteRegistryTest do
              RouteRegistry.register(registry, self(), %{
                installation_id: @installation,
                device_id: nil,
+               role: :daemon,
+               grant_generation: 1,
                source_route_id: "55555555-5555-4555-8555-555555555555",
                limits: %{max_queued_bytes: 50}
              })

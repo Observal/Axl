@@ -40,7 +40,8 @@ defmodule AxlRelay.FrameTest do
       rate_limited: 8,
       queue_full: 9,
       slow_consumer: 10,
-      service_unavailable: 11
+      service_unavailable: 11,
+      ticket_revoked: 12
     ]
 
     for {code, value} <- codes do

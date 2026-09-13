@@ -4,7 +4,7 @@
 defmodule AxlRelay.WebSocketRelayTest do
   use ExUnit.Case, async: false
 
-  alias AxlRelay.{Frame, Listener, RouteRegistry}
+  alias AxlRelay.{Connection, Frame, Listener, RouteRegistry}
 
   @daemon_route "11111111-1111-4111-8111-111111111111"
   @device_route "22222222-2222-4222-8222-222222222222"
@@ -16,6 +16,24 @@ defmodule AxlRelay.WebSocketRelayTest do
     @impl true
     def consume_ticket(%{"ticket" => "unavailable"}, _relay_instance_id, _options),
       do: {:error, :service_unavailable}
+
+    def consume_ticket(%{"ticket" => "half-open"}, _relay_instance_id, options) do
+      {:ok,
+       %{
+         installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+         device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+         source_route_id: Keyword.fetch!(options, :device),
+         role: :device,
+         grant_generation: 1,
+         lease_expires_at: System.system_time(:millisecond) + 60_000,
+         limits: %{
+           max_frame_bytes: 65_535,
+           max_queued_bytes: 524_288,
+           heartbeat_interval_ms: 10,
+           idle_timeout_ms: 30
+         }
+       }}
+    end
 
     def consume_ticket(%{"ticket" => ticket}, _relay_instance_id, options)
         when ticket in ["daemon", "device"] do
@@ -32,6 +50,7 @@ defmodule AxlRelay.WebSocketRelayTest do
            ),
          source_route_id: route_id,
          role: role,
+         grant_generation: 1,
          lease_expires_at: System.system_time(:millisecond) + 60_000,
          limits: %{
            max_frame_bytes: 65_535,
@@ -84,6 +103,9 @@ defmodule AxlRelay.WebSocketRelayTest do
 
     assert_eventually(fn -> map_size(RouteRegistry.snapshot(registry).routes) == 2 end)
 
+    expect_discovered_peer(daemon, @daemon_route, "device", @device_route)
+    expect_discovered_peer(device, @device_route, "daemon", @daemon_route)
+
     assert {:ok, send_frame} =
              Frame.encode(%{
                kind: :send,
@@ -113,6 +135,34 @@ defmodule AxlRelay.WebSocketRelayTest do
     :gen_tcp.close(daemon)
   end
 
+  test "closes a half-open connection after the explicit inbound idle deadline" do
+    registry =
+      start_supervised!(Supervisor.child_spec({RouteRegistry, name: nil}, id: make_ref()))
+
+    {:ok, state} =
+      Connection.init(
+        control_plane: FakeControlPlane,
+        control_plane_options: [device: @device_route],
+        relay_instance_id: "relay-test",
+        registry: registry
+      )
+
+    admission =
+      :json.encode(%{
+        "version" => 1,
+        "ticket" => "half-open",
+        "connectionNonce" => "fixture-nonce",
+        "possessionProof" => "AAECA/8="
+      })
+      |> IO.iodata_to_binary()
+
+    assert {:ok, active} = Connection.handle_in({admission, opcode: :binary}, state)
+    Process.sleep(35)
+
+    assert {:stop, :normal, {1008, "idle_timeout"}, _state} =
+             Connection.handle_info(:heartbeat, active)
+  end
+
   test "fails admission closed when the control plane is unavailable", %{
     registry: registry,
     port: port
@@ -133,6 +183,8 @@ defmodule AxlRelay.WebSocketRelayTest do
              RouteRegistry.register(registry, self(), %{
                installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
                device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+               role: :device,
+               grant_generation: 1,
                source_route_id: route,
                limits: %{max_queued_bytes: 524_288}
              })
@@ -215,6 +267,28 @@ defmodule AxlRelay.WebSocketRelayTest do
       |> :binary.list_to_bin()
 
     <<0x82, encoded_length::binary, mask::binary, masked::binary>>
+  end
+
+  defp expect_discovered_peer(socket, source_route, peer_role, peer_route) do
+    assert %{
+             "type" => "route_snapshot",
+             "sourceRoute" => %{"routeId" => ^source_route},
+             "peers" => peers
+           } = receive_json_message(socket)
+
+    if peers == [] do
+      assert %{
+               "type" => "route_available",
+               "peers" => [%{"role" => ^peer_role, "routeId" => ^peer_route}]
+             } =
+               receive_json_message(socket)
+    else
+      assert [%{"role" => ^peer_role, "routeId" => ^peer_route}] = peers
+    end
+  end
+
+  defp receive_json_message(socket) do
+    socket |> receive_binary_frame() |> :json.decode()
   end
 
   defp receive_binary_frame(socket) do

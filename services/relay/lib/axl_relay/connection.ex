@@ -26,6 +26,7 @@ defmodule AxlRelay.Connection do
        route_id: nil,
        limits: nil,
        rate_window_started: System.monotonic_time(:millisecond),
+       last_inbound_at: nil,
        rate_frames: 0,
        rate_bytes: 0
      }}
@@ -50,7 +51,14 @@ defmodule AxlRelay.Connection do
         result.lease_expires_at - System.system_time(:millisecond)
       )
 
-      {:ok, %{state | phase: :active, route_id: result.source_route_id, limits: result.limits}}
+      {:ok,
+       %{
+         state
+         | phase: :active,
+           route_id: result.source_route_id,
+           limits: result.limits,
+           last_inbound_at: System.monotonic_time(:millisecond)
+       }}
     else
       {:error, code} -> close(code, state)
       false -> close(:ticket_expired, state)
@@ -62,6 +70,7 @@ defmodule AxlRelay.Connection do
     with true <- byte_size(message) <= state.limits.max_frame_bytes,
          {:ok, %{kind: :send} = frame} <- Frame.decode(message),
          {:ok, rate_state} <- rate_limit(state, byte_size(message)) do
+      rate_state = %{rate_state | last_inbound_at: System.monotonic_time(:millisecond)}
       admitted = receipt(frame.attempt_id, :admitted)
 
       case RouteRegistry.forward(
@@ -86,6 +95,10 @@ defmodule AxlRelay.Connection do
   def handle_in(_frame, state), do: close(:bad_frame, state)
 
   @impl true
+  def handle_control({_payload, opcode: opcode}, %{phase: :active} = state)
+      when opcode in [:ping, :pong],
+      do: {:ok, %{state | last_inbound_at: System.monotonic_time(:millisecond)}}
+
   def handle_control({_payload, opcode: opcode}, state) when opcode in [:ping, :pong],
     do: {:ok, state}
 
@@ -112,12 +125,32 @@ defmodule AxlRelay.Connection do
   end
 
   def handle_info(:heartbeat, %{phase: :active} = state) do
-    Process.send_after(self(), :heartbeat, state.limits.heartbeat_interval_ms)
-    {:push, {:ping, <<>>}, state}
+    now = System.monotonic_time(:millisecond)
+
+    if now - state.last_inbound_at >= state.limits.idle_timeout_ms do
+      close(:idle_timeout, state)
+    else
+      Process.send_after(self(), :heartbeat, state.limits.heartbeat_interval_ms)
+      {:push, {:ping, <<>>}, state}
+    end
+  end
+
+  def handle_info({:route_snapshot, own, peers}, state) do
+    {:push, {:binary, discovery("route_snapshot", own, peers)}, state}
+  end
+
+  def handle_info({:route_available, peer}, state) do
+    {:push, {:binary, discovery("route_available", nil, [peer])}, state}
+  end
+
+  def handle_info({:route_unavailable, peer}, state) do
+    {:push, {:binary, discovery("route_unavailable", nil, [peer])}, state}
   end
 
   def handle_info(:lease_expired, state), do: close(:unauthorized, state)
   def handle_info(:route_revoked, state), do: close(:unauthorized, state)
+  def handle_info(:route_replaced, state), do: close(:unauthorized, state)
+  def handle_info(:slow_consumer, state), do: close(:slow_consumer, state)
   def handle_info(:relay_draining, state), do: close(:service_unavailable, state)
 
   def handle_info(:admission_timeout, %{phase: :awaiting_admission} = state),
@@ -169,6 +202,26 @@ defmodule AxlRelay.Connection do
   defp encode!(frame) do
     {:ok, encoded} = Frame.encode(frame)
     encoded
+  end
+
+  defp discovery(type, own, peers) do
+    message = %{
+      "version" => 1,
+      "type" => type,
+      "peers" => Enum.map(peers, &json_route/1)
+    }
+
+    message = if own == nil, do: message, else: Map.put(message, "sourceRoute", json_route(own))
+    message |> :json.encode() |> IO.iodata_to_binary()
+  end
+
+  defp json_route(route) do
+    value = %{
+      "routeId" => route.route_id,
+      "role" => Atom.to_string(route.role)
+    }
+
+    if route.device_id == nil, do: value, else: Map.put(value, "deviceId", route.device_id)
   end
 
   defp close(code, state),
