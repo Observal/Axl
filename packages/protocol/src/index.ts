@@ -8,6 +8,7 @@ export * from "./event-envelope.ts";
 export * from "./events.ts";
 export * from "./model-stream.ts";
 export * from "./provider-management.ts";
+export * from "./remote-transport.ts";
 export * from "./version.ts";
 export * from "./wire.ts";
 export * from "./host-control.ts";

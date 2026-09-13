@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # `@axl/sdk`
@@ -28,6 +29,7 @@ The SDK owns:
 - explicit prompt delivery outcomes across send, steer, follow-up, queue, and interrupt workflows
 - bounded, content-verified blob uploads with progress and cancellation
 - generation-checked workspace browsing, file reads, diffs, and checkpoint controls
+- an injected atomic opaque-outbox store that retries exact ciphertext bytes and removes mutations only after daemon acceptance
 
 The SDK does not own:
 
