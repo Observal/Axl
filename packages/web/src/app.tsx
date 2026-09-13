@@ -92,6 +92,7 @@ import {
   togglePane,
 } from "./panes.ts";
 import { SessionLifecycle } from "./session-lifecycle.tsx";
+import type { SplitState } from "./split-pane.tsx";
 import { TerminalPane } from "./terminal-pane.tsx";
 import {
   consumePendingPromptDeliveries,
@@ -286,6 +287,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => createPaneLayout(initialLayout.panes));
   const [browserPane, setBrowserPane] = useState<BrowserPaneState>(EMPTY_BROWSER_STATE);
   const [mobileDock, setMobileDock] = useState(false);
+  const [filesSplit, setFilesSplit] = useState<SplitState>({ size: 220, collapsed: false });
+  const [changesSplit, setChangesSplit] = useState<SplitState>({ size: 200, collapsed: false });
   const [terminalError, setTerminalError] = useState<string>();
   const [workspaceScope, setWorkspaceScope] = useState<WorkspaceStatusScope>("working");
   const [transcriptSearchOpen, setTranscriptSearchOpen] = useState(false);
@@ -2127,11 +2130,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
               return <BrowserPane state={browserPane} onState={setBrowserPane} />;
             case "files":
               return opened
-                ? <WorkspaceExplorer browser={workspaceBrowser} loading={browserLoading} error={browserError} onOpenDirectory={(path) => void loadWorkspaceDirectory(path)} onOpenFile={(path) => void loadWorkspaceFile(path)} onLoadMoreEntries={() => void loadWorkspaceDirectory(workspaceBrowser.path, true)} onLoadMoreFile={() => { if (workspaceBrowser.file) void loadWorkspaceFile(workspaceBrowser.file.path, true); }} onRetry={refreshWorkspaceFiles} onMentionPath={mentionPath} />
+                ? <WorkspaceExplorer browser={workspaceBrowser} loading={browserLoading} error={browserError} onOpenDirectory={(path) => void loadWorkspaceDirectory(path)} onOpenFile={(path) => void loadWorkspaceFile(path)} onLoadMoreEntries={() => void loadWorkspaceDirectory(workspaceBrowser.path, true)} onLoadMoreFile={() => { if (workspaceBrowser.file) void loadWorkspaceFile(workspaceBrowser.file.path, true); }} onRetry={refreshWorkspaceFiles} onMentionPath={mentionPath} filesSplit={filesSplit} onFilesSplit={setFilesSplit} />
                 : <div className="pane-empty"><strong>No session</strong><span>Open a session to browse its workspace.</span></div>;
             case "changes":
               return opened
-                ? <WorkspaceChanges review={workspaceReview} loading={reviewLoading} error={reviewError} view={changesView} scope={workspaceScope} canCheckpoint={canCheckpointWorkspace} checkpointEnabled={workspaceCheckpointEnabled} checkpointDisabled={busy || conversation.activeOperationId !== undefined} onScope={(scope) => void loadWorkspaceChanges(scope)} onCheckpoint={(enabled) => void configureWorkspaceCheckpoint(enabled)} onViewChange={(view) => { setChangesView(view); persistLayout({ ...currentPreferences(), changesView: view }); }} onRetry={refreshWorkspaceChanges} onMentionPath={mentionPath} onOpenInFiles={openInFiles} />
+                ? <WorkspaceChanges review={workspaceReview} loading={reviewLoading} error={reviewError} view={changesView} scope={workspaceScope} canCheckpoint={canCheckpointWorkspace} checkpointEnabled={workspaceCheckpointEnabled} checkpointDisabled={busy || conversation.activeOperationId !== undefined} onScope={(scope) => void loadWorkspaceChanges(scope)} onCheckpoint={(enabled) => void configureWorkspaceCheckpoint(enabled)} onViewChange={(view) => { setChangesView(view); persistLayout({ ...currentPreferences(), changesView: view }); }} onRetry={refreshWorkspaceChanges} onMentionPath={mentionPath} onOpenInFiles={openInFiles} changesSplit={changesSplit} onChangesSplit={setChangesSplit} />
                 : <div className="pane-empty"><strong>No session</strong><span>Open a session to review its changes.</span></div>;
             case "terminal":
               return <TerminalPane entries={terminalRecords} running={directOperation?.kind === "shell" && directOperation.source === "terminal" && directOperation.command !== undefined ? { command: directOperation.command, cancelling: directOperation.cancelling } : undefined} error={terminalError} disabled={!canShell || !connected || opened === undefined} cwd={opened?.cwd ?? bootstrap?.cwd ?? ""} onRun={(command, excluded) => void runTerminalCommand(command, excluded)} onCancel={() => void cancelDirectOperation()} />;

@@ -9,6 +9,7 @@ import type {
   WorkspaceStatusScope,
 } from "@axl/sdk";
 import { highlightLine, languageForPath } from "@axl/ui";
+import { SplitPane, type SplitState, SplitToggle } from "./split-pane.tsx";
 import { workspaceTotals } from "./view-state.ts";
 
 export interface WorkspaceBrowserState {
@@ -41,6 +42,12 @@ interface WorkspacePanelProps {
   readonly onMentionPath: (path: string) => void;
   /** Opens a changed file in the Files pane. */
   readonly onOpenInFiles: (path: string) => void;
+  /** Tree | preview split in the Files pane. */
+  readonly filesSplit: SplitState;
+  readonly onFilesSplit: (state: SplitState) => void;
+  /** File list | diff split in the Changes pane. */
+  readonly changesSplit: SplitState;
+  readonly onChangesSplit: (state: SplitState) => void;
 }
 
 export type WorkspaceExplorerProps = Pick<
@@ -54,6 +61,8 @@ export type WorkspaceExplorerProps = Pick<
   | "onLoadMoreFile"
   | "onRetry"
   | "onMentionPath"
+  | "filesSplit"
+  | "onFilesSplit"
 >;
 
 export type WorkspaceChangesProps = Pick<
@@ -72,6 +81,8 @@ export type WorkspaceChangesProps = Pick<
   | "onRetry"
   | "onMentionPath"
   | "onOpenInFiles"
+  | "changesSplit"
+  | "onChangesSplit"
 >;
 
 function MentionButton({ path, onMentionPath }: { readonly path: string; readonly onMentionPath: (path: string) => void }): React.JSX.Element {
@@ -86,10 +97,12 @@ function DiffContent({
   diff,
   onMentionPath,
   onOpenInFiles,
+  leading,
 }: {
   readonly diff: WorkspaceReviewSnapshot["diffs"][number];
   readonly onMentionPath: (path: string) => void;
   readonly onOpenInFiles: (path: string) => void;
+  readonly leading?: React.ReactNode;
 }): React.JSX.Element {
   const language = languageForPath(diff.entry.path);
   const additions = diff.hunks
@@ -101,6 +114,7 @@ function DiffContent({
   return (
     <section className="selected-diff" aria-label={`Changes in ${diff.entry.path}`}>
       <header>
+        {leading}
         <div>
           <strong>{diff.entry.path.split("/").at(-1)}</strong>
           <span>
@@ -188,15 +202,17 @@ export function WorkspaceExplorer({
   onLoadMoreFile,
   onRetry,
   onMentionPath,
+  filesSplit,
+  onFilesSplit,
 }: WorkspaceExplorerProps): React.JSX.Element {
   const crumbs = browser.path ? browser.path.split("/") : [];
   const file = browser.file;
   const lines = file?.text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
   const language = file === undefined ? undefined : languageForPath(file.path);
-  return (
-    <div className="workspace-browser">
+  const tree = (
       <section className="workspace-tree" aria-label="Workspace files">
         <div className="workspace-breadcrumbs">
+          <SplitToggle state={filesSplit} onState={onFilesSplit} label="file tree" />
           <button type="button" onClick={() => onOpenDirectory("")} aria-label="Workspace root">
             root
           </button>
@@ -270,10 +286,13 @@ export function WorkspaceExplorer({
         )}
         {loading && <div className="workspace-progress" role="status"><i className="loading-ring" />Loading workspace…</div>}
       </section>
+  );
+  const preview = (
       <section className="workspace-file" aria-label="File preview">
         {file ? (
           <>
             <header>
+              {filesSplit.collapsed && <SplitToggle state={filesSplit} onState={onFilesSplit} label="file tree" />}
               <div>
                 <strong>{file.path.split("/").at(-1)}</strong>
                 <span>
@@ -308,12 +327,17 @@ export function WorkspaceExplorer({
           </>
         ) : (
           <div className="workspace-file-empty">
+            {filesSplit.collapsed && <SplitToggle state={filesSplit} onState={onFilesSplit} label="file tree" />}
             <EntryIcon type="file" />
             <strong>Select a file</strong>
             <span>Text files open here through the daemon.</span>
           </div>
         )}
       </section>
+  );
+  return (
+    <div className="workspace-browser">
+      <SplitPane state={filesSplit} onState={onFilesSplit} label="file tree" primary={tree} secondary={preview} />
     </div>
   );
 }
@@ -333,11 +357,59 @@ export function WorkspaceChanges({
   onRetry,
   onMentionPath,
   onOpenInFiles,
+  changesSplit,
+  onChangesSplit,
 }: WorkspaceChangesProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string>();
   const totals = workspaceTotals(review?.diffs ?? []);
-  const selected =
-    review?.diffs.find((diff) => diff.entry.entryId === selectedId) ?? review?.diffs[0];
+  const diffs = review?.diffs ?? [];
+  const selectedIndex = Math.max(0, diffs.findIndex((diff) => diff.entry.entryId === selectedId));
+  const selected = diffs[selectedIndex];
+  const step = (direction: -1 | 1): void => {
+    const next = diffs[(selectedIndex + direction + diffs.length) % diffs.length];
+    if (next !== undefined) setSelectedId(next.entry.entryId);
+  };
+  const checkpointLabel = checkpointEnabled === true
+    ? "Checkpoints on: a baseline is captured before each session operation. Click to stop."
+    : "Start last-turn checkpoints: capture a baseline before each session operation.";
+  const list = (
+    <nav aria-label="Changed files" className="changed-files">
+      {diffs.map((diff) => {
+        const fileTotals = workspaceTotals([diff]);
+        return (
+          <button
+            type="button"
+            key={diff.entry.entryId}
+            className={diff.entry.entryId === selected?.entry.entryId ? "active" : ""}
+            title={diff.entry.path}
+            onClick={() => setSelectedId(diff.entry.entryId)}
+          >
+            <span className="changed-file-name">
+              <strong>{diff.entry.path.split("/").at(-1)}</strong>
+              <ChangeStats additions={fileTotals.additions} deletions={fileTotals.deletions} />
+            </span>
+            <span>{diff.entry.path.includes("/") ? diff.entry.path.slice(0, diff.entry.path.lastIndexOf("/")) : ""}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+  const navigation = (
+    <span className="diff-navigation">
+      {changesSplit.collapsed && <SplitToggle state={changesSplit} onState={onChangesSplit} label="changed files" />}
+      {diffs.length > 1 && (
+        <>
+          <button type="button" className="icon-button" aria-label="Previous changed file" onClick={() => step(-1)}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3.5-4.5 4.5 4.5 4.5" /></svg>
+          </button>
+          <small>{selectedIndex + 1}/{diffs.length}</small>
+          <button type="button" className="icon-button" aria-label="Next changed file" onClick={() => step(1)}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" /></svg>
+          </button>
+        </>
+      )}
+    </span>
+  );
   return (
     <div className="workspace-changes">
       <div className="workspace-review-toolbar">
@@ -345,75 +417,58 @@ export function WorkspaceChanges({
           <button className={scope === "working" ? "active" : ""} type="button" onClick={() => onScope("working")}>Working tree</button>
           <button className={scope === "last-turn" ? "active" : ""} type="button" onClick={() => onScope("last-turn")}>Last turn</button>
         </div>
+        {review && (
+          <span className="changes-summary">
+            <span className="branch-name" title={review.status.branch.head ?? ""}>
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <circle cx="4" cy="3" r="1.5" />
+                <circle cx="4" cy="13" r="1.5" />
+                <circle cx="12" cy="5.5" r="1.5" />
+                <path d="M4 4.5v7M5.5 10c4 0 6.5-1 6.5-3" />
+              </svg>
+              {review.status.branch.name ?? review.status.branch.state}
+            </span>
+            <ChangeStats additions={totals.additions} deletions={totals.deletions} />
+          </span>
+        )}
         <div className="workspace-toolbar-actions" role="group" aria-label="Changes layout">
-          <button className={view === "files" ? "active" : ""} type="button" onClick={() => onViewChange("files")} aria-label="File picker view">
+          {canCheckpoint && (
+            <button
+              type="button"
+              className={checkpointEnabled === true ? "icon-button active checkpoint-toggle" : "icon-button checkpoint-toggle"}
+              aria-pressed={checkpointEnabled === true}
+              aria-label={checkpointLabel}
+              title={review?.status.checkpointId ? `${checkpointLabel} Baseline ${review.status.checkpointId.slice(0, 8)}.` : checkpointLabel}
+              disabled={loading || checkpointDisabled}
+              onClick={() => onCheckpoint(checkpointEnabled !== true)}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v3M8 10.5v3M2.5 8h3M10.5 8h3" /><circle cx="8" cy="8" r="2.25" /></svg>
+            </button>
+          )}
+          {view === "files" && <SplitToggle state={changesSplit} onState={onChangesSplit} label="changed files" />}
+          <button className={view === "files" ? "icon-button active" : "icon-button"} type="button" onClick={() => onViewChange("files")} aria-label="One file at a time" title="One file at a time">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3h4v10h-4zM6.5 3h7v10h-7" /></svg>
           </button>
-          <button className={view === "all" ? "active" : ""} type="button" onClick={() => onViewChange("all")} aria-label="All files view">
+          <button className={view === "all" ? "icon-button active" : "icon-button"} type="button" onClick={() => onViewChange("all")} aria-label="All files stacked" title="All files stacked">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 8h10M3 12.5h10" /></svg>
-          </button>
-          <button className="workspace-refresh" type="button" onClick={onRetry} aria-label="Refresh changes">
-            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 6a5 5 0 1 0 .2 3M13 2.5V6H9.5" /></svg>
           </button>
         </div>
       </div>
-      {canCheckpoint && (
-        <div className="checkpoint-bar">
-          <span>
-            <strong>{review?.status.checkpointId ? "Checkpoint available" : "Last-turn checkpoints"}</strong>
-            <small>
-              {review?.status.checkpointId
-                ? `Baseline ${review.status.checkpointId.slice(0, 8)} · captured before a session operation`
-                : "Capture a bounded baseline before each session operation."}
-            </small>
-          </span>
-          <button type="button" disabled={loading || checkpointDisabled} onClick={() => onCheckpoint(checkpointEnabled !== true)}>
-            {checkpointEnabled === true ? "Stop capture" : "Start checkpoints"}
-          </button>
-        </div>
-      )}
-      {review && (
-        <div className="changes-summary">
-          <span className="branch-name">
-            <svg viewBox="0 0 16 16" aria-hidden="true">
-              <circle cx="4" cy="3" r="1.5" />
-              <circle cx="4" cy="13" r="1.5" />
-              <circle cx="12" cy="5.5" r="1.5" />
-              <path d="M4 4.5v7M5.5 10c4 0 6.5-1 6.5-3" />
-            </svg>
-            {review.status.branch.name ?? review.status.branch.state}
-          </span>
-          <ChangeStats additions={totals.additions} deletions={totals.deletions} />
-        </div>
-      )}
       {loading && <div className="changes-state"><i className="loading-ring" /><span>Loading workspace changes…</span></div>}
       {error && <div className="changes-state error"><span>{error}</span><button type="button" onClick={onRetry}>Retry</button></div>}
-      {!loading && !error && review?.diffs.length === 0 && <div className="changes-state"><span>{scope === "last-turn" ? "No changes since the checkpoint" : "No workspace changes"}</span></div>}
+      {!loading && !error && review !== undefined && diffs.length === 0 && <div className="changes-state"><span>{scope === "last-turn" ? "No changes since the checkpoint" : "No workspace changes"}</span></div>}
       {review && selected && view === "files" && (
         <div className="changes-layout">
-          <nav aria-label="Changed files">
-            {review.diffs.map((diff) => {
-              const fileTotals = workspaceTotals([diff]);
-              return (
-                <button
-                  type="button"
-                  key={diff.entry.entryId}
-                  className={diff.entry.entryId === selected.entry.entryId ? "active" : ""}
-                  onClick={() => setSelectedId(diff.entry.entryId)}
-                >
-                  <span className="changed-file-name">
-                    <strong>{diff.entry.path.split("/").at(-1)}</strong>
-                    <ChangeStats additions={fileTotals.additions} deletions={fileTotals.deletions} />
-                  </span>
-                  <span>{diff.entry.path.includes("/") ? diff.entry.path.slice(0, diff.entry.path.lastIndexOf("/")) : ""}</span>
-                </button>
-              );
-            })}
-          </nav>
-          <DiffContent diff={selected} onMentionPath={onMentionPath} onOpenInFiles={onOpenInFiles} />
+          <SplitPane
+            state={changesSplit}
+            onState={onChangesSplit}
+            label="changed files list"
+            primary={list}
+            secondary={<DiffContent diff={selected} onMentionPath={onMentionPath} onOpenInFiles={onOpenInFiles} leading={navigation} />}
+          />
         </div>
       )}
-      {review && view === "all" && <div className="all-diffs">{review.diffs.map((diff) => <DiffContent key={diff.entry.entryId} diff={diff} onMentionPath={onMentionPath} onOpenInFiles={onOpenInFiles} />)}</div>}
+      {review && view === "all" && <div className="all-diffs">{diffs.map((diff) => <DiffContent key={diff.entry.entryId} diff={diff} onMentionPath={onMentionPath} onOpenInFiles={onOpenInFiles} />)}</div>}
       {review?.truncated && <p className="changes-limit">Showing the first 100 changed files.</p>}
     </div>
   );
