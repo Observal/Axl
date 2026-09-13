@@ -25,7 +25,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 const SECURITY_HEADERS = {
   "cache-control": "no-store",
   "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-resource-policy": "same-origin",
   "referrer-policy": "no-referrer",
@@ -54,21 +54,38 @@ export interface WebGatewayOptions {
   readonly webSocketIdleTimeoutMs?: number;
 }
 
+const WEB_PANE_IDS = ["browser", "files", "changes", "terminal"] as const;
+type WebPaneId = (typeof WEB_PANE_IDS)[number];
+
 export interface WebPreferences {
   readonly sidebarWidth: number;
-  readonly changesWidth: number;
+  readonly dockWidth: number;
   readonly sidebarCollapsed: boolean;
   readonly changesView: "files" | "all";
+  readonly panes: readonly WebPaneId[];
 }
 
 const MAX_WEB_ARTIFACT_BYTES = 64 * 1024 * 1024;
 
 const DEFAULT_WEB_PREFERENCES: WebPreferences = {
   sidebarWidth: 264,
-  changesWidth: 680,
+  dockWidth: 680,
   sidebarCollapsed: false,
   changesView: "files",
+  panes: ["browser", "files"],
 };
+
+function parsePaneIds(value: unknown): readonly WebPaneId[] {
+  if (!Array.isArray(value) || value.length > WEB_PANE_IDS.length)
+    throw new Error("Web preferences are invalid");
+  const seen = new Set<WebPaneId>();
+  for (const pane of value) {
+    if (!(WEB_PANE_IDS as readonly unknown[]).includes(pane) || seen.has(pane as WebPaneId))
+      throw new Error("Web preferences are invalid");
+    seen.add(pane as WebPaneId);
+  }
+  return WEB_PANE_IDS.filter((pane) => seen.has(pane));
+}
 
 function parsePreferences(value: unknown): WebPreferences {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -76,19 +93,26 @@ function parsePreferences(value: unknown): WebPreferences {
   const record = value as Record<string, unknown>;
   if (
     Object.keys(record).some(
-      (key) => !["sidebarWidth", "changesWidth", "sidebarCollapsed", "changesView"].includes(key),
+      (key) =>
+        !["sidebarWidth", "dockWidth", "sidebarCollapsed", "changesView", "panes"].includes(key),
     ) ||
     !Number.isInteger(record.sidebarWidth) ||
     Number(record.sidebarWidth) < 200 ||
     Number(record.sidebarWidth) > 420 ||
-    !Number.isInteger(record.changesWidth) ||
-    Number(record.changesWidth) < 420 ||
-    Number(record.changesWidth) > 900 ||
+    !Number.isInteger(record.dockWidth) ||
+    Number(record.dockWidth) < 380 ||
+    Number(record.dockWidth) > 1200 ||
     typeof record.sidebarCollapsed !== "boolean" ||
     (record.changesView !== "files" && record.changesView !== "all")
   )
     throw new Error("Web preferences are invalid");
-  return record as unknown as WebPreferences;
+  return {
+    sidebarWidth: record.sidebarWidth as number,
+    dockWidth: record.dockWidth as number,
+    sidebarCollapsed: record.sidebarCollapsed,
+    changesView: record.changesView,
+    panes: parsePaneIds(record.panes),
+  };
 }
 
 export interface WebGateway {
@@ -397,12 +421,22 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
   const launchExpiresAt = Date.now() + 60_000;
   const credentialExpiresAt = Date.now() + 12 * 60 * 60 * 1_000;
   const preferencesPath = join(options.stateDirectory, "web-preferences.json");
-  let preferences = await readFile(preferencesPath, "utf8")
-    .then((text) => parsePreferences(JSON.parse(text)))
-    .catch((error: NodeJS.ErrnoException) => {
+  let preferences = await readFile(preferencesPath, "utf8").then(
+    (text) => {
+      try {
+        return parsePreferences(JSON.parse(text));
+      } catch (cause) {
+        throw new Error(
+          `Stored web preferences at ${preferencesPath} are invalid; delete the file to reset them`,
+          { cause },
+        );
+      }
+    },
+    (error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return DEFAULT_WEB_PREFERENCES;
       throw error;
-    });
+    },
+  );
   let preferenceWrites = Promise.resolve();
   let providerLogin:
     | { readonly requestId: string; readonly controller: AbortController }

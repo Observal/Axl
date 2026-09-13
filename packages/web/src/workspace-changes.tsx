@@ -11,8 +11,6 @@ import type {
 import { highlightLine, languageForPath } from "@axl/ui";
 import { workspaceTotals } from "./view-state.ts";
 
-export type WorkspacePanelTab = "files" | "changes";
-
 export interface WorkspaceBrowserState {
   readonly path: string;
   readonly entries: readonly WorkspaceEntry[];
@@ -22,9 +20,6 @@ export interface WorkspaceBrowserState {
 }
 
 interface WorkspacePanelProps {
-  readonly tab: WorkspacePanelTab;
-  readonly canBrowse: boolean;
-  readonly canReview: boolean;
   readonly canCheckpoint: boolean;
   readonly browser: WorkspaceBrowserState;
   readonly review?: WorkspaceReviewSnapshot | undefined;
@@ -34,7 +29,6 @@ interface WorkspacePanelProps {
   readonly loading: boolean;
   readonly error?: string | undefined;
   readonly view: "files" | "all";
-  readonly onTab: (tab: WorkspacePanelTab) => void;
   readonly onOpenDirectory: (path: string) => void;
   readonly onOpenFile: (path: string) => void;
   readonly onLoadMoreEntries: () => void;
@@ -42,9 +36,36 @@ interface WorkspacePanelProps {
   readonly onScope: (scope: WorkspaceStatusScope) => void;
   readonly onCheckpoint: (enabled: boolean) => void;
   readonly onViewChange: (view: "files" | "all") => void;
-  readonly onClose: () => void;
   readonly onRetry: () => void;
 }
+
+export type WorkspaceExplorerProps = Pick<
+  WorkspacePanelProps,
+  | "browser"
+  | "loading"
+  | "error"
+  | "onOpenDirectory"
+  | "onOpenFile"
+  | "onLoadMoreEntries"
+  | "onLoadMoreFile"
+  | "onRetry"
+>;
+
+export type WorkspaceChangesProps = Pick<
+  WorkspacePanelProps,
+  | "review"
+  | "loading"
+  | "error"
+  | "view"
+  | "scope"
+  | "canCheckpoint"
+  | "checkpointEnabled"
+  | "checkpointDisabled"
+  | "onScope"
+  | "onCheckpoint"
+  | "onViewChange"
+  | "onRetry"
+>;
 
 function DiffContent({ diff }: { readonly diff: WorkspaceReviewSnapshot["diffs"][number] }): React.JSX.Element {
   const language = languageForPath(diff.entry.path);
@@ -126,7 +147,7 @@ function EntryIcon({ type }: { readonly type: WorkspaceEntry["type"] }): React.J
   );
 }
 
-function WorkspaceExplorer({
+export function WorkspaceExplorer({
   browser,
   loading,
   error,
@@ -135,17 +156,7 @@ function WorkspaceExplorer({
   onLoadMoreEntries,
   onLoadMoreFile,
   onRetry,
-}: Pick<
-  WorkspacePanelProps,
-  | "browser"
-  | "loading"
-  | "error"
-  | "onOpenDirectory"
-  | "onOpenFile"
-  | "onLoadMoreEntries"
-  | "onLoadMoreFile"
-  | "onRetry"
->): React.JSX.Element {
+}: WorkspaceExplorerProps): React.JSX.Element {
   const crumbs = browser.path ? browser.path.split("/") : [];
   const file = browser.file;
   const lines = file?.text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
@@ -263,7 +274,7 @@ function WorkspaceExplorer({
   );
 }
 
-function WorkspaceChanges({
+export function WorkspaceChanges({
   review,
   loading,
   error,
@@ -276,27 +287,13 @@ function WorkspaceChanges({
   onCheckpoint,
   onViewChange,
   onRetry,
-}: Pick<
-  WorkspacePanelProps,
-  | "review"
-  | "loading"
-  | "error"
-  | "view"
-  | "scope"
-  | "canCheckpoint"
-  | "checkpointEnabled"
-  | "checkpointDisabled"
-  | "onScope"
-  | "onCheckpoint"
-  | "onViewChange"
-  | "onRetry"
->): React.JSX.Element {
+}: WorkspaceChangesProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string>();
   const totals = workspaceTotals(review?.diffs ?? []);
   const selected =
     review?.diffs.find((diff) => diff.entry.entryId === selectedId) ?? review?.diffs[0];
   return (
-    <>
+    <div className="workspace-changes">
       <div className="workspace-review-toolbar">
         <div role="group" aria-label="Change scope">
           <button className={scope === "working" ? "active" : ""} type="button" onClick={() => onScope("working")}>Working tree</button>
@@ -372,27 +369,6 @@ function WorkspaceChanges({
       )}
       {review && view === "all" && <div className="all-diffs">{review.diffs.map((diff) => <DiffContent key={diff.entry.entryId} diff={diff} />)}</div>}
       {review?.truncated && <p className="changes-limit">Showing the first 100 changed files.</p>}
-    </>
-  );
-}
-
-export function WorkspacePanel(props: WorkspacePanelProps): React.JSX.Element {
-  return (
-    <aside className="changes-panel" aria-label="Workspace">
-      <header className="changes-header">
-        <nav aria-label="Workspace views">
-          {props.canBrowse && <button className={props.tab === "files" ? "active" : ""} type="button" onClick={() => props.onTab("files")}>Files</button>}
-          {props.canReview && <button className={props.tab === "changes" ? "active" : ""} type="button" onClick={() => props.onTab("changes")}>Changes</button>}
-        </nav>
-        <button type="button" aria-label="Close workspace" onClick={props.onClose}>
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
-        </button>
-      </header>
-      {props.tab === "files" ? (
-        <WorkspaceExplorer {...props} />
-      ) : (
-        <WorkspaceChanges {...props} />
-      )}
-    </aside>
+    </div>
   );
 }

@@ -23,14 +23,27 @@
   --subtle: #7b7b85;
   --accent: #6d70c9;
   --accent-strong: #a6a8eb;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --focus: color-mix(in srgb, var(--accent) 55%, transparent);
   --green: #43b77b;
+  --amber: #d6b25e;
+  --red: #e4848c;
   --surface-hover: #1b1b1e;
   --surface-active: #232327;
+  --hover: var(--surface-hover);
   --code-bg: #0e0e10;
   --input-bg: #131315;
   --glass: rgba(25, 25, 28, 0.88);
   --scrim: rgba(4, 4, 6, 0.66);
   --shadow: rgba(0, 0, 0, 0.42);
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --fast: 140ms;
+  --medium: 220ms;
+  --dock-motion: 360ms;
 }
 
 :root[data-theme="light"] {

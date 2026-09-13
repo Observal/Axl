@@ -12,11 +12,19 @@ import {
 } from "@axl/sdk";
 import { BrowserWebSocketTransportFactory } from "@axl/sdk/browser";
 
+import { type PaneId, parsePaneIds } from "./panes.ts";
+
+export const SIDEBAR_WIDTH_RANGE = Object.freeze({ min: 200, max: 420 });
+export const DOCK_WIDTH_RANGE = Object.freeze({ min: 380, max: 1200 });
+
 export interface WebPreferences {
   readonly sidebarWidth: number;
-  readonly changesWidth: number;
+  /** Width of the right-hand pane dock. */
+  readonly dockWidth: number;
   readonly sidebarCollapsed: boolean;
   readonly changesView: "files" | "all";
+  /** Open dock panes in tiling order. */
+  readonly panes: readonly PaneId[];
 }
 
 export type WebHostCapability = "provider.auth.login";
@@ -56,16 +64,28 @@ export function parseWebPreferences(value: unknown): WebPreferences {
   const preferences = value as Record<string, unknown>;
   if (
     !Number.isInteger(preferences.sidebarWidth) ||
-    Number(preferences.sidebarWidth) < 200 ||
-    Number(preferences.sidebarWidth) > 420 ||
-    !Number.isInteger(preferences.changesWidth) ||
-    Number(preferences.changesWidth) < 420 ||
-    Number(preferences.changesWidth) > 900 ||
+    Number(preferences.sidebarWidth) < SIDEBAR_WIDTH_RANGE.min ||
+    Number(preferences.sidebarWidth) > SIDEBAR_WIDTH_RANGE.max ||
+    !Number.isInteger(preferences.dockWidth) ||
+    Number(preferences.dockWidth) < DOCK_WIDTH_RANGE.min ||
+    Number(preferences.dockWidth) > DOCK_WIDTH_RANGE.max ||
     typeof preferences.sidebarCollapsed !== "boolean" ||
     (preferences.changesView !== "files" && preferences.changesView !== "all")
   )
     throw new Error("Invalid web preferences");
-  return value as WebPreferences;
+  let panes: readonly PaneId[];
+  try {
+    panes = parsePaneIds(preferences.panes);
+  } catch (cause) {
+    throw new Error("Invalid web preferences", { cause });
+  }
+  return {
+    sidebarWidth: preferences.sidebarWidth as number,
+    dockWidth: preferences.dockWidth as number,
+    sidebarCollapsed: preferences.sidebarCollapsed,
+    changesView: preferences.changesView,
+    panes,
+  };
 }
 
 export function parseBootstrap(value: unknown): WebBootstrap {

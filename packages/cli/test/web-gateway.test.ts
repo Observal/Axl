@@ -287,9 +287,10 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     webSocketPath: `${new URL(gateway.origin).pathname}ws`,
     preferences: {
       sidebarWidth: 264,
-      changesWidth: 680,
+      dockWidth: 680,
       sidebarCollapsed: false,
       changesView: "files",
+      panes: ["browser", "files"],
     },
     hostCapabilities: ["provider.auth.login"],
   });
@@ -298,18 +299,32 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
     body: JSON.stringify({
       sidebarWidth: 300,
-      changesWidth: 720,
+      dockWidth: 720,
       sidebarCollapsed: true,
       changesView: "all",
+      panes: ["terminal", "browser"],
     }),
   });
   assert.equal(preferences.status, 200);
   assert.deepEqual(JSON.parse(await readFile(join(directory, "web-preferences.json"), "utf8")), {
     sidebarWidth: 300,
-    changesWidth: 720,
+    dockWidth: 720,
     sidebarCollapsed: true,
     changesView: "all",
+    panes: ["browser", "terminal"],
   });
+  const invalidPanes = await fetch(new URL("preferences", gateway.origin), {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({
+      sidebarWidth: 300,
+      dockWidth: 720,
+      sidebarCollapsed: true,
+      changesView: "all",
+      panes: ["browser", "browser"],
+    }),
+  });
+  assert.equal(invalidPanes.status, 400);
 
   const loginUrl = new URL("host/provider/login", gateway.origin);
   const loginRequestId = "123e4567-e89b-42d3-a456-426614174010";

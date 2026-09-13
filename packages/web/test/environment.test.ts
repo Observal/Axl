@@ -16,9 +16,10 @@ const valid = {
   webSocketPath: "/a/process/ws",
   preferences: {
     sidebarWidth: 280,
-    changesWidth: 720,
+    dockWidth: 720,
     sidebarCollapsed: false,
     changesView: "files",
+    panes: ["browser", "files"],
   },
   hostCapabilities: ["provider.auth.login"],
 };
@@ -33,8 +34,17 @@ test("rejects oversized session imports before upload", async () => {
 test("validates persisted browser layout preferences", () => {
   assert.deepEqual(parseBootstrap(valid), valid);
   assert.throws(
-    () => parseBootstrap({ ...valid, preferences: { ...valid.preferences, changesWidth: 2000 } }),
+    () => parseBootstrap({ ...valid, preferences: { ...valid.preferences, dockWidth: 2000 } }),
     /Invalid web preferences/,
+  );
+  assert.throws(
+    () => parseBootstrap({ ...valid, preferences: { ...valid.preferences, panes: ["editor"] } }),
+    /Invalid web preferences/,
+  );
+  assert.deepEqual(
+    parseBootstrap({ ...valid, preferences: { ...valid.preferences, panes: ["files", "browser"] } })
+      .preferences.panes,
+    ["browser", "files"],
   );
   assert.throws(
     () => parseBootstrap({ ...valid, preferences: { ...valid.preferences, changesView: "grid" } }),
