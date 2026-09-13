@@ -127,22 +127,26 @@ export function resizePane(
   return { ...layout, weights };
 }
 
-export type BrowserTarget =
-  | { readonly kind: "frame"; readonly url: string }
-  | { readonly kind: "external"; readonly url: string };
+export interface BrowserTarget {
+  readonly url: string;
+  /** Loopback development servers; these almost always allow embedding. */
+  readonly loopback: boolean;
+}
 
-const FRAMEABLE_HOSTS = new Set(["localhost", "127.0.0.1"]);
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
- * Resolves user input into a browser-pane target.
- * Loopback HTTP origins can be framed inside the gateway's CSP; every other web URL opens externally.
+ * Resolves user input into a browser-pane URL. Only http and https are allowed. A bare
+ * loopback "host:port" gets an http scheme; any other bare host gets https.
  */
 export function parseBrowserTarget(input: string): BrowserTarget {
   const trimmed = input.trim();
   if (trimmed === "") throw new Error("Enter a URL");
   // "host:port" has no scheme; a scheme is followed by something other than a bare port.
   const hasScheme = /^[a-z][a-z0-9+.-]*:(?!\d+(?:[/?#]|$))/iu.test(trimmed);
-  const withScheme = hasScheme ? trimmed : `http://${trimmed}`;
+  const bareHost = (trimmed.split(/[/?#]/u, 1)[0] ?? trimmed).replace(/:\d+$/u, "");
+  const scheme = LOOPBACK_HOSTS.has(bareHost) ? "http" : "https";
+  const withScheme = hasScheme ? trimmed : `${scheme}://${trimmed}`;
   let url: URL;
   try {
     url = new URL(withScheme);
@@ -154,10 +158,7 @@ export function parseBrowserTarget(input: string): BrowserTarget {
   }
   if (url.username !== "" || url.password !== "")
     throw new Error("URLs with credentials are not allowed");
-  return {
-    kind: FRAMEABLE_HOSTS.has(url.hostname) ? "frame" : "external",
-    url: url.href,
-  };
+  return { url: url.href, loopback: LOOPBACK_HOSTS.has(url.hostname) };
 }
 
 export interface TerminalEntry {

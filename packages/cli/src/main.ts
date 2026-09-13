@@ -54,7 +54,7 @@ const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
 const WEB_ASSET_RELATIVE_PATH = process.env.AXL_WEB_ASSET_PATH ?? "../../web/dist";
 
 const HELP = `Usage: axl [session-id] [options]
-       axl web [session-id] [--no-open]
+       axl web [session-id] [--no-open] [--print-url]
        axl providers [provider-id]
        axl models [provider-id]
        axl login <provider-id> [api_key|oauth]
@@ -96,6 +96,8 @@ Options:
   --interrupt        Authorize cancellation for daemon stop/restart
   --yes              Confirm disconnecting other daemon clients
   --force            Force a previously requested shutdown (daemon stop --yes)
+  --no-open          Do not open a browser for axl web
+  --print-url        Print the one-use axl web launch URL for manual opening
   --help             Show this help
   --version          Show the installed version
 `;
@@ -145,6 +147,7 @@ interface CliArguments {
   unsafe: boolean;
   resume: boolean;
   noOpen: boolean;
+  printUrl: boolean;
   showHelp: boolean;
   showVersion: boolean;
 }
@@ -160,6 +163,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     unsafe: false,
     resume: false,
     noOpen: false,
+    printUrl: false,
     raw: false,
     confirmPrefix: false,
     showHelp: false,
@@ -207,6 +211,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
       break;
     }
     if (argument === "--no-open") parsed.noOpen = true;
+    else if (argument === "--print-url") parsed.printUrl = true;
     else if (argument === "--interrupt") parsed.interrupt = true;
     else if (argument === "--yes") parsed.yes = true;
     else if (argument === "--force") parsed.force = true;
@@ -335,6 +340,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     throw new Error(`${parsed.command} does not accept a session ID`);
   }
   if (parsed.noOpen && parsed.command !== "web") throw new Error("--no-open requires axl web");
+  if (parsed.printUrl && parsed.command !== "web") throw new Error("--print-url requires axl web");
   if (parsed.command === "session-export" && !parsed.raw) {
     throw new Error("session export requires --raw");
   }
@@ -1120,11 +1126,15 @@ async function main(): Promise<void> {
         : {}),
     });
     process.stdout.write(`Axl web: ${gateway.origin}\n`);
+    const launchUrl =
+      cli.sessionId === undefined
+        ? gateway.launchUrl
+        : `${gateway.launchUrl}&session=${encodeURIComponent(cli.sessionId)}`;
+    if (cli.printUrl) {
+      // Explicitly requested token-bearing URL: one use, expires in 60 seconds.
+      process.stdout.write(`Open within 60 seconds (one use): ${launchUrl}\n`);
+    }
     if (!cli.noOpen) {
-      const launchUrl =
-        cli.sessionId === undefined
-          ? gateway.launchUrl
-          : `${gateway.launchUrl}&session=${encodeURIComponent(cli.sessionId)}`;
       try {
         await launchBrowser(launchUrl);
       } catch (cause) {

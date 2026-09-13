@@ -71,20 +71,24 @@ test("resizing trades height between neighbours and respects the minimum", () =>
   assert.equal(resizePane(layout, 0, 50, 0), layout);
 });
 
-test("browser targets frame loopback origins and open everything else externally", () => {
+test("browser targets accept web URLs and default bare hosts sensibly", () => {
   assert.deepEqual(parseBrowserTarget("localhost:5173"), {
-    kind: "frame",
     url: "http://localhost:5173/",
+    loopback: true,
   });
   assert.deepEqual(parseBrowserTarget(" http://127.0.0.1:3000/app?x=1 "), {
-    kind: "frame",
     url: "http://127.0.0.1:3000/app?x=1",
+    loopback: true,
   });
-  assert.deepEqual(parseBrowserTarget("https://example.com/docs"), {
-    kind: "external",
+  assert.deepEqual(parseBrowserTarget("example.com/docs"), {
     url: "https://example.com/docs",
+    loopback: false,
   });
-  assert.equal(parseBrowserTarget("http://[::1]:8080").kind, "external");
+  assert.deepEqual(parseBrowserTarget("http://example.com"), {
+    url: "http://example.com/",
+    loopback: false,
+  });
+  assert.equal(parseBrowserTarget("http://[::1]:8080").loopback, true);
   assert.throws(() => parseBrowserTarget(""), /Enter a URL/u);
   assert.throws(() => parseBrowserTarget("javascript:alert(1)"), /Only http and https/u);
   assert.throws(() => parseBrowserTarget("file:///etc/passwd"), /Only http and https/u);

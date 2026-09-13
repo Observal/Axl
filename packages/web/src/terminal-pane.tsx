@@ -30,9 +30,13 @@ export function TerminalPane({
   const [input, setInput] = useState("");
   const [excluded, setExcluded] = useState(false);
   const [historyIndex, setHistoryIndex] = useState<number>();
+  /** Entries before this id are hidden after Ctrl+L; the canonical log is untouched. */
+  const [clearedBefore, setClearedBefore] = useState<string>();
   const output = useRef<HTMLDivElement>(null);
   const field = useRef<HTMLInputElement>(null);
   const history = entries.map((entry) => entry.command);
+  const clearedIndex = clearedBefore === undefined ? -1 : entries.findIndex((entry) => entry.id === clearedBefore);
+  const visible = clearedIndex < 0 ? entries : entries.slice(clearedIndex + 1);
 
   useEffect(() => {
     output.current?.scrollTo({ top: output.current.scrollHeight });
@@ -63,12 +67,14 @@ export function TerminalPane({
   return (
     <div className="terminal-pane" onClick={(event) => { if (event.target === event.currentTarget) field.current?.focus(); }}>
       <div className="terminal-output" ref={output} aria-live="polite" aria-label="Shell output">
-        {entries.length === 0 && running === undefined && (
+        {visible.length === 0 && running === undefined && (
           <p className="terminal-hint">
-            Commands run in the session sandbox through the daemon. Output joins the transcript unless you exclude it.
+            {entries.length === 0
+              ? "Commands run in the session sandbox through the daemon. Output joins the transcript unless you exclude it. ↑↓ history · Ctrl+C cancel · Ctrl+L clear"
+              : "Cleared. Earlier output stays in the transcript."}
           </p>
         )}
-        {entries.map((entry) => (
+        {visible.map((entry) => (
           <article key={entry.id} className={`terminal-entry${entry.isError ? " failed" : ""}`}>
             <div className="terminal-command">
               <span className="terminal-prompt" aria-hidden="true">{prompt} ❯</span>
@@ -108,7 +114,8 @@ export function TerminalPane({
           autoComplete="off"
           aria-label="Shell command"
           placeholder={disabled ? "Shell is unavailable" : "Run a command"}
-          disabled={disabled || running !== undefined}
+          disabled={disabled}
+          readOnly={running !== undefined}
           onChange={(event) => {
             setInput(event.target.value);
             setHistoryIndex(undefined);
@@ -120,6 +127,15 @@ export function TerminalPane({
             } else if (event.key === "ArrowDown") {
               event.preventDefault();
               recall(1);
+            } else if (event.ctrlKey && event.key.toLocaleLowerCase() === "l") {
+              event.preventDefault();
+              setClearedBefore(entries.at(-1)?.id);
+            } else if (event.ctrlKey && event.key.toLocaleLowerCase() === "c" && running !== undefined) {
+              event.preventDefault();
+              onCancel();
+            } else if (event.key === "Escape") {
+              setInput("");
+              setHistoryIndex(undefined);
             }
           }}
         />

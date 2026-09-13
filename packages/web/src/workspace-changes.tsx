@@ -37,6 +37,10 @@ interface WorkspacePanelProps {
   readonly onCheckpoint: (enabled: boolean) => void;
   readonly onViewChange: (view: "files" | "all") => void;
   readonly onRetry: () => void;
+  /** Inserts a workspace path into the composer. */
+  readonly onMentionPath: (path: string) => void;
+  /** Opens a changed file in the Files pane. */
+  readonly onOpenInFiles: (path: string) => void;
 }
 
 export type WorkspaceExplorerProps = Pick<
@@ -49,6 +53,7 @@ export type WorkspaceExplorerProps = Pick<
   | "onLoadMoreEntries"
   | "onLoadMoreFile"
   | "onRetry"
+  | "onMentionPath"
 >;
 
 export type WorkspaceChangesProps = Pick<
@@ -65,9 +70,27 @@ export type WorkspaceChangesProps = Pick<
   | "onCheckpoint"
   | "onViewChange"
   | "onRetry"
+  | "onMentionPath"
+  | "onOpenInFiles"
 >;
 
-function DiffContent({ diff }: { readonly diff: WorkspaceReviewSnapshot["diffs"][number] }): React.JSX.Element {
+function MentionButton({ path, onMentionPath }: { readonly path: string; readonly onMentionPath: (path: string) => void }): React.JSX.Element {
+  return (
+    <button type="button" className="icon-button" aria-label={`Insert ${path} into the prompt`} title="Insert path into prompt" onClick={() => onMentionPath(path)}>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10M4.5 9.5 8 3l3.5 6.5M5.6 7.5h4.8" /></svg>
+    </button>
+  );
+}
+
+function DiffContent({
+  diff,
+  onMentionPath,
+  onOpenInFiles,
+}: {
+  readonly diff: WorkspaceReviewSnapshot["diffs"][number];
+  readonly onMentionPath: (path: string) => void;
+  readonly onOpenInFiles: (path: string) => void;
+}): React.JSX.Element {
   const language = languageForPath(diff.entry.path);
   const additions = diff.hunks
     .flatMap((hunk) => hunk.lines)
@@ -86,7 +109,15 @@ function DiffContent({ diff }: { readonly diff: WorkspaceReviewSnapshot["diffs"]
               : ""}
           </span>
         </div>
-        <ChangeStats additions={additions} deletions={deletions} />
+        <span className="selected-diff-actions">
+          <ChangeStats additions={additions} deletions={deletions} />
+          {diff.entry.kind !== "deleted" && (
+            <button type="button" className="icon-button" aria-label={`Open ${diff.entry.path} in Files`} title="Open in Files" onClick={() => onOpenInFiles(diff.entry.path)}>
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h4l1.2 1.5h5.8v7h-11z" /></svg>
+            </button>
+          )}
+          <MentionButton path={diff.entry.path} onMentionPath={onMentionPath} />
+        </span>
       </header>
       {diff.binary ? (
         <p className="binary-change">Binary file changed</p>
@@ -156,10 +187,12 @@ export function WorkspaceExplorer({
   onLoadMoreEntries,
   onLoadMoreFile,
   onRetry,
+  onMentionPath,
 }: WorkspaceExplorerProps): React.JSX.Element {
   const crumbs = browser.path ? browser.path.split("/") : [];
   const file = browser.file;
   const lines = file?.text.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+  const language = file === undefined ? undefined : languageForPath(file.path);
   return (
     <div className="workspace-browser">
       <section className="workspace-tree" aria-label="Workspace files">
@@ -241,8 +274,14 @@ export function WorkspaceExplorer({
         {file ? (
           <>
             <header>
-              <strong>{file.path.split("/").at(-1)}</strong>
-              <span>{file.path}</span>
+              <div>
+                <strong>{file.path.split("/").at(-1)}</strong>
+                <span>
+                  {file.path}
+                  {file.totalLines !== undefined ? ` · ${file.totalLines} lines` : ""}
+                </span>
+              </div>
+              <MentionButton path={file.path} onMentionPath={onMentionPath} />
             </header>
             {lines.length === 0 ? (
               <div className="changes-state"><span>This file is empty</span></div>
@@ -251,7 +290,12 @@ export function WorkspaceExplorer({
                 {lines.map((line, index) => (
                   <div role="row" key={file.startLine + index}>
                     <span role="cell">{file.startLine + index}</span>
-                    <code role="cell">{line.endsWith("\n") ? line.slice(0, -1) || " " : line || " "}</code>
+                    <code
+                      role="cell"
+                      dangerouslySetInnerHTML={{
+                        __html: highlightLine((line.endsWith("\n") ? line.slice(0, -1) : line) || " ", language),
+                      }}
+                    />
                   </div>
                 ))}
               </div>
@@ -287,6 +331,8 @@ export function WorkspaceChanges({
   onCheckpoint,
   onViewChange,
   onRetry,
+  onMentionPath,
+  onOpenInFiles,
 }: WorkspaceChangesProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string>();
   const totals = workspaceTotals(review?.diffs ?? []);
@@ -364,10 +410,10 @@ export function WorkspaceChanges({
               );
             })}
           </nav>
-          <DiffContent diff={selected} />
+          <DiffContent diff={selected} onMentionPath={onMentionPath} onOpenInFiles={onOpenInFiles} />
         </div>
       )}
-      {review && view === "all" && <div className="all-diffs">{review.diffs.map((diff) => <DiffContent key={diff.entry.entryId} diff={diff} />)}</div>}
+      {review && view === "all" && <div className="all-diffs">{review.diffs.map((diff) => <DiffContent key={diff.entry.entryId} diff={diff} onMentionPath={onMentionPath} onOpenInFiles={onOpenInFiles} />)}</div>}
       {review?.truncated && <p className="changes-limit">Showing the first 100 changed files.</p>}
     </div>
   );

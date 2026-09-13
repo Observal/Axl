@@ -187,7 +187,7 @@ Panes render existing daemon capabilities and add no authority:
 
 - **Files** and **Changes** use the bounded `session.workspace.*` RPCs described above.
 - **Terminal** is a projection of `user.shell` events plus an input that submits `session.shell` through the SDK. It is not a PTY. Output stays in the canonical log and appears in the transcript as well; the pane offers the same include or exclude choice as `!` and `!!` in the composer.
-- **Browser** frames loopback `http`/`https` origins (`localhost`, `127.0.0.1`) inside a sandboxed `iframe` with `no-referrer`. The gateway CSP allows only those `frame-src` origins. Any other URL opens in a new tab; nothing is proxied.
+- **Browser** frames `http`/`https` URLs inside a sandboxed `iframe` with `no-referrer`. Sites that refuse embedding stay blank and can be opened in a new tab; nothing is proxied through the gateway.
 
 Each pane is available only when the daemon grants the capabilities it renders.
 

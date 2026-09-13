@@ -46,7 +46,7 @@ import {
   uploadBlob as uploadSessionBlob,
 } from "@axl/sdk";
 
-import { BrowserPane, type BrowserPaneState } from "./browser-pane.tsx";
+import { BrowserPane, type BrowserPaneState, EMPTY_BROWSER_STATE } from "./browser-pane.tsx";
 import { CommandPalette } from "./command-palette.tsx";
 import {
   filterCommands,
@@ -284,7 +284,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [changesView, setChangesView] = useState<"files" | "all">(initialLayout.changesView);
   const [theme, setTheme] = useState<WebTheme>(storedWebTheme);
   const [paneLayout, setPaneLayout] = useState<PaneLayout>(() => createPaneLayout(initialLayout.panes));
-  const [browserPane, setBrowserPane] = useState<BrowserPaneState>({ generation: 0 });
+  const [browserPane, setBrowserPane] = useState<BrowserPaneState>(EMPTY_BROWSER_STATE);
   const [mobileDock, setMobileDock] = useState(false);
   const [terminalError, setTerminalError] = useState<string>();
   const [workspaceScope, setWorkspaceScope] = useState<WorkspaceStatusScope>("working");
@@ -366,7 +366,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const openedSessionId = useRef<SessionId | undefined>(preview?.opened.sessionId);
   const selectionGeneration = useRef(0);
   const workspaceRequestGeneration = useRef(0);
-  const browserRequest = useRef(0);
+  const listRequest = useRef(0);
+  const fileRequest = useRef(0);
   const reviewRequest = useRef(0);
   const transcript = useRef<HTMLDivElement>(null);
   const transcriptNavigationTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -1429,9 +1430,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       : undefined;
     if (append && cursor === undefined) return;
     const session = workspaceRequestGeneration.current;
-    const request = ++browserRequest.current;
+    const request = ++listRequest.current;
     const current = (): boolean =>
-      session === workspaceRequestGeneration.current && request === browserRequest.current;
+      session === workspaceRequestGeneration.current && request === listRequest.current;
     setBrowserLoading(true);
     setBrowserError(undefined);
     if (!append) setWorkspaceBrowser((state) => ({ path, entries: [], loaded: false, ...(state.file === undefined ? {} : { file: state.file }) }));
@@ -1465,9 +1466,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       : undefined;
     if (append && (previous === undefined || !previous.truncated)) return;
     const session = workspaceRequestGeneration.current;
-    const request = ++browserRequest.current;
+    const request = ++fileRequest.current;
     const current = (): boolean =>
-      session === workspaceRequestGeneration.current && request === browserRequest.current;
+      session === workspaceRequestGeneration.current && request === fileRequest.current;
     setBrowserLoading(true);
     setBrowserError(undefined);
     try {
@@ -1768,6 +1769,27 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     if (layout.panes.join() !== paneLayout.panes.join()) {
       persistLayout({ ...currentPreferences(), panes: layout.panes });
     }
+  };
+
+  const mentionPath = (path: string): void => {
+    setDraft((current) => {
+      const trimmed = current.trimEnd();
+      return trimmed === "" ? `${path} ` : `${trimmed} ${path} `;
+    });
+    showActionNotice("Path added to the prompt");
+    queueMicrotask(() => {
+      const field = composer.current;
+      if (field === null) return;
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
+    });
+  };
+
+  const openInFiles = (path: string): void => {
+    if (!paneLayout.panes.includes("files")) applyPaneLayout(openPane(paneLayout, "files"));
+    const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+    if (workspaceBrowser.path !== directory || !workspaceBrowser.loaded) void loadWorkspaceDirectory(directory);
+    void loadWorkspaceFile(path);
   };
 
   const togglePaneOpen = (pane: PaneId): void => {
@@ -2105,11 +2127,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
               return <BrowserPane state={browserPane} onState={setBrowserPane} />;
             case "files":
               return opened
-                ? <WorkspaceExplorer browser={workspaceBrowser} loading={browserLoading} error={browserError} onOpenDirectory={(path) => void loadWorkspaceDirectory(path)} onOpenFile={(path) => void loadWorkspaceFile(path)} onLoadMoreEntries={() => void loadWorkspaceDirectory(workspaceBrowser.path, true)} onLoadMoreFile={() => { if (workspaceBrowser.file) void loadWorkspaceFile(workspaceBrowser.file.path, true); }} onRetry={refreshWorkspaceFiles} />
+                ? <WorkspaceExplorer browser={workspaceBrowser} loading={browserLoading} error={browserError} onOpenDirectory={(path) => void loadWorkspaceDirectory(path)} onOpenFile={(path) => void loadWorkspaceFile(path)} onLoadMoreEntries={() => void loadWorkspaceDirectory(workspaceBrowser.path, true)} onLoadMoreFile={() => { if (workspaceBrowser.file) void loadWorkspaceFile(workspaceBrowser.file.path, true); }} onRetry={refreshWorkspaceFiles} onMentionPath={mentionPath} />
                 : <div className="pane-empty"><strong>No session</strong><span>Open a session to browse its workspace.</span></div>;
             case "changes":
               return opened
-                ? <WorkspaceChanges review={workspaceReview} loading={reviewLoading} error={reviewError} view={changesView} scope={workspaceScope} canCheckpoint={canCheckpointWorkspace} checkpointEnabled={workspaceCheckpointEnabled} checkpointDisabled={busy || conversation.activeOperationId !== undefined} onScope={(scope) => void loadWorkspaceChanges(scope)} onCheckpoint={(enabled) => void configureWorkspaceCheckpoint(enabled)} onViewChange={(view) => { setChangesView(view); persistLayout({ ...currentPreferences(), changesView: view }); }} onRetry={refreshWorkspaceChanges} />
+                ? <WorkspaceChanges review={workspaceReview} loading={reviewLoading} error={reviewError} view={changesView} scope={workspaceScope} canCheckpoint={canCheckpointWorkspace} checkpointEnabled={workspaceCheckpointEnabled} checkpointDisabled={busy || conversation.activeOperationId !== undefined} onScope={(scope) => void loadWorkspaceChanges(scope)} onCheckpoint={(enabled) => void configureWorkspaceCheckpoint(enabled)} onViewChange={(view) => { setChangesView(view); persistLayout({ ...currentPreferences(), changesView: view }); }} onRetry={refreshWorkspaceChanges} onMentionPath={mentionPath} onOpenInFiles={openInFiles} />
                 : <div className="pane-empty"><strong>No session</strong><span>Open a session to review its changes.</span></div>;
             case "terminal":
               return <TerminalPane entries={terminalRecords} running={directOperation?.kind === "shell" && directOperation.source === "terminal" && directOperation.command !== undefined ? { command: directOperation.command, cancelling: directOperation.cancelling } : undefined} error={terminalError} disabled={!canShell || !connected || opened === undefined} cwd={opened?.cwd ?? bootstrap?.cwd ?? ""} onRun={(command, excluded) => void runTerminalCommand(command, excluded)} onCancel={() => void cancelDirectOperation()} />;
