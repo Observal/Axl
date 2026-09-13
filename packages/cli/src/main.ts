@@ -44,6 +44,7 @@ import {
 } from "@axl/sdk";
 import { connectUnixClient, createUnixDaemonHost } from "@axl/sdk/unix";
 
+import { launchBrowser } from "./browser-launch.ts";
 import { inspectLegacyDaemon, type LegacyDaemonStatus, stopLegacyDaemon } from "./legacy-daemon.ts";
 import { createTerminalProviderLoginAdapter } from "./provider-auth-ui.ts";
 import { providerErrorMessage, runProviderCommand, usageLine } from "./provider-cli.ts";
@@ -51,23 +52,6 @@ import { loadTuiSettings, saveTuiSettings, type TuiSettings } from "./settings.t
 
 const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
 const WEB_ASSET_RELATIVE_PATH = process.env.AXL_WEB_ASSET_PATH ?? "../../web/dist";
-
-function openBrowser(url: string): Promise<void> {
-  const command =
-    process.platform === "darwin"
-      ? { file: "open", args: [url] }
-      : process.platform === "win32"
-        ? { file: "rundll32", args: ["url.dll,FileProtocolHandler", url] }
-        : { file: "xdg-open", args: [url] };
-  return new Promise((resolve, reject) => {
-    const child = spawn(command.file, command.args, { detached: true, stdio: "ignore" });
-    child.once("error", reject);
-    child.once("spawn", () => {
-      child.unref();
-      resolve();
-    });
-  });
-}
 
 const HELP = `Usage: axl [session-id] [options]
        axl web [session-id] [--no-open]
@@ -1095,7 +1079,7 @@ async function main(): Promise<void> {
         providerHost,
       });
       try {
-        await openBrowser(`${gateway.launchUrl}&session=${encodeURIComponent(sessionId)}`);
+        await launchBrowser(`${gateway.launchUrl}&session=${encodeURIComponent(sessionId)}`);
       } catch (error) {
         await gateway.close();
         throw error;
@@ -1142,10 +1126,12 @@ async function main(): Promise<void> {
           ? gateway.launchUrl
           : `${gateway.launchUrl}&session=${encodeURIComponent(cli.sessionId)}`;
       try {
-        await openBrowser(launchUrl);
-      } catch (error) {
+        await launchBrowser(launchUrl);
+      } catch (cause) {
         await gateway.close();
-        throw error;
+        throw new Error(
+          `Could not open the authenticated web client automatically: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
       }
     }
     const stop = (): void => {

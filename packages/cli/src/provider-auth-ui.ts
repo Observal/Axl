@@ -1,12 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
+// SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
-
-import { spawn } from "node:child_process";
 
 import type { AuthEvent, AuthPrompt } from "@axl/ai";
 import type { TrustedProviderLoginAdapter } from "@axl/runtime";
 import type { ProviderLoginPresentation } from "@axl/tui";
 import { promptLine, type SetupInput, type SetupOutput, sanitizeTerminalText } from "@axl/tui";
+
+import { type BrowserLaunchOptions, launchBrowser } from "./browser-launch.ts";
 
 export function validatedAuthorizationUrl(value: string): URL {
   let url: URL;
@@ -24,29 +25,18 @@ export function validatedAuthorizationUrl(value: string): URL {
   return url;
 }
 
-interface BrowserProcess {
-  once(event: "error", listener: (error: Error) => void): unknown;
-  unref(): void;
-}
-
-type BrowserLauncher = (file: string, args: readonly string[]) => BrowserProcess;
-
-export function openAuthorizationUrl(
+export async function openAuthorizationUrl(
   url: URL,
   output: SetupOutput,
-  launch: BrowserLauncher = (file, args) => spawn(file, args, { detached: true, stdio: "ignore" }),
-): void {
-  const command =
-    process.platform === "darwin"
-      ? { file: "open", args: [url.href] }
-      : process.platform === "win32"
-        ? { file: "rundll32", args: ["url.dll,FileProtocolHandler", url.href] }
-        : { file: "xdg-open", args: [url.href] };
-  const child = launch(command.file, command.args);
-  child.once("error", (error) => {
-    output.write(`  Could not open the authorization URL automatically: ${safe(error.message)}\n`);
-  });
-  child.unref();
+  options: BrowserLaunchOptions = {},
+): Promise<void> {
+  try {
+    await launchBrowser(url.href, options);
+  } catch (error) {
+    output.write(
+      `  Could not open the authorization URL automatically: ${safe(error instanceof Error ? error.message : String(error))}\n`,
+    );
+  }
 }
 
 function safe(value: string): string {
@@ -91,13 +81,13 @@ function presentEvent(output: SetupOutput, event: AuthEvent): void {
     const url = validatedAuthorizationUrl(event.url);
     output.write(`  ${safe(event.instructions ?? "Complete authorization in your browser.")}\n`);
     output.write(`  ${url.href}\n`);
-    openAuthorizationUrl(url, output);
+    void openAuthorizationUrl(url, output);
     return;
   }
   if (event.type === "device_code") {
     const url = validatedAuthorizationUrl(event.verificationUri);
     output.write(`  Open ${url.href}\n  Code: ${safe(event.userCode)}\n`);
-    openAuthorizationUrl(url, output);
+    void openAuthorizationUrl(url, output);
     return;
   }
   output.write(`  ${safe(event.message)}\n`);
