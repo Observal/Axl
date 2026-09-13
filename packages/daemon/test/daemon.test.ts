@@ -3235,8 +3235,16 @@ test("queue restore leaves queue and active work untouched when its event append
     content: [{ type: "text", text: "keep queued" }],
     priority: "back",
   });
+  await waitFor(
+    () =>
+      subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status === "queued",
+    "queued prompt projection",
+  );
   const logPath = join(dataDirectory, "sessions", `${created.sessionId}.jsonl`);
-  await chmod(logPath, 0o400);
+  const backupPath = `${logPath}.writable`;
+  await rename(logPath, backupPath);
+  await mkdir(logPath);
   try {
     await assert.rejects(
       client.request("session.queue.restore", {
@@ -3251,10 +3259,11 @@ test("queue restore leaves queue and active work untouched when its event append
       "queued",
     );
   } finally {
-    await chmod(logPath, 0o600);
+    await rm(logPath, { recursive: true });
+    await rename(backupPath, logPath);
     release();
+    await active;
   }
-  await active;
 });
 
 test("queued prompts become paused after restart and require explicit re-queueing", async (context) => {
