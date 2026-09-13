@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { parseBrowserTarget } from "./panes.ts";
 
@@ -35,44 +35,33 @@ export function BrowserPane({
   readonly onState: (state: BrowserPaneState) => void;
 }): React.JSX.Element {
   const url = browserUrl(state);
+  const externalPreview = url !== undefined && parseBrowserTarget(url).mode === "external";
   const [input, setInput] = useState(url ?? "");
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(url !== undefined);
-  const [showEmbedHint, setShowEmbedHint] = useState(false);
-  const hintedOrigins = useRef(new Set<string>());
+  const [externalUrl, setExternalUrl] = useState<string>();
 
   useEffect(() => {
     setInput(url ?? "");
     setLoading(url !== undefined);
-    setShowEmbedHint(false);
+    setExternalUrl(undefined);
   }, [url, state.generation]);
-
-  useEffect(() => {
-    if (!showEmbedHint) return;
-    const timer = setTimeout(() => setShowEmbedHint(false), 8000);
-    return () => clearTimeout(timer);
-  }, [showEmbedHint]);
 
   const navigate = (value: string): void => {
     setError(undefined);
     try {
       const target = parseBrowserTarget(value);
+      if (target.mode === "external") {
+        setInput(url ?? "");
+        setExternalUrl(target.url);
+        window.open(target.url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      setExternalUrl(undefined);
       onState(browserNavigate(state, target.url));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Invalid URL");
     }
-  };
-
-  const loaded = (): void => {
-    setLoading(false);
-    // Cross-origin frames give no signal when a site refuses embedding, so surface the escape
-    // hatch once per origin.
-    if (url === undefined) return;
-    const target = parseBrowserTarget(url);
-    const origin = new URL(target.url).origin;
-    if (target.loopback || hintedOrigins.current.has(origin)) return;
-    hintedOrigins.current.add(origin);
-    setShowEmbedHint(true);
   };
 
   return (
@@ -87,7 +76,7 @@ export function BrowserPane({
         <button
           type="button"
           className="icon-button"
-          aria-label="Back"
+          aria-label="Back in Preview"
           disabled={state.index <= 0}
           onClick={() => onState({ ...state, index: state.index - 1, generation: state.generation + 1 })}
         >
@@ -96,7 +85,7 @@ export function BrowserPane({
         <button
           type="button"
           className="icon-button"
-          aria-label="Forward"
+          aria-label="Forward in Preview"
           disabled={state.index < 0 || state.index >= state.history.length - 1}
           onClick={() => onState({ ...state, index: state.index + 1, generation: state.generation + 1 })}
         >
@@ -105,7 +94,7 @@ export function BrowserPane({
         <button
           type="button"
           className="icon-button"
-          aria-label="Reload"
+          aria-label="Reload Preview"
           disabled={url === undefined}
           onClick={() => onState({ ...state, generation: state.generation + 1 })}
         >
@@ -116,11 +105,15 @@ export function BrowserPane({
           inputMode="url"
           spellCheck={false}
           autoComplete="off"
-          aria-label="Browser address"
+          aria-label="Preview address"
           aria-invalid={error !== undefined}
-          placeholder="Enter a URL"
+          placeholder="localhost:3000"
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => {
+            setInput(event.target.value);
+            setError(undefined);
+            setExternalUrl(undefined);
+          }}
           onFocus={(event) => event.target.select()}
         />
         {url !== undefined && (
@@ -129,19 +122,29 @@ export function BrowserPane({
             href={url}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Open in a new tab"
-            title="Open in a new tab"
+            aria-label="Open preview in a new tab"
+            title="Open preview in a new tab"
           >
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9 2.5h4.5V7M13.5 2.5 7.5 8.5M11 9.5v4H2.5V5h4" /></svg>
           </a>
         )}
       </form>
       {error !== undefined && <p className="browser-note error" role="alert">{error}</p>}
+      {externalUrl !== undefined && (
+        <p className="browser-note" role="status">
+          External pages open in a browser tab. <a href={externalUrl} target="_blank" rel="noopener noreferrer">Open again</a> or <button type="button" onClick={() => { onState(browserNavigate(state, externalUrl)); setExternalUrl(undefined); }}>preview here</button> if the page allows embedding.
+        </p>
+      )}
+      {externalPreview && externalUrl === undefined && (
+        <p className="browser-note" role="status">
+          This external page may block embedded previews. <a href={url} target="_blank" rel="noopener noreferrer">Open in a browser tab</a>
+        </p>
+      )}
       {url === undefined ? (
         <div className="pane-empty">
           <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" /></svg>
-          <strong>Open a page</strong>
-          <span>Preview a dev server or any web page. Sites that refuse embedding stay blank; use ↗ to open them in a tab.</span>
+          <strong>Preview a development server</strong>
+          <span>Localhost and embeddable development pages open here. Other external URLs open in a normal browser tab.</span>
           <div className="pane-chips">
             {SUGGESTIONS.map((suggestion) => (
               <button type="button" key={suggestion} onClick={() => navigate(suggestion)}>
@@ -154,21 +157,14 @@ export function BrowserPane({
         <div className={`browser-frame${loading ? " loading" : ""}`}>
           <iframe
             key={`${url}#${state.generation}`}
-            title="Browser preview"
+            title="Development preview"
             src={url}
             sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
             referrerPolicy="no-referrer"
             allow="clipboard-read; clipboard-write; fullscreen"
-            onLoad={loaded}
+            onLoad={() => setLoading(false)}
           />
-          {loading && <div className="browser-loading" role="status"><i className="loading-ring" />Loading…</div>}
-          {showEmbedHint && !loading && (
-            <div className="browser-embed-hint" role="status">
-              <span>Blank page? The site refuses to be embedded.</span>
-              <a href={url} target="_blank" rel="noopener noreferrer">Open in a new tab</a>
-              <button type="button" aria-label="Dismiss" onClick={() => setShowEmbedHint(false)}>×</button>
-            </div>
-          )}
+          {loading && <div className="browser-loading" role="status"><i className="loading-ring" />Loading preview…</div>}
         </div>
       )}
     </div>

@@ -97,24 +97,30 @@ test("resizing trades height between neighbours and respects the minimum", () =>
   assert.equal(resizePane(layout, 0, 50, 0), layout);
 });
 
-test("browser targets accept web URLs and default bare hosts sensibly", () => {
+test("browser targets preview loopback pages and open external pages outside the dock", () => {
   assert.deepEqual(parseBrowserTarget("localhost:5173"), {
     url: "http://localhost:5173/",
-    loopback: true,
+    mode: "preview",
   });
   assert.deepEqual(parseBrowserTarget(" http://127.0.0.1:3000/app?x=1 "), {
     url: "http://127.0.0.1:3000/app?x=1",
-    loopback: true,
+    mode: "preview",
   });
   assert.deepEqual(parseBrowserTarget("example.com/docs"), {
     url: "https://example.com/docs",
-    loopback: false,
+    mode: "external",
   });
   assert.deepEqual(parseBrowserTarget("http://example.com"), {
     url: "http://example.com/",
-    loopback: false,
+    mode: "external",
   });
-  assert.equal(parseBrowserTarget("http://[::1]:8080").loopback, true);
+  assert.equal(parseBrowserTarget("http://[::1]:8080").mode, "preview");
+  assert.deepEqual(parseBrowserTarget("LOCALHOST:4173"), {
+    url: "http://localhost:4173/",
+    mode: "preview",
+  });
+  assert.equal(parseBrowserTarget("app.localhost:4173").mode, "preview");
+  assert.equal(parseBrowserTarget("0.0.0.0:8080").mode, "preview");
   assert.throws(() => parseBrowserTarget(""), /Enter a URL/u);
   assert.throws(() => parseBrowserTarget("javascript:alert(1)"), /Only http and https/u);
   assert.throws(() => parseBrowserTarget("file:///etc/passwd"), /Only http and https/u);

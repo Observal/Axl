@@ -8,7 +8,7 @@ export const PANE_IDS = ["browser", "files", "changes", "terminal"] as const;
 export type PaneId = (typeof PANE_IDS)[number];
 
 export const PANE_LABELS: Readonly<Record<PaneId, string>> = {
-  browser: "Browser",
+  browser: "Preview",
   files: "Files",
   changes: "Changes",
   terminal: "Terminal",
@@ -164,11 +164,15 @@ export function resizePane(
 
 export interface BrowserTarget {
   readonly url: string;
-  /** Loopback development servers; these almost always allow embedding. */
-  readonly loopback: boolean;
+  /** Local development pages preview in the dock; external pages open in a browser tab. */
+  readonly mode: "preview" | "external";
 }
 
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "0.0.0.0"]);
+
+function isLoopbackHost(hostname: string): boolean {
+  return LOOPBACK_HOSTS.has(hostname) || hostname.endsWith(".localhost");
+}
 
 /**
  * Resolves user input into a browser-pane URL. Only http and https are allowed. A bare
@@ -179,8 +183,8 @@ export function parseBrowserTarget(input: string): BrowserTarget {
   if (trimmed === "") throw new Error("Enter a URL");
   // "host:port" has no scheme; a scheme is followed by something other than a bare port.
   const hasScheme = /^[a-z][a-z0-9+.-]*:(?!\d+(?:[/?#]|$))/iu.test(trimmed);
-  const bareHost = (trimmed.split(/[/?#]/u, 1)[0] ?? trimmed).replace(/:\d+$/u, "");
-  const scheme = LOOPBACK_HOSTS.has(bareHost) ? "http" : "https";
+  const bareHost = (trimmed.split(/[/?#]/u, 1)[0] ?? trimmed).replace(/:\d+$/u, "").toLowerCase();
+  const scheme = isLoopbackHost(bareHost) ? "http" : "https";
   const withScheme = hasScheme ? trimmed : `${scheme}://${trimmed}`;
   let url: URL;
   try {
@@ -193,7 +197,7 @@ export function parseBrowserTarget(input: string): BrowserTarget {
   }
   if (url.username !== "" || url.password !== "")
     throw new Error("URLs with credentials are not allowed");
-  return { url: url.href, loopback: LOOPBACK_HOSTS.has(url.hostname) };
+  return { url: url.href, mode: isLoopbackHost(url.hostname) ? "preview" : "external" };
 }
 
 export interface TerminalEntry {

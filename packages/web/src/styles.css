@@ -24,7 +24,6 @@ svg { flex:none; }
 @keyframes pop { from { opacity:0; transform:translateY(-4px) scale(.985); } to { opacity:1; transform:none; } }
 @keyframes rise { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
 @keyframes fade { from { opacity:0; } to { opacity:1; } }
-@keyframes notice { from { opacity:0; transform:translate(-50%,6px); } to { opacity:1; transform:translate(-50%,0); } }
 .shell {
   --sidebar-col: var(--sidebar-width, 264px);
   --dock-col: 0px;
@@ -327,7 +326,7 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .pane-chips button { padding:5px 9px; border:1px solid var(--line-soft); border-radius:999px; background:transparent; color:var(--muted); font:11px/1.2 var(--font-mono); cursor:pointer; transition:background var(--fast) var(--ease), color var(--fast) var(--ease), border-color var(--fast) var(--ease); }
 .pane-chips button:hover { border-color:var(--line); background:var(--selected); color:var(--text); }
 
-/* Browser pane */
+/* Preview pane */
 .browser-pane { display:flex; flex-direction:column; }
 .browser-bar { display:flex; align-items:center; gap:4px; flex:none; padding:0 8px 8px 8px; }
 .browser-bar .icon-button { width:28px; height:28px; }
@@ -335,18 +334,14 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .browser-bar input:focus { border-color:var(--line); color:var(--text); }
 .browser-bar input[aria-invalid="true"] { border-color:rgba(228,132,140,.5); }
 .browser-note { margin:0 14px 8px; color:var(--muted); font-size:11px; line-height:1.45; }
+.browser-note a,.browser-note button { color:var(--accent-strong); text-underline-offset:3px; }
+.browser-note button { padding:0; border:0; background:transparent; text-decoration:underline; cursor:pointer; }
 .browser-note.error { color:var(--red); }
 .browser-frame { position:relative; flex:1; min-height:0; background:#fff; }
 .browser-frame iframe { display:block; width:100%; height:100%; border:0; background:#fff; }
 .browser-frame.loading iframe { opacity:0; }
 .browser-frame iframe { transition:opacity var(--medium) var(--ease); }
 .browser-loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; gap:8px; background:var(--sidebar); color:var(--muted); font-size:11px; }
-.browser-embed-hint { position:absolute; bottom:10px; left:50%; display:flex; align-items:center; gap:10px; max-width:calc(100% - 24px); padding:6px 6px 6px 11px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--raised); color:var(--muted); font-size:11px; box-shadow:0 10px 28px rgba(0,0,0,.4); transform:translateX(-50%); animation:notice var(--medium) var(--ease-out); }
-.browser-embed-hint span { white-space:nowrap; }
-.browser-embed-hint a { color:var(--accent-strong); text-decoration:none; white-space:nowrap; }
-.browser-embed-hint a:hover { text-decoration:underline; text-underline-offset:3px; }
-.browser-embed-hint button { width:22px; height:22px; padding:0; border:0; border-radius:4px; background:transparent; color:var(--muted); font-size:14px; cursor:pointer; }
-.browser-embed-hint button:hover { background:var(--selected); color:var(--text); }
 
 /* Terminal pane */
 .terminal-pane { display:flex; flex-direction:column; font:11.5px/1.55 var(--font-mono); }
