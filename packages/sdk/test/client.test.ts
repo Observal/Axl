@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -417,6 +418,66 @@ test("fails reconnect explicitly when a previously granted capability disappears
     }),
     (error) => error instanceof AxlClientError && error.code === "not_initialized",
   );
+  client.close();
+});
+
+test("exposes typed child-session creation with idempotent delivery", async () => {
+  const { client, transport } = await connect();
+  const parentSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+  const result = client.startChild({
+    parentSessionId,
+    name: "researcher",
+    task: "Research tmux",
+    authority: "user",
+    historyMode: "fresh",
+  });
+  const request = transport.messages.find(
+    (message) => (message as { method?: string }).method === "child.start",
+  ) as { id: number; idempotencyKey?: string };
+  assert.ok(request.idempotencyKey);
+  transport.emit({
+    kind: "success",
+    id: request.id,
+    method: "child.start",
+    result: {
+      child: {
+        sessionId: "123e4567-e89b-42d3-a456-426614174001",
+        cwd: "/repo",
+        runtime: { state: "running" },
+        profile: "standard",
+      },
+      name: "researcher",
+      parentSessionId,
+      authority: "user",
+      historyMode: "fresh",
+    },
+  });
+  assert.equal((await result).name, "researcher");
+  client.close();
+});
+
+test("exposes typed child messaging", async () => {
+  const { client, transport } = await connect();
+  const parentSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+  const result = client.sendToChild({
+    parentSessionId,
+    child: "researcher",
+    content: [{ type: "text", text: "Also inspect layouts" }],
+  });
+  const request = transport.messages.find(
+    (message) => (message as { method?: string }).method === "child.send",
+  ) as { id: number; idempotencyKey?: string };
+  assert.ok(request.idempotencyKey);
+  transport.emit({
+    kind: "success",
+    id: request.id,
+    method: "child.send",
+    result: {
+      queued: true,
+      childSessionId: "123e4567-e89b-42d3-a456-426614174001",
+    },
+  });
+  assert.equal((await result).queued, true);
   client.close();
 });
 

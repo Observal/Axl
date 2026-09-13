@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -8,7 +9,6 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
-import type { AxlClient, WireEvent } from "@axl/sdk";
 import {
   type CanonicalEvent,
   EVENT_FORMAT_VERSION,
@@ -16,7 +16,9 @@ import {
   type EventType,
   parseEvent,
   parseSessionId,
+  type SessionId,
 } from "@axl/protocol";
+import type { AxlClient, WireEvent } from "@axl/sdk";
 
 import {
   AxlApp,
@@ -216,6 +218,21 @@ function client(
       if (method === "session.interaction.respond") throw new Error("interaction response failed");
       throw new Error(`Unexpected request ${method}`);
     },
+    async startChild(params: { parentSessionId: SessionId; name: string }) {
+      requests.push({ method: "child.start", params });
+      return {
+        child: {
+          sessionId: parseSessionId("123e4567-e89b-42d3-a456-426614174001"),
+          cwd: "/workspace",
+          runtime: { state: "running" },
+          profile: "standard",
+        },
+        name: params.name,
+        parentSessionId: params.parentSessionId,
+        authority: "user",
+        historyMode: "fresh",
+      } as const;
+    },
     async shell(params: { operationId: string; command: string }) {
       requests.push({ method: "session.shell", params });
       if (sendError !== undefined) {
@@ -335,6 +352,22 @@ class ReconnectClient {
   }
 }
 
+test("resuming a child attachment does not reconfigure its active session", async () => {
+  const input = new Input();
+  const output = new Output();
+  const daemon = new ReconnectClient([event("session.created", { cwd: process.cwd() })]);
+  const app = await AxlApp.start({
+    client: daemon.daemonClient(),
+    sessionId,
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+  });
+  assert.equal(daemon.requests.includes("session.configure"), false);
+  app.stop();
+});
+
 test("projects a call and result as one settled transaction", async () => {
   const operationId = "00000000-0000-4000-8000-000000000010";
   const snapshot = [
@@ -370,6 +403,91 @@ test("projects a call and result as one settled transaction", async () => {
   assert.equal(output.text.split("passed").length - 1, 1);
   assert.match(output.text, /SHELL\s+done \| 1\.0s/);
   assert.doesNotThrow(() => (app as unknown as { rebuildTranscript(): void }).rebuildTranscript());
+  app.stop();
+});
+
+test("starts an interactive subagent and opens its pane through the host adapter", async () => {
+  const input = new Input();
+  const output = new Output();
+  const requests: unknown[] = [];
+  const panes: unknown[] = [];
+  const app = await AxlApp.start({
+    client: client([event("session.created", { cwd: process.cwd() })], requests),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+    openChildPane: async (child) => {
+      panes.push(child);
+      return { multiplexer: "tmux", paneId: "%42" };
+    },
+  });
+
+  input.write("/subagents start researcher Research tmux\r");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(
+    requests.find((request) => (request as { method?: string }).method === "child.start"),
+    {
+      method: "child.start",
+      params: {
+        parentSessionId: sessionId,
+        name: "researcher",
+        task: "Research tmux",
+        authority: "user",
+        historyMode: "fresh",
+      },
+    },
+  );
+  assert.deepEqual(panes, [
+    {
+      sessionId: "123e4567-e89b-42d3-a456-426614174001",
+      name: "researcher",
+      cwd: "/workspace",
+    },
+  ]);
+  assert.match(output.text, /researcher running in tmux pane %42/);
+  app.stop();
+});
+
+test("closes a managed subagent pane after its result reaches the parent", async () => {
+  const input = new Input();
+  const output = new Output();
+  const daemon = new ReconnectClient([event("session.created", { cwd: process.cwd() })]);
+  const opened: string[] = [];
+  const closed: string[] = [];
+  const app = await AxlApp.start({
+    client: daemon.daemonClient(),
+    input,
+    output,
+    cwd: process.cwd(),
+    color: false,
+    openChildPane: async () => {
+      opened.push("%42");
+      return { multiplexer: "tmux", paneId: "%42" };
+    },
+    closeChildPane: async (paneId) => {
+      closed.push(paneId);
+    },
+  });
+  const childSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174001");
+  daemon.emit(
+    event("child.spawn_requested", {
+      childSessionId,
+      name: "researcher",
+      task: "Research tmux",
+      authority: "user",
+      historyMode: "fresh",
+    }),
+  );
+  daemon.emit(event("child.started", { childSessionId, name: "researcher" }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  daemon.emit(event("child.result", { childSessionId, status: "aborted" }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(opened, ["%42"]);
+  assert.deepEqual(closed, []);
+  daemon.emit(event("child.result", { childSessionId, status: "completed" }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(closed, ["%42"]);
   app.stop();
 });
 

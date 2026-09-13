@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -240,6 +241,14 @@ export class FullscreenScreen {
 
   setScrollbar(scrollbar: FullscreenScrollbar): void {
     this.scrollbar = scrollbar;
+  }
+
+  isFollowingLatest(): boolean {
+    return this.following;
+  }
+
+  followLatest(): void {
+    this.scrollToEnd(this.lastDocument.length, this.lastViewportHeight);
   }
 
   setMouse(mouse: FullscreenMouse): void {

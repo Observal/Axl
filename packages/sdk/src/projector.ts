@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
@@ -92,6 +93,16 @@ export interface ProjectedInterruptDelivery {
   readonly status: "queued" | "interrupting" | "delivered" | "failed";
 }
 
+export interface ProjectedChild {
+  readonly sessionId: SessionId;
+  readonly name: string;
+  readonly task: string;
+  readonly authority: EventPayloadMap["child.spawn_requested"]["authority"];
+  readonly historyMode: EventPayloadMap["child.spawn_requested"]["historyMode"];
+  readonly status: "starting" | "running" | "completed" | "failed" | "aborted";
+  readonly result?: JsonValue;
+}
+
 export interface ConversationState {
   readonly sessionId?: SessionId;
   readonly selectedNodeId?: EventId;
@@ -104,6 +115,7 @@ export interface ConversationState {
   readonly uncertainShellOperations: readonly UncertainShellOperation[];
   readonly queue: readonly ProjectedQueueItem[];
   readonly interruptDeliveries: readonly ProjectedInterruptDelivery[];
+  readonly children: readonly ProjectedChild[];
   readonly model?: string;
   readonly provider?: string;
   readonly entitlement?: string;
@@ -132,6 +144,7 @@ export type ConversationOverview = Omit<
   | "queue"
   | "interruptDeliveries"
   | "uncertainShellOperations"
+  | "children"
 > & { readonly recordCount: number };
 
 /** Display order for locally pending inputs under the daemon's delivery contract.
@@ -212,6 +225,7 @@ export class ConversationProjector {
   private readonly uncertainShellOperations = new Map<OperationId, UncertainShellOperation>();
   private readonly queue = new Map<EventId, ProjectedQueueItem>();
   private readonly interruptDeliveries = new Map<OperationId, ProjectedInterruptDelivery>();
+  private readonly children = new Map<SessionId, ProjectedChild>();
   private activeOperationId: OperationId | undefined;
   private model: string | undefined;
   private provider: string | undefined;
@@ -255,6 +269,7 @@ export class ConversationProjector {
       uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
       queue: Object.freeze([...this.queue.values()]),
       interruptDeliveries: Object.freeze([...this.interruptDeliveries.values()]),
+      children: Object.freeze([...this.children.values()]),
     });
   }
 
@@ -307,6 +322,7 @@ export class ConversationProjector {
     if (!keepUncertainShells) this.uncertainShellOperations.clear();
     this.queue.clear();
     this.interruptDeliveries.clear();
+    this.children.clear();
     this.model = undefined;
     this.provider = undefined;
     this.entitlement = undefined;
@@ -516,6 +532,48 @@ export class ConversationProjector {
       case "sandbox.configured":
         this.sandbox = { provider: event.payload.provider, enforced: event.payload.enforced };
         break;
+      case "child.spawn_requested":
+        if (this.children.has(event.payload.childSessionId)) {
+          throw new ProjectionError(
+            "child_identity_conflict",
+            `Duplicate child ${event.payload.childSessionId}`,
+          );
+        }
+        this.children.set(event.payload.childSessionId, {
+          sessionId: event.payload.childSessionId,
+          name: event.payload.name,
+          task: event.payload.task,
+          authority: event.payload.authority,
+          historyMode: event.payload.historyMode,
+          status: "starting",
+        });
+        break;
+      case "child.started": {
+        const child = this.children.get(event.payload.childSessionId);
+        if (child === undefined || child.name !== event.payload.name) {
+          throw new ProjectionError(
+            "child_identity_conflict",
+            `Child start ${event.payload.childSessionId} has no matching spawn`,
+          );
+        }
+        this.children.set(event.payload.childSessionId, { ...child, status: "running" });
+        break;
+      }
+      case "child.result": {
+        const child = this.children.get(event.payload.childSessionId);
+        if (child === undefined) {
+          throw new ProjectionError(
+            "child_identity_conflict",
+            `Child result ${event.payload.childSessionId} has no matching spawn`,
+          );
+        }
+        this.children.set(event.payload.childSessionId, {
+          ...child,
+          status: event.payload.status,
+          ...(event.payload.result === undefined ? {} : { result: event.payload.result }),
+        });
+        break;
+      }
       case "assistant.message":
         this.usage = addUsage(this.usage, event.payload.usage);
         if (event.payload.stopReason === "tool_use") {

@@ -3,6 +3,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-FileCopyrightText: 2026 Srihari -->
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl roadmap
@@ -2051,6 +2052,8 @@ The terminal presentation surface already has first-party renderer consumers and
 Adversarial tests cannot escape workspace path rules, tool egress policy, extension process capabilities, or required container isolation. Missing enforcement always blocks execution.
 
 ### Phase 8: Child sessions, modes, and orchestration
+
+The terminal multiplexer projection for interactive child sessions is drafted in [`docs/architecture/interactive-subagent-panes.md`](docs/architecture/interactive-subagent-panes.md). It follows the daemon-owned child contract in this phase and does not change the immediate implementation order.
 
 #### Unified child contract
 

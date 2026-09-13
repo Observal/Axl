@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { access, readdir } from "node:fs/promises";
@@ -318,7 +319,17 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     providerManagement,
-    runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
+    runtime: async ({
+      sessionId,
+      cwd,
+      boundary,
+      selection,
+      child,
+      interact,
+      readBlob,
+      startChild,
+      sendToChild,
+    }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";
       const [hasMcpConfig, hasSkills] =
@@ -391,6 +402,67 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       } else if (profile === "minimal") {
         tools.register(kernel.makeEditTool({ cwd, ...(unsafe ? {} : { policy }) }));
       }
+      if (selection.subagents === true) {
+        if (startChild === undefined || sendToChild === undefined) {
+          throw new Error("Subagent tools require daemon child-session callbacks");
+        }
+        tools.register({
+          name: "subagent",
+          description:
+            "Start an asynchronous child agent for a specific task. The child result is delivered back automatically; do not poll.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              task: { type: "string" },
+            },
+            required: ["name", "task"],
+            additionalProperties: false,
+          },
+          async execute(input) {
+            const name = typeof input.name === "string" ? input.name : "";
+            const task = typeof input.task === "string" ? input.task : "";
+            if (!name || !task) throw new Error("subagent requires name and task");
+            const started = await startChild({ name, task });
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Started ${started.name} as child session ${started.sessionId}. The result will arrive automatically.`,
+                },
+              ],
+              isError: false,
+              details: started,
+            };
+          },
+        });
+        tools.register({
+          name: "subagent_message",
+          description: "Send a follow-up message to a child by its stable name or session ID.",
+          inputSchema: {
+            type: "object",
+            properties: { child: { type: "string" }, message: { type: "string" } },
+            required: ["child", "message"],
+            additionalProperties: false,
+          },
+          async execute(input) {
+            const target = typeof input.child === "string" ? input.child : "";
+            const message = typeof input.message === "string" ? input.message : "";
+            if (!target || !message) throw new Error("subagent_message requires child and message");
+            const queued = await sendToChild(target, [{ type: "text", text: message }]);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Queued message for child session ${queued.childSessionId}.`,
+                },
+              ],
+              isError: false,
+              details: queued,
+            };
+          },
+        });
+      }
       if (active.webFetch) tools.register(kernel.makeWebFetchTool());
       const braveSearchKey = active.webSearch
         ? ai.nodeAuthContext.env("BRAVE_SEARCH_API_KEY") || undefined
@@ -436,7 +508,33 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
               ],
             }
           : {}),
-        instructions: [...instructions, ...(skillSection === undefined ? [] : [skillSection])],
+        instructions: [
+          ...instructions,
+          ...(skillSection === undefined ? [] : [skillSection]),
+          ...(child === undefined
+            ? []
+            : [
+                {
+                  name: "child-assignment",
+                  source: "daemon-child-session",
+                  content: [
+                    `You are the ${child.name} child session.`,
+                    `Your assigned task is: ${child.task}`,
+                    "Work only on this assigned task. Return a concise final result to the parent session.",
+                  ].join("\n"),
+                },
+              ]),
+          ...(selection.subagents === true
+            ? [
+                {
+                  name: "subagent-delegation",
+                  source: "daemon-child-session",
+                  content:
+                    "The user explicitly enabled asynchronous subagents for this session tree. Use the subagent tool for independent work that can run concurrently. Descendant delegation is bounded to three levels, four direct children per session, and twelve total descendants. Results return automatically to the immediate parent as attributed messages; synthesize them before reporting farther up the tree. Use subagent_message to steer an existing child. Do not poll.",
+                },
+              ]
+            : []),
+        ],
       });
       return {
         model,
@@ -456,7 +554,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         configRequest: requestSettings,
         configThinking: thinking,
         configProfile: { profile },
-        configTools: { webFetch: active.webFetch, webSearch: active.webSearch },
+        configTools: {
+          webFetch: active.webFetch,
+          webSearch: active.webSearch,
+          ...(selection.subagents === undefined ? {} : { subagents: selection.subagents }),
+        },
         ...(boundary === "config_change"
           ? {}
           : {

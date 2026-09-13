@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { open, mkdir, readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import {
+  DEFAULT_MODEL_REQUEST_SETTINGS,
   isRetryableMutationMethod,
   isRpcErrorRetryable,
   parseOperationId,
@@ -94,6 +96,26 @@ function timestamp(value: unknown, path: string): number {
     throw new Error(`${path} must be a non-negative safe integer`);
   }
   return value as number;
+}
+
+function parsePersistedRpcResult(
+  method: RetryableMutationMethod,
+  value: unknown,
+): RpcResult<RetryableMutationMethod> {
+  if (
+    method === "session.configure" &&
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  ) {
+    return parseRpcResult(method, {
+      ...value,
+      ...("providerId" in value ? {} : { providerId: "azure-openai-responses" }),
+      ...("requestSettings" in value ? {} : { requestSettings: DEFAULT_MODEL_REQUEST_SETTINGS }),
+      ...("subagents" in value ? {} : { subagents: false }),
+    });
+  }
+  return parseRpcResult(method, value);
 }
 
 function parseFailure(value: unknown, path: string): CommandFailure {
@@ -265,9 +287,13 @@ export class CommandJournal {
           throw new Error(`Corrupt command journal: unmatched completion ${record.idempotencyKey}`);
         }
         if (record.type === "succeeded") {
-          parseRpcResult(entry.acceptance.method, record.result);
+          entry.completion = {
+            ...record,
+            result: parsePersistedRpcResult(entry.acceptance.method, record.result),
+          };
+        } else {
+          entry.completion = record;
         }
-        entry.completion = record;
       }
     }
     return journal;
@@ -318,7 +344,7 @@ export class CommandJournal {
     return this.accept(input).then((entry) => {
       const completion = entry.completion;
       if (completion?.type === "succeeded") {
-        return parseRpcResult(input.method, completion.result);
+        return parsePersistedRpcResult(input.method, completion.result) as RpcResult<Method>;
       }
       if (completion?.type === "failed") {
         throw new CommandJournalError(

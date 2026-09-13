@@ -299,7 +299,6 @@ export class SessionView {
       case "context.extension":
       case "interaction.requested":
       case "interaction.resolved":
-      case "child.result":
         return EMPTY_ROWS;
       case "user.message":
         return [
@@ -478,6 +477,28 @@ export class SessionView {
         ];
       case "session.closed":
         return this.wrap(dim(`· session ${event.payload.reason}`));
+      case "child.spawn_requested":
+        return this.wrap(
+          dim(
+            `· subagent ${sanitizeTerminalText(event.payload.name)} starting · ${sanitizeTerminalText(event.payload.historyMode)}`,
+          ),
+        );
+      case "child.started":
+        return this.wrap(dim(`· subagent ${sanitizeTerminalText(event.payload.name)} running`));
+      case "child.input_queued":
+        return this.wrap(
+          dim(`· message queued for subagent ${event.payload.childSessionId.slice(0, 8)}`),
+        );
+      case "child.result":
+        return this.wrap(
+          event.payload.status === "completed"
+            ? (this.palette.success ?? this.palette.accent)(
+                `✓ subagent ${event.payload.childSessionId.slice(0, 8)} completed`,
+              )
+            : (this.palette.warning ?? error)(
+                `! subagent ${event.payload.childSessionId.slice(0, 8)} ${event.payload.status}`,
+              ),
+        );
       default:
         return assertNever(event);
     }
