@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection, type Socket } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -327,6 +327,22 @@ function providerLoginCancellation(bytes: Buffer): string {
   return providerLoginRequestId(request.requestId);
 }
 
+function projectFolderRequest(bytes: Buffer): string {
+  const value = JSON.parse(bytes.toString("utf8")) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("Invalid project folder request");
+  const request = value as Record<string, unknown>;
+  if (
+    Object.keys(request).length !== 1 ||
+    typeof request.path !== "string" ||
+    request.path.length === 0 ||
+    request.path.length > 4096 ||
+    request.path.includes("\0")
+  )
+    throw new Error("Invalid project folder request");
+  return request.path;
+}
+
 function send(
   response: ServerResponse,
   status: number,
@@ -513,8 +529,44 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
             cwd: options.cwd,
             webSocketPath: `${prefix}ws`,
             preferences,
-            hostCapabilities: options.providerHost === undefined ? [] : ["provider.auth.login"],
+            hostCapabilities: [
+              "project.folder.validate",
+              ...(options.providerHost === undefined ? [] : ["provider.auth.login"]),
+            ],
           }),
+          "application/json; charset=utf-8",
+        );
+      }
+      if (request.method === "POST" && relative === "host/project-folder/validate") {
+        if (!validOrigin(request) || !authorized(request))
+          return send(response, 401, "Authentication required");
+        const requested = projectFolderRequest(await requestBody(request, 8192));
+        let canonical: string;
+        try {
+          canonical = await realpath(resolve(options.cwd, requested));
+          if (!(await stat(canonical)).isDirectory()) {
+            return send(
+              response,
+              200,
+              JSON.stringify({ valid: false, error: "Choose a folder, not a file" }),
+              "application/json; charset=utf-8",
+            );
+          }
+        } catch {
+          return send(
+            response,
+            200,
+            JSON.stringify({
+              valid: false,
+              error: "Project folder does not exist or cannot be accessed",
+            }),
+            "application/json; charset=utf-8",
+          );
+        }
+        return send(
+          response,
+          200,
+          JSON.stringify({ valid: true, path: canonical }),
           "application/json; charset=utf-8",
         );
       }

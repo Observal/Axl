@@ -27,7 +27,13 @@ export interface WebPreferences {
   readonly panes: readonly PaneId[];
 }
 
-export type WebHostCapability = "provider.auth.login";
+export type WebHostCapability = "project.folder.validate" | "provider.auth.login";
+
+export type ProjectFolderValidation =
+  | { readonly valid: true; readonly path: string }
+  | { readonly valid: false; readonly error: string };
+
+const WEB_HOST_CAPABILITIES = ["project.folder.validate", "provider.auth.login"] as const;
 
 export const WEB_REQUESTED_CAPABILITIES = Object.freeze(
   WIRE_CAPABILITIES.filter((capability) => capability !== "provider.auth.login"),
@@ -96,7 +102,9 @@ export function parseBootstrap(value: unknown): WebBootstrap {
     typeof record.cwd !== "string" ||
     typeof record.webSocketPath !== "string" ||
     !Array.isArray(record.hostCapabilities) ||
-    record.hostCapabilities.some((capability) => capability !== "provider.auth.login") ||
+    record.hostCapabilities.some(
+      (capability) => !(WEB_HOST_CAPABILITIES as readonly unknown[]).includes(capability),
+    ) ||
     new Set(record.hostCapabilities).size !== record.hostCapabilities.length
   )
     throw new Error("Invalid web bootstrap response");
@@ -162,6 +170,37 @@ export async function saveWebPreferences(preferences: WebPreferences): Promise<v
     headers: { "content-type": "application/json" },
     body: JSON.stringify(preferences),
   });
+}
+
+export async function validateProjectFolder(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ProjectFolderValidation> {
+  const value = await json<unknown>("host/project-folder/validate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+    ...(signal === undefined ? {} : { signal }),
+  });
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("Invalid project folder validation response");
+  const result = value as Record<string, unknown>;
+  const keys = Object.keys(result).sort();
+  if (
+    keys.join(",") === "path,valid" &&
+    result.valid === true &&
+    typeof result.path === "string" &&
+    result.path !== ""
+  )
+    return { valid: true, path: result.path };
+  if (
+    keys.join(",") === "error,valid" &&
+    result.valid === false &&
+    typeof result.error === "string" &&
+    result.error !== ""
+  )
+    return { valid: false, error: result.error };
+  throw new Error("Invalid project folder validation response");
 }
 
 export async function exportSessionArtifact(sessionId: SessionId): Promise<Blob> {

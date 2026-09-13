@@ -493,9 +493,9 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .new-session-body { display:grid; padding:0 20px; }
 .new-session-step { display:grid; gap:12px; padding:18px 0; border-bottom:1px solid var(--line-soft); }
 .new-session-step:last-of-type { border-bottom:0; }
-.new-session-step > header strong,.new-session-step > header small,.new-session-model > span strong,.new-session-model > span small,.new-session-workspace > span strong,.new-session-workspace > span small { display:block; }
-.new-session-step > header strong,.new-session-model > span strong,.new-session-workspace > span strong { color:var(--text-soft); font-size:12px; font-weight:600; }
-.new-session-step > header small,.new-session-model > span small,.new-session-workspace > span small { margin-top:4px; color:var(--subtle); font-size:10px; }
+.new-session-step > header strong,.new-session-step > header small,.new-session-model > span strong,.new-session-model > span small,.new-session-workspace > label strong,.new-session-workspace > label small { display:block; }
+.new-session-step > header strong,.new-session-model > span strong,.new-session-workspace > label strong { color:var(--text-soft); font-size:12px; font-weight:600; }
+.new-session-step > header small,.new-session-model > span small,.new-session-workspace > label small { margin-top:4px; color:var(--subtle); font-size:10px; }
 .session-mode { display:grid; grid-template-columns:1fr 1fr; gap:6px; padding:4px; border:1px solid var(--line); border-radius:9px; background:var(--input-bg); }
 .session-mode button { display:flex; min-height:64px; align-items:center; gap:12px; padding:11px 13px; border:1px solid transparent; border-radius:6px; background:transparent; color:var(--muted); text-align:left; cursor:pointer; }
 .session-mode button:hover:not(:disabled) { background:var(--raised); color:var(--text-soft); }
@@ -505,9 +505,16 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .session-mode small { margin-top:4px; color:var(--subtle); font-size:10px; }
 .session-mode svg { width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
 .session-mode button[aria-pressed="true"] svg { color:var(--accent-strong); }
-.new-session-workspace { display:grid; grid-template-columns:minmax(140px,.45fr) minmax(0,1fr); align-items:center; gap:24px; }
-.new-session-workspace input { min-height:40px; padding:0 11px; border:1px solid var(--line); border-radius:7px; outline:0; background:var(--input-bg); color:var(--text); font-family:var(--font-mono); font-size:11px; }
+.new-session-workspace { display:grid; grid-template-columns:minmax(140px,.45fr) minmax(0,1fr); align-items:start; gap:24px; }
+.project-folder-field { display:grid; min-width:0; gap:7px; }
+.new-session-workspace input { width:100%; min-height:40px; padding:0 11px; border:1px solid var(--line); border-radius:7px; outline:0; background:var(--input-bg); color:var(--text); font-family:var(--font-mono); font-size:11px; }
 .new-session-workspace input:focus { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent); }
+.new-session-workspace input[aria-invalid="true"] { border-color:var(--red); }
+.project-folder-suggestions { display:flex; min-width:0; flex-wrap:wrap; gap:5px; }
+.project-folder-suggestions button { min-width:0; max-width:100%; flex:1 1 140px; overflow:hidden; padding:4px 7px; border:1px solid var(--line-soft); border-radius:var(--r-sm); background:transparent; color:var(--muted); font:11px/1.2 var(--font-mono); text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+.project-folder-suggestions button:hover:not(:disabled) { border-color:var(--line); background:var(--selected); color:var(--text); }
+#project-folder-status { min-height:15px; color:var(--subtle); font-size:11px; line-height:1.4; overflow-wrap:anywhere; }
+#project-folder-status.error { color:var(--red); }
 .new-session-model { display:grid; grid-template-columns:minmax(140px,.45fr) minmax(0,1fr); align-items:center; gap:24px; }
 .new-session-model .model-picker { width:100%; }
 .new-session-model .model-picker > summary { justify-content:space-between; min-height:40px; padding:0 11px; border:1px solid var(--line); border-radius:7px; background:var(--input-bg); color:var(--text-soft); }

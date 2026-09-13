@@ -65,6 +65,7 @@ import {
   parseWebPreferences,
   saveWebPreferences,
   SIDEBAR_WIDTH_RANGE,
+  validateProjectFolder,
   type WebBootstrap,
   type WebPreferences,
 } from "./environment.ts";
@@ -123,6 +124,10 @@ const DEFAULT_LAYOUT: WebPreferences = {
   panes: DEFAULT_PANES,
 };
 const PREVIEW_LAYOUT_KEY = "axl.preview.layout";
+const validatePreviewProjectFolder = (path: string): Promise<{
+  readonly valid: true;
+  readonly path: string;
+}> => Promise.resolve({ valid: true, path });
 const WEB_THEME_KEY = "axl.web.theme";
 
 function storedWebTheme(): WebTheme {
@@ -759,10 +764,17 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   }, [usageOpen]);
 
   const openNewSession = (mode?: NewSessionDraft["mode"]): void => {
+    const current = newSessionController.current.draft;
+    const defaultProjectFolder = bootstrap?.cwd ?? preview?.opened.cwd;
     const draft =
       mode === undefined
-        ? newSessionController.current.draft
-        : newSessionController.current.update({ mode });
+        ? current
+        : newSessionController.current.update({
+            mode,
+            ...(mode === "code" && current.workspace === undefined && defaultProjectFolder
+              ? { workspace: defaultProjectFolder }
+              : {}),
+          });
     setNewSessionDraft(draft);
     setNewSessionError(undefined);
     setNewSessionModelPickerOpenRequest(0);
@@ -770,7 +782,16 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   };
 
   const updateNewSession = (update: NewSessionDraftUpdate): void => {
-    setNewSessionDraft(newSessionController.current.update(update));
+    const current = newSessionController.current.draft;
+    const defaultProjectFolder = bootstrap?.cwd ?? preview?.opened.cwd;
+    setNewSessionDraft(
+      newSessionController.current.update({
+        ...update,
+        ...(update.mode === "code" && current.workspace === undefined && defaultProjectFolder
+          ? { workspace: defaultProjectFolder }
+          : {}),
+      }),
+    );
     setNewSessionError(undefined);
   };
 
@@ -1958,6 +1979,13 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const selectedSummary = sessions.find((item) => item.sessionId === opened?.sessionId);
   const currentTitle = selectedSummary === undefined ? opened?.title ?? "Current session" : sessionTitle(selectedSummary);
   const visibleSessions = sessions.filter((session) => matchesSession(session, query));
+  const projectFolders = useMemo(
+    () =>
+      [...new Set([bootstrap?.cwd, preview?.opened.cwd, ...sessions.map((session) => session.cwd)])]
+        .filter((path): path is string => path !== undefined && path.trim() !== "")
+        .slice(0, 4),
+    [bootstrap?.cwd, preview?.opened.cwd, sessions],
+  );
   const promptBreakpoints = useMemo(() => transcriptPromptBreakpoints(conversation), [conversation]);
   const transcriptMatches = useMemo(() => transcriptMessageMatches(conversation, transcriptQuery), [conversation, transcriptQuery]);
   const usageStats = useMemo(() => sessionUsageStats(conversation), [conversation]);
@@ -2017,6 +2045,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     (preview?.interrupt !== undefined || client !== undefined);
   const canLoginProvider = preview?.loginProvider !== undefined ||
     bootstrap?.hostCapabilities.includes("provider.auth.login") === true;
+  const projectFolderValidator = preview !== undefined
+    ? validatePreviewProjectFolder
+    : bootstrap?.hostCapabilities.includes("project.folder.validate") === true
+      ? validateProjectFolder
+      : undefined;
   const codeSession = opened?.profile !== "chat";
   const canBrowseWorkspace = codeSession &&
     hasCapability("session.workspace.list") &&
@@ -2141,6 +2174,21 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={currentPreferences()} theme={theme} providers={providerInventory} providerLoading={providerLoading} providerRefresh={providerDirectory.refresh} providerError={providerError} providerLogin={providerLogin} settingsError={settingsError} canRefresh={hasCapability("provider.catalog.refresh")} canLogin={canLoginProvider} canLogout={hasCapability("provider.auth.logout")} onTab={setControlCenter} onPreferences={applyWebPreferences} onTheme={(nextTheme) => { setSettingsError(undefined); setTheme(nextTheme); }} onRefresh={(providerId) => void refreshProviders(providerId)} onCancelRefresh={() => providerDirectoryController.current?.cancelRefresh()} onLogin={(providerId, method) => void startProviderLogin(providerId, method)} onCancelLogin={cancelProviderLogin} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId, method) => void copyProviderLogin(providerId, method)} onClose={() => { setControlCenter(undefined); setSettingsError(undefined); }} /></Suspense>}
     {sessionLifecycleOpen && selectedSummary && <SessionLifecycle session={selectedSummary} busy={busy} capabilities={lifecycleCapabilities} {...(sessionLifecycleError === undefined ? {} : { error: sessionLifecycleError })} onRename={(title) => void renameSession(title)} onClone={() => void cloneSession()} onExport={() => void exportArtifact()} onDispose={() => void disposeSession()} onDelete={() => void deleteSession()} onClose={() => { setSessionLifecycleOpen(false); setSessionLifecycleError(undefined); }} />}
     {requeueOpen && <RequeueDialog items={pausedQueue} busyItemId={requeueBusyItemId} error={requeueError} onRequeue={(queueItemId) => void requeueItem(queueItemId)} onClose={() => { setRequeueOpen(false); setRequeueError(undefined); }} />}
-    {newSessionOpen && <NewSessionDialog draft={newSessionDraft} models={modelCatalog} modelPickerOpenRequest={newSessionModelPickerOpenRequest} busy={busy} {...(newSessionError === undefined ? {} : { error: newSessionError })} {...(canCreate ? {} : { unavailableReason: "Session creation was not granted" })} onChange={updateNewSession} onSubmit={() => void createSession()} onClose={() => { setNewSessionOpen(false); setNewSessionError(undefined); }} />}
+    {newSessionOpen && <NewSessionDialog
+      draft={newSessionDraft}
+      models={modelCatalog}
+      modelPickerOpenRequest={newSessionModelPickerOpenRequest}
+      busy={busy}
+      projectFolders={projectFolders}
+      {...(newSessionError === undefined ? {} : { error: newSessionError })}
+      {...(canCreate ? {} : { unavailableReason: "Session creation was not granted" })}
+      {...(projectFolderValidator === undefined ? {} : { onValidateProjectFolder: projectFolderValidator })}
+      onChange={updateNewSession}
+      onSubmit={() => void createSession()}
+      onClose={() => {
+        setNewSessionOpen(false);
+        setNewSessionError(undefined);
+      }}
+    />}
   </main>;
 }

@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -292,8 +292,45 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
       changesView: "files",
       panes: ["browser", "files"],
     },
-    hostCapabilities: ["provider.auth.login"],
+    hostCapabilities: ["project.folder.validate", "provider.auth.login"],
   });
+
+  const projectFolderUrl = new URL("host/project-folder/validate", gateway.origin);
+  const validProjectFolder = await fetch(projectFolderUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ path: directory }),
+  });
+  assert.equal(validProjectFolder.status, 200);
+  assert.deepEqual(await validProjectFolder.json(), {
+    valid: true,
+    path: await realpath(directory),
+  });
+  const projectFile = await fetch(projectFolderUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ path: join(directory, "index.html") }),
+  });
+  assert.deepEqual(await projectFile.json(), {
+    valid: false,
+    error: "Choose a folder, not a file",
+  });
+  const missingProjectFolder = await fetch(projectFolderUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ path: join(directory, "missing") }),
+  });
+  assert.deepEqual(await missingProjectFolder.json(), {
+    valid: false,
+    error: "Project folder does not exist or cannot be accessed",
+  });
+  const invalidProjectFolder = await fetch(projectFolderUrl, {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ path: directory, browse: true }),
+  });
+  assert.equal(invalidProjectFolder.status, 400);
+
   const preferences = await fetch(new URL("preferences", gateway.origin), {
     method: "POST",
     headers: { origin, cookie: cookieHeader, "content-type": "application/json" },

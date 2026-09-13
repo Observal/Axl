@@ -8,6 +8,7 @@ import {
   browserProviderHost,
   importSessionArtifact,
   parseBootstrap,
+  validateProjectFolder,
   WEB_REQUESTED_CAPABILITIES,
 } from "../src/environment.ts";
 
@@ -21,7 +22,7 @@ const valid = {
     changesView: "files",
     panes: ["browser", "files"],
   },
-  hostCapabilities: ["provider.auth.login"],
+  hostCapabilities: ["project.folder.validate", "provider.auth.login"],
 };
 
 test("rejects oversized session imports before upload", async () => {
@@ -62,6 +63,40 @@ test("browser requests queue and presence capabilities but omits trusted login",
   assert.equal(WEB_REQUESTED_CAPABILITIES.includes("session.queue.requeue"), true);
   assert.equal(WEB_REQUESTED_CAPABILITIES.includes("session.queue.restore"), true);
   assert.equal(WEB_REQUESTED_CAPABILITIES.includes("session.presence"), true);
+});
+
+test("project folder validation sends one exact path to the trusted host", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestPath = "";
+  let requestBody = "";
+  globalThis.fetch = (input, init) => {
+    requestPath = String(input);
+    requestBody = String(init?.body);
+    return Promise.resolve(
+      new Response(JSON.stringify({ valid: true, path: "/canonical/project" })),
+    );
+  };
+  try {
+    assert.deepEqual(await validateProjectFolder("/project"), {
+      valid: true,
+      path: "/canonical/project",
+    });
+    assert.equal(requestPath, "host/project-folder/validate");
+    assert.deepEqual(JSON.parse(requestBody), { path: "/project" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("project folder validation rejects malformed host responses", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () =>
+    Promise.resolve(new Response(JSON.stringify({ valid: true, path: "/project", extra: true })));
+  try {
+    await assert.rejects(validateProjectFolder("/project"), /Invalid project folder validation/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("provider login sends only typed intent to the trusted host", async () => {
