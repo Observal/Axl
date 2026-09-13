@@ -27,7 +27,8 @@ type PackageManifest = {
 function walk(directory: string, visit: (path: string) => void): void {
   if (!existsSync(directory)) return;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if ([".git", "dist", "node_modules"].includes(entry.name)) continue;
+    if ([".git", "_build", "deps", "dist", "node_modules"].includes(entry.name)) continue;
+    if (entry.isSymbolicLink()) continue;
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) walk(path, visit);
     else visit(path);
@@ -36,9 +37,11 @@ function walk(directory: string, visit: (path: string) => void): void {
 
 function packageDirectories(root: string): string[] {
   const directories: string[] = [];
-  walk(resolve(root, "packages"), (path) => {
-    if (path.endsWith(`${sep}package.json`)) directories.push(dirname(path));
-  });
+  for (const workspaceRoot of ["packages", "services"]) {
+    walk(resolve(root, workspaceRoot), (path) => {
+      if (path.endsWith(`${sep}package.json`)) directories.push(dirname(path));
+    });
+  }
   return directories;
 }
 
@@ -93,6 +96,9 @@ export function checkWorkspace(root: string): string[] {
   const sdk = packages.find(({ directory }) => directory === resolve(root, "packages/sdk"));
   const ui = packages.find(({ directory }) => directory === resolve(root, "packages/ui"));
   const tui = packages.find(({ directory }) => directory === resolve(root, "packages/tui"));
+  const controlPlane = packages.find(
+    ({ directory }) => directory === resolve(root, "services/control-plane"),
+  );
   const protocolName = protocol?.manifest.name ?? "@axl/protocol";
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
   const tuiName = tui?.manifest.name ?? "@axl/tui";
@@ -136,6 +142,16 @@ export function checkWorkspace(root: string): string[] {
       if (dependency !== protocolName) {
         errors.push(
           `${relative(root, sdk.directory)} may depend only on ${protocolName}, found ${dependency}`,
+        );
+      }
+    }
+  }
+
+  if (controlPlane) {
+    for (const dependency of runtimeDependencies(controlPlane.manifest)) {
+      if (dependency !== protocolName) {
+        errors.push(
+          `${relative(root, controlPlane.directory)} may depend only on ${protocolName}, found ${dependency}`,
         );
       }
     }
@@ -198,6 +214,16 @@ export function checkWorkspace(root: string): string[] {
           );
         }
         if (
+          directory === controlPlane?.directory &&
+          !specifier.startsWith(".") &&
+          !specifier.startsWith("node:") &&
+          specifier !== protocolName
+        ) {
+          errors.push(
+            `${relative(root, path)} imports ${specifier}; control plane may import only Node.js and ${protocolName}`,
+          );
+        }
+        if (
           directory === tui?.directory &&
           !specifier.startsWith(".") &&
           !specifier.startsWith("node:") &&
@@ -222,6 +248,28 @@ export function checkWorkspace(root: string): string[] {
         }
       }
     });
+  }
+
+  const relayMixPath = resolve(root, "services/relay/mix.exs");
+  if (existsSync(relayMixPath)) {
+    const relayMix = readFileSync(relayMixPath, "utf8");
+    const allowedRelayDependencies = new Set([
+      "bandit",
+      "plug",
+      "websock_adapter",
+      "credo",
+      "dialyxir",
+      "mix_audit",
+    ]);
+    for (const match of relayMix.matchAll(/\{:([a-z][a-z0-9_]*),/g)) {
+      const dependency = match[1] as string;
+      if (!allowedRelayDependencies.has(dependency)) {
+        errors.push(`services/relay may not depend on unapproved package ${dependency}`);
+      }
+    }
+    if (/\bpath:\s*/.test(relayMix)) {
+      errors.push("services/relay must not use path dependencies into repository packages");
+    }
   }
 
   walk(resolve(root, "apps"), (path) => {

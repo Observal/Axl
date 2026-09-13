@@ -13,7 +13,9 @@ import { StringDecoder } from "node:string_decoder";
 
 import {
   type AttachmentPresence,
+  type AuthenticatedRemoteRequest,
   type DaemonHostStatus,
+  type DeviceId,
   type HostContext,
   type HostResponse,
   HOST_CONTROL_VERSION,
@@ -32,10 +34,13 @@ import {
   MAX_CANONICAL_EVENT_BYTES,
   MAX_WIRE_MESSAGE_BYTES,
   ProtocolValidationError,
+  parseAuthenticatedRemoteRequest,
   parseOperationId,
   parseRpcResult,
   parseSessionId,
   parseWireRequest,
+  type RemoteDeviceScope,
+  type RequestId,
   type RetryableMutationMethod,
   RPC_METHODS,
   requiredCapability,
@@ -54,6 +59,8 @@ import { commandCatalog } from "./command-catalog.ts";
 import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
 import { DataDirectoryLock } from "./data-directory-lock.ts";
 import type { ProviderManagementService } from "./provider-management.ts";
+import { RemoteAuthorityError, type RemoteDeviceAuthorityStore } from "./remote-authority.ts";
+import { requiredRemoteScope } from "./remote-rpc.ts";
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
 export type DaemonSecurityMode = "sandboxed" | "unsafe";
@@ -72,6 +79,29 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly heartbeatIntervalMs?: number;
   readonly presenceTimeoutMs?: number;
   readonly providerManagement?: ProviderManagementService;
+}
+
+export interface AuthenticatedRemoteAttachmentOptions {
+  readonly deviceId: DeviceId;
+  readonly authority: RemoteDeviceAuthorityStore;
+  readonly send: (message: ServerMessage) => void;
+}
+
+export interface AuthenticatedRemoteRequestResult {
+  readonly requestId: RequestId;
+  readonly method: WireRequest["method"];
+  readonly result: unknown;
+}
+
+export interface AuthenticatedRemoteAttachment {
+  request(value: unknown): Promise<AuthenticatedRemoteRequestResult>;
+  close(): void;
+}
+
+interface RemoteExecutionAuthority {
+  readonly store: RemoteDeviceAuthorityStore;
+  readonly deviceId: DeviceId;
+  readonly scope: RemoteDeviceScope;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -225,6 +255,8 @@ export class AxlDaemon {
   private socketIdentity: SocketIdentity | undefined;
   private readonly connections = new Set<Socket>();
   private readonly connectionStates = new Set<ConnectionState>();
+  private readonly remoteConnectionStates = new Set<ConnectionState>();
+  private readonly remoteAttachmentClosers = new Set<() => void>();
   private readonly cursors = new Map<EventCursor, CursorRecord>();
   private sessionCatalogGeneration = 0;
 
@@ -332,7 +364,7 @@ export class AxlDaemon {
     if (this.stopping !== undefined) return this.stopping;
     this.lifecycle = "stopping";
     this.sessions.beginShutdown();
-    for (const state of this.connectionStates) {
+    for (const state of [...this.connectionStates, ...this.remoteConnectionStates]) {
       for (const controller of state.cancellableRequests.values()) controller.abort();
     }
     this.stopping = this.finishShutdown().catch((error: unknown) => {
@@ -341,6 +373,121 @@ export class AxlDaemon {
       throw error;
     });
     return this.stopping;
+  }
+
+  attachAuthenticatedRemoteDevice(
+    options: AuthenticatedRemoteAttachmentOptions,
+  ): AuthenticatedRemoteAttachment {
+    if (this.lifecycle !== "running" || this.commandJournal === undefined) {
+      throw new DaemonError("daemon_stopping", "Daemon is not accepting remote attachments");
+    }
+    let closed = false;
+    let nextWireRequestId = 0;
+    const state: ConnectionState = {
+      initialized: true,
+      control: false,
+      attachmentId: randomUUID(),
+      client: { kind: "remote", version: "internal", instanceId: options.deviceId },
+      connectedAt: Date.now(),
+      lastSeenAt: Date.now(),
+      grantedCapabilities: new Set(this.capabilities),
+      pendingRequests: 0,
+      cancellableRequests: new Map(),
+      sessionListPages: new Map(),
+      subscriptions: new Map(),
+      send: (message) => {
+        if (!closed) options.send(message);
+      },
+    };
+    this.remoteConnectionStates.add(state);
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      for (const controller of state.cancellableRequests.values()) controller.abort();
+      for (const subscription of state.subscriptions.values()) subscription.unsubscribe();
+      state.cancellableRequests.clear();
+      state.subscriptions.clear();
+      this.remoteConnectionStates.delete(state);
+      this.remoteAttachmentClosers.delete(close);
+      removeRevocationListener();
+    };
+    const removeRevocationListener = options.authority.onDeviceRevoked((deviceId) => {
+      if (deviceId === options.deviceId) close();
+    });
+    this.remoteAttachmentClosers.add(close);
+
+    return {
+      request: (value) => {
+        const operation = (async (): Promise<AuthenticatedRemoteRequestResult> => {
+          if (closed)
+            throw new RemoteAuthorityError("device_revoked", "Remote attachment is closed");
+          if (state.pendingRequests >= MAX_PENDING_REQUESTS) {
+            throw new DaemonError("rate_limited", "Too many pending remote requests");
+          }
+          const remoteRequest: AuthenticatedRemoteRequest = parseAuthenticatedRemoteRequest(value);
+          if (remoteRequest.deviceId !== options.deviceId) {
+            throw new RemoteAuthorityError(
+              "device_identity_mismatch",
+              "Authenticated device does not match the request",
+            );
+          }
+          const wireRequest = parseWireRequest({
+            kind: "request",
+            id: nextWireRequestId,
+            method: remoteRequest.method,
+            params: remoteRequest.params,
+            ...(remoteRequest.idempotencyKey === undefined
+              ? {}
+              : { idempotencyKey: remoteRequest.idempotencyKey }),
+          });
+          nextWireRequestId =
+            nextWireRequestId === Number.MAX_SAFE_INTEGER ? 0 : nextWireRequestId + 1;
+          const scope = requiredRemoteScope(wireRequest.method);
+          if (scope === undefined) {
+            throw new RemoteAuthorityError(
+              "remote_method_forbidden",
+              "RPC method is not available to remote devices",
+            );
+          }
+          if (this.securityMode === "unsafe" && scope !== "observe") {
+            throw new RemoteAuthorityError(
+              "unsafe_remote_forbidden",
+              "Remote mutation is unavailable for unsafe sessions",
+            );
+          }
+
+          state.pendingRequests += 1;
+          state.lastSeenAt = Date.now();
+          const admissionId = randomUUID();
+          this.admitted.set(admissionId, wireRequest);
+          try {
+            const result = await this.executeRequest(wireRequest, state.send, state, undefined, {
+              store: options.authority,
+              deviceId: options.deviceId,
+              scope,
+            });
+            const validated = parseRpcResult(wireRequest.method, result);
+            this.activateReadySubscriptions(state, state.send);
+            return {
+              requestId: remoteRequest.requestId,
+              method: wireRequest.method,
+              result: validated,
+            };
+          } finally {
+            this.admitted.delete(admissionId);
+            state.pendingRequests -= 1;
+          }
+        })();
+        const tracked = operation.then(
+          () => undefined,
+          () => undefined,
+        );
+        this.pending.add(tracked);
+        void tracked.finally(() => this.pending.delete(tracked));
+        return operation;
+      },
+      close,
+    };
   }
 
   private async finishShutdown(): Promise<void> {
@@ -353,7 +500,7 @@ export class AxlDaemon {
     await this.removeOwnedSocket();
     this.lifecycle = "stopped";
     this.cursors.clear();
-    for (const state of this.connectionStates) {
+    for (const state of [...this.connectionStates, ...this.remoteConnectionStates]) {
       if (!state.control)
         state.send({
           kind: "error",
@@ -365,6 +512,7 @@ export class AxlDaemon {
           },
         });
     }
+    for (const close of [...this.remoteAttachmentClosers]) close();
     const server = this.server;
     this.server = undefined;
     if (server?.listening) server.close(() => this.hostOptions.onStopped?.());
@@ -894,6 +1042,7 @@ export class AxlDaemon {
     send: (message: ServerMessage) => void,
     state: ConnectionState,
     signal?: AbortSignal,
+    remoteAuthority?: RemoteExecutionAuthority,
   ): Promise<unknown> {
     let normalized = request;
     if (request.method === "session.create") {
@@ -930,6 +1079,7 @@ export class AxlDaemon {
       normalized = { ...request, params: { ...request.params, cwd } };
     }
     if (!isRetryableMutationMethod(normalized.method)) {
+      remoteAuthority?.store.authorize(remoteAuthority.deviceId, remoteAuthority.scope);
       return this.dispatch(normalized, send, state, undefined, signal);
     }
     const idempotencyKey = normalized.idempotencyKey;
@@ -966,19 +1116,26 @@ export class AxlDaemon {
         affectedOperationId,
       );
     }
+    const journalInput = {
+      idempotencyKey,
+      method: normalized.method as RetryableMutationMethod,
+      requestHash: hashCanonicalRequest(normalized.method, normalized.params as never),
+      ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
+      ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
+      ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
+      ...(interactionId === undefined ? {} : { interactionId }),
+    };
+    const effect = (acceptance: CommandAcceptance) =>
+      this.dispatch(normalized, send, state, acceptance) as never;
     try {
-      return await journal.execute(
-        {
-          idempotencyKey,
-          method: normalized.method as RetryableMutationMethod,
-          requestHash: hashCanonicalRequest(normalized.method, normalized.params as never),
-          ...(params.sessionId === undefined ? {} : { targetSessionId: params.sessionId }),
-          ...(intendedSessionId === undefined ? {} : { intendedSessionId }),
-          ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
-          ...(interactionId === undefined ? {} : { interactionId }),
-        },
-        (acceptance) => this.dispatch(normalized, send, state, acceptance) as never,
-      );
+      if (remoteAuthority !== undefined) {
+        return await remoteAuthority.store.runAuthorizedUntilAccepted(
+          remoteAuthority.deviceId,
+          remoteAuthority.scope,
+          () => journal.start(journalInput, effect),
+        );
+      }
+      return await journal.execute(journalInput, effect);
     } finally {
       if (interruptDeliveryOperationId !== undefined) {
         this.sessions.releaseInterruptDelivery(params.sessionId, interruptDeliveryOperationId);

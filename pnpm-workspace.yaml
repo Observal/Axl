@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan
+# SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
 packages:
   - packages/*
   - packages/extensions/*
+  - services/*
   - apps/*
 allowBuilds:
   esbuild: false

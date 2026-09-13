@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan
+# SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
 version = 1
@@ -11,7 +12,6 @@ path = [
   "LICENSES/Apache-2.0.txt",
   "biome.json",
   "distribution/npm/package.json",
-  "package.json",
   "packages/ai/tsconfig.build.json",
   "packages/ai/tsconfig.json",
   "packages/daemon/tsconfig.build.json",
@@ -43,6 +43,14 @@ SPDX-FileCopyrightText = "2026 Hari Srinivasan"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
+path = ["package.json"]
+SPDX-FileCopyrightText = [
+  "2026 Hari Srinivasan",
+  "2026 Lokesh",
+]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
 path = [
   "packages/ai/package.json",
   "packages/extensions/api/package.json",
@@ -58,6 +66,19 @@ SPDX-FileCopyrightText = [
   "2026 Hari Srinivasan",
   "2026 Kaushik Kumar",
 ]
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "packages/protocol/test/fixtures/internal-relay-api-v1.json",
+  "packages/protocol/test/fixtures/remote-transport-v1.json",
+  "services/control-plane/package.json",
+  "services/control-plane/tsconfig.build.json",
+  "services/control-plane/tsconfig.json",
+  "services/relay/.tool-versions",
+  "services/relay/mix.lock",
+]
+SPDX-FileCopyrightText = "2026 Lokesh"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]

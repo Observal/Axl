@@ -277,6 +277,12 @@ importers:
         specifier: 8.2.2
         version: 8.2.2(@types/node@22.19.19)(esbuild@0.28.2)(yaml@2.8.3)
 
+  services/control-plane:
+    dependencies:
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+
 packages:
 
   '@aws-sdk/core@3.977.9':

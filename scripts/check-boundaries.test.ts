@@ -68,6 +68,30 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
   ]);
 });
 
+test("enforces control-plane and relay service boundaries", () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-service-boundaries-"));
+  const controlPlane = join(root, "services/control-plane");
+  mkdirSync(join(controlPlane, "src"), { recursive: true });
+  writeFileSync(
+    join(controlPlane, "package.json"),
+    JSON.stringify({ name: "@axl/control-plane", dependencies: { fastify: "1.0.0" } }),
+  );
+  writeFileSync(join(controlPlane, "src/index.ts"), 'import "@axl/daemon";\n');
+  const relay = join(root, "services/relay");
+  mkdirSync(relay, { recursive: true });
+  writeFileSync(
+    join(relay, "mix.exs"),
+    'defp deps, do: [{:bandit, "1.12.5"}, {:forbidden, path: "../../packages/kernel"}]\n',
+  );
+
+  assert.deepEqual(checkWorkspace(root), [
+    "services/control-plane may depend only on @axl/protocol, found fastify",
+    "services/control-plane/src/index.ts imports @axl/daemon; control plane may import only Node.js and @axl/protocol",
+    "services/relay may not depend on unapproved package forbidden",
+    "services/relay must not use path dependencies into repository packages",
+  ]);
+});
+
 test("checks real imports without interpreting embedded clipboard scripts as dependencies", () => {
   const root = mkdtempSync(join(tmpdir(), "axl-boundary-syntax-"));
   writePackage(
