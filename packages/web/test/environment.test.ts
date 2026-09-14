@@ -4,8 +4,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { parseSessionId } from "@axl/sdk";
+
 import {
   browserProviderHost,
+  browserSessionPath,
   importSessionArtifact,
   parseBootstrap,
   validateProjectFolder,
@@ -55,6 +58,15 @@ test("validates persisted browser layout preferences", () => {
     () => parseBootstrap({ ...valid, hostCapabilities: ["process.spawn"] }),
     /Invalid web bootstrap response/,
   );
+});
+
+test("browser session URLs survive refresh without retaining launch credentials", () => {
+  const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
+  assert.equal(
+    browserSessionPath("http://127.0.0.1/a/token/?theme=dark#token=secret", sessionId),
+    `/a/token/?theme=dark&session=${sessionId}`,
+  );
+  assert.equal(browserSessionPath(`http://127.0.0.1/a/token/?session=${sessionId}`), "/a/token/");
 });
 
 test("browser requests queue and presence capabilities but omits trusted login", () => {

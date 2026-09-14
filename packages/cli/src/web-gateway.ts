@@ -15,6 +15,7 @@ import {
   parseProviderIdParam,
   parseProviderLoginMethod,
   parseSessionId,
+  parseWireRequest,
   type SessionOpenResult,
   WIRE_PROTOCOL_VERSION,
 } from "@axl/protocol";
@@ -66,6 +67,7 @@ export interface WebPreferences {
 }
 
 const MAX_WEB_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_WORKSPACE_REVIEW_DIFFS = 100;
 
 const DEFAULT_WEB_PREFERENCES: WebPreferences = {
   sidebarWidth: 264,
@@ -74,6 +76,14 @@ const DEFAULT_WEB_PREFERENCES: WebPreferences = {
   changesView: "files",
   panes: ["browser", "files"],
 };
+
+function isWorkspaceDiffRequest(text: string): boolean {
+  try {
+    return parseWireRequest(JSON.parse(text)).method === "session.workspace.diff";
+  } catch {
+    return false;
+  }
+}
 
 function parsePaneIds(value: unknown): readonly WebPaneId[] {
   if (!Array.isArray(value) || value.length > WEB_PANE_IDS.length)
@@ -730,6 +740,7 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
     let buffer = "";
     const decoder = new StringDecoder("utf8");
     let messages = 0;
+    let workspaceDiffs = 0;
     let burstTokens = 20;
     let lastMessageAt = performance.now();
     let windowStarted = performance.now();
@@ -754,18 +765,26 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
     };
     webSocket.on("message", (data, binary) => {
       resetIdleTimer();
-      if (binary || Buffer.byteLength(data.toString()) > MAX_WIRE_MESSAGE_BYTES)
+      const text = data.toString();
+      if (binary || Buffer.byteLength(text) > MAX_WIRE_MESSAGE_BYTES)
         return webSocket.close(1009, "Text message limit exceeded");
       const now = performance.now();
       if (now - windowStarted > 10_000) {
         windowStarted = now;
         messages = 0;
+        workspaceDiffs = 0;
       }
-      burstTokens = Math.min(20, burstTokens + ((now - lastMessageAt) * 10) / 1_000);
-      lastMessageAt = now;
-      if (++messages > 100 || burstTokens < 1) return webSocket.close(1008, "Rate limit exceeded");
-      burstTokens -= 1;
-      daemon.write(data.toString());
+      if (isWorkspaceDiffRequest(text)) {
+        if (++workspaceDiffs > MAX_WORKSPACE_REVIEW_DIFFS)
+          return webSocket.close(1008, "Rate limit exceeded");
+      } else {
+        burstTokens = Math.min(20, burstTokens + ((now - lastMessageAt) * 10) / 1_000);
+        lastMessageAt = now;
+        if (++messages > 100 || burstTokens < 1)
+          return webSocket.close(1008, "Rate limit exceeded");
+        burstTokens -= 1;
+      }
+      daemon.write(text);
     });
     daemon.on("data", (chunk) => {
       buffer += decoder.write(chunk);

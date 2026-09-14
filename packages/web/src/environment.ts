@@ -5,6 +5,7 @@ import {
   AxlClient,
   parseProviderAuthenticationStatus,
   parseRpcResult,
+  parseSessionId,
   type SessionId,
   type SessionOpenResult,
   type TrustedProviderHost,
@@ -46,11 +47,29 @@ export interface WebBootstrap {
   readonly hostCapabilities: readonly WebHostCapability[];
 }
 
-function fragment(): { readonly token?: string; readonly sessionId?: string } {
+export function browserSessionPath(href: string, sessionId?: SessionId): string {
+  const url = new URL(href);
+  if (sessionId === undefined) url.searchParams.delete("session");
+  else url.searchParams.set("session", sessionId);
+  return `${url.pathname}${url.search}`;
+}
+
+export function retainBrowserSession(sessionId?: SessionId): void {
+  history.replaceState(null, "", browserSessionPath(location.href, sessionId));
+}
+
+function fragment(): { readonly token?: string; readonly sessionId?: SessionId } {
   const values = new URLSearchParams(location.hash.slice(1));
   const token = values.get("token") ?? undefined;
-  const sessionId = values.get("session") ?? undefined;
-  history.replaceState(null, "", `${location.pathname}${location.search}`);
+  const requestedSession =
+    values.get("session") ?? new URLSearchParams(location.search).get("session");
+  let sessionId: SessionId | undefined;
+  try {
+    if (requestedSession !== null) sessionId = parseSessionId(requestedSession);
+  } catch {
+    sessionId = undefined;
+  }
+  retainBrowserSession(sessionId);
   return {
     ...(token === undefined ? {} : { token }),
     ...(sessionId === undefined ? {} : { sessionId }),
@@ -254,8 +273,6 @@ export async function connectWebEnvironment(): Promise<{
   return {
     client,
     bootstrap,
-    ...(selected.sessionId === undefined
-      ? {}
-      : { selectedSessionId: selected.sessionId as SessionId }),
+    ...(selected.sessionId === undefined ? {} : { selectedSessionId: selected.sessionId }),
   };
 }

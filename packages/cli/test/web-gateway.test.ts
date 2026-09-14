@@ -510,6 +510,61 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     healthy.once("open", resolve);
     healthy.once("error", reject);
   });
+
+  const review = new WebSocket(new URL("ws", gateway.origin), {
+    headers: { origin, cookie: cookieHeader },
+  });
+  await new Promise<void>((resolve, reject) => {
+    review.once("open", resolve);
+    review.once("error", reject);
+  });
+  const reviewReplies = new Promise<void>((resolve, reject) => {
+    let replies = 0;
+    review.on("message", () => {
+      if (++replies === 110) resolve();
+    });
+    review.once("error", reject);
+  });
+  for (let id = 0; id < 10; id += 1)
+    review.send(
+      `${JSON.stringify({ kind: "request", id, method: "connection.ping", params: {} })}\n`,
+    );
+  for (let id = 10; id < 110; id += 1)
+    review.send(
+      `${JSON.stringify({
+        kind: "request",
+        id,
+        method: "session.workspace.diff",
+        params: {
+          sessionId: "123e4567-e89b-42d3-a456-426614174000",
+          entryId: `entry-${id}`,
+          contextLines: 3,
+          repositoryGeneration: "fixture",
+          maxBytes: 512 * 1024,
+        },
+      })}\n`,
+    );
+  await reviewReplies;
+  assert.equal(review.readyState, WebSocket.OPEN);
+  const reviewClose = new Promise<number>((resolve) =>
+    review.once("close", (code) => resolve(code)),
+  );
+  review.send(
+    `${JSON.stringify({
+      kind: "request",
+      id: 110,
+      method: "session.workspace.diff",
+      params: {
+        sessionId: "123e4567-e89b-42d3-a456-426614174000",
+        entryId: "entry-110",
+        contextLines: 3,
+        repositoryGeneration: "fixture",
+        maxBytes: 512 * 1024,
+      },
+    })}\n`,
+  );
+  assert.equal(await reviewClose, 1008);
+
   const flooded = new WebSocket(new URL("ws", gateway.origin), {
     headers: { origin, cookie: cookieHeader },
   });

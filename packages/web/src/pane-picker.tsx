@@ -54,8 +54,8 @@ export function PanePicker({
         title="Choose visible panes"
       >
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5" /><path d="M8 2.5v11" /></svg>
-        <span>Panes</span>
-        <b>{openPanes.length}</b>
+        <span>{openPanes.length === 0 ? "Add pane" : "Panes"}</span>
+        {openPanes.length > 0 && <b>{openPanes.length}</b>}
         <svg className="pane-picker-chevron" viewBox="0 0 12 12" aria-hidden="true"><path d="m3 4.5 3 3 3-3" /></svg>
       </summary>
       <fieldset className="pane-picker-options">
