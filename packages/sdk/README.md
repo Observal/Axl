@@ -29,7 +29,9 @@ The SDK owns:
 - explicit prompt delivery outcomes across send, steer, follow-up, queue, and interrupt workflows
 - bounded, content-verified blob uploads with progress and cancellation
 - generation-checked workspace browsing, file reads, diffs, and checkpoint controls
-- an injected atomic opaque-outbox store that retries exact ciphertext bytes and removes mutations only after daemon acceptance
+- an injected atomic opaque-outbox store that persists stable crypto-session destinations, resolves ephemeral routes per attempt, retries exact ciphertext bytes, and removes mutations only after authenticated daemon acceptance
+- one-use relay-ticket acquisition, bounded WebSocket admission, role-filtered route discovery, and bounded reconnect
+- relay receipt diagnostics and opaque inbound delivery through an injected authenticated opener
 
 The SDK does not own:
 
@@ -40,7 +42,7 @@ The SDK does not own:
 - provider-specific authentication
 - terminal, browser, desktop, or mobile presentation
 
-Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages.
+Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages. The remote delivery API consumes immutable prepared envelopes. It does not create ciphertext or commit cryptographic state; the current outbox transaction is fake-E2EE scaffolding until Person 1 supplies the reviewed atomic OpenMLS prepared-envelope contract.
 
 ## Public entry points
 

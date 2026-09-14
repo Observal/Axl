@@ -7,7 +7,7 @@ Status: approved infrastructure behind test-only fake E2EE
 
 ## Scope
 
-This slice establishes durable installation-scoped device authority without enabling a network remote transport in the daemon. `packages/daemon/src/remote-authority.ts` owns the local record and effective grant calculation. An internal authenticated attachment connects an explicitly allowlisted subset of existing RPCs to the same daemon dispatcher and command journal. The relay and control plane cannot widen daemon authority.
+This slice establishes durable installation-scoped device authority without enabling production network access in the daemon. `packages/daemon/src/remote-authority.ts` owns the local record and effective grant calculation. An internal authenticated attachment connects an explicitly allowlisted subset of existing RPCs to the same daemon dispatcher and command journal. The relay and control plane cannot widen daemon authority. A disposable hosted-path test now wires this attachment to the real relay through test-only fake E2EE; no production runtime starts that bridge.
 
 The processing contract remains:
 
@@ -66,7 +66,7 @@ Retryable mutations enter the existing daemon command journal while the authorit
 
 ## Current non-capabilities
 
-This module is not wired to the relay, runtime, CLI, SDK, or ordinary sessions. It does not:
+This module is not wired to the production runtime, CLI, or ordinary sessions. Outside the explicit disposable integration test, it does not:
 
 - authenticate cryptography
 - define pairing or key storage

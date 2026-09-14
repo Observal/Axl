@@ -22,13 +22,13 @@ Allowed work is limited to:
 - bounded routing, queues, heartbeat, lease expiry, revocation, draining, and rate limits
 - later daemon authorization and SDK delivery tests behind a test-only fake E2EE adapter
 
-Person 1 exclusively owns PQXDH, Triple Ratchet, pairing cryptography, signatures, cryptographic prekey validation and consumption, cryptographic replay behavior, secure key and ratchet storage, encryption and decryption, associated data, attachment cryptography, and cryptographic test vectors.
+Person 1 exclusively owns the OpenMLS profile, pairwise group lifecycle, pairing cryptography, signatures, KeyPackage and Welcome validation and consumption, cryptographic replay behavior, secure epoch-state storage, encryption and decryption, associated data, attachment cryptography, and cryptographic test vectors.
 
-PQXDH plus Triple Ratchet is the approved direction and supersedes earlier Noise selections. No production cryptography may be implemented or enabled until Person 1 supplies an approved RFC, exact suite, reviewed library, secure-state contract, and interoperability fixtures and the integrated result passes independent review.
+The provisional direction is OpenMLS with one pairwise daemon-device group, daemon-only commits, phone Update proposals, an opaque KeyPackage and Welcome rendezvous, and explicit draft-suite migration. No production cryptography may be implemented or enabled until Person 1 supplies an approved RFC, exact suite, reviewed library, browser/WASM feasibility, secure-state transaction, and interoperability fixtures and the integrated result passes independent review. This transport document defines no OpenMLS wire fields or persistence format.
 
 ## Service ownership
 
-`services/control-plane` is the only hosted component allowed to mutate account, installation, device, ticket, prekey, grant, upload-reservation, quota, and security-audit state. This slice implements ticket state only. Authentication, authorization, proof verification, clocks, and persistence are injected. Test adapters are deterministic and are not production defaults.
+`services/control-plane` is the only hosted component allowed to mutate account, installation, device, ticket, opaque KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit state. This slice implements ticket state only. Authentication, authorization, proof verification, clocks, and persistence are injected. Test adapters are deterministic and are not production defaults.
 
 `services/relay` owns ticket-authenticated WebSocket admission and bounded in-memory routing. It has no database access, E2EE dependency, RPC knowledge, canonical history, durable mailbox, or attachment storage. The relay derives the source route from consumed-ticket state and never accepts it from a sender.
 
@@ -151,4 +151,4 @@ The architecture review selected role-filtered relay discovery, strict opposite-
 
 ## Review boundary
 
-Stop here after the documentation, CI boundaries, fixtures, ticket-consumption path, and first bounded relay slice pass. Daemon authorization, SDK outbox behavior, prekey storage, S3 transport, real E2EE integration, ordinary-session steering, and permission approvals require the next reviewed milestone.
+This preflight checkpoint was followed by daemon authority, SDK delivery, and a disposable hosted-path test behind fake E2EE. See [`remote-hosted-path.md`](remote-hosted-path.md). OpenMLS rendezvous storage, S3 transport, real E2EE integration, ordinary-session steering, and permission approvals remain separate reviewed milestones.
