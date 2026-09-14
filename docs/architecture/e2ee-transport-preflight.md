@@ -3,11 +3,11 @@
 
 # E2EE transport preflight
 
-Status: architecture review checkpoint
+Status: completed transport checkpoint; endpoint cryptography superseded
 
 ## Integration base
 
-The private implementation branch is `feature/e2ee-transport`. It was created from clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687` and rebased for integration onto clean `main` commit `57bd31b7e718a125fc51a0fcf3a554cb100ea708`.
+The original private implementation branch was `feature/e2ee-transport`. Its completed transport checkpoint was integrated into the shared `RC` branch. Draft PR #394 is the aggregate `RC` to `main` review. New remote-control milestones use focused branches from current `RC` and target `RC`; they do not push implementation directly to the integration branch.
 
 ## Scope
 
@@ -22,13 +22,13 @@ Allowed work is limited to:
 - bounded routing, queues, heartbeat, lease expiry, revocation, draining, and rate limits
 - later daemon authorization and SDK delivery tests behind a test-only fake E2EE adapter
 
-Person 1 exclusively owns the OpenMLS profile, pairwise group lifecycle, pairing cryptography, signatures, KeyPackage and Welcome validation and consumption, cryptographic replay behavior, secure epoch-state storage, encryption and decryption, associated data, attachment cryptography, and cryptographic test vectors.
+Person 1 exclusively owns the endpoint OpenMLS profile, pairwise group lifecycle, pairing cryptography, credentials and signatures, KeyPackage and Welcome validation and consumption, cryptographic replay and epoch behavior, secure group-state storage, encryption and decryption, associated data, attachment cryptography, and cryptographic test vectors.
 
-The provisional direction is OpenMLS with one pairwise daemon-device group, daemon-only commits, phone Update proposals, an opaque KeyPackage and Welcome rendezvous, and explicit draft-suite migration. No production cryptography may be implemented or enabled until Person 1 supplies an approved RFC, exact suite, reviewed library, browser/WASM feasibility, secure-state transaction, and interoperability fixtures and the integrated result passes independent review. This transport document defines no OpenMLS wire fields or persistence format.
+The prior PQXDH plus Triple Ratchet direction is superseded. The proposed successor is the pairwise hybrid post-quantum OpenMLS profile in [Remote endpoint E2EE with OpenMLS](remote-e2ee-openmls.md), with daemon-only commits, phone self-Update proposals, an opaque KeyPackage and Welcome rendezvous, and explicit profile migration. No production cryptography may be implemented or enabled until that specification, exact pinned dependencies, transactional storage contract, browser/WASM feasibility, interoperability fixtures, and independent review pass their gates. This transport document defines no OpenMLS wire fields or persistence format.
 
 ## Service ownership
 
-`services/control-plane` is the only hosted component allowed to mutate account, installation, device, ticket, opaque KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit state. This slice implements ticket state only. Authentication, authorization, proof verification, clocks, and persistence are injected. Test adapters are deterministic and are not production defaults.
+`services/control-plane` is the only hosted component allowed to mutate account, installation, device, ticket, opaque KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit state. This slice implements ticket state only. Authentication, authorization, proof verification, clocks, and persistence are injected. Test adapters are deterministic and are not production defaults. The control plane never receives private MLS keys, decrypted Welcome contents, MLS group state, or application plaintext.
 
 `services/relay` owns ticket-authenticated WebSocket admission and bounded in-memory routing. It has no database access, E2EE dependency, RPC knowledge, canonical history, durable mailbox, or attachment storage. The relay derives the source route from consumed-ticket state and never accepts it from a sender.
 
@@ -151,4 +151,4 @@ The architecture review selected role-filtered relay discovery, strict opposite-
 
 ## Review boundary
 
-This preflight checkpoint was followed by daemon authority, SDK delivery, and a disposable hosted-path test behind fake E2EE. See [`remote-hosted-path.md`](remote-hosted-path.md). OpenMLS rendezvous storage, S3 transport, real E2EE integration, ordinary-session steering, and permission approvals remain separate reviewed milestones.
+This historical preflight checkpoint was followed by daemon authority, SDK delivery, and a disposable hosted-path test behind fake E2EE. See [`remote-hosted-path.md`](remote-hosted-path.md). OpenMLS endpoint implementation, KeyPackage and Welcome rendezvous storage, attachment cryptography, real E2EE integration, ordinary-session steering, and permission approvals remain separate reviewed milestones.

@@ -32,7 +32,8 @@ Codex offers a useful contrast. Its CLI and Rust core share a repository, while 
 - Use **TypeScript** for the kernel, protocol, daemon, adoption compiler, terminal client, web client, extensions, and hosted control plane. It matches the ecosystems and standards Axl integrates with.
 - Use **Elixir/OTP only for the hosted ciphertext relay** under `services/relay/`. The relay is a bounded transport process and must not own daemon, RPC, account, persistence, or cryptographic behavior.
 - Use **Kotlin with Jetpack Compose** for Android and **Swift with SwiftUI** for iOS. Choose protocol code generation when the first of these clients is built.
-- Do not add another application language. Tooling should use TypeScript or POSIX shell.
+- A narrowly scoped **Rust endpoint-E2EE core** is the only proposed exception. It may be added only after approval of [`docs/architecture/remote-e2ee-openmls.md`](docs/architecture/remote-e2ee-openmls.md), its dependency and license review, and browser/WASM feasibility. It must expose thin Node, browser/WASM, Swift, and Kotlin bindings and must not absorb daemon, SDK, relay, account, authorization, or presentation behavior.
+- Do not add another application language outside that reviewed exception. Other tooling should use TypeScript or POSIX shell.
 
 ## 3. Repository layout
 
@@ -51,6 +52,7 @@ axl/
     web/               # web client
     ui/                # shared presentation tokens and React renderers
     sdk/               # shared TypeScript client SDK when multiple clients need it
+    e2ee/              # proposed Rust endpoint-E2EE core; create only after its architecture gate
     extensions/        # first-party extensions, one package per feature (roadmap §2.9)
   services/
     control-plane/     # separately deployable TypeScript hosted control plane
@@ -71,7 +73,7 @@ These rules keep package ownership clear:
 - First-party extensions use the same public extension API as third-party extensions.
 - `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript presentation client creates a real need for generation. The Elixir relay implements only its narrow transport and internal-service framing against canonical byte and JSON fixtures; it is not a daemon-protocol client.
 - Apps use the public protocol SDK rather than package internals.
-- `services/control-plane` may depend on `packages/protocol`. It owns hosted account, installation, device, ticket, opaque KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit mutation. Identity providers, persistent datastores, and production service authentication stay behind injected interfaces until approved.
+- `services/control-plane` may depend on `packages/protocol`. It owns hosted account, installation, device, ticket, opaque OpenMLS KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit mutation. It never owns private E2EE state, decrypted Welcome contents, MLS group state, or application plaintext. Identity providers, persistent datastores, and production service authentication stay behind injected interfaces until approved.
 - `services/relay` consumes versioned language-neutral fixtures. It must not import TypeScript package internals, access the control-plane datastore, decrypt envelopes, interpret daemon RPC, persist canonical history, or store attachment bodies. It calls the authenticated control-plane admission API once per new connection and accepts authenticated revocation notifications.
 - The control plane and relay are separate deployables. They share no private implementation imports and communicate only through their versioned internal HTTP contract.
 - `packages/runtime` assembles providers, tools, extensions, sandboxing, and the authoritative daemon without importing a presentation client.
