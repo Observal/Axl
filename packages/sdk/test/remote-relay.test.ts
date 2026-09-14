@@ -154,6 +154,17 @@ async function nextTurn(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+function deferred<Value>(): {
+  readonly promise: Promise<Value>;
+  readonly resolve: (value: Value) => void;
+} {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
 async function connect(
   factory: FakeSocketFactory,
   issuedCredential = credential(),
@@ -345,6 +356,87 @@ test("failed WebSocket startup can retry with a new ticket and socket", async ()
   assert.equal(acquisitions, 2);
   assert.equal(connection.state, "connected");
   connection.close();
+});
+
+test("close during retry backoff prevents another ticket acquisition", async () => {
+  const factory = new FakeSocketFactory();
+  const backoffStarted = deferred<void>();
+  const releaseBackoff = deferred<void>();
+  let acquisitions = 0;
+  const connection = new RemoteRelayConnection({
+    tickets: {
+      async acquire() {
+        acquisitions += 1;
+        if (acquisitions === 1) throw new Error("temporary ticket failure");
+        return credential();
+      },
+    },
+    sockets: factory,
+    reconnect: { initialDelayMs: 1, maximumDelayMs: 1, jitterRatio: 0, maximumAttempts: 2 },
+    sleep: async () => {
+      backoffStarted.resolve();
+      await releaseBackoff.promise;
+    },
+  });
+
+  const starting = connection.start();
+  await backoffStarted.promise;
+  connection.close();
+  releaseBackoff.resolve();
+  await starting;
+
+  assert.equal(connection.state, "closed");
+  assert.equal(acquisitions, 1);
+  assert.equal(factory.sockets.length, 0);
+});
+
+test("close during ticket acquisition prevents WebSocket creation", async () => {
+  const factory = new FakeSocketFactory();
+  const pendingCredential = deferred<RelayAdmissionCredential>();
+  let acquisitions = 0;
+  const connection = new RemoteRelayConnection({
+    tickets: {
+      acquire() {
+        acquisitions += 1;
+        return pendingCredential.promise;
+      },
+    },
+    sockets: factory,
+  });
+
+  const starting = connection.start();
+  await nextTurn();
+  connection.close();
+  pendingCredential.resolve(credential());
+  await starting;
+
+  assert.equal(connection.state, "closed");
+  assert.equal(acquisitions, 1);
+  assert.equal(factory.sockets.length, 0);
+});
+
+test("close while converting a message prevents stale route application", async () => {
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory);
+  const pendingBytes = deferred<ArrayBuffer>();
+  const delayedBlob = new Blob([Uint8Array.of(1)]);
+  Object.defineProperty(delayedBlob, "arrayBuffer", { value: () => pendingBytes.promise });
+
+  socket.message(delayedBlob);
+  await nextTurn();
+  connection.close();
+  const available = discovery("route_available", secondDaemonRoute);
+  pendingBytes.resolve(
+    available.buffer.slice(
+      available.byteOffset,
+      available.byteOffset + available.byteLength,
+    ) as ArrayBuffer,
+  );
+  await nextTurn();
+  await nextTurn();
+
+  assert.equal(connection.state, "closed");
+  assert.deepEqual(connection.routes, []);
 });
 
 test("enforces the negotiated frame limit before conversion and outbound send", async () => {
