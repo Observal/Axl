@@ -220,7 +220,12 @@ test("assembles an authoritative local runtime without a presentation client", a
   const workspace = join(root, "workspace");
   const stateDirectory = join(axlHome, "unsafe");
   const socketPath = join(stateDirectory, "axl.sock");
-  await mkdir(workspace, { recursive: true });
+  await mkdir(join(workspace, ".axl", "skills", "ignored"), { recursive: true });
+  await writeFile(join(workspace, "AGENTS.md"), "Use the repository instructions.\n");
+  await writeFile(
+    join(workspace, ".axl", "skills", "ignored", "SKILL.md"),
+    "---\nname: ignored\ndescription: Must not enter the stable prompt.\n---\nIgnored.\n",
+  );
 
   const store = new FileCredentialStore(join(axlHome, "credentials.json"));
   const customSource = getStaticModelCatalog("deepseek")[0];
@@ -358,8 +363,25 @@ test("assembles an authoritative local runtime without a presentation client", a
     events
       .filter((event) => event.type === "tool.schema")
       .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
-    ["bash", "read", "write", "edit", "web_fetch", "web_search"],
+    [
+      "bash",
+      "read",
+      "write",
+      "edit",
+      "web_fetch",
+      "web_search",
+      "ask_user_question",
+      "capability_search",
+    ],
   );
+  const prompt = events
+    .filter((event) => event.type === "prompt.section")
+    .map((event) => (event.type === "prompt.section" ? event.payload.content : ""))
+    .join("\n\n");
+  assert.match(prompt, /<project_instructions path=.*AGENTS\.md/);
+  assert.match(prompt, /Use the repository instructions\./);
+  assert.doesNotMatch(prompt, /Must not enter the stable prompt|<available_skills>/);
+
   assert.deepEqual(events.find((event) => event.type === "config.request")?.payload, {
     maxOutputTokens: null,
     httpIdleTimeoutMs: 300_000,

@@ -12,6 +12,8 @@ import test, { type TestContext } from "node:test";
 import type { JsonObject } from "@axl/protocol";
 
 import {
+  makeAskUserQuestionTool,
+  makeCapabilitySearchTool,
   makeEditTool,
   makeReadTool,
   makeShellTool,
@@ -38,6 +40,15 @@ function shellIn(cwd: string, overrides: Partial<Parameters<typeof makeShellTool
 function text(result: { content: readonly { type: string; text?: string }[] }): string {
   return result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "";
 }
+
+test("pending interactive and capability tools fail explicitly", async () => {
+  const ask = makeAskUserQuestionTool();
+  const search = makeCapabilitySearchTool();
+  assert.equal(ask.name, "ask_user_question");
+  assert.equal(search.name, "capability_search");
+  await assert.rejects(ask.execute({ questions: [] }, noSignal), /not implemented/);
+  await assert.rejects(search.execute({ query: "release" }, noSignal), /not implemented/);
+});
 
 test("shell runs a command and reports output and exit status", async (context) => {
   const cwd = await workspace(context);

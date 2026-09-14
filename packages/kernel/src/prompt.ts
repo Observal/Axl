@@ -18,7 +18,7 @@ export interface StablePrompt {
 }
 
 export const DEFAULT_IDENTITY =
-  "You are Axl, a coding agent. You work directly in the user's repository with the tools listed below.";
+  "You are Axl, a coding agent. You help users inspect repositories, run commands, edit code, and verify changes.";
 
 /** Essential operating constraints — short, static, and free of feature instructions. */
 export const ESSENTIAL_CONSTRAINTS: readonly string[] = [
@@ -37,6 +37,10 @@ export interface StablePromptInput {
   readonly constraints?: readonly string[];
 }
 
+function xmlAttribute(value: string): string {
+  return `"${value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;")}"`;
+}
+
 /**
  * Builds the stable base prompt: identity, working directory, active tools,
  * applicable AGENTS.md, and essential constraints — nothing else. No subagent
@@ -45,15 +49,15 @@ export interface StablePromptInput {
  * input, by construction.
  */
 export function buildStablePrompt(input: StablePromptInput): StablePrompt {
+  const instructions = input.instructions ?? [];
   const sections: PromptSection[] = [
     { name: "identity", source: "core", content: input.identity ?? DEFAULT_IDENTITY },
-    { name: "workspace", source: "core", content: `Working directory: ${input.cwd}` },
     {
       name: "tools",
       source: "core",
       content:
         input.tools.length === 0
-          ? "No tools are available."
+          ? "Available tools:\n(none)"
           : `Available tools:\n${input.tools
               .map((tool) => `- ${tool.name}: ${tool.description}`)
               .join("\n")}`,
@@ -61,9 +65,28 @@ export function buildStablePrompt(input: StablePromptInput): StablePrompt {
     {
       name: "constraints",
       source: "core",
-      content: (input.constraints ?? ESSENTIAL_CONSTRAINTS).map((line) => `- ${line}`).join("\n"),
+      content: `Guidelines:\n${(input.constraints ?? ESSENTIAL_CONSTRAINTS)
+        .map((line) => `- ${line}`)
+        .join("\n")}`,
     },
-    ...(input.instructions ?? []),
+    ...(instructions.length === 0
+      ? []
+      : [
+          {
+            name: "project-context",
+            source: "agents",
+            content: [
+              "<project_context>",
+              "Project-specific instructions and guidelines:",
+              ...instructions.map(
+                (section) =>
+                  `<project_instructions path=${xmlAttribute(section.source)}>\n${section.content}\n</project_instructions>`,
+              ),
+              "</project_context>",
+            ].join("\n\n"),
+          },
+        ]),
+    { name: "workspace", source: "core", content: `Current working directory: ${input.cwd}` },
   ];
   return {
     sections,

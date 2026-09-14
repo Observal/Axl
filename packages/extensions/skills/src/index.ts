@@ -7,7 +7,7 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { TerminalExtension } from "@axl/extension-api";
-import type { KernelTool, PromptSection, ToolExecutionResult } from "@axl/kernel";
+import type { KernelTool, ToolExecutionResult } from "@axl/kernel";
 import type { JsonObject } from "@axl/protocol";
 import { parseDocument } from "yaml";
 
@@ -175,18 +175,6 @@ export async function discoverSkills(
     for (const skill of await skillsIn(directory)) discovered.set(skill.name, skill);
   }
   return [...discovered.values()].sort((left, right) => left.name.localeCompare(right.name));
-}
-
-export function skillCatalogSection(skills: readonly AgentSkill[]): PromptSection | undefined {
-  if (skills.length === 0) return undefined;
-  return {
-    name: "skills",
-    source: "agent-skills",
-    content: [
-      "Available skills. Load one with the skill tool when its description matches the task:",
-      ...skills.map((skill) => `- ${skill.name}: ${skill.description}`),
-    ].join("\n"),
-  };
 }
 
 async function readSkillFile(skill: AgentSkill, requestedPath: string): Promise<string> {

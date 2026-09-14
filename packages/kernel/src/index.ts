@@ -16,6 +16,7 @@ export * from "./replay.ts";
 export * from "./session-tree.ts";
 export * from "./tools.ts";
 export * from "./tools/edit.ts";
+export * from "./tools/pending.ts";
 export * from "./tools/read.ts";
 export * from "./tools/shell.ts";
 export * from "./tools/validate.ts";

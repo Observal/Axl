@@ -61,16 +61,36 @@ test("the stable prompt contains exactly the specified base and nothing more", (
     ],
   });
 
-  assert.match(prompt.text, /You are Axl/);
-  assert.match(prompt.text, /Working directory: \/workspace\/repo/);
-  assert.match(prompt.text, /- shell: Run a shell command/);
-  assert.match(prompt.text, /Use pnpm\./);
-  assert.match(prompt.text, /Never fabricate/);
+  assert.equal(
+    prompt.text,
+    `You are Axl, a coding agent. You help users inspect repositories, run commands, edit code, and verify changes.
+
+Available tools:
+- shell: Run a shell command
+- edit: Replace exact text in a file
+
+Guidelines:
+- Prefer small, verifiable steps and report what you actually did.
+- When a command or edit fails, show the failure rather than working around it silently.
+- Never fabricate file contents or command output.
+
+<project_context>
+
+Project-specific instructions and guidelines:
+
+<project_instructions path="/workspace/repo/AGENTS.md">
+Use pnpm.
+</project_instructions>
+
+</project_context>
+
+Current working directory: /workspace/repo`,
+  );
   // No subagent instructions, skill bodies, or feature catalogs, ever.
   assert.doesNotMatch(prompt.text, /subagent|delegate|skill|plugin|plan mode/i);
   assert.deepEqual(
     prompt.sections.map((section) => section.name),
-    ["identity", "workspace", "tools", "constraints", "agents-project"],
+    ["identity", "tools", "constraints", "project-context", "workspace"],
   );
 });
 
@@ -123,7 +143,7 @@ test("a fresh session logs prompt sections once and freezes the prefix", async (
   const sections = events.filter((event) => event.type === "prompt.section");
   assert.deepEqual(
     sections.map((event) => (event.type === "prompt.section" ? event.payload.name : "")),
-    ["identity", "workspace", "tools", "constraints"],
+    ["identity", "tools", "constraints", "workspace"],
   );
 
   // Reopening logs no duplicate sections; the system prefix is byte-identical.
