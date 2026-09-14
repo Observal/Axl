@@ -49,6 +49,7 @@ export interface TuiSettings {
   readonly diffLayout?: "unified" | "split";
   readonly workspaceReview?: boolean;
   readonly imageDisplay?: ImageDisplay;
+  readonly loungeEnabled?: boolean;
 }
 
 const EMPTY_SETTINGS: TuiSettings = { version: 1 };
@@ -113,6 +114,7 @@ function parseSettings(value: unknown, path: string): TuiSettings {
     "diffLayout",
     "workspaceReview",
     "imageDisplay",
+    "loungeEnabled",
   ]);
   for (const key of Object.keys(input)) {
     if (!allowed.has(key)) throw new Error(`${path}: unknown setting ${key}`);
@@ -213,6 +215,9 @@ function parseSettings(value: unknown, path: string): TuiSettings {
   }
   if (input.workspaceReview !== undefined && typeof input.workspaceReview !== "boolean") {
     throw new Error(`${path}: workspaceReview must be a boolean`);
+  }
+  if (input.loungeEnabled !== undefined && typeof input.loungeEnabled !== "boolean") {
+    throw new Error(`${path}: loungeEnabled must be a boolean`);
   }
   if (
     input.imageDisplay !== undefined &&

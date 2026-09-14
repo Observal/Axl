@@ -56,6 +56,12 @@ importers:
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@axl/extension-api':
+        specifier: workspace:*
+        version: link:../extensions/api
+      '@axl/extension-lounge':
+        specifier: workspace:*
+        version: link:../extensions/lounge
       '@axl/extension-mcp':
         specifier: workspace:*
         version: link:../extensions/mcp
@@ -102,6 +108,12 @@ importers:
         version: link:../sdk
 
   packages/extensions/api: {}
+
+  packages/extensions/lounge:
+    dependencies:
+      '@axl/extension-api':
+        specifier: workspace:*
+        version: link:../api
 
   packages/extensions/mcp:
     dependencies:

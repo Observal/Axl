@@ -8,6 +8,8 @@ const PASTE_ON = "\x1b[?2004h";
 const PASTE_OFF = "\x1b[?2004l";
 const FOCUS_ON = "\x1b[?1004h";
 const FOCUS_OFF = "\x1b[?1004l";
+const MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 const KITTY_QUERY_AND_ENABLE = "\x1b[>1u\x1b[?u\x1b[c";
 const KITTY_KEYS_OFF = "\x1b[<u";
 const MODIFY_OTHER_KEYS_ON = "\x1b[>4;2m";
@@ -82,6 +84,8 @@ export class TerminalSession {
   private resizeAttached = false;
   private pasteEnabled = false;
   private focusEnabled = false;
+  private mouseCaptureRequested = false;
+  private mouseCaptureEnabled = false;
   private keyboardMode: KeyboardMode = "inactive";
   private keyboardTimer: NodeJS.Timeout | undefined;
   private inputBuffer: TerminalInputBuffer | undefined;
@@ -109,7 +113,10 @@ export class TerminalSession {
       this.pasteEnabled = true;
       this.focusEnabled = true;
       this.keyboardMode = "negotiating";
-      this.options.output.write(`${PASTE_ON}${FOCUS_ON}${KITTY_QUERY_AND_ENABLE}`);
+      this.options.output.write(
+        `${PASTE_ON}${FOCUS_ON}${KITTY_QUERY_AND_ENABLE}${this.mouseCaptureRequested ? MOUSE_ON : ""}`,
+      );
+      this.mouseCaptureEnabled = this.mouseCaptureRequested;
       this.inputAttached = true;
       this.options.input.on("data", this.inputListener);
       this.resizeAttached = true;
@@ -136,11 +143,25 @@ export class TerminalSession {
       !this.resizeAttached &&
       !this.pasteEnabled &&
       !this.focusEnabled &&
-      this.keyboardMode === "inactive"
+      this.keyboardMode === "inactive" &&
+      !this.mouseCaptureEnabled
     ) {
       return;
     }
     this.restore();
+  }
+
+  setMouseCapture(enabled: boolean): void {
+    this.mouseCaptureRequested = enabled;
+    if (!this.started || enabled === this.mouseCaptureEnabled) return;
+    this.options.output.write(enabled ? MOUSE_ON : MOUSE_OFF);
+    this.mouseCaptureEnabled = enabled;
+  }
+
+  refreshMouseCapture(): void {
+    if (!this.started) return;
+    this.options.output.write(this.mouseCaptureRequested ? MOUSE_ON : MOUSE_OFF);
+    this.mouseCaptureEnabled = this.mouseCaptureRequested;
   }
 
   suspend(): void {
@@ -253,16 +274,22 @@ export class TerminalSession {
       attempt(() => this.options.output.off("resize", this.options.onResize));
       this.resizeAttached = false;
     }
-    if (this.pasteEnabled || this.focusEnabled || this.keyboardMode !== "inactive") {
+    if (
+      this.pasteEnabled ||
+      this.focusEnabled ||
+      this.mouseCaptureEnabled ||
+      this.keyboardMode !== "inactive"
+    ) {
       const keyboardOff =
         this.keyboardMode === "modifyOtherKeys" ? MODIFY_OTHER_KEYS_OFF : KITTY_KEYS_OFF;
       attempt(() => {
         this.options.output.write(
-          `${PASTE_OFF}${FOCUS_OFF}${keyboardOff}${RESET_STYLE}${ENABLE_AUTOWRAP}${SHOW_CURSOR}`,
+          `${PASTE_OFF}${FOCUS_OFF}${this.mouseCaptureEnabled ? MOUSE_OFF : ""}${keyboardOff}${RESET_STYLE}${ENABLE_AUTOWRAP}${SHOW_CURSOR}`,
         );
       });
       this.pasteEnabled = false;
       this.focusEnabled = false;
+      this.mouseCaptureEnabled = false;
       this.keyboardMode = "inactive";
     }
     attempt(() => this.options.input.setRawMode?.(this.previousRaw));

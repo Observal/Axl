@@ -264,7 +264,7 @@ export class SessionView {
     const previousModel = this.model;
     const previousThinking = this.thinking;
     const previousSandbox = this.sandbox;
-    const projected = this.projection.state;
+    const projected = this.projection.overview;
     this.provider = projected.provider;
     this.model = projected.model;
     this.thinking = projected.thinking;

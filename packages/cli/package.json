@@ -24,7 +24,9 @@
   },
   "dependencies": {
     "@axl/ai": "workspace:*",
+    "@axl/extension-api": "workspace:*",
     "@axl/daemon": "workspace:*",
+    "@axl/extension-lounge": "workspace:*",
     "@axl/extension-mcp": "workspace:*",
     "@axl/extension-prompts": "workspace:*",
     "@axl/extension-skills": "workspace:*",

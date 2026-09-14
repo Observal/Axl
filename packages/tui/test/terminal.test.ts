@@ -95,6 +95,32 @@ test("owns terminal modes and listeners for one idempotent lifecycle", () => {
   assert.equal(state.resizes(), 1);
 });
 
+test("mouse capture enables dynamically and restores across suspend and stop", () => {
+  const state = session(undefined, undefined, () => undefined);
+  state.terminal.setMouseCapture(true);
+  state.terminal.start();
+  let virtual = new VirtualTerminal();
+  for (const write of state.output.writes) virtual.write(write);
+  assert.equal(virtual.mouseModes.has(1000), true);
+  assert.equal(virtual.mouseModes.has(1002), true);
+  assert.equal(virtual.mouseModes.has(1006), true);
+
+  state.terminal.suspend();
+  virtual = new VirtualTerminal();
+  for (const write of state.output.writes) virtual.write(write);
+  assert.equal(virtual.mouseModes.has(1000), true);
+  assert.equal(virtual.mouseModes.has(1002), true);
+  assert.equal(virtual.mouseModes.has(1006), true);
+
+  state.terminal.setMouseCapture(false);
+  virtual = new VirtualTerminal();
+  for (const write of state.output.writes) virtual.write(write);
+  assert.equal(virtual.mouseModes.has(1000), false);
+  assert.equal(virtual.mouseModes.has(1002), false);
+  assert.equal(virtual.mouseModes.has(1006), false);
+  state.terminal.stop();
+});
+
 test("consumes fragmented Kitty negotiation before forwarding input", () => {
   const state = session();
   state.terminal.start();

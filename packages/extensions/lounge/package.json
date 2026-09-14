@@ -1,0 +1,30 @@
+{
+  "name": "@axl/extension-lounge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dependency-free Lounge game engines for Axl",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./terminal": {
+      "types": "./dist/extension.d.ts",
+      "import": "./dist/extension.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "benchmark": "pnpm --filter @axl/extension-api build && node --expose-gc benchmark/codeword.ts",
+    "build": "tsc -b tsconfig.build.json --force",
+    "test": "pnpm --filter @axl/extension-api build && node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@axl/extension-api": "workspace:*"
+  }
+}

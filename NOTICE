@@ -17,6 +17,8 @@ Axl uses grok-mermaid 0.2.2 as an external dependency for Unicode Mermaid render
 
 Axl's generated model catalog includes factual metadata derived from models.dev, retrieved from https://models.dev/api.json. Models.dev is Copyright 2025 models.dev contributors and is distributed under the MIT license.
 
+Axl's Codeword dictionaries are transformed from the English Speller Database (ESDB, formerly SCOWLv2) release rel-2026.02.25 at commit 7e99edab8e32f9f9ea2b15f249ca8d4d67237410. ESDB is Copyright 2000-2026 by Kevin Atkinson and is distributed under the permissive terms in LICENSES/LicenseRef-ESDB.txt.
+
 Axl uses `@deepseek-ai/node-addon-landlock-run` 0.1.1 from DeepSeek Harness.
 Its JavaScript package includes an MIT notice, and its platform launcher packages
 are distributed under BSD-3-Clause. Those notices remain in the installed dependency

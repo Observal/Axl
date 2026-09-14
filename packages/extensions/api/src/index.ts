@@ -8,7 +8,9 @@ export type ExtensionCapability =
   | "terminal.status"
   | "terminal.widgets"
   | "terminal.events"
-  | "terminal.tool-renderers";
+  | "terminal.tool-renderers"
+  | "terminal.activities"
+  | "terminal.activity-storage";
 
 export interface ExtensionManifest {
   readonly id: string;
@@ -92,6 +94,231 @@ export type TerminalExtensionEvent = TerminalExtensionEventInput & {
 
 export type ExtensionDisposer = () => void | Promise<void>;
 
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue };
+
+export type ActivityStyle =
+  | "text"
+  | "muted"
+  | "accent"
+  | "success"
+  | "warning"
+  | "error"
+  | "selection";
+
+export interface ActivitySpan {
+  readonly text: string;
+  readonly style: ActivityStyle;
+  readonly emphasis?: "none" | "strong" | "reverse";
+}
+
+export interface ActivityFrame {
+  readonly lines: readonly (readonly ActivitySpan[])[];
+  readonly cursor?: { readonly row: number; readonly column: number };
+  readonly announcement?: string;
+}
+
+export interface ActivityViewport {
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface ActivityPresentationPreferences {
+  readonly reducedMotion: boolean;
+  readonly textOnly: boolean;
+}
+
+export interface ActivitySafeStatus {
+  readonly operation:
+    | "idle"
+    | "working"
+    | "waiting"
+    | "blocked"
+    | "failed"
+    | "completed"
+    | "unknown";
+  readonly elapsedMs?: number;
+  readonly activeToolCount: number;
+  readonly queuedInput: {
+    readonly steer: number;
+    readonly followUp: number;
+    readonly interrupt: number;
+  };
+}
+
+export type ActivityInput =
+  | {
+      readonly type: "key";
+      readonly key: string;
+      readonly ctrl: boolean;
+      readonly alt: boolean;
+      readonly shift: boolean;
+      readonly repeat: boolean;
+    }
+  | { readonly type: "paste" }
+  | { readonly type: "composition" }
+  | {
+      readonly type: "mouse";
+      readonly phase: "press" | "release";
+      readonly button: "left" | "middle" | "right";
+      readonly row: number;
+      readonly column: number;
+      readonly ctrl: boolean;
+      readonly alt: boolean;
+      readonly shift: boolean;
+    }
+  | { readonly type: "focus"; readonly focused: boolean }
+  | { readonly type: "unknown" };
+
+export type ActivityPauseReason =
+  | "attention"
+  | "hidden"
+  | "unfocused"
+  | "monitor-focused"
+  | "unsupported-size"
+  | "disconnect"
+  | "completion"
+  | "failure"
+  | "session-switch"
+  | "reload";
+
+export interface ActivityStoredValue<T extends JsonValue = JsonValue> {
+  readonly revision: number;
+  readonly schemaVersion: number;
+  readonly value: T;
+}
+
+export interface ActivityStorage<T extends JsonValue = JsonValue> {
+  read(signal?: AbortSignal): Promise<ActivityStoredValue<T> | undefined>;
+  write(
+    expectedRevision: number | null,
+    schemaVersion: number,
+    value: T,
+    signal?: AbortSignal,
+  ): Promise<ActivityStoredValue<T>>;
+  reset(expectedRevision: number, signal?: AbortSignal): Promise<void>;
+}
+
+export interface ActivityStorageScope {
+  readonly extensionId: string;
+  readonly activityId: string;
+}
+
+export interface ActivityStorageAdapter {
+  read(scope: ActivityStorageScope, signal: AbortSignal): Promise<ActivityStoredValue | undefined>;
+  write(
+    scope: ActivityStorageScope,
+    expectedRevision: number | null,
+    schemaVersion: number,
+    value: JsonValue,
+    signal: AbortSignal,
+  ): Promise<ActivityStoredValue>;
+  reset(scope: ActivityStorageScope, expectedRevision: number, signal: AbortSignal): Promise<void>;
+}
+
+export type ActivityScheduledCallback = (elapsedMs: number) => void;
+
+export interface ActivityContext {
+  readonly signal: AbortSignal;
+  now(): number;
+  status(): ActivitySafeStatus;
+  presentation(): ActivityPresentationPreferences;
+  invalidate(): void;
+  schedule(delayMs: number, callback: ActivityScheduledCallback): ExtensionDisposer;
+  readonly storage?: ActivityStorage;
+}
+
+export interface TerminalActivityInstance {
+  render(viewport: ActivityViewport): ActivityFrame;
+  handleInput(input: ActivityInput): void;
+  presentationChanged?(): void;
+  pause(reason: ActivityPauseReason): void;
+  resume(): void;
+  serialize(): JsonValue | undefined;
+  dispose(): void | Promise<void>;
+}
+
+export interface TerminalActivity {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
+  readonly category: "game";
+  readonly mouse?: boolean;
+  readonly minimumViewport?: ActivityViewport;
+  create(context: ActivityContext): TerminalActivityInstance;
+}
+
+export interface OwnedTerminalActivity extends TerminalActivity {
+  readonly extensionId: string;
+}
+
+export interface ActivityHostServices {
+  now(): number;
+  schedule(delayMs: number, callback: () => void): ExtensionDisposer;
+  invalidate(): void;
+  status(): ActivitySafeStatus;
+  presentation(): ActivityPresentationPreferences;
+  readonly storage?: ActivityStorageAdapter;
+}
+
+export interface HostedActivityInstance {
+  readonly extensionId: string;
+  readonly activityId: string;
+  readonly epoch: number;
+  readonly state: "active" | "paused" | "disposed";
+  render(epoch: number, viewport: ActivityViewport): ActivityFrame;
+  handleInput(epoch: number, input: ActivityInput): void;
+  presentationChanged(epoch: number): void;
+  pause(epoch: number, reason: ActivityPauseReason): void;
+  resume(epoch: number): void;
+  serialize(epoch: number): JsonValue | undefined;
+  dispose(): Promise<void>;
+}
+
+export const ACTIVITY_LIMITS = Object.freeze({
+  maxFrameLines: 512,
+  maxSpans: 4_096,
+  maxFrameBytes: 256 * 1024,
+  maxAnnouncementBytes: 4 * 1024,
+  maxStoredBytes: 256 * 1024,
+  maxViewportWidth: 1_000,
+  maxViewportHeight: 1_000,
+  maxScheduleDelayMs: 24 * 60 * 60 * 1_000,
+});
+
+export class ActivityContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ActivityContractError";
+  }
+}
+
+export type ActivityStorageErrorCode =
+  | "conflict"
+  | "invalid"
+  | "corrupt"
+  | "future-version"
+  | "oversized"
+  | "permission"
+  | "locked"
+  | "unavailable"
+  | "aborted";
+
+export class ActivityStorageError extends Error {
+  readonly code: ActivityStorageErrorCode;
+
+  constructor(code: ActivityStorageErrorCode, message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ActivityStorageError";
+    this.code = code;
+  }
+}
+
 export interface TerminalExtensionApi {
   registerCommand(command: TerminalCommand): ExtensionDisposer;
   registerShortcut(shortcut: TerminalShortcut): ExtensionDisposer;
@@ -99,6 +326,7 @@ export interface TerminalExtensionApi {
   registerWorkingLabel(label: string): ExtensionDisposer;
   registerWidget(key: string, widget: TerminalWidget): ExtensionDisposer;
   registerToolRenderer(toolName: string, renderer: TerminalToolRenderer): ExtensionDisposer;
+  registerActivity(activity: TerminalActivity): ExtensionDisposer;
   on(
     event: TerminalExtensionEventInput["type"],
     handler: (event: TerminalExtensionEvent) => void | Promise<void>,
@@ -143,6 +371,8 @@ interface OwnedListener {
 
 export interface TerminalExtensionHostOptions {
   readonly cleanupTimeoutMs?: number;
+  /** Definitions kept available for explicit later activation without running them initially. */
+  readonly initiallyInactiveExtensionIds?: readonly string[];
 }
 
 interface OwnedDisposer {
@@ -189,6 +419,540 @@ async function withinCleanupBudget(
   }
 }
 
+function assertBoundedText(value: string, label: string, maximumBytes: number): void {
+  if (new TextEncoder().encode(value).byteLength > maximumBytes) {
+    throw new ActivityContractError(`${label} exceeds ${maximumBytes} bytes`);
+  }
+}
+
+function assertPositiveInteger(value: number, label: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new ActivityContractError(`${label} must be a positive integer`);
+  }
+}
+
+function validateJson(value: unknown, maximumBytes = ACTIVITY_LIMITS.maxStoredBytes): JsonValue {
+  const seen = new Set<object>();
+  const visit = (candidate: unknown): void => {
+    if (candidate === null || typeof candidate === "boolean" || typeof candidate === "string") {
+      return;
+    }
+    if (typeof candidate === "number") {
+      if (!Number.isFinite(candidate))
+        throw new ActivityStorageError("invalid", "JSON numbers must be finite");
+      return;
+    }
+    if (typeof candidate !== "object") {
+      throw new ActivityStorageError("invalid", "Activity state must contain only JSON values");
+    }
+    if (seen.has(candidate))
+      throw new ActivityStorageError("invalid", "Activity state must not be cyclic");
+    seen.add(candidate);
+    if (Array.isArray(candidate)) {
+      for (let index = 0; index < candidate.length; index += 1) {
+        if (!(index in candidate))
+          throw new ActivityStorageError("invalid", "Activity state arrays must not be sparse");
+        visit(candidate[index]);
+      }
+    } else {
+      const prototype = Object.getPrototypeOf(candidate);
+      if (prototype !== Object.prototype && prototype !== null) {
+        throw new ActivityStorageError("invalid", "Activity state objects must be plain objects");
+      }
+      for (const item of Object.values(candidate)) visit(item);
+    }
+    seen.delete(candidate);
+  };
+  visit(value);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    throw new ActivityStorageError(
+      "invalid",
+      `Activity state is not serializable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (new TextEncoder().encode(serialized).byteLength > maximumBytes) {
+    throw new ActivityStorageError("oversized", `Activity state exceeds ${maximumBytes} bytes`);
+  }
+  return value as JsonValue;
+}
+
+function validateStoredValue(value: ActivityStoredValue): ActivityStoredValue {
+  assertPositiveInteger(value.revision, "storage revision");
+  assertPositiveInteger(value.schemaVersion, "storage schemaVersion");
+  validateJson(value.value);
+  return value;
+}
+
+function validateStatus(status: ActivitySafeStatus): ActivitySafeStatus {
+  const operations = new Set<ActivitySafeStatus["operation"]>([
+    "idle",
+    "working",
+    "waiting",
+    "blocked",
+    "failed",
+    "completed",
+    "unknown",
+  ]);
+  if (!operations.has(status.operation))
+    throw new ActivityContractError("Invalid activity operation status");
+  for (const [label, value] of [
+    ["activeToolCount", status.activeToolCount],
+    ["queuedInput.steer", status.queuedInput.steer],
+    ["queuedInput.followUp", status.queuedInput.followUp],
+    ["queuedInput.interrupt", status.queuedInput.interrupt],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new ActivityContractError(`${label} must be a non-negative integer`);
+    }
+  }
+  if (
+    status.elapsedMs !== undefined &&
+    (!Number.isFinite(status.elapsedMs) || status.elapsedMs < 0)
+  ) {
+    throw new ActivityContractError("elapsedMs must be finite and non-negative");
+  }
+  return Object.freeze({
+    operation: status.operation,
+    ...(status.elapsedMs === undefined ? {} : { elapsedMs: status.elapsedMs }),
+    activeToolCount: status.activeToolCount,
+    queuedInput: Object.freeze({ ...status.queuedInput }),
+  });
+}
+
+function validatePresentation(
+  preferences: ActivityPresentationPreferences,
+): ActivityPresentationPreferences {
+  if (typeof preferences.reducedMotion !== "boolean" || typeof preferences.textOnly !== "boolean") {
+    throw new ActivityContractError("Activity presentation preferences must be boolean");
+  }
+  return Object.freeze({ ...preferences });
+}
+
+function validateViewport(viewport: ActivityViewport): void {
+  assertPositiveInteger(viewport.width, "viewport width");
+  assertPositiveInteger(viewport.height, "viewport height");
+  if (
+    viewport.width > ACTIVITY_LIMITS.maxViewportWidth ||
+    viewport.height > ACTIVITY_LIMITS.maxViewportHeight
+  ) {
+    throw new ActivityContractError("Activity viewport exceeds host bounds");
+  }
+}
+
+function validateFrame(frame: ActivityFrame, viewport: ActivityViewport): ActivityFrame {
+  if (!Array.isArray(frame.lines))
+    throw new ActivityContractError("Activity frame lines must be an array");
+  if (frame.lines.length > viewport.height || frame.lines.length > ACTIVITY_LIMITS.maxFrameLines) {
+    throw new ActivityContractError("Activity frame exceeds the line bound");
+  }
+  let spans = 0;
+  let bytes = 0;
+  const encoder = new TextEncoder();
+  const styles = new Set<ActivityStyle>([
+    "text",
+    "muted",
+    "accent",
+    "success",
+    "warning",
+    "error",
+    "selection",
+  ]);
+  for (const line of frame.lines) {
+    if (!Array.isArray(line))
+      throw new ActivityContractError("Activity frame lines must contain span arrays");
+    spans += line.length;
+    for (const span of line) {
+      if (typeof span.text !== "string" || !styles.has(span.style)) {
+        throw new ActivityContractError("Activity frame contains an invalid span");
+      }
+      if (span.emphasis !== undefined && !["none", "strong", "reverse"].includes(span.emphasis)) {
+        throw new ActivityContractError("Activity frame contains invalid emphasis");
+      }
+      bytes += encoder.encode(span.text).byteLength;
+    }
+  }
+  if (spans > ACTIVITY_LIMITS.maxSpans)
+    throw new ActivityContractError("Activity frame exceeds the span bound");
+  if (bytes > ACTIVITY_LIMITS.maxFrameBytes)
+    throw new ActivityContractError("Activity frame exceeds the text bound");
+  if (frame.announcement !== undefined) {
+    assertBoundedText(
+      frame.announcement,
+      "Activity announcement",
+      ACTIVITY_LIMITS.maxAnnouncementBytes,
+    );
+  }
+  if (frame.cursor !== undefined) {
+    if (
+      !Number.isSafeInteger(frame.cursor.row) ||
+      !Number.isSafeInteger(frame.cursor.column) ||
+      frame.cursor.row < 0 ||
+      frame.cursor.column < 0 ||
+      frame.cursor.row >= viewport.height ||
+      frame.cursor.column >= viewport.width
+    ) {
+      throw new ActivityContractError("Activity cursor is outside the viewport");
+    }
+  }
+  return frame;
+}
+
+function validateInput(input: ActivityInput): void {
+  if (input.type === "key") {
+    if (typeof input.key !== "string" || input.key.length === 0 || input.key.length > 64) {
+      throw new ActivityContractError("Activity key identifier is invalid");
+    }
+    for (const modifier of [input.ctrl, input.alt, input.shift, input.repeat]) {
+      if (typeof modifier !== "boolean")
+        throw new ActivityContractError("Activity key modifiers must be boolean");
+    }
+  } else if (input.type === "mouse") {
+    if (input.phase !== "press" && input.phase !== "release") {
+      throw new ActivityContractError("Activity mouse phase is invalid");
+    }
+    if (input.button !== "left" && input.button !== "middle" && input.button !== "right") {
+      throw new ActivityContractError("Activity mouse button is invalid");
+    }
+    if (
+      !Number.isSafeInteger(input.row) ||
+      !Number.isSafeInteger(input.column) ||
+      input.row < 0 ||
+      input.column < 0 ||
+      input.row >= ACTIVITY_LIMITS.maxViewportHeight ||
+      input.column >= ACTIVITY_LIMITS.maxViewportWidth
+    ) {
+      throw new ActivityContractError("Activity mouse position is outside host bounds");
+    }
+    for (const modifier of [input.ctrl, input.alt, input.shift]) {
+      if (typeof modifier !== "boolean") {
+        throw new ActivityContractError("Activity mouse modifiers must be boolean");
+      }
+    }
+  } else if (input.type === "focus") {
+    if (typeof input.focused !== "boolean")
+      throw new ActivityContractError("Activity focus must be boolean");
+  } else if (!["paste", "composition", "unknown"].includes(input.type)) {
+    throw new ActivityContractError("Unknown structured activity input");
+  }
+}
+
+class HostedActivity implements HostedActivityInstance {
+  readonly extensionId: string;
+  readonly activityId: string;
+  private readonly services: ActivityHostServices;
+  private readonly mouseEnabled: boolean;
+  private readonly onDisposed: () => void;
+  private epochValue = 1;
+  private stateValue: "active" | "paused" | "disposed" = "active";
+  private readonly lifecycle = new AbortController();
+  private epochLifecycle = new AbortController();
+  private readonly schedules = new Set<ExtensionDisposer>();
+  private invalidationPending = false;
+  private lastNow = 0;
+  private viewport: ActivityViewport | undefined;
+  private instance: TerminalActivityInstance | undefined;
+  private disposal: Promise<void> | undefined;
+
+  constructor(
+    extensionId: string,
+    activityId: string,
+    services: ActivityHostServices,
+    create: (context: ActivityContext) => TerminalActivityInstance,
+    storageEnabled: boolean,
+    mouseEnabled: boolean,
+    onDisposed: () => void,
+  ) {
+    this.extensionId = extensionId;
+    this.activityId = activityId;
+    this.services = services;
+    this.mouseEnabled = mouseEnabled;
+    this.onDisposed = onDisposed;
+    this.lastNow = this.readNow();
+    const thisHost = this;
+    const context: ActivityContext = {
+      get signal() {
+        return thisHost.epochLifecycle.signal;
+      },
+      now: () => {
+        this.assertActive();
+        return this.readNow();
+      },
+      status: () => {
+        this.assertActive();
+        return validateStatus(this.services.status());
+      },
+      presentation: () => {
+        this.assertActive();
+        return validatePresentation(this.services.presentation());
+      },
+      invalidate: () => {
+        this.assertActive();
+        if (this.invalidationPending) return;
+        this.invalidationPending = true;
+        this.services.invalidate();
+      },
+      schedule: (delayMs, callback) => this.schedule(delayMs, callback),
+      ...(storageEnabled ? { storage: this.createStorage() } : {}),
+    };
+    try {
+      this.instance = create(Object.freeze(context));
+      if (this.instance === null || typeof this.instance !== "object") {
+        throw new ActivityContractError(`Activity ${activityId} did not create an instance`);
+      }
+    } catch (error) {
+      this.stateValue = "disposed";
+      this.lifecycle.abort();
+      this.epochLifecycle.abort();
+      this.cancelSchedules();
+      throw error;
+    }
+  }
+
+  get epoch(): number {
+    return this.epochValue;
+  }
+
+  get state(): "active" | "paused" | "disposed" {
+    return this.stateValue;
+  }
+
+  render(epoch: number, viewport: ActivityViewport): ActivityFrame {
+    this.assertEpoch(epoch, "render");
+    validateViewport(viewport);
+    this.invalidationPending = false;
+    const frame = validateFrame(
+      this.requireInstance().render(Object.freeze({ ...viewport })),
+      viewport,
+    );
+    this.viewport = Object.freeze({ ...viewport });
+    return frame;
+  }
+
+  handleInput(epoch: number, input: ActivityInput): void {
+    this.assertEpoch(epoch, "input");
+    validateInput(input);
+    if (input.type === "mouse" && !this.mouseEnabled) {
+      throw new ActivityContractError(`Activity ${this.activityId} did not opt in to mouse input`);
+    }
+    if (
+      input.type === "mouse" &&
+      (this.viewport === undefined ||
+        input.row >= this.viewport.height ||
+        input.column >= this.viewport.width)
+    ) {
+      throw new ActivityContractError("Activity mouse position is outside its rendered viewport");
+    }
+    this.requireInstance().handleInput(Object.freeze({ ...input }));
+  }
+
+  presentationChanged(epoch: number): void {
+    this.assertEpoch(epoch, "presentation change");
+    this.cancelSchedules();
+    this.requireInstance().presentationChanged?.();
+  }
+
+  pause(epoch: number, reason: ActivityPauseReason): void {
+    this.assertEpoch(epoch, "pause");
+    this.stateValue = "paused";
+    this.epochValue += 1;
+    this.epochLifecycle.abort();
+    this.cancelSchedules();
+    this.invalidationPending = false;
+    this.viewport = undefined;
+    this.requireInstance().pause(reason);
+  }
+
+  resume(epoch: number): void {
+    if (this.stateValue !== "paused" || epoch !== this.epochValue) {
+      throw new ActivityContractError(`Activity ${this.activityId} resume used a stale epoch`);
+    }
+    this.stateValue = "active";
+    this.epochValue += 1;
+    this.epochLifecycle = new AbortController();
+    this.requireInstance().resume();
+  }
+
+  serialize(epoch: number): JsonValue | undefined {
+    if (this.stateValue === "disposed" || epoch !== this.epochValue) {
+      throw new ActivityContractError(`Activity ${this.activityId} serialize used a stale epoch`);
+    }
+    const value = this.requireInstance().serialize();
+    return value === undefined ? undefined : validateJson(value);
+  }
+
+  dispose(): Promise<void> {
+    if (this.disposal !== undefined) return this.disposal;
+    this.stateValue = "disposed";
+    this.epochValue += 1;
+    this.lifecycle.abort();
+    this.epochLifecycle.abort();
+    this.cancelSchedules();
+    this.invalidationPending = false;
+    this.viewport = undefined;
+    const instance = this.instance;
+    this.instance = undefined;
+    this.onDisposed();
+    this.disposal = Promise.resolve()
+      .then(() => instance?.dispose())
+      .then(() => undefined);
+    return this.disposal;
+  }
+
+  private assertActive(): void {
+    if (this.stateValue !== "active" || this.lifecycle.signal.aborted) {
+      throw new ActivityContractError(`Activity ${this.activityId} context is stale`);
+    }
+  }
+
+  private assertEpoch(epoch: number, operation: string): void {
+    if (this.stateValue !== "active" || epoch !== this.epochValue) {
+      throw new ActivityContractError(
+        `Activity ${this.activityId} ${operation} used a stale epoch`,
+      );
+    }
+  }
+
+  private requireInstance(): TerminalActivityInstance {
+    if (this.instance === undefined)
+      throw new ActivityContractError(`Activity ${this.activityId} is disposed`);
+    return this.instance;
+  }
+
+  private readNow(): number {
+    const value = this.services.now();
+    if (!Number.isFinite(value) || value < this.lastNow) {
+      throw new ActivityContractError("Activity host clock must be finite and monotonic");
+    }
+    this.lastNow = value;
+    return value;
+  }
+
+  private schedule(delayMs: number, callback: ActivityScheduledCallback): ExtensionDisposer {
+    this.assertActive();
+    if (
+      !Number.isSafeInteger(delayMs) ||
+      delayMs < 0 ||
+      delayMs > ACTIVITY_LIMITS.maxScheduleDelayMs
+    ) {
+      throw new ActivityContractError("Activity schedule delay is outside host bounds");
+    }
+    const epoch = this.epochValue;
+    const startedAt = this.readNow();
+    let active = true;
+    let cancelHost: ExtensionDisposer = () => undefined;
+    const cancel = once(() => {
+      if (!active) return;
+      active = false;
+      this.schedules.delete(cancel);
+      return cancelHost();
+    });
+    cancelHost = this.services.schedule(delayMs, () => {
+      if (!active) return;
+      active = false;
+      this.schedules.delete(cancel);
+      if (this.stateValue !== "active" || this.epochValue !== epoch) return;
+      callback(this.readNow() - startedAt);
+    });
+    if (active) this.schedules.add(cancel);
+    return cancel;
+  }
+
+  private cancelSchedules(): void {
+    for (const cancel of [...this.schedules]) cancel();
+    this.schedules.clear();
+  }
+
+  private createStorage(): ActivityStorage {
+    const adapter = this.services.storage;
+    if (adapter === undefined) {
+      throw new ActivityContractError("Activity storage capability has no host adapter");
+    }
+    const scope = Object.freeze({ extensionId: this.extensionId, activityId: this.activityId });
+    const run = async <T>(
+      signal: AbortSignal | undefined,
+      operation: (combined: AbortSignal) => Promise<T>,
+    ): Promise<T> => {
+      this.assertActive();
+      const epoch = this.epochValue;
+      const signals = [this.lifecycle.signal, this.epochLifecycle.signal];
+      if (signal !== undefined) signals.push(signal);
+      const controller = new AbortController();
+      const listeners = signals.map((source) => {
+        const abort = () => controller.abort(source.reason);
+        if (source.aborted) abort();
+        else source.addEventListener("abort", abort, { once: true });
+        return { source, abort };
+      });
+      const combined = controller.signal;
+      try {
+        if (combined.aborted) {
+          throw new ActivityStorageError("aborted", "Activity storage operation was aborted");
+        }
+        let result: T;
+        try {
+          result = await operation(combined);
+        } catch (error) {
+          if (combined.aborted) {
+            throw new ActivityStorageError("aborted", "Activity storage operation was aborted");
+          }
+          throw error;
+        }
+        if (this.stateValue !== "active" || this.epochValue !== epoch || combined.aborted) {
+          throw new ActivityStorageError("aborted", "Activity storage context became stale");
+        }
+        return result;
+      } finally {
+        for (const { source, abort } of listeners) source.removeEventListener("abort", abort);
+      }
+    };
+    const storage: ActivityStorage = {
+      read: (signal?: AbortSignal) =>
+        run(signal, async (combined) => {
+          const value = await adapter.read(scope, combined);
+          return value === undefined ? undefined : validateStoredValue(value);
+        }),
+      write: (expectedRevision, schemaVersion, value, signal?: AbortSignal) => {
+        if (
+          expectedRevision !== null &&
+          (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)
+        ) {
+          throw new ActivityStorageError(
+            "invalid",
+            "Expected revision must be null or a positive integer",
+          );
+        }
+        if (!Number.isSafeInteger(schemaVersion) || schemaVersion < 1) {
+          throw new ActivityStorageError("invalid", "Schema version must be a positive integer");
+        }
+        const checked = validateJson(value);
+        return run(signal, async (combined) => {
+          const stored = validateStoredValue(
+            await adapter.write(scope, expectedRevision, schemaVersion, checked, combined),
+          );
+          const nextRevision = expectedRevision === null ? 1 : expectedRevision + 1;
+          if (stored.revision !== nextRevision || stored.schemaVersion !== schemaVersion) {
+            throw new ActivityStorageError(
+              "invalid",
+              "Storage adapter returned an invalid revision",
+            );
+          }
+          return stored;
+        });
+      },
+      reset: (expectedRevision, signal?: AbortSignal) => {
+        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+          throw new ActivityStorageError("invalid", "Expected revision must be a positive integer");
+        }
+        return run(signal, (combined) => adapter.reset(scope, expectedRevision, combined));
+      },
+    };
+    return Object.freeze(storage);
+  }
+}
+
 /** Owns trusted terminal registrations without exposing client or daemon internals. */
 export class TerminalExtensionHost {
   private readonly definitions: readonly TerminalExtension[];
@@ -197,6 +961,8 @@ export class TerminalExtensionHost {
   private readonly statusesByKey = new Map<string, OwnedStatus>();
   private readonly widgetsByKey = new Map<string, OwnedWidget>();
   private readonly toolRenderersByName = new Map<string, OwnedTerminalToolRenderer>();
+  private readonly activitiesById = new Map<string, OwnedTerminalActivity>();
+  private readonly activityInstances = new Map<string, Set<HostedActivity>>();
   private readonly listenersByEvent = new Map<
     TerminalExtensionEventInput["type"],
     Set<OwnedListener>
@@ -207,6 +973,7 @@ export class TerminalExtensionHost {
   private readonly activeExtensions = new Set<string>();
   private ownedDisposers: OwnedDisposer[] = [];
   private readonly cleanupTimeoutMs: number;
+  private readonly inactiveExtensionIds: Set<string>;
   private widgetRevisionValue = 0;
   private active = false;
 
@@ -216,6 +983,7 @@ export class TerminalExtensionHost {
   ) {
     this.definitions = [...definitions];
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
+    this.inactiveExtensionIds = new Set(options.initiallyInactiveExtensionIds ?? []);
     if (!Number.isSafeInteger(this.cleanupTimeoutMs) || this.cleanupTimeoutMs < 1) {
       throw new ExtensionRegistrationError("cleanupTimeoutMs must be a positive integer");
     }
@@ -228,14 +996,21 @@ export class TerminalExtensionHost {
       if (ids.has(id)) throw new ExtensionRegistrationError(`Duplicate extension id ${id}`);
       ids.add(id);
     }
+    for (const id of this.inactiveExtensionIds) {
+      if (!ids.has(id))
+        throw new ExtensionRegistrationError(`Unknown initially inactive extension ${id}`);
+    }
   }
 
   async activate(): Promise<void> {
     if (this.active) throw new ExtensionRegistrationError("Terminal extensions are already active");
     this.active = true;
     try {
-      for (const definition of this.definitions)
-        await this.activateExtension(definition.manifest.id);
+      for (const definition of this.definitions) {
+        if (!this.inactiveExtensionIds.has(definition.manifest.id)) {
+          await this.activateExtension(definition.manifest.id);
+        }
+      }
     } catch (error) {
       try {
         await this.dispose();
@@ -274,6 +1049,19 @@ export class TerminalExtensionHost {
         );
       }
       throw activationError;
+    }
+  }
+
+  async setExtensionEnabled(extensionId: string, enabled: boolean): Promise<void> {
+    if (!this.definitions.some((definition) => definition.manifest.id === extensionId)) {
+      throw new ExtensionRegistrationError(`Unknown extension ${extensionId}`);
+    }
+    if (enabled) {
+      this.inactiveExtensionIds.delete(extensionId);
+      await this.activateExtension(extensionId);
+    } else {
+      this.inactiveExtensionIds.add(extensionId);
+      await this.deactivate(extensionId);
     }
   }
 
@@ -370,6 +1158,40 @@ export class TerminalExtensionHost {
 
   toolRenderer(name: string): OwnedTerminalToolRenderer | undefined {
     return this.toolRenderersByName.get(name);
+  }
+
+  activities(): readonly OwnedTerminalActivity[] {
+    return [...this.activitiesById.values()];
+  }
+
+  createActivity(activityId: string, services: ActivityHostServices): HostedActivityInstance {
+    const activity = this.activitiesById.get(activityId);
+    if (activity === undefined) {
+      throw new ExtensionRegistrationError(`Unknown activity ${activityId}`);
+    }
+    const lifecycle = this.lifecycles.get(activity.extensionId);
+    if (!this.active || lifecycle === undefined || lifecycle.signal.aborted) {
+      throw new ExtensionRegistrationError(`Extension ${activity.extensionId} API is stale`);
+    }
+    let hosted: HostedActivity;
+    const instances = this.activityInstances.get(activityId) ?? new Set<HostedActivity>();
+    hosted = new HostedActivity(
+      activity.extensionId,
+      activity.id,
+      services,
+      activity.create,
+      this.definitions
+        .find((definition) => definition.manifest.id === activity.extensionId)
+        ?.manifest.capabilities.includes("terminal.activity-storage") ?? false,
+      activity.mouse === true,
+      () => {
+        instances.delete(hosted);
+        if (instances.size === 0) this.activityInstances.delete(activityId);
+      },
+    );
+    instances.add(hosted);
+    this.activityInstances.set(activityId, instances);
+    return hosted;
   }
 
   async emit(input: TerminalExtensionEventInput): Promise<readonly Error[]> {
@@ -501,6 +1323,47 @@ export class TerminalExtensionHost {
           if (this.toolRenderersByName.get(toolName) === owned) {
             this.toolRenderersByName.delete(toolName);
           }
+        });
+      },
+      registerActivity: (activity) => {
+        requireCapability("terminal.activities");
+        if (!EXTENSION_ID.test(activity.id)) {
+          throw new ExtensionRegistrationError(`Invalid activity id ${activity.id}`);
+        }
+        if (!activity.name.trim() || !activity.description.trim()) {
+          throw new ExtensionRegistrationError(
+            `Activity ${activity.id} requires a name and description`,
+          );
+        }
+        assertBoundedText(activity.name, "Activity name", 128);
+        assertBoundedText(activity.description, "Activity description", 1_024);
+        if (activity.category !== "game") {
+          throw new ExtensionRegistrationError(
+            `Activity ${activity.id} has an unsupported category`,
+          );
+        }
+        if (activity.mouse !== undefined && typeof activity.mouse !== "boolean") {
+          throw new ExtensionRegistrationError(`Activity ${activity.id} mouse support is invalid`);
+        }
+        if (activity.minimumViewport !== undefined) {
+          validateViewport(activity.minimumViewport);
+        }
+        if (this.activitiesById.has(activity.id)) {
+          throw new ExtensionRegistrationError(`Activity ${activity.id} is already registered`);
+        }
+        const owned = {
+          ...activity,
+          ...(activity.minimumViewport === undefined
+            ? {}
+            : { minimumViewport: Object.freeze({ ...activity.minimumViewport }) }),
+          extensionId,
+        };
+        this.activitiesById.set(activity.id, owned);
+        return own(async () => {
+          if (this.activitiesById.get(activity.id) !== owned) return;
+          this.activitiesById.delete(activity.id);
+          const instances = [...(this.activityInstances.get(activity.id) ?? [])];
+          await Promise.all(instances.map((instance) => instance.dispose()));
         });
       },
       on: (event, handler) => {

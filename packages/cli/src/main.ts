@@ -46,6 +46,7 @@ import { connectUnixClient, createUnixDaemonHost } from "@axl/sdk/unix";
 
 import { launchBrowser } from "./browser-launch.ts";
 import { inspectLegacyDaemon, type LegacyDaemonStatus, stopLegacyDaemon } from "./legacy-daemon.ts";
+import { DEFAULT_LOUNGE_SETTINGS, LoungeStorage } from "./lounge-storage.ts";
 import { createTerminalProviderLoginAdapter } from "./provider-auth-ui.ts";
 import { providerErrorMessage, runProviderCommand, usageLine } from "./provider-cli.ts";
 import { loadTuiSettings, saveTuiSettings, type TuiSettings } from "./settings.ts";
@@ -1212,6 +1213,12 @@ async function main(): Promise<void> {
     };
   };
 
+  const loungeEnabled = settings.loungeEnabled ?? true;
+  const loungeStorage = new LoungeStorage(join(axlHome, "lounge"));
+  const loungeSettings = loungeEnabled
+    ? await loungeStorage.loadSettings()
+    : DEFAULT_LOUNGE_SETTINGS;
+
   let settingsWrite: Promise<void> = Promise.resolve();
   const persistSettings = (update: Partial<Omit<TuiSettings, "version">>): Promise<void> => {
     settings = { ...settings, ...update, version: 1 };
@@ -1224,16 +1231,29 @@ async function main(): Promise<void> {
 
   const [
     { AxlApp },
+    { createLoungeExtension },
     { mcpTerminalExtension },
     { promptTemplatesExtension },
     { skillTerminalExtension },
   ] = await Promise.all([
     tuiModule ?? import("@axl/tui"),
+    import("@axl/extension-lounge/terminal"),
     import("@axl/extension-mcp"),
     import("@axl/extension-prompts"),
     import("@axl/extension-skills"),
   ]);
   timing.mark("TUI modules");
+  let previousLoungeSeed = Date.now() - 1;
+  const nextLoungeSeed = (): number => {
+    previousLoungeSeed = Math.max(Date.now(), previousLoungeSeed + 1);
+    return previousLoungeSeed;
+  };
+  const loungeExtension = createLoungeExtension({
+    utcDate: () => new Date().toISOString().slice(0, 10),
+    practiceSeed: nextLoungeSeed,
+    game2048Seed: nextLoungeSeed,
+    minesweeperSeed: nextLoungeSeed,
+  });
   const app = await AxlApp.start({
     client,
     daemonHost: createUnixDaemonHost(socketPath),
@@ -1262,8 +1282,20 @@ async function main(): Promise<void> {
     diffLayout: settings.diffLayout ?? "unified",
     workspaceReview: settings.workspaceReview ?? false,
     imageDisplay: settings.imageDisplay ?? "auto",
+    loungeEnabled,
+    loungeExtensionIds: [loungeExtension.manifest.id],
+    ...(loungeSettings.lastActivityId === undefined
+      ? {}
+      : { loungeLastActivityId: loungeSettings.lastActivityId }),
+    loungeReducedMotion: loungeSettings.reducedMotion,
+    loungeTextOnly: loungeSettings.textOnly,
+    activityStorage: loungeStorage,
+    loadLoungePreferences: () => loungeStorage.loadSettings(),
+    onLoungePreferenceChange: (update) =>
+      loungeStorage.updateSettings(update).then(() => undefined),
     globalThemeDirectory: join(axlHome, "themes"),
     extensions: [
+      loungeExtension,
       mcpTerminalExtension,
       promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),
       skillTerminalExtension,
