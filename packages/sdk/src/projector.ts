@@ -4,6 +4,7 @@
 
 import type {
   CanonicalEvent,
+  ContextResource,
   EventId,
   EventPayloadMap,
   JsonObject,
@@ -121,6 +122,7 @@ export interface ConversationState {
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
   readonly userQuestions?: boolean;
+  readonly contextResources: readonly ContextResource[];
   readonly sandbox?: { readonly provider: string; readonly enforced: boolean };
   readonly usage: UsageTotals;
   readonly activity?: ProjectedActivity;
@@ -232,6 +234,7 @@ export class ConversationProjector {
   private webFetch: boolean | undefined;
   private webSearch: boolean | undefined;
   private userQuestions: boolean | undefined;
+  private contextResources: readonly ContextResource[] = [];
   private sandbox: ConversationState["sandbox"];
   private usage: UsageTotals = EMPTY_USAGE;
   private activity: ProjectedActivity | undefined;
@@ -289,6 +292,7 @@ export class ConversationProjector {
       ...(this.webFetch === undefined ? {} : { webFetch: this.webFetch }),
       ...(this.webSearch === undefined ? {} : { webSearch: this.webSearch }),
       ...(this.userQuestions === undefined ? {} : { userQuestions: this.userQuestions }),
+      contextResources: this.contextResources,
       ...(this.sandbox === undefined ? {} : { sandbox: this.sandbox }),
       usage: this.usage,
       ...(this.activity === undefined ? {} : { activity: this.activity }),
@@ -331,6 +335,8 @@ export class ConversationProjector {
     this.profile = undefined;
     this.webFetch = undefined;
     this.webSearch = undefined;
+    this.userQuestions = undefined;
+    this.contextResources = [];
     this.sandbox = undefined;
     this.usage = EMPTY_USAGE;
     this.activity = undefined;
@@ -537,6 +543,9 @@ export class ConversationProjector {
         this.webFetch = event.payload.webFetch;
         this.webSearch = event.payload.webSearch;
         this.userQuestions = event.payload.userQuestions ?? false;
+        break;
+      case "context.resources":
+        this.contextResources = event.payload.resources;
         break;
       case "sandbox.configured":
         this.sandbox = { provider: event.payload.provider, enforced: event.payload.enforced };

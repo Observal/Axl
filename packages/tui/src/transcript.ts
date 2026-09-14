@@ -295,6 +295,7 @@ export class SessionView {
       case "config.entitlement":
       case "config.profile":
       case "config.tools":
+      case "context.resources":
       case "prompt.section":
       case "tool.schema":
       case "context.extension":

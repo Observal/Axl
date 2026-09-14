@@ -311,13 +311,24 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     providerManagement,
-    runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
+    runtime: async ({
+      sessionId,
+      cwd,
+      boundary,
+      selection,
+      contextResources,
+      interact,
+      readBlob,
+    }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";
-      const instructions = await kernel.loadAgentsInstructions({
-        cwd,
-        globalPath: join(axlHome, "AGENTS.md"),
-      });
+      const resources =
+        contextResources ??
+        (await kernel.loadAgentsResources({
+          cwd,
+          globalPath: join(axlHome, "AGENTS.md"),
+        }));
+      const instructions = kernel.agentsInstructionsFromResources(resources);
       const active = {
         providerId: selection.providerId ?? defaults.providerId ?? "azure-openai-responses",
         modelId: selection.modelId ?? defaults.modelId,
@@ -399,6 +410,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         model,
         tools,
         prompt,
+        contextResources: resources,
         compaction,
         modelContextWindow: modelInfo.contextWindow,
         log: {

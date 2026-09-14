@@ -65,6 +65,13 @@ export type RestoredQueueItem = {
   readonly source: "queue" | "steer" | "follow_up";
 };
 
+export type ContextResource = {
+  readonly kind: "agents";
+  readonly scope: "global" | "project";
+  readonly path: string;
+  readonly content: string;
+};
+
 export type Usage = {
   readonly inputTokens: number;
   readonly outputTokens: number;
@@ -152,6 +159,7 @@ export type EventPayloadMap = {
     readonly reason: DialectBoundaryReason;
   };
   "prompt.section": { readonly name: string; readonly source: string; readonly content: string };
+  "context.resources": { readonly resources: readonly ContextResource[] };
   "tool.schema": {
     readonly name: string;
     readonly description: string;
@@ -576,6 +584,19 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.name, `${path}.name`);
     string(payload.source, `${path}.source`);
     string(payload.content, `${path}.content`, true);
+    return payload;
+  },
+  "context.resources": (payload, path) => {
+    exact(payload, path, ["resources"]);
+    for (const [index, value] of array(payload.resources, `${path}.resources`).entries()) {
+      const resourcePath = `${path}.resources[${index}]`;
+      const resource = object(value, resourcePath);
+      exact(resource, resourcePath, ["kind", "scope", "path", "content"]);
+      choice(resource.kind, `${resourcePath}.kind`, ["agents"]);
+      choice(resource.scope, `${resourcePath}.scope`, ["global", "project"]);
+      string(resource.path, `${resourcePath}.path`);
+      string(resource.content, `${resourcePath}.content`, true);
+    }
     return payload;
   },
   "tool.schema": (payload, path) => {

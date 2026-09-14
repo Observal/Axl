@@ -311,6 +311,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     case "config.entitlement":
     case "config.profile":
     case "config.tools":
+    case "context.resources":
     case "prompt.section":
     case "tool.schema":
     case "context.extension":

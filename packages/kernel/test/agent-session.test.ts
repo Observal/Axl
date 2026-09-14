@@ -148,8 +148,9 @@ test("runs a plain turn and persists the canonical events", async (context) => {
 
   const reread = await session.log.read();
   const tree = SessionTree.fromEvents(sessionId, reread.events);
-  assert.equal(tree.size, 3); // session.created + 2
+  assert.equal(tree.size, 4); // session.created + context.resources + turn events
   assert.equal(reread.events[0]?.type, "session.created");
+  assert.equal(reread.events[1]?.type, "context.resources");
   await session.dispose();
 });
 

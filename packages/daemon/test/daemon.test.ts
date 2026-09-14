@@ -32,6 +32,7 @@ import {
   JsonlEventLog,
   type ModelPort,
   type ModelRetryOptions,
+  buildStablePrompt,
   ToolRegistry,
 } from "@axl/kernel";
 import type {
@@ -1161,7 +1162,7 @@ test("creates a session, streams the live tail, and answers sends", async (conte
   const pushed: WireEvent[] = [];
   client.onEvent((event) => pushed.push(event));
   const { events: snapshot } = await subscribeAll(client, created.sessionId);
-  assert.deepEqual(types(snapshot), ["session.created"]);
+  assert.deepEqual(types(snapshot), ["session.created", "context.resources"]);
 
   const sent = (await client.request("session.send", {
     sessionId: created.sessionId,
@@ -1385,7 +1386,12 @@ test("events appended between resume and subscribe enter the frozen snapshot", a
   });
 
   const { events } = await subscribeAll(attaching, created.sessionId);
-  assert.deepEqual(types(events), ["session.created", "user.message", "assistant.message"]);
+  assert.deepEqual(types(events), [
+    "session.created",
+    "context.resources",
+    "user.message",
+    "assistant.message",
+  ]);
 });
 
 test("streams transient deltas and resumes the latest accumulated activity", async (context) => {
@@ -1489,7 +1495,7 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
     content: [{ type: "blob", blob }],
   });
   await waitFor(
-    () => observerSubscription.projector.state.records.length === 3,
+    () => observerSubscription.projector.state.records.length === 4,
     "attachment projection in second client",
   );
   assert.deepEqual(
@@ -1678,7 +1684,12 @@ test("a session survives daemon termination and resumes with full history", asyn
   });
   assert.equal(resumed.sessionId, created.sessionId);
   const { events: paged } = await subscribeAll(reconnected, created.sessionId);
-  assert.deepEqual(types(paged), ["session.created", "user.message", "assistant.message"]);
+  assert.deepEqual(types(paged), [
+    "session.created",
+    "context.resources",
+    "user.message",
+    "assistant.message",
+  ]);
 
   const sent = (await reconnected.request("session.send", {
     sessionId: created.sessionId,
@@ -3644,6 +3655,7 @@ test("selected-node subscriptions remain bound to the selected lineage", async (
   assert.ok(descriptor);
   assert.deepEqual(types(descriptor.page.events), [
     "session.created",
+    "context.resources",
     "user.message",
     "assistant.message",
   ]);
@@ -3732,7 +3744,7 @@ test("SDK automatically recovers a canonical sequence gap from the daemon", asyn
   assert.match(recoveries[0]?.message ?? "", /out of order/);
   assert.deepEqual(
     subscription.projector.state.records.map((record) => record.event.type),
-    ["session.created", "user.message", "assistant.message"],
+    ["session.created", "context.resources", "user.message", "assistant.message"],
   );
 });
 
@@ -3831,7 +3843,7 @@ test("SDK replaces an expired reconnect cursor with an authoritative snapshot", 
     delivery: "prompt",
     content: [{ type: "text", text: "authoritative replacement" }],
   });
-  await waitFor(() => subscription.projector.state.records.length === 3, "initial live delivery");
+  await waitFor(() => subscription.projector.state.records.length === 4, "initial live delivery");
   const expected = subscription.projector.state;
 
   expireNextResume = true;
@@ -3897,8 +3909,8 @@ test("TUI-style and SDK attachments observe identical canonical state", async (c
   });
   await waitFor(
     () =>
-      tuiSubscription.projector.state.records.length === 3 &&
-      sdkSubscription.projector.state.records.length === 3,
+      tuiSubscription.projector.state.records.length === 4 &&
+      sdkSubscription.projector.state.records.length === 4,
     "both attachment projections",
   );
 
@@ -4563,7 +4575,7 @@ test("configuration changes rebuild and log the selected model and thinking", as
   assert.equal(changed.profile, "standard");
   assert.equal(changed.webFetch, false);
   assert.equal(changed.webSearch, false);
-  assert.equal(changed.boundaryEventIds.length, 4);
+  assert.equal(changed.boundaryEventIds.length, 5);
 
   client.close();
   await daemon.stop();
@@ -4620,14 +4632,33 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "axl.sock");
   const boundaries: string[] = [];
+  let resourceGeneration = 0;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
-    runtime: ({ boundary }) => {
+    runtime: ({ boundary, contextResources }) => {
       boundaries.push(boundary);
+      const resources = contextResources ?? [
+        {
+          kind: "agents" as const,
+          scope: "project" as const,
+          path: join(directory, "AGENTS.md"),
+          content: `Rules ${++resourceGeneration}`,
+        },
+      ];
       return {
         model: replyPort(),
         tools: new ToolRegistry(),
+        contextResources: resources,
+        prompt: buildStablePrompt({
+          cwd: directory,
+          tools: [],
+          instructions: resources.map((resource, index) => ({
+            name: `agents-${index}`,
+            source: resource.path,
+            content: resource.content,
+          })),
+        }),
         ...(boundary === "config_change"
           ? {}
           : {
@@ -4661,6 +4692,22 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
     (event) => event.type === "config.dialect" && reloaded.boundaryEventIds.includes(event.id),
   );
   assert.equal(dialect?.type === "config.dialect" && dialect.payload.reason, "reload");
+  const resources = pushed.find(
+    (event) => event.type === "context.resources" && reloaded.boundaryEventIds.includes(event.id),
+  );
+  assert.equal(
+    resources?.type === "context.resources" && resources.payload.resources[0]?.content,
+    "Rules 2",
+  );
+  assert.equal(
+    pushed
+      .filter((event) => event.type === "prompt.section")
+      .some(
+        (event) =>
+          reloaded.boundaryEventIds.includes(event.id) && event.payload.content.includes("Rules 2"),
+      ),
+    true,
+  );
   assert.equal(
     pushed
       .filter((event) => reloaded.boundaryEventIds.includes(event.id))
@@ -4671,27 +4718,33 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   client.close();
   await daemon.stop();
   await removeCommandCompletions(join(directory, "data"), new Set([reloadKey]));
+  const restartedResources: string[] = [];
   const restarted = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
-    runtime: ({ boundary }) => ({
-      model: replyPort(),
-      tools: new ToolRegistry(),
-      ...(boundary === "config_change"
-        ? {}
-        : {
-            configDialect: {
-              dialectId: "generic" as const,
-              rosterFingerprint: "f".repeat(64),
-              reason: boundary,
-            },
-          }),
-    }),
+    runtime: ({ boundary, contextResources }) => {
+      restartedResources.push(contextResources?.[0]?.content ?? "rediscovered");
+      return {
+        model: replyPort(),
+        tools: new ToolRegistry(),
+        contextResources: contextResources ?? [],
+        ...(boundary === "config_change"
+          ? {}
+          : {
+              configDialect: {
+                dialectId: "generic" as const,
+                rosterFingerprint: "f".repeat(64),
+                reason: boundary,
+              },
+            }),
+      };
+    },
   });
   await restarted.start();
   context.after(() => restarted.stop());
   const recoveredClient = await connectUnixClient(socketPath);
   context.after(() => recoveredClient.close());
+  assert.deepEqual(restartedResources, ["Rules 2"]);
   assert.deepEqual(
     await recoveredClient.request(
       "session.reload",

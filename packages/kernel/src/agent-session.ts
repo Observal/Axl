@@ -183,6 +183,8 @@ export interface AgentSessionOptions {
    */
   readonly prompt?: StablePrompt;
   readonly system?: string;
+  readonly contextResources?: EventPayloadMap["context.resources"]["resources"];
+  readonly recordPromptSnapshot?: boolean;
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
   readonly retry?: ModelRetryOptions | false;
@@ -360,11 +362,18 @@ export class AgentSession {
         isError: true,
       });
     }
-    if (opened.events.length === 0) {
+    const fresh = opened.events.length === 0;
+    if (fresh) {
       await session.append(options.creationOperationId, "session.created", { cwd: options.cwd });
-      // The stable prompt freezes at session start; its sections are logged once.
+    }
+    const hasResourceSnapshot = opened.events.some((event) => event.type === "context.resources");
+    if (fresh || options.recordPromptSnapshot === true || !hasResourceSnapshot) {
+      await session.append(options.boundaryOperationId, "context.resources", {
+        resources: options.contextResources ?? [],
+      });
+      // Prompt sections are a canonical snapshot at every explicit runtime boundary.
       for (const section of options.prompt?.sections ?? []) {
-        await session.append(undefined, "prompt.section", section);
+        await session.append(options.boundaryOperationId, "prompt.section", section);
       }
     }
     // Tool schemas are model-visible configuration, so every runtime boundary

@@ -96,6 +96,7 @@ export interface SessionRuntime {
   readonly tools: ToolRegistry;
   readonly prompt?: StablePrompt;
   readonly system?: string;
+  readonly contextResources?: EventPayloadMap["context.resources"]["resources"];
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
   readonly compaction?: Partial<CompactionSettings>;
@@ -136,6 +137,8 @@ export type SessionRuntimeFactory = (input: {
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
   readonly selection: SessionConfiguration;
+  /** Canonical resources to reuse. Undefined only for first load and explicit reload. */
+  readonly contextResources?: EventPayloadMap["context.resources"]["resources"];
   readonly interact: (
     request: SessionInteractionRequest,
     signal?: AbortSignal,
@@ -492,11 +495,15 @@ export class SessionManager {
     boundaryOperationId?: OperationId,
     creationOperationId?: OperationId,
   ): Promise<AgentSession> {
+    const previousResources = events.findLast((event) => event.type === "context.resources");
     const runtime = await this.options.runtime({
       sessionId,
       cwd,
       boundary,
       selection,
+      ...(boundary === "reload" || previousResources?.type !== "context.resources"
+        ? {}
+        : { contextResources: previousResources.payload.resources }),
       interact: (request, signal) => this.interact(sessionId, request, signal),
       readBlob: (reference) => this.blobs.readAll(sessionId, reference),
     });
@@ -506,6 +513,10 @@ export class SessionManager {
       cwd,
       ...(runtime.prompt === undefined ? {} : { prompt: runtime.prompt }),
       ...(runtime.system === undefined ? {} : { system: runtime.system }),
+      ...(runtime.contextResources === undefined
+        ? {}
+        : { contextResources: runtime.contextResources }),
+      recordPromptSnapshot: boundary !== "session_start",
       log: {
         ...(runtime.log?.secretValues === undefined
           ? {}
@@ -566,8 +577,9 @@ export class SessionManager {
     cwd: string,
     selection: SessionConfiguration,
     creationOperationId?: OperationId,
+    persistedEvents: readonly CanonicalEvent[] = [],
   ): Promise<ManagedSession> {
-    const events: CanonicalEvent[] = [];
+    const events: CanonicalEvent[] = [...persistedEvents];
     const listeners = new Set<(event: CanonicalEvent) => void>();
     const activityListeners = new Set<(frame: SessionActivityFrame) => void>();
     const activityState = {
@@ -1231,7 +1243,13 @@ export class SessionManager {
             `Reserved session ${sessionId} has conflicting history`,
           );
         }
-        const managed = await this.open(sessionId, source.cwd, source.selection);
+        const managed = await this.open(
+          sessionId,
+          source.cwd,
+          source.selection,
+          undefined,
+          existing.events,
+        );
         return {
           sessionId,
           events: [...managed.events],
@@ -1322,7 +1340,7 @@ export class SessionManager {
           await directory.close();
         }
       }
-      const managed = await this.open(sessionId, source.cwd, source.selection);
+      const managed = await this.open(sessionId, source.cwd, source.selection, undefined, copied);
       return {
         sessionId,
         events: [...managed.events],
@@ -1370,18 +1388,24 @@ export class SessionManager {
         userQuestions = event.payload.userQuestions;
       }
     }
-    return this.open(sessionId, created.payload.cwd, {
-      // Event-format v1 sessions created before provider selection was logged
-      // always used Azure OpenAI Responses.
-      providerId: providerId ?? "azure-openai-responses",
-      ...(requestSettings === undefined ? {} : { requestSettings }),
-      ...(modelId === undefined ? {} : { modelId }),
-      ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
-      ...(webFetch === undefined ? {} : { webFetch }),
-      ...(webSearch === undefined ? {} : { webSearch }),
-      ...(userQuestions === undefined ? {} : { userQuestions }),
-      profile: profile ?? "standard",
-    });
+    return this.open(
+      sessionId,
+      created.payload.cwd,
+      {
+        // Event-format v1 sessions created before provider selection was logged
+        // always used Azure OpenAI Responses.
+        providerId: providerId ?? "azure-openai-responses",
+        ...(requestSettings === undefined ? {} : { requestSettings }),
+        ...(modelId === undefined ? {} : { modelId }),
+        ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+        ...(webFetch === undefined ? {} : { webFetch }),
+        ...(webSearch === undefined ? {} : { webSearch }),
+        ...(userQuestions === undefined ? {} : { userQuestions }),
+        profile: profile ?? "standard",
+      },
+      undefined,
+      events,
+    );
   }
 
   async reload(

@@ -41,6 +41,12 @@ Axl is not yet a hosted service, remote collaboration product, browser applicati
 | Isolation | Bubblewrap, Landlock, seccomp, and rlimits on Linux; Seatbelt on macOS; optional rootless Podman or Docker execution |
 | Safety | Path canonicalization, symlink-escape rejection, secret redaction, bounded protocol messages, and fail-closed sandbox selection |
 
+## Project instructions
+
+Axl loads `AGENTS.md` files from the nearest Git repository root through the session working directory, with broader instructions first and nearer instructions last. Outside a Git repository, only the working directory is considered. `AGENTS.override.md` replaces `AGENTS.md` in the same directory. Global instructions come from `~/.axl/AGENTS.md` and support the same override filename.
+
+Loaded paths and exact model-visible content are recorded in the canonical session log and projected through the SDK. A resumed session keeps its recorded instruction snapshot. Run `/reload` to discover file changes and record a new context boundary. Symlinks that escape the applicable project or global root are rejected.
+
 ## Prompt templates
 
 Put reusable Markdown prompts in `~/.axl/prompts/` or `.axl/prompts/`. Project templates override global templates with the same filename. Run `/prompt` to browse them or `/prompt <name> [arguments]` to expand one into the editor for review before sending. Templates reload with `/reload`.

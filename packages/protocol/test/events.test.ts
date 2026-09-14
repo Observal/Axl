@@ -112,6 +112,16 @@ const validPayloads = {
     reason: "model_switch",
   },
   "prompt.section": { name: "identity", source: "core", content: "You are Axl." },
+  "context.resources": {
+    resources: [
+      {
+        kind: "agents",
+        scope: "project",
+        path: "/workspace/AGENTS.md",
+        content: "Use pnpm.",
+      },
+    ],
+  },
   "tool.schema": {
     name: "read",
     description: "Read a file",

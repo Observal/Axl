@@ -44,6 +44,7 @@ export const EVENT_PRESENTATION_SURFACES = Object.freeze({
   "config.tools": "state",
   "config.dialect": "status",
   "prompt.section": "internal",
+  "context.resources": "state",
   "tool.schema": "internal",
   "context.injected": "transcript",
   "context.extension": "internal",

@@ -14,6 +14,7 @@ const conversation: ConversationState = {
   uncertainShellOperations: [],
   queue: [],
   interruptDeliveries: [],
+  contextResources: [],
   usage: {
     inputTokens: 0,
     outputTokens: 0,

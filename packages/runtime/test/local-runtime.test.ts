@@ -14,7 +14,7 @@ import test from "node:test";
 import { FileCredentialStore, getStaticModelCatalog } from "@axl/ai";
 import { AxlDaemon } from "@axl/daemon";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
-import type { ModelStreamEvent } from "@axl/protocol";
+import type { CanonicalEvent, ModelStreamEvent } from "@axl/protocol";
 import { AxlClientError } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
 
@@ -393,6 +393,30 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.match(prompt, /<project_instructions path=.*AGENTS\.md/);
   assert.match(prompt, /Use the repository instructions\./);
   assert.doesNotMatch(prompt, /Must not enter the stable prompt|<available_skills>/);
+  assert.deepEqual(events.find((event) => event.type === "context.resources")?.payload, {
+    resources: [
+      {
+        kind: "agents",
+        scope: "project",
+        path: join(workspace, "AGENTS.md"),
+        content: "Use the repository instructions.",
+      },
+    ],
+  });
+
+  const pushed: CanonicalEvent[] = [];
+  client.onEvent((message) => pushed.push(message.event));
+  await writeFile(join(workspace, "AGENTS.override.md"), "Use the reloaded override.\n");
+  const reloaded = await client.request("session.reload", { sessionId: opened.sessionId });
+  const reloadedResources = pushed.find(
+    (event) => event.type === "context.resources" && reloaded.boundaryEventIds.includes(event.id),
+  );
+  assert.deepEqual(
+    reloadedResources?.type === "context.resources"
+      ? reloadedResources.payload.resources.map(({ path, content }) => [path, content])
+      : undefined,
+    [[join(workspace, "AGENTS.override.md"), "Use the reloaded override."]],
+  );
 
   assert.deepEqual(events.find((event) => event.type === "config.request")?.payload, {
     maxOutputTokens: null,
