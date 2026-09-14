@@ -248,6 +248,51 @@ test("admits with a bounded first binary message and tracks route replacement", 
   connection.close();
 });
 
+test("startup retries a durable sending record with byte-identical ciphertext", async () => {
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory);
+  const store = new MemoryOutboxStore();
+  const opaqueEnvelope = Uint8Array.of(0, 1, 2, 255);
+  store.records.set(requestId, {
+    requestId,
+    idempotencyKey,
+    destinationCryptoSessionId: cryptoSessionId,
+    opaqueEnvelope,
+    createdAt: 1_900_000_000_000,
+    state: "sending",
+  });
+  let attempt = 0;
+  const attemptIds = {
+    create() {
+      attempt += 1;
+      return parseTransportAttemptId(
+        `88888888-8888-4888-8888-${attempt.toString().padStart(12, "0")}`,
+      );
+    },
+  };
+  const outbox = new OpaqueOutbox(store, attemptIds, connection);
+  const delivery = new RemoteHostedDelivery({
+    connection,
+    outbox,
+    expectedDaemonId: daemonId,
+    attemptIds,
+    opener: {
+      async open(ciphertext) {
+        return { authenticatedPeerId: daemonId, plaintext: ciphertext };
+      },
+    },
+  });
+
+  await delivery.start();
+
+  const retried = parseRelayBinaryFrame(socket.sent.at(-1) ?? new Uint8Array());
+  assert.ok("destinationRouteId" in retried);
+  assert.equal(retried.destinationRouteId, firstDaemonRoute);
+  assert.deepEqual(retried.opaquePayload, opaqueEnvelope);
+  assert.equal((await outbox.list())[0]?.state, "sending");
+  delivery.close();
+});
+
 test("reconnect resolves a new route and retries byte-identical prepared ciphertext", async () => {
   const factory = new FakeSocketFactory();
   const { connection, socket: firstSocket } = await connect(factory);
