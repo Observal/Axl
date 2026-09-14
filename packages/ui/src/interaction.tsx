@@ -2,7 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { useState } from "react";
-import type { InteractionAction, JsonObject, JsonValue, ProjectedInteraction } from "@axl/sdk";
+import type {
+  InteractionAction,
+  JsonObject,
+  JsonValue,
+  ProjectedInteraction,
+  UserQuestion,
+  UserQuestionAnswer,
+} from "@axl/sdk";
+import { Markdown } from "./markdown.tsx";
 
 export type InteractionResponder = (
   interactionId: string,
@@ -136,6 +144,134 @@ function InteractionForm({ interaction, respond }: { readonly interaction: Proje
   </section>;
 }
 
+function UserQuestionnaire({ interaction, respond }: { readonly interaction: ProjectedInteraction; readonly respond: InteractionResponder }): React.JSX.Element {
+  const questions = Array.isArray(interaction.request.payload.data?.questions)
+    ? interaction.request.payload.data.questions as unknown as readonly UserQuestion[]
+    : [];
+  const [answers, setAnswers] = useState<readonly UserQuestionAnswer[]>(() =>
+    questions.map((_, questionIndex) => ({ questionIndex, selectedLabels: [] })),
+  );
+  const [step, setStep] = useState(0);
+  const [reviewing, setReviewing] = useState(false);
+  const [custom, setCustom] = useState(false);
+  const [preview, setPreview] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [submitting, setSubmitting] = useState(false);
+  const question = questions[step];
+  const answer = answers[step] ?? { questionIndex: step, selectedLabels: [] };
+  const update = (next: UserQuestionAnswer): void => {
+    setAnswers((current) => current.map((item, index) => index === step ? next : item));
+  };
+  const advance = (): void => {
+    setCustom(false);
+    setPreview(undefined);
+    if (step === questions.length - 1) setReviewing(true);
+    else setStep((current) => current + 1);
+  };
+  const submit = async (action: "accept" | "cancel"): Promise<void> => {
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      await respond(interaction.interactionId, action, action === "accept" ? { answers } : undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not submit answers");
+      setSubmitting(false);
+    }
+  };
+  if (question === undefined) {
+    return <div className="notice system-notice warning"><strong>Questionnaire unavailable</strong><small>No questions were provided.</small></div>;
+  }
+  if (reviewing) {
+    return <section className="interaction-card questionnaire" aria-label="Review answers">
+      <header><strong>Review answers</strong><small>{questions.length}/{questions.length}</small></header>
+      <div className="question-review">
+        {questions.map((item, index) => {
+          const itemAnswer = answers[index];
+          return <button type="button" key={item.question} onClick={() => { setStep(index); setReviewing(false); }}>
+            <span><strong>{item.question}</strong><small>{[...(itemAnswer?.selectedLabels ?? []), itemAnswer?.customAnswer].filter(Boolean).join(", ")}</small></span>
+            <span>Edit</span>
+          </button>;
+        })}
+      </div>
+      {error && <div className="interaction-error" role="alert">{error}</div>}
+      <footer><button type="button" disabled={submitting} onClick={() => void submit("cancel")}>Cancel</button><button className="primary" type="button" disabled={submitting} onClick={() => void submit("accept")}>{submitting ? "Submitting…" : "Submit"}</button></footer>
+    </section>;
+  }
+  const hasAnswer = answer.selectedLabels.length > 0 || (answer.customAnswer?.trim().length ?? 0) > 0;
+  return <section className="interaction-card questionnaire" aria-label="Questions from Axl">
+    <header><strong>{question.question}</strong><small>{step + 1}/{questions.length}</small></header>
+    <div className={`question-stage${preview === undefined ? "" : " has-preview"}`}>
+      <div className="question-options" role="group" aria-label={question.header}>
+        {question.options.map((option, optionIndex) => {
+          const selected = answer.selectedLabels.includes(option.label);
+          return <button
+            className={selected ? "selected" : undefined}
+            type="button"
+            key={option.label}
+            aria-pressed={selected}
+            onFocus={() => setPreview(option.preview)}
+            onMouseEnter={() => setPreview(option.preview)}
+            onClick={() => {
+              const selectedLabels = question.multiSelect === true
+                ? selected
+                  ? answer.selectedLabels.filter((label) => label !== option.label)
+                  : [...answer.selectedLabels, option.label]
+                : [option.label];
+              setCustom(false);
+              update({
+                questionIndex: step,
+                selectedLabels,
+                ...(question.multiSelect === true && answer.customAnswer !== undefined
+                  ? { customAnswer: answer.customAnswer }
+                  : {}),
+              });
+              if (question.multiSelect !== true) advance();
+            }}
+          >
+            <span><strong>{option.label}</strong><small>{option.description}</small></span>
+            <kbd>{optionIndex + 1}</kbd>
+          </button>;
+        })}
+        <button
+          className={custom ? "selected" : undefined}
+          type="button"
+          aria-pressed={custom}
+          onFocus={() => setPreview(undefined)}
+          onMouseEnter={() => setPreview(undefined)}
+          onClick={() => {
+            setCustom(true);
+            update({
+              questionIndex: step,
+              selectedLabels: question.multiSelect === true ? answer.selectedLabels : [],
+              customAnswer: answer.customAnswer ?? "",
+            });
+          }}
+        >
+          <span><strong>Type something else…</strong><small>Provide an answer not listed above</small></span>
+          <kbd>{question.options.length + 1}</kbd>
+        </button>
+        {custom && <div className="question-custom"><input
+          type="text"
+          aria-label={`Custom answer for ${question.question}`}
+          autoFocus
+          maxLength={4000}
+          value={answer.customAnswer ?? ""}
+          onChange={(event) => update({ ...answer, customAnswer: event.target.value })}
+        /></div>}
+      </div>
+      {preview && <div className="question-preview"><Markdown text={preview} /></div>}
+    </div>
+    {error && <div className="interaction-error" role="alert">{error}</div>}
+    <footer>
+      <button type="button" disabled={submitting} onClick={() => void submit("cancel")}>Cancel</button>
+      <span>
+        {step > 0 && <button type="button" onClick={() => { setStep((current) => current - 1); setCustom(false); setPreview(undefined); }}>Back</button>}
+        {(question.multiSelect === true || custom) && <button className="primary" type="button" disabled={!hasAnswer || submitting} onClick={advance}>{step === questions.length - 1 ? "Review" : "Continue"}</button>}
+      </span>
+    </footer>
+  </section>;
+}
+
 function InteractionApproval({ interaction, respond, error: initialError }: { readonly interaction: ProjectedInteraction; readonly respond: InteractionResponder; readonly error?: string | undefined }): React.JSX.Element {
   const [error, setError] = useState(initialError);
   const [submitting, setSubmitting] = useState(false);
@@ -167,6 +303,9 @@ export function InteractionCard({ interaction, respond }: { readonly interaction
   const resolution = interaction.resolution;
   if (resolution !== undefined) return <div className="notice system-notice"><strong>Interaction {resolution.payload.action}</strong><small>{interaction.request.payload.source} · {interaction.request.payload.message}</small></div>;
   if (respond === undefined) return <div className="notice system-notice warning" role="status"><strong>Interaction required</strong><small>{interaction.request.payload.source} · {interaction.request.payload.message}</small></div>;
+  if (interaction.request.payload.kind === "user_question") {
+    return <UserQuestionnaire interaction={interaction} respond={respond} />;
+  }
   return interaction.request.payload.kind === "mcp_elicitation_form"
     ? <InteractionForm interaction={interaction} respond={respond} />
     : <InteractionApproval interaction={interaction} respond={respond} />;

@@ -1041,6 +1041,7 @@ export class AxlDaemon {
           thinkingLevel,
           webFetch,
           webSearch,
+          userQuestions,
           profile,
           requestSettings,
         } = request.params;
@@ -1054,6 +1055,7 @@ export class AxlDaemon {
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             ...(webFetch === undefined ? {} : { webFetch }),
             ...(webSearch === undefined ? {} : { webSearch }),
+            ...(userQuestions === undefined ? {} : { userQuestions }),
             profile: profile ?? "standard",
           },
           reservation,
@@ -1192,6 +1194,7 @@ export class AxlDaemon {
           thinkingLevel,
           webFetch,
           webSearch,
+          userQuestions,
           profile,
           requestSettings,
         } = request.params;
@@ -1204,6 +1207,7 @@ export class AxlDaemon {
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             ...(webFetch === undefined ? {} : { webFetch }),
             ...(webSearch === undefined ? {} : { webSearch }),
+            ...(userQuestions === undefined ? {} : { userQuestions }),
             ...(profile === undefined ? {} : { profile }),
           },
           this.mutationOperationId(acceptance),

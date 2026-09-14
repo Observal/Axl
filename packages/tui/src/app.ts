@@ -33,7 +33,12 @@ import type {
   SessionSummary,
   ThinkingLevel,
 } from "@axl/protocol";
-import { parseEventId, parseOperationId, parseSessionId } from "@axl/protocol";
+import {
+  parseEventId,
+  parseOperationId,
+  parseSessionId,
+  parseUserQuestionRequest,
+} from "@axl/protocol";
 import {
   type AxlClient,
   AxlClientError,
@@ -91,6 +96,7 @@ import {
 import { type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
+import { QuestionnaireOverlay } from "./questionnaire.ts";
 import {
   AUTOWRAP_OFF,
   AUTOWRAP_ON,
@@ -1019,6 +1025,7 @@ export class AxlApp {
             ...(options.profile === undefined ? {} : { profile: options.profile }),
             ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
             ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+            userQuestions: true,
           })
         : await resumeSessionMetadata(options.client, options.sessionId);
     const cwd = opened?.cwd ?? options.cwd;
@@ -4375,7 +4382,8 @@ export class AxlApp {
     const request = this.interactionQueue.shift() as EventPayloadMap["interaction.requested"];
     this.activeInteractionId = request.interactionId;
     this.interactionError = undefined;
-    if (request.kind === "mcp_elicitation_form") this.openInteractionForm(request);
+    if (request.kind === "user_question") this.openUserQuestions(request);
+    else if (request.kind === "mcp_elicitation_form") this.openInteractionForm(request);
     else this.openInteractionApproval(request);
   }
 
@@ -4447,6 +4455,37 @@ export class AxlApp {
       },
     };
     this.overlays.replace(modal);
+  }
+
+  private openUserQuestions(
+    request: EventPayloadMap["interaction.requested"],
+    respond: (
+      interactionId: string,
+      action: "accept" | "decline" | "cancel",
+      content?: JsonObject,
+    ) => Promise<boolean> = (interactionId, action, content) =>
+      this.respondToInteraction(interactionId, action, content),
+  ): void {
+    const questions = Array.isArray(request.data?.questions)
+      ? parseUserQuestionRequest({ questions: request.data.questions }).questions
+      : [];
+    const dialog = new QuestionnaireOverlay({
+      questions,
+      palette: () => this.view.palette,
+      refresh: () => this.redraw(),
+      submit: async (answers) => {
+        if (!(await respond(request.interactionId, "accept", { answers }))) {
+          throw new Error(this.interactionError ?? "Could not submit answers");
+        }
+      },
+      cancel: async () => {
+        if (!(await respond(request.interactionId, "cancel"))) {
+          throw new Error(this.interactionError ?? "Could not cancel questionnaire");
+        }
+      },
+    });
+    this.overlays.replace(dialog);
+    this.redraw();
   }
 
   private openInteractionForm(request: EventPayloadMap["interaction.requested"]): void {

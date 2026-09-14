@@ -57,6 +57,7 @@ test("requires a workspace for Code and submits staged choices atomically", asyn
     {
       cwd: "/code",
       profile: "standard",
+      userQuestions: true,
       thinkingLevel: "high",
       webFetch: false,
       webSearch: true,

@@ -113,6 +113,7 @@ export interface ConversationState {
   readonly profile?: SessionProfile;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly userQuestions?: boolean;
   readonly sandbox?: { readonly provider: string; readonly enforced: boolean };
   readonly usage: UsageTotals;
   readonly activity?: ProjectedActivity;
@@ -222,6 +223,7 @@ export class ConversationProjector {
   private profile: SessionProfile | undefined;
   private webFetch: boolean | undefined;
   private webSearch: boolean | undefined;
+  private userQuestions: boolean | undefined;
   private sandbox: ConversationState["sandbox"];
   private usage: UsageTotals = EMPTY_USAGE;
   private activity: ProjectedActivity | undefined;
@@ -275,6 +277,7 @@ export class ConversationProjector {
       ...(this.profile === undefined ? {} : { profile: this.profile }),
       ...(this.webFetch === undefined ? {} : { webFetch: this.webFetch }),
       ...(this.webSearch === undefined ? {} : { webSearch: this.webSearch }),
+      ...(this.userQuestions === undefined ? {} : { userQuestions: this.userQuestions }),
       ...(this.sandbox === undefined ? {} : { sandbox: this.sandbox }),
       usage: this.usage,
       ...(this.activity === undefined ? {} : { activity: this.activity }),
@@ -518,6 +521,7 @@ export class ConversationProjector {
       case "config.tools":
         this.webFetch = event.payload.webFetch;
         this.webSearch = event.payload.webSearch;
+        this.userQuestions = event.payload.userQuestions ?? false;
         break;
       case "sandbox.configured":
         this.sandbox = { provider: event.payload.provider, enforced: event.payload.enforced };

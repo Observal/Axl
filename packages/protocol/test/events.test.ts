@@ -17,6 +17,8 @@ import {
   parseEventId,
   parseOperationId,
   parseSessionId,
+  parseUserQuestionRequest,
+  parseUserQuestionResponse,
 } from "../src/index.ts";
 
 const eventId = parseEventId("018f47a5-4f18-7cc2-8000-123456789abc");
@@ -162,6 +164,71 @@ test("validates every canonical event variant", () => {
   for (const [type, payload] of Object.entries(validPayloads)) {
     assert.equal(parseEvent(event(type, payload)).type, type);
   }
+});
+
+test("validates questionnaire requests and answers", () => {
+  const request = parseUserQuestionRequest({
+    questions: [
+      {
+        header: "Runtime",
+        question: "Which runtime?",
+        options: [
+          { label: "Node", description: "Use Node.js", preview: "node index.js" },
+          { label: "Bun", description: "Use Bun" },
+        ],
+      },
+      {
+        header: "Checks",
+        question: "Which checks?",
+        multiSelect: true,
+        options: [
+          { label: "Test", description: "Run tests" },
+          { label: "Lint", description: "Run lint" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(
+    parseUserQuestionResponse(
+      {
+        answers: [
+          { questionIndex: 0, selectedLabels: ["Node"] },
+          { questionIndex: 1, selectedLabels: ["Test"], customAnswer: "Typecheck" },
+        ],
+      },
+      request,
+    ).answers[1],
+    { questionIndex: 1, selectedLabels: ["Test"], customAnswer: "Typecheck" },
+  );
+  assert.throws(
+    () =>
+      parseUserQuestionRequest({
+        questions: [
+          {
+            header: "Choice",
+            question: "Choose?",
+            options: [
+              { label: "Other", description: "Reserved" },
+              { label: "Two", description: "Second" },
+            ],
+          },
+        ],
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseUserQuestionResponse(
+        {
+          answers: [
+            { questionIndex: 0, selectedLabels: ["Unknown"] },
+            { questionIndex: 1, selectedLabels: ["Test"] },
+          ],
+        },
+        request,
+      ),
+    ProtocolValidationError,
+  );
 });
 
 test("rejects unknown event types", () => {

@@ -22,6 +22,7 @@ import {
   type CompactionSettings,
   type ModelPort,
   type ModelTurnRequest,
+  makeAskUserQuestionTool,
   ToolRegistry,
 } from "@axl/kernel";
 import type {
@@ -1949,6 +1950,76 @@ test("Ctrl+Enter interrupts the active turn and delivers replacement input", asy
   input.write("do this instead\x1b[13;5u");
   await until(() => text().includes("replacement complete"), "interrupt replacement");
   assert.deepEqual(prompts, ["obsolete work", "do this instead"]);
+});
+
+test("ask_user_question blocks and resumes through the TUI", async (context) => {
+  let call = 0;
+  const model: ModelPort = {
+    stream() {
+      call += 1;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          yield {
+            type: "tool_call",
+            callId: "question",
+            name: "ask_user_question",
+            input: {
+              questions: [
+                {
+                  header: "Runtime",
+                  question: "Which runtime?",
+                  options: [
+                    { label: "Node", description: "Use Node.js", preview: "node index.js" },
+                    { label: "Bun", description: "Use Bun" },
+                  ],
+                },
+                {
+                  header: "Checks",
+                  question: "Which checks?",
+                  multiSelect: true,
+                  options: [
+                    { label: "Test", description: "Run tests" },
+                    { label: "Lint", description: "Run lint" },
+                  ],
+                },
+              ],
+            },
+          };
+          yield { type: "completed", stopReason: "tool_use", usage };
+        } else {
+          yield { type: "text_delta", text: "selected runtime" };
+          yield { type: "completed", stopReason: "stop", usage };
+        }
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, (interact) => {
+    const tools = new ToolRegistry();
+    tools.register(makeAskUserQuestionTool(interact));
+    return tools;
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+  context.after(() => app.stop());
+
+  input.write("ask me\r");
+  await until(() => text().includes("Which runtime?"), "question prompt");
+  assert.match(text(), /Node/);
+  input.write("\r");
+  await until(() => text().includes("Which checks?"), "multi-select prompt");
+  input.write("\r");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  input.write("\t");
+  await until(() => text().includes("Review answers"), "answer review");
+  input.write("\r");
+  await until(() => text().includes("selected runtime"), "question continuation");
 });
 
 test("MCP interactions block the operation until the user responds", async (context) => {

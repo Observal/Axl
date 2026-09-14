@@ -50,6 +50,8 @@ import {
   parseEventId,
   parseOperationId,
   parseSessionId,
+  parseUserQuestionRequest,
+  parseUserQuestionResponse,
   type RestoredQueueItem,
   type SessionActivityFrame,
   type SessionConfiguration,
@@ -162,6 +164,7 @@ interface QueuedTurn {
 }
 
 interface PendingInteraction {
+  readonly request: SessionInteractionRequest;
   readonly resolve: (response: SessionInteractionResponse) => void;
   readonly reject: (error: Error) => void;
   resolution?: Promise<EventId>;
@@ -1335,6 +1338,7 @@ export class SessionManager {
     let requestSettings: ModelRequestSettings | undefined;
     let webFetch: boolean | undefined;
     let webSearch: boolean | undefined;
+    let userQuestions: boolean | undefined;
     let profile: SessionConfiguration["profile"] = created.payload.profile;
     for (const event of events) {
       if (event.type === "config.provider") providerId = event.payload.providerId;
@@ -1345,6 +1349,7 @@ export class SessionManager {
       else if (event.type === "config.tools") {
         webFetch = event.payload.webFetch;
         webSearch = event.payload.webSearch;
+        userQuestions = event.payload.userQuestions;
       }
     }
     return this.open(sessionId, created.payload.cwd, {
@@ -1356,6 +1361,7 @@ export class SessionManager {
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(webFetch === undefined ? {} : { webFetch }),
       ...(webSearch === undefined ? {} : { webSearch }),
+      ...(userQuestions === undefined ? {} : { userQuestions }),
       profile: profile ?? "standard",
     });
   }
@@ -1391,6 +1397,7 @@ export class SessionManager {
     profile: NonNullable<SessionConfiguration["profile"]>;
     webFetch: boolean;
     webSearch: boolean;
+    userQuestions: boolean;
     requestSettings: ModelRequestSettings;
     boundaryEventIds: readonly EventId[];
   }> {
@@ -1417,7 +1424,13 @@ export class SessionManager {
         : {}),
       ...(request?.type === "config.request" ? { requestSettings: request.payload } : {}),
       ...(tools?.type === "config.tools"
-        ? { webFetch: tools.payload.webFetch, webSearch: tools.payload.webSearch }
+        ? {
+            webFetch: tools.payload.webFetch,
+            webSearch: tools.payload.webSearch,
+            ...(tools.payload.userQuestions === undefined
+              ? {}
+              : { userQuestions: tools.payload.userQuestions }),
+          }
         : {}),
       ...(profile?.type === "config.profile" ? { profile: profile.payload.profile } : {}),
       ...managed.selection,
@@ -1434,7 +1447,9 @@ export class SessionManager {
       (update.modelId !== undefined && update.modelId !== managed.selection.modelId)
         ? "model_switch"
         : (update.webFetch !== undefined && update.webFetch !== managed.selection.webFetch) ||
-            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch)
+            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch) ||
+            (update.userQuestions !== undefined &&
+              update.userQuestions !== managed.selection.userQuestions)
           ? "tool_change"
           : "config_change";
     const before = managed.events.length;
@@ -1465,6 +1480,7 @@ export class SessionManager {
     profile: NonNullable<SessionConfiguration["profile"]>;
     webFetch: boolean;
     webSearch: boolean;
+    userQuestions: boolean;
     requestSettings: ModelRequestSettings;
     boundaryEventIds: readonly EventId[];
   } {
@@ -1495,6 +1511,8 @@ export class SessionManager {
       profile: managed.selection.profile ?? "standard",
       webFetch: tools?.type === "config.tools" ? tools.payload.webFetch : false,
       webSearch: tools?.type === "config.tools" ? tools.payload.webSearch : false,
+      userQuestions:
+        tools?.type === "config.tools" ? (tools.payload.userQuestions ?? false) : false,
       boundaryEventIds: boundaryEvents.map((event) => event.id),
     };
   }
@@ -2396,7 +2414,7 @@ export class SessionManager {
     const interactionId = randomUUID();
     let pending!: PendingInteraction;
     const response = new Promise<SessionInteractionResponse>((resolvePromise, rejectPromise) => {
-      pending = { resolve: resolvePromise, reject: rejectPromise };
+      pending = { request, resolve: resolvePromise, reject: rejectPromise };
     });
     managed.interactions.set(interactionId, pending);
 
@@ -2407,13 +2425,16 @@ export class SessionManager {
       }
     };
     signal?.addEventListener("abort", abort, { once: true });
-    const timeout = setTimeout(() => {
-      if (managed.interactions.delete(interactionId)) {
-        this.options.onSessionMetadataChange?.();
-        pending.reject(new DaemonError("interaction_timeout", "Interaction timed out"));
-      }
-    }, 300_000);
-    timeout.unref();
+    const timeout =
+      request.kind === "user_question"
+        ? undefined
+        : setTimeout(() => {
+            if (managed.interactions.delete(interactionId)) {
+              this.options.onSessionMetadataChange?.();
+              pending.reject(new DaemonError("interaction_timeout", "Interaction timed out"));
+            }
+          }, 300_000);
+    timeout?.unref();
 
     try {
       await managed.session.requestInteraction({ interactionId, ...request });
@@ -2422,7 +2443,7 @@ export class SessionManager {
       if (managed.interactions.delete(interactionId)) this.options.onSessionMetadataChange?.();
       throw error;
     } finally {
-      clearTimeout(timeout);
+      if (timeout !== undefined) clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
     }
   }
@@ -2464,6 +2485,24 @@ export class SessionManager {
         `Interaction ${interactionId} is already resolved`,
         { details: { resolutionEventId } },
       );
+    }
+    if (pending.request.kind === "user_question") {
+      try {
+        if (response.action === "accept") {
+          parseUserQuestionResponse(
+            response.content,
+            parseUserQuestionRequest(pending.request.data, "interaction.request.data"),
+            "interaction.response.content",
+          );
+        } else if (response.content !== undefined) {
+          throw new Error("Cancelled or declined questionnaires cannot include answers");
+        }
+      } catch (error) {
+        throw new DaemonError(
+          "invalid_interaction_response",
+          error instanceof Error ? error.message : "Invalid questionnaire response",
+        );
+      }
     }
     const resolving = managed.session
       .resolveInteraction({ interactionId, ...response }, operationId)

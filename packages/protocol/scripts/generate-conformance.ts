@@ -141,10 +141,21 @@ const eventPayloads = {
   "permission.resolved": { requestId: eventId, decision: "allow_once" },
   "interaction.requested": {
     interactionId: "interaction-1",
-    kind: "mcp_elicitation_form",
-    source: "mcp:example",
-    message: "Choose a value",
-    data: { requestedSchema: { type: "object" } },
+    kind: "user_question",
+    source: "ask_user_question",
+    message: "Choose a value?",
+    data: {
+      questions: [
+        {
+          header: "Choice",
+          question: "Choose a value?",
+          options: [
+            { label: "One", description: "Choose one" },
+            { label: "Two", description: "Choose two" },
+          ],
+        },
+      ],
+    },
   },
   "interaction.resolved": {
     interactionId: "interaction-1",
@@ -202,6 +213,7 @@ const params = {
     providerId: "provider-1",
     modelId: "model-1",
     profile: "standard",
+    userQuestions: true,
   },
   "session.resume": { sessionId },
   "session.list": { scope: "all_local", order: "recent", pageSize: 50 },
@@ -430,6 +442,7 @@ const results = {
     profile: "standard",
     webFetch: true,
     webSearch: false,
+    userQuestions: true,
     boundaryEventIds: [eventId],
   },
   "session.interaction.respond": {

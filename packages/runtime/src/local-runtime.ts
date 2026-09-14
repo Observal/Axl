@@ -308,7 +308,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     providerManagement,
-    runtime: async ({ sessionId, cwd, boundary, selection, readBlob }) => {
+    runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";
       const instructions = await kernel.loadAgentsInstructions({
@@ -321,6 +321,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         thinkingLevel: selection.thinkingLevel ?? defaults.thinkingLevel,
         webFetch: profile === "standard" && (selection.webFetch ?? defaults.webFetch ?? true),
         webSearch: profile === "standard" && (selection.webSearch ?? defaults.webSearch ?? true),
+        userQuestions: profile === "standard" && (selection.userQuestions ?? false),
       };
       const modelInfo = await validateProviderSelection(
         providers,
@@ -370,10 +371,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           }),
         );
       }
-      if (profile === "standard") {
-        tools.register(kernel.makeAskUserQuestionTool());
-        tools.register(kernel.makeCapabilitySearchTool());
-      }
+      if (active.userQuestions) tools.register(kernel.makeAskUserQuestionTool(interact));
+      if (profile === "standard") tools.register(kernel.makeCapabilitySearchTool());
 
       const prompt = kernel.buildStablePrompt({
         cwd,
@@ -404,7 +403,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         configRequest: requestSettings,
         configThinking: thinking,
         configProfile: { profile },
-        configTools: { webFetch: active.webFetch, webSearch: active.webSearch },
+        configTools: {
+          webFetch: active.webFetch,
+          webSearch: active.webSearch,
+          userQuestions: active.userQuestions,
+        },
         ...(boundary === "config_change"
           ? {}
           : {

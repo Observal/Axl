@@ -26,12 +26,14 @@ import {
   parseModelRequestConfiguration,
   parseModelRequestSettings,
 } from "./model-request.ts";
+import { parseUserQuestionRequest } from "./user-question.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type SessionProfile = "minimal" | "standard" | "chat" | "exec";
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type InteractionAction = "accept" | "decline" | "cancel";
 export type InteractionKind =
+  | "user_question"
   | "mcp_tool"
   | "mcp_sampling_request"
   | "mcp_sampling_response"
@@ -140,6 +142,7 @@ export type EventPayloadMap = {
   "config.tools": {
     readonly webFetch: boolean;
     readonly webSearch: boolean;
+    readonly userQuestions?: boolean;
   };
   "config.dialect": {
     readonly dialectId: string;
@@ -527,9 +530,12 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "config.tools": (payload, path) => {
-    exact(payload, path, ["webFetch", "webSearch"]);
+    exact(payload, path, ["webFetch", "webSearch"], ["userQuestions"]);
     boolean(payload.webFetch, `${path}.webFetch`);
     boolean(payload.webSearch, `${path}.webSearch`);
+    if (payload.userQuestions !== undefined) {
+      boolean(payload.userQuestions, `${path}.userQuestions`);
+    }
     return payload;
   },
   "config.dialect": (payload, path) => {
@@ -588,6 +594,7 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     exact(payload, path, ["interactionId", "kind", "source", "message"], ["data"]);
     string(payload.interactionId, `${path}.interactionId`);
     choice(payload.kind, `${path}.kind`, [
+      "user_question",
       "mcp_tool",
       "mcp_sampling_request",
       "mcp_sampling_response",
@@ -597,6 +604,10 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.source, `${path}.source`);
     string(payload.message, `${path}.message`);
     if (payload.data !== undefined) object(payload.data, `${path}.data`);
+    if (payload.kind === "user_question") {
+      if (payload.data === undefined) validationError(`${path}.data`, "is required");
+      parseUserQuestionRequest(payload.data, `${path}.data`);
+    }
     return payload;
   },
   "interaction.resolved": (payload, path) => {

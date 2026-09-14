@@ -343,7 +343,10 @@ test("assembles an authoritative local runtime without a presentation client", a
     providerId: "deepseek",
     phase: "logged_out",
   });
-  const opened = await client.request("session.create", { cwd: workspace });
+  const opened = await client.request("session.create", {
+    cwd: workspace,
+    userQuestions: true,
+  });
   const subscription = await client.request("session.subscribe", {
     sessionId: opened.sessionId,
   });
@@ -392,7 +395,28 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.deepEqual(events.find((event) => event.type === "config.tools")?.payload, {
     webFetch: true,
     webSearch: true,
+    userQuestions: true,
   });
+
+  const unattended = await client.request("session.create", { cwd: workspace });
+  const unattendedSubscription = await client.request("session.subscribe", {
+    sessionId: unattended.sessionId,
+  });
+  assert.equal(
+    unattendedSubscription.snapshot?.page.events.some(
+      (event) => event.type === "tool.schema" && event.payload.name === "ask_user_question",
+    ),
+    false,
+  );
+  assert.equal(
+    unattendedSubscription.snapshot?.page.events
+      .filter((event) => event.type === "prompt.section")
+      .some(
+        (event) =>
+          event.type === "prompt.section" && event.payload.content.includes("ask_user_question"),
+      ),
+    false,
+  );
 
   for (const [profile, expectedTools] of [
     ["minimal", ["bash", "edit"]],

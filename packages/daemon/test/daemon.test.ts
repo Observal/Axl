@@ -3949,9 +3949,21 @@ test("routes runtime interaction requests to an attached client", async (context
         async execute(_input, signal) {
           const response = await interact(
             {
-              kind: "mcp_tool",
-              source: "mcp:test",
-              message: "Allow test tool?",
+              kind: "user_question",
+              source: "ask_user_question",
+              message: "Choose a runtime?",
+              data: {
+                questions: [
+                  {
+                    header: "Runtime",
+                    question: "Choose a runtime?",
+                    options: [
+                      { label: "Node", description: "Use Node.js" },
+                      { label: "Bun", description: "Use Bun" },
+                    ],
+                  },
+                ],
+              },
             },
             signal,
           );
@@ -3987,11 +3999,25 @@ test("routes runtime interaction requests to an attached client", async (context
     if (!interaction) await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   }
   assert.ok(interaction);
+  await assert.rejects(
+    client.request(
+      "session.interaction.respond",
+      {
+        sessionId: created.sessionId,
+        interactionId: interaction.payload.interactionId,
+        action: "accept",
+        content: { answers: [{ questionIndex: 0, selectedLabels: ["Deno"] }] },
+      },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000122" },
+    ),
+    (error) => error instanceof AxlClientError && error.code === "invalid_interaction_response",
+  );
   const responseKey = "00000000-0000-4000-8000-000000000104";
   const responseParams = {
     sessionId: created.sessionId,
     interactionId: interaction.payload.interactionId,
     action: "accept" as const,
+    content: { answers: [{ questionIndex: 0, selectedLabels: ["Node"] }] },
   };
   const responseRequest = client.request("session.interaction.respond", responseParams, {
     idempotencyKey: responseKey,
