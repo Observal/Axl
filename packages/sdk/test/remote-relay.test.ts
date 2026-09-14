@@ -30,6 +30,7 @@ import {
   HttpRelayTicketProvider,
   RemoteHostedDelivery,
   RemoteRelayConnection,
+  RemoteRelayError,
   type RelayAdmissionCredential,
   type RemoteRelayConnectionState,
   type RemoteWebSocket,
@@ -89,8 +90,12 @@ class FakeSocket implements RemoteWebSocket {
     this.emit({ type: "open" });
   }
 
-  message(data: Uint8Array): void {
+  message(data: unknown): void {
     this.emit({ type: "message", data });
+  }
+
+  fail(): void {
+    this.emit({ type: "error" });
   }
 
   private emit(event: RemoteWebSocketEvent): void {
@@ -117,13 +122,13 @@ const requestId = parseRemoteRequestId("55555555-5555-4555-8555-555555555555");
 const idempotencyKey = parseIdempotencyKey("66666666-6666-4666-8666-666666666666");
 const daemonId = parseDeviceId("77777777-7777-4777-8777-777777777777");
 
-function credential(): RelayAdmissionCredential {
+function credential(maxFrameBytes = DEFAULT_RELAY_LIMITS.maxFrameBytes): RelayAdmissionCredential {
   return {
     ticket: "one-use-ticket",
     relayUrl: "wss://relay.invalid/v1/connect",
     expiresAt: Date.now() + 60_000,
     proofSchemeVersion: 1,
-    limits: DEFAULT_RELAY_LIMITS,
+    limits: { ...DEFAULT_RELAY_LIMITS, maxFrameBytes },
     connectionNonce: "nonce",
     possessionProof: Uint8Array.of(1, 2, 3),
   };
@@ -151,11 +156,12 @@ async function nextTurn(): Promise<void> {
 
 async function connect(
   factory: FakeSocketFactory,
+  issuedCredential = credential(),
 ): Promise<{ readonly connection: RemoteRelayConnection; readonly socket: FakeSocket }> {
   const connection = new RemoteRelayConnection({
     tickets: {
       async acquire() {
-        return credential();
+        return issuedCredential;
       },
     },
     sockets: factory,
@@ -245,6 +251,143 @@ test("admits with a bounded first binary message and tracks route replacement", 
   socket.message(discovery("route_unavailable", secondDaemonRoute));
   await nextTurn();
   await assert.rejects(connection.resolve(cryptoSessionId), /Daemon route is unavailable/);
+  connection.close();
+});
+
+test("failed delivery startup can retry and concurrent starts share one connection attempt", async () => {
+  const factory = new FakeSocketFactory();
+  let acquisitions = 0;
+  const connection = new RemoteRelayConnection({
+    tickets: {
+      async acquire() {
+        acquisitions += 1;
+        if (acquisitions === 1) throw new Error("control plane unavailable");
+        return credential();
+      },
+    },
+    sockets: factory,
+    destinationCryptoSessionId: cryptoSessionId,
+    reconnect: { initialDelayMs: 1, maximumDelayMs: 1, jitterRatio: 0, maximumAttempts: 1 },
+    routeWaitMs: 100,
+    sleep: async () => undefined,
+  });
+  const store = new MemoryOutboxStore();
+  const attemptIds = {
+    create: () => parseTransportAttemptId("88888888-8888-4888-8888-000000000001"),
+  };
+  const delivery = new RemoteHostedDelivery({
+    connection,
+    outbox: new OpaqueOutbox(store, attemptIds, connection),
+    expectedDaemonId: daemonId,
+    attemptIds,
+    opener: {
+      async open(ciphertext) {
+        return { authenticatedPeerId: daemonId, plaintext: ciphertext };
+      },
+    },
+  });
+
+  await assert.rejects(delivery.start(), /attempts were exhausted/);
+  assert.equal(connection.state, "disconnected");
+  assert.equal(acquisitions, 1);
+
+  const firstRetry = delivery.start();
+  const concurrentRetry = delivery.start();
+  assert.equal(firstRetry, concurrentRetry);
+  await nextTurn();
+  const socket = factory.sockets[0];
+  assert.ok(socket);
+  socket.open();
+  socket.message(discovery("route_snapshot", firstDaemonRoute));
+  await Promise.all([firstRetry, concurrentRetry]);
+
+  assert.equal(acquisitions, 2);
+  assert.equal(connection.state, "connected");
+  delivery.close();
+});
+
+test("failed WebSocket startup can retry with a new ticket and socket", async () => {
+  const factory = new FakeSocketFactory();
+  let acquisitions = 0;
+  const connection = new RemoteRelayConnection({
+    tickets: {
+      async acquire() {
+        acquisitions += 1;
+        return credential();
+      },
+    },
+    sockets: factory,
+    destinationCryptoSessionId: cryptoSessionId,
+    reconnect: { initialDelayMs: 1, maximumDelayMs: 1, jitterRatio: 0, maximumAttempts: 1 },
+    routeWaitMs: 100,
+    sleep: async () => undefined,
+  });
+
+  const failedStart = connection.start();
+  const concurrentFailedStart = connection.start();
+  assert.equal(failedStart, concurrentFailedStart);
+  await nextTurn();
+  const failedSocket = factory.sockets[0];
+  assert.ok(failedSocket);
+  failedSocket.fail();
+  await assert.rejects(failedStart, /attempts were exhausted/);
+
+  const retry = connection.start();
+  const concurrentRetry = connection.start();
+  assert.equal(retry, concurrentRetry);
+  await nextTurn();
+  const retrySocket = factory.sockets[1];
+  assert.ok(retrySocket);
+  retrySocket.open();
+  retrySocket.message(discovery("route_snapshot", firstDaemonRoute));
+  await retry;
+
+  assert.equal(acquisitions, 2);
+  assert.equal(connection.state, "connected");
+  connection.close();
+});
+
+test("enforces the negotiated frame limit before conversion and outbound send", async () => {
+  const maximumBytes = 512;
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory, credential(maximumBytes));
+  const oversizedPayload = new Uint8Array(maximumBytes - 37);
+
+  assert.throws(
+    () =>
+      connection.send(
+        firstDaemonRoute,
+        parseTransportAttemptId("88888888-8888-4888-8888-000000000001"),
+        oversizedPayload,
+      ),
+    (error) => error instanceof RemoteRelayError && error.code === "frame_too_large",
+  );
+
+  let converted = false;
+  const oversizedBlob = new Blob([new Uint8Array(maximumBytes + 1)]);
+  Object.defineProperty(oversizedBlob, "arrayBuffer", {
+    value: async () => {
+      converted = true;
+      return new ArrayBuffer(maximumBytes + 1);
+    },
+  });
+  socket.message(oversizedBlob);
+  await nextTurn();
+
+  assert.equal(converted, false);
+  assert.equal(socket.readyState, 3);
+  connection.close();
+});
+
+test("rejects oversized discovery text before JSON parsing", async () => {
+  const maximumBytes = 512;
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory, credential(maximumBytes));
+
+  socket.message("{".repeat(maximumBytes + 1));
+  await nextTurn();
+
+  assert.equal(socket.readyState, 3);
   connection.close();
 });
 
