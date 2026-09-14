@@ -10,11 +10,13 @@ import {
   type CommandListResult,
   mergeCommandDirectory,
   parseEventId,
+  parseOperationId,
   parseSessionId,
 } from "../src/index.ts";
 
 const sessionId = parseSessionId("00000000-0000-4000-8000-000000000001");
 const queueItemId = parseEventId("00000000-0000-4000-8000-000000000002");
+const operationId = parseOperationId("00000000-0000-4000-8000-000000000003");
 const catalog: CommandListResult = {
   generation: "builtin-1",
   commands: [
@@ -142,6 +144,9 @@ test("command controller loads, searches, and invokes typed operations", async (
     request: async (method: string, params: unknown) => {
       requests.push({ method, params });
       if (method === "command.list") return catalog;
+      if (method === "session.compact") {
+        return { state: "queued", operationId, eventId: queueItemId };
+      }
       return method === "session.reload" ? { boundaryEventIds: [] } : {};
     },
     refreshProviderCatalogs: async (params: unknown) => {
@@ -202,7 +207,7 @@ test("command controller loads, searches, and invokes typed operations", async (
     },
   );
   assert.deepEqual(await commands.invoke("/compact keep decisions", sessionId), {
-    state: "completed",
+    state: "queued",
     command: "compact",
   });
   assert.deepEqual(await commands.invoke("/rename Focused work", sessionId), {

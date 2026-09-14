@@ -366,6 +366,7 @@ Implemented first-party integrations include:
 
 - [Setup](SETUP.md)
 - [Session profiles](docs/session-profiles.md)
+- [Context compaction](docs/compaction.md)
 - [Development guide](docs/DEVELOPMENT_GUIDE.md)
 - [Product vision and implementation roadmap](ROADMAP.md)
 - [Repository structure](CODE_STRUCTURE.md)

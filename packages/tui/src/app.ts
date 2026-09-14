@@ -2615,6 +2615,10 @@ export class AxlApp {
       }
       return;
     }
+    if (outcome.state === "queued") {
+      this.notice = this.view.palette.dim(`· /${outcome.command} queued after the active response`);
+      return;
+    }
     switch (outcome.surface) {
       case "model":
         await this.selectModel("");
@@ -2692,7 +2696,6 @@ export class AxlApp {
     const changesSession = command === "resume" || command === "fork" || command === "clone";
     const requiresIdle = new Set([
       "clone",
-      "compact",
       "delete",
       "dispose",
       "export",
@@ -5433,11 +5436,15 @@ export class AxlApp {
     this.notice = undefined;
     this.redraw();
     try {
-      await this.commandController.invoke(
+      const outcome = await this.commandController.invoke(
         `/compact${instructions === undefined ? "" : ` ${instructions}`}`,
         this.sessionId,
       );
-      this.notice = undefined;
+      this.awaitingOperationOwnership = false;
+      this.notice =
+        outcome.state === "queued"
+          ? this.view.palette.dim("· /compact queued after the active response")
+          : undefined;
     } catch (error) {
       this.awaitingOperationOwnership = false;
       this.notice = this.view.palette.error(

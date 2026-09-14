@@ -965,6 +965,7 @@ async function main(): Promise<void> {
     }),
     modelId: cli.model ?? settings.modelId ?? "gpt-5",
     thinkingLevel: cli.thinking ?? settings.thinkingLevel ?? "medium",
+    ...(settings.compaction === undefined ? {} : { compaction: settings.compaction }),
     webFetch: cli.webFetch ?? settings.webFetch ?? true,
     webSearch: cli.webSearch ?? settings.webSearch ?? true,
   };

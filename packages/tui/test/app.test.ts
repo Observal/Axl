@@ -607,7 +607,7 @@ test("/compact summarizes older context through the daemon", async (context) => 
   };
   const { socketPath, directory } = await startStack(context, model, undefined, undefined, {
     keepRecentTokens: 7,
-    maxOutputTokens: 123,
+    reserveTokens: 154,
   });
   const input = new PassThrough();
   const { output, text } = captureOutput();
@@ -2806,6 +2806,55 @@ test("fullscreen clicks toggle one tool group without expanding the others", asy
   assert.ok(terminal.rows().some((row) => row.includes("RESULT:second.txt")));
 });
 
+test("/compact queues behind an active response", async (context) => {
+  let releaseActive = (): void => undefined;
+  const gate = new Promise<void>((resolvePromise) => {
+    releaseActive = resolvePromise;
+  });
+  let calls = 0;
+  let activeStarted = false;
+  const model: ModelPort = {
+    stream() {
+      const call = ++calls;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 3) {
+          activeStarted = true;
+          await gate;
+        }
+        yield {
+          type: "text_delta",
+          text: call === 4 ? "## Goal\nQueued compaction" : `answer ${call}`,
+        };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, undefined, undefined, {
+    keepRecentTokens: 1,
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+  context.after(() => app.stop());
+
+  input.write("older prompt\r");
+  await until(() => text().includes("answer 1"), "first answer");
+  input.write("recent prompt\r");
+  await until(() => text().includes("answer 2"), "second answer");
+  input.write("active prompt\r");
+  await until(() => activeStarted, "active response");
+  input.write("/compact keep decisions\r");
+  await until(() => text().includes("queued after the active response"), "queued compaction");
+  releaseActive();
+  await until(() => text().includes("Context compacted"), "queued compaction completion");
+});
+
 test("Escape cancels compaction without replacing context", async (context) => {
   let calls = 0;
   let summarizing = false;
@@ -2865,7 +2914,7 @@ test("Escape cancels compaction without replacing context", async (context) => {
   input.write("/compact\r");
   await until(() => summarizing && text().includes("Compacting context"), "summary started");
   input.write("\x1b");
-  await until(() => text().includes("interrupted"), "compaction cancellation");
+  await until(() => text().includes("cancelled"), "compaction cancellation");
   assert.equal(subscription.projector.overview.lastCompaction, undefined);
   assert.doesNotMatch(text(), /Request failed/);
 });

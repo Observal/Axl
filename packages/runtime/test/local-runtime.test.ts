@@ -254,7 +254,16 @@ test("assembles an authoritative local runtime without a presentation client", a
     axlHome,
     stateDirectory,
     socketPath,
-    defaults: { modelId: "gpt-5", thinkingLevel: "medium" },
+    defaults: {
+      modelId: "gpt-5",
+      thinkingLevel: "medium",
+      compaction: {
+        enabled: true,
+        reserveTokens: 12_000,
+        keepRecentTokens: 20_000,
+        modelOverrides: { "azure-openai-responses/gpt-5": { keepRecentTokens: 30_000 } },
+      },
+    },
     store,
     unsafe: true,
   });
@@ -388,6 +397,11 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.deepEqual(events.find((event) => event.type === "config.request")?.payload, {
     maxOutputTokens: null,
     httpIdleTimeoutMs: 300_000,
+  });
+  assert.deepEqual(events.find((event) => event.type === "config.compaction")?.payload, {
+    enabled: true,
+    reserveTokens: 12_000,
+    keepRecentTokens: 30_000,
   });
   assert.deepEqual(events.find((event) => event.type === "config.profile")?.payload, {
     profile: "standard",

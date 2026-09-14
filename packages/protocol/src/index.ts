@@ -4,6 +4,7 @@
 
 export * from "./canonical-event.ts";
 export * from "./canonical-request.ts";
+export * from "./compaction.ts";
 export * from "./event-envelope.ts";
 export * from "./events.ts";
 export * from "./model-stream.ts";

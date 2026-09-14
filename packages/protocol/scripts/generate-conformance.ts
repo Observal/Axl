@@ -106,6 +106,7 @@ const eventPayloads = {
     details: { lines: 1 },
   },
   "config.request": { maxOutputTokens: null, httpIdleTimeoutMs: 300_000 },
+  "config.compaction": { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
   "model.request_configured": {
     maxOutputTokens: 8192,
     httpIdleTimeoutMs: 300_000,
@@ -169,7 +170,28 @@ const eventPayloads = {
     details: { landlock: "full" },
   },
   "sandbox.violation": { capability: "filesystem.write", reason: "outside workspace" },
-  "context.compacted": { summary: "Earlier work", replacedEventIds: [otherEventId] },
+  "compaction.queued": { instructions: "Keep decisions" },
+  "compaction.started": {
+    reason: "manual",
+    estimatedInputTokens: 50_000,
+    contextWindow: 128_000,
+    reserveTokens: 16_384,
+    keepRecentTokens: 20_000,
+  },
+  "compaction.failed": {
+    reason: "overflow",
+    code: "summarization_failed",
+    message: "Provider unavailable",
+    willRetry: false,
+  },
+  "context.compacted": {
+    summary: "Earlier work",
+    replacedEventIds: [otherEventId],
+    reason: "manual",
+    willRetry: false,
+    readFiles: ["README.md"],
+    modifiedFiles: ["src/main.ts"],
+  },
   "session.error": { code: "provider_failed", message: "Provider unavailable", retryable: true },
   "child.result": {
     childSessionId: otherSessionId,
@@ -415,7 +437,7 @@ const results = {
     stopReason: "stop",
     targetOperationId: operationId,
   },
-  "session.compact": { eventId },
+  "session.compact": { state: "completed", operationId, eventId },
   "session.queue.enqueue": { queueItemId: eventId, state: "queued" },
   "session.queue.requeue": { queueItemId: eventId, state: "queued" },
   "session.queue.restore": {

@@ -22,6 +22,7 @@ import {
 
 import {
   AgentSession,
+  type CompactionSettings,
   CompactionUnavailableError,
   type KernelTool,
   type ModelPort,
@@ -89,7 +90,8 @@ async function makeSession(
   options: {
     system?: string;
     retry?: ModelRetryOptions | false;
-    compaction?: { keepRecentTokens?: number; maxOutputTokens?: number };
+    compaction?: Partial<CompactionSettings>;
+    modelContextWindow?: number;
     onActivity?: (frame: SessionActivityFrame) => void;
   } = {},
 ): Promise<{ session: AgentSession; path: string; tools: ToolRegistry }> {
@@ -160,7 +162,7 @@ test("manual compaction replaces old model context without deleting history", as
     say("## Goal\nContinue the updated test"),
   ]);
   const { session, path } = await makeSession(context, port, new ToolRegistry(), {
-    compaction: { keepRecentTokens: 7, maxOutputTokens: 123 },
+    compaction: { keepRecentTokens: 7, reserveTokens: 154 },
   });
   const initial = (await session.log.read()).events;
   await assert.rejects(session.compact(), {
@@ -262,6 +264,148 @@ test("failed compaction leaves the original context active", async (context) => 
     ["user", "assistant", "user", "assistant", "user"],
   );
   await session.dispose();
+});
+
+test("proactively compacts before a prompt that would cross the reserved context boundary", async (context) => {
+  const port = makePort([
+    say("old answer"),
+    say("## Goal\nRetain the old turn"),
+    say("recent answer"),
+  ]);
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    compaction: { enabled: true, reserveTokens: 8, keepRecentTokens: 1 },
+    modelContextWindow: 32,
+  });
+
+  await session.runTurn([{ type: "text", text: "old prompt" }]);
+  await session.runTurn([{ type: "text", text: "x".repeat(80) }]);
+
+  assert.equal(port.requests.length, 3);
+  assert.equal(port.requests[1]?.toolChoice, "none");
+  assert.equal(port.requests[1]?.cacheRetention, "none");
+  assert.match(JSON.stringify(port.requests[2]?.messages[0]), /Retain the old turn/);
+  const events = (await session.log.read()).events;
+  assert.equal(
+    events.find((event) => event.type === "compaction.started")?.payload.reason,
+    "threshold",
+  );
+  assert.equal(
+    events.some((event) => event.type === "context.compacted"),
+    true,
+  );
+});
+
+test("steering and follow-ups retain their boundary semantics during automatic compaction", async (context) => {
+  let releaseSummary = (): void => undefined;
+  let markSummaryStarted = (): void => undefined;
+  const summaryStarted = new Promise<void>((resolvePromise) => {
+    markSummaryStarted = resolvePromise;
+  });
+  const summaryGate = new Promise<void>((resolvePromise) => {
+    releaseSummary = resolvePromise;
+  });
+  const requests: ModelTurnRequest[] = [];
+  let calls = 0;
+  const port: ModelPort = {
+    stream(request) {
+      requests.push(request);
+      const call = ++calls;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 2) {
+          markSummaryStarted();
+          await summaryGate;
+          yield { type: "text_delta", text: "## Goal\nKeep context" };
+        } else {
+          yield { type: "text_delta", text: `answer ${call}` };
+        }
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    compaction: { enabled: true, reserveTokens: 8, keepRecentTokens: 1 },
+    modelContextWindow: 32,
+  });
+  await session.runTurn([{ type: "text", text: "old prompt" }]);
+
+  const running = session.runTurn([{ type: "text", text: "x".repeat(80) }]);
+  await summaryStarted;
+  session.steer([{ type: "text", text: "steer after compaction" }]);
+  session.followUp([{ type: "text", text: "follow after response" }]);
+  releaseSummary();
+  await running;
+
+  const lastUser = (request: ModelTurnRequest): string | undefined => {
+    const message = request.messages.findLast((item) => item.role === "user");
+    return message?.role === "user" && message.content[0]?.type === "text"
+      ? message.content[0].text
+      : undefined;
+  };
+  assert.equal(lastUser(requests[2] as ModelTurnRequest), "steer after compaction");
+  assert.equal(lastUser(requests[3] as ModelTurnRequest), "follow after response");
+});
+
+test("compacts between a tool result and the next model request", async (context) => {
+  const port = makePort([
+    callTool("call-1", { value: "large tool result" }),
+    say("## Goal\nContinue the tool turn"),
+    say("done"),
+  ]);
+  const registry = new ToolRegistry();
+  registry.register(echoTool().tool);
+  const { session } = await makeSession(context, port, registry, {
+    compaction: { enabled: true, reserveTokens: 5, keepRecentTokens: 1 },
+    modelContextWindow: 20,
+  });
+
+  await session.runTurn([{ type: "text", text: "use tool" }]);
+
+  assert.equal(port.requests.length, 3);
+  assert.equal(port.requests[1]?.toolChoice, "none");
+  assert.equal(
+    (await session.log.read()).events.some(
+      (event) => event.type === "compaction.started" && event.payload.reason === "threshold",
+    ),
+    true,
+  );
+});
+
+test("recovers one context overflow by compacting and retrying once", async (context) => {
+  const overflow: readonly ModelStreamEvent[] = [
+    {
+      type: "error",
+      code: "context_length_exceeded",
+      message: "too many tokens",
+      retryable: false,
+      category: "context_limit",
+      requestPhase: "before_dispatch",
+    },
+  ];
+  const port = makePort([
+    say("old answer"),
+    say("recent answer"),
+    overflow,
+    say("## Goal\nRecovered context"),
+    say("recovered"),
+  ]);
+  const { session } = await makeSession(context, port, new ToolRegistry(), {
+    compaction: { enabled: true, reserveTokens: 8, keepRecentTokens: 1 },
+  });
+  await session.runTurn([{ type: "text", text: "old prompt" }]);
+  await session.runTurn([{ type: "text", text: "recent prompt" }]);
+
+  const result = await session.runTurn([{ type: "text", text: "overflow prompt" }]);
+
+  assert.equal(result.stopReason, "stop");
+  assert.equal(port.requests.length, 5);
+  const events = (await session.log.read()).events;
+  assert.equal(
+    events.some(
+      (event) => event.type === "compaction.started" && event.payload.reason === "overflow",
+    ),
+    true,
+  );
+  assert.equal(events.filter((event) => event.type === "context.compacted").length, 1);
 });
 
 test("publishes ordered deltas and clears them after the canonical assistant event", async (context) => {
@@ -403,7 +547,56 @@ test("split-turn compaction keeps tool calls paired with their results", async (
     messagesFromLineage(events).map((message) => message.role),
     ["user", "assistant"],
   );
+  const splitPrompt = port.requests[2]?.messages[0];
+  assert.match(
+    splitPrompt?.role === "user" && splitPrompt.content[0]?.type === "text"
+      ? splitPrompt.content[0].text
+      : "",
+    /## Original Request/,
+  );
   await session.dispose();
+});
+
+test("repeated compaction preserves cumulative read and modified file lists", async (context) => {
+  const toolUse = (callId: string, name: string, path: string): readonly ModelStreamEvent[] => [
+    { type: "tool_call", callId, name, input: { path } },
+    { type: "completed", stopReason: "tool_use", usage },
+  ];
+  const port = makePort([
+    toolUse("read-1", "read", "README.md"),
+    say("read done"),
+    say("recent"),
+    say("first history summary"),
+    say("first turn-prefix summary"),
+    toolUse("edit-1", "edit", "src/main.ts"),
+    say("edit done"),
+    say("latest"),
+    say("second history summary"),
+    say("second turn-prefix summary"),
+  ]);
+  const registry = new ToolRegistry();
+  for (const name of ["read", "edit"]) {
+    registry.register({
+      name,
+      description: name,
+      inputSchema: { type: "object" },
+      execute: () => Promise.resolve({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+  }
+  const { session } = await makeSession(context, port, registry, {
+    compaction: { keepRecentTokens: 1 },
+  });
+
+  await session.runTurn([{ type: "text", text: "read" }]);
+  await session.runTurn([{ type: "text", text: "checkpoint" }]);
+  const first = await session.compact();
+  assert.deepEqual(first.payload.readFiles, ["README.md"]);
+  await session.runTurn([{ type: "text", text: "edit" }]);
+  await session.runTurn([{ type: "text", text: "checkpoint again" }]);
+  const second = await session.compact();
+
+  assert.deepEqual(second.payload.readFiles, ["README.md"]);
+  assert.deepEqual(second.payload.modifiedFiles, ["src/main.ts"]);
 });
 
 test("an unregistered tool yields an error result, not a crash", async (context) => {
@@ -810,9 +1003,27 @@ test("reopening after daemon loss closes an unanswered tool call", async (contex
       message: "Approve?",
     },
   });
+  const compactionOperationId = parseOperationId("00000000-0000-4000-8000-000000000014");
+  const compaction = parseEvent({
+    version: EVENT_FORMAT_VERSION,
+    id: "00000000-0000-4000-8000-000000000015",
+    sessionId,
+    operationId: compactionOperationId,
+    parentId: interaction.id,
+    timestamp: 13,
+    type: "compaction.started",
+    payload: {
+      reason: "threshold",
+      estimatedInputTokens: 100,
+      contextWindow: 100,
+      reserveTokens: 10,
+      keepRecentTokens: 20,
+    },
+  });
   await session.log.append(assistant);
   await session.log.append(call);
   await session.log.append(interaction);
+  await session.log.append(compaction);
   await session.dispose();
 
   const port = makePort([say("continued")]);
@@ -830,6 +1041,13 @@ test("reopening after daemon loss closes an unanswered tool call", async (contex
   assert.ok(resolvedInteraction);
   if (resolvedInteraction.type === "interaction.resolved") {
     assert.equal(resolvedInteraction.payload.action, "cancel");
+  }
+  const failedCompaction = recoveredEvents.find(
+    (event) => event.type === "compaction.failed" && event.operationId === compactionOperationId,
+  );
+  assert.ok(failedCompaction);
+  if (failedCompaction.type === "compaction.failed") {
+    assert.equal(failedCompaction.payload.code, "daemon_restart");
   }
   const recovered = recoveredEvents.find(
     (event) => event.type === "tool.result" && event.payload.callId === "interrupted-call",

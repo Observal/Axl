@@ -1146,7 +1146,11 @@ export class AxlDaemon {
             : parseOperationId(acceptance.affectedOperationId, "affectedOperationId"),
         );
       case "session.compact":
-        return this.sessions.compact(request.params.sessionId, request.params.instructions);
+        return this.sessions.compact(
+          request.params.sessionId,
+          request.params.instructions,
+          this.mutationOperationId(acceptance),
+        );
       case "session.queue.enqueue":
         return this.sessions.enqueue(
           request.params.sessionId,

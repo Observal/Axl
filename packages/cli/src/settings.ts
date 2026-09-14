@@ -9,8 +9,10 @@ import { dirname } from "node:path";
 
 import { THINKING_LEVELS } from "@axl/ai/models";
 import {
+  type CompactionPreferences,
   type ThinkingLevel,
   type ModelRequestSettings,
+  parseCompactionPreferences,
   parseModelRequestSettings,
 } from "@axl/protocol";
 
@@ -28,6 +30,7 @@ export interface AxlSettings {
 
 export interface TuiSettings {
   readonly requestSettings?: ModelRequestSettings;
+  readonly compaction?: CompactionPreferences;
   readonly version: 1;
   readonly providerId?: string;
   readonly modelId?: string;
@@ -96,6 +99,7 @@ function parseSettings(value: unknown, path: string): TuiSettings {
     "modelId",
     "thinkingLevel",
     "requestSettings",
+    "compaction",
     "theme",
     "webFetch",
     "webSearch",
@@ -119,6 +123,8 @@ function parseSettings(value: unknown, path: string): TuiSettings {
   }
   if (input.requestSettings !== undefined)
     parseModelRequestSettings(input.requestSettings, `${path}.requestSettings`);
+  if (input.compaction !== undefined)
+    parseCompactionPreferences(input.compaction, `${path}.compaction`);
   if (input.version !== 1) throw new Error(`${path}: version must be 1`);
   for (const field of ["providerId", "modelId"] as const) {
     if (input[field] !== undefined && (typeof input[field] !== "string" || !input[field])) {

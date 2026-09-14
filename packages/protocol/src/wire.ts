@@ -866,7 +866,11 @@ export interface RpcMethodMap {
   };
   readonly "session.compact": {
     readonly params: { readonly sessionId: SessionId; readonly instructions?: string };
-    readonly result: { readonly eventId: EventId };
+    readonly result: {
+      readonly state: "completed" | "queued";
+      readonly operationId: OperationId;
+      readonly eventId: EventId;
+    };
   };
   readonly "session.queue.enqueue": {
     readonly params: {
@@ -1010,6 +1014,7 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.import",
   "session.send",
   "session.interruptAndDeliver",
+  "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
   "session.queue.restore",
@@ -2672,8 +2677,15 @@ export function parseRpcResult<Method extends RpcMethod>(
     };
   } else if (method === "session.compact") {
     const result = object(value, path);
-    exact(result, path, ["eventId"]);
-    parsed = { eventId: parseEventId(result.eventId, `${path}.eventId`) };
+    exact(result, path, ["state", "operationId", "eventId"]);
+    if (result.state !== "completed" && result.state !== "queued") {
+      throw new ProtocolValidationError(`${path}.state`, "must be completed or queued");
+    }
+    parsed = {
+      state: result.state,
+      operationId: parseOperationId(result.operationId, `${path}.operationId`),
+      eventId: parseEventId(result.eventId, `${path}.eventId`),
+    };
   } else if (method === "session.queue.enqueue" || method === "session.queue.requeue") {
     const result = object(value, path);
     exact(result, path, ["queueItemId", "state"]);
@@ -3183,7 +3195,12 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_corrupt",
     "content_too_large",
   ],
-  "session.compact": [...SESSION_BASE_ERRORS, "operation_active", "content_too_large"],
+  "session.compact": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
   "session.queue.enqueue": [
     ...SESSION_BASE_ERRORS,
     ...MUTATION_ERRORS,

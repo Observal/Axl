@@ -20,6 +20,7 @@ import {
   type SessionId,
 } from "./event-envelope.ts";
 
+import { type CompactionSettings, parseCompactionSettings } from "./compaction.ts";
 import {
   type ModelRequestConfiguration,
   type ModelRequestSettings,
@@ -129,6 +130,7 @@ export type EventPayloadMap = {
     readonly details?: JsonValue;
   };
   "config.request": ModelRequestSettings;
+  "config.compaction": CompactionSettings;
   "model.request_configured": ModelRequestConfiguration;
   "config.model": { readonly modelId: string };
   "config.provider": { readonly providerId: string };
@@ -186,9 +188,27 @@ export type EventPayloadMap = {
     readonly details?: JsonObject;
   };
   "sandbox.violation": { readonly capability: string; readonly reason: string };
+  "compaction.queued": { readonly instructions?: string };
+  "compaction.started": {
+    readonly reason: "manual" | "threshold" | "overflow";
+    readonly estimatedInputTokens: number;
+    readonly contextWindow: number;
+    readonly reserveTokens: number;
+    readonly keepRecentTokens: number;
+  };
+  "compaction.failed": {
+    readonly reason: "manual" | "threshold" | "overflow";
+    readonly code: string;
+    readonly message: string;
+    readonly willRetry: boolean;
+  };
   "context.compacted": {
     readonly summary: string;
     readonly replacedEventIds: readonly EventId[];
+    readonly reason?: "manual" | "threshold" | "overflow";
+    readonly willRetry?: boolean;
+    readonly readFiles?: readonly string[];
+    readonly modifiedFiles?: readonly string[];
     readonly usage?: Usage;
   };
   "session.error": {
@@ -500,6 +520,7 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "config.request": (payload, path) => parseModelRequestSettings(payload, path),
+  "config.compaction": (payload, path) => parseCompactionSettings(payload, path),
   "model.request_configured": (payload, path) => parseModelRequestConfiguration(payload, path),
   "config.model": (payload, path) => {
     exact(payload, path, ["modelId"]);
@@ -631,13 +652,57 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.reason, `${path}.reason`);
     return payload;
   },
+  "compaction.queued": (payload, path) => {
+    exact(payload, path, [], ["instructions"]);
+    if (payload.instructions !== undefined) string(payload.instructions, `${path}.instructions`);
+    return payload;
+  },
+  "compaction.started": (payload, path) => {
+    exact(payload, path, [
+      "reason",
+      "estimatedInputTokens",
+      "contextWindow",
+      "reserveTokens",
+      "keepRecentTokens",
+    ]);
+    choice(payload.reason, `${path}.reason`, ["manual", "threshold", "overflow"]);
+    for (const field of [
+      "estimatedInputTokens",
+      "contextWindow",
+      "reserveTokens",
+      "keepRecentTokens",
+    ] as const) {
+      nonNegativeInteger(payload[field], `${path}.${field}`);
+    }
+    return payload;
+  },
+  "compaction.failed": (payload, path) => {
+    exact(payload, path, ["reason", "code", "message", "willRetry"]);
+    choice(payload.reason, `${path}.reason`, ["manual", "threshold", "overflow"]);
+    string(payload.code, `${path}.code`);
+    string(payload.message, `${path}.message`);
+    boolean(payload.willRetry, `${path}.willRetry`);
+    return payload;
+  },
   "context.compacted": (payload, path) => {
-    exact(payload, path, ["summary", "replacedEventIds"], ["usage"]);
+    exact(
+      payload,
+      path,
+      ["summary", "replacedEventIds"],
+      ["reason", "willRetry", "readFiles", "modifiedFiles", "usage"],
+    );
     string(payload.summary, `${path}.summary`);
     validateEventIds(payload.replacedEventIds, `${path}.replacedEventIds`);
     if ((payload.replacedEventIds as readonly JsonValue[]).length === 0) {
       validationError(`${path}.replacedEventIds`, "must not be empty");
     }
+    if (payload.reason !== undefined)
+      choice(payload.reason, `${path}.reason`, ["manual", "threshold", "overflow"]);
+    if (payload.willRetry !== undefined) boolean(payload.willRetry, `${path}.willRetry`);
+    if (payload.readFiles !== undefined)
+      validateStringArray(payload.readFiles, `${path}.readFiles`);
+    if (payload.modifiedFiles !== undefined)
+      validateStringArray(payload.modifiedFiles, `${path}.modifiedFiles`);
     if (payload.usage !== undefined) validateUsage(payload.usage, `${path}.usage`);
     return payload;
   },

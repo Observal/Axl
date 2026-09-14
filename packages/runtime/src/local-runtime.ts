@@ -10,9 +10,11 @@ import { join } from "node:path";
 import type { CredentialStore } from "@axl/ai";
 import { type AxlDaemon, listStoredSessions } from "@axl/daemon";
 import {
+  type CompactionPreferences,
   DEFAULT_MODEL_REQUEST_SETTINGS,
   type ModelRequestSettings,
   parseModelRequestSettings,
+  resolveCompactionSettings,
   type SessionSummary,
   type ThinkingLevel,
 } from "@axl/protocol";
@@ -26,6 +28,7 @@ import {
 export interface LocalRuntimeDefaults {
   readonly providerId?: string;
   readonly requestSettings?: ModelRequestSettings;
+  readonly compaction?: CompactionPreferences;
   readonly modelId: string;
   readonly thinkingLevel: ThinkingLevel;
   readonly webFetch?: boolean;
@@ -329,6 +332,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         active.modelId,
       );
       const thinking = ai.clampThinkingLevel(modelInfo, active.thinkingLevel);
+      const compaction = resolveCompactionSettings(
+        defaults.compaction,
+        active.providerId,
+        active.modelId,
+      );
       const policy = {
         workspace: cwd,
         readableRoots: [cwd],
@@ -391,6 +399,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         model,
         tools,
         prompt,
+        compaction,
+        modelContextWindow: modelInfo.contextWindow,
         log: {
           secretValues: () => [
             ...(braveSearchKey === undefined ? [] : [braveSearchKey]),
@@ -401,6 +411,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         configProvider: { providerId: active.providerId },
         configModel: { modelId: active.modelId },
         configRequest: requestSettings,
+        configCompaction: compaction,
         configThinking: thinking,
         configProfile: { profile },
         configTools: {

@@ -27,7 +27,13 @@ import { StringDecoder } from "node:string_decoder";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 
-import { JsonlEventLog, type ModelPort, type ModelRetryOptions, ToolRegistry } from "@axl/kernel";
+import {
+  type CompactionSettings,
+  JsonlEventLog,
+  type ModelPort,
+  type ModelRetryOptions,
+  ToolRegistry,
+} from "@axl/kernel";
 import type {
   BlobReference,
   CanonicalEvent,
@@ -143,6 +149,8 @@ async function startDaemon(
   deliveryOptions: {
     readonly cursorLifetimeMs?: number;
     readonly retry?: ModelRetryOptions | false;
+    readonly compaction?: Partial<CompactionSettings>;
+    readonly modelContextWindow?: number;
     readonly tools?: (sessionId: SessionId, dataDirectory: string) => ToolRegistry;
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
@@ -151,7 +159,7 @@ async function startDaemon(
   const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
   const dataDirectory = join(directory, "data");
-  const { retry, tools, ...daemonOptions } = deliveryOptions;
+  const { retry, compaction, modelContextWindow, tools, ...daemonOptions } = deliveryOptions;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory,
@@ -164,6 +172,8 @@ async function startDaemon(
       tools: tools?.(sessionId, dataDirectory) ?? new ToolRegistry(),
       system: "You are Axl.",
       ...(retry === undefined ? {} : { retry }),
+      ...(compaction === undefined ? {} : { compaction }),
+      ...(modelContextWindow === undefined ? {} : { modelContextWindow }),
     }),
   });
   await daemon.start();
@@ -3053,6 +3063,83 @@ test("steering and follow-ups cross clients through the daemon", async (context)
   await sending;
 
   assert.deepEqual(prompts, ["start", "adjust", "then summarize"]);
+});
+
+test("manual compaction queues behind an active response and runs for every client", async (context) => {
+  let releaseActive = (): void => undefined;
+  const activeGate = new Promise<void>((resolvePromise) => {
+    releaseActive = resolvePromise;
+  });
+  let markActive = (): void => undefined;
+  const activeStarted = new Promise<void>((resolvePromise) => {
+    markActive = resolvePromise;
+  });
+  let calls = 0;
+  const model: ModelPort = {
+    stream() {
+      const call = ++calls;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 3) {
+          markActive();
+          await activeGate;
+        }
+        yield {
+          type: "text_delta",
+          text: call === 4 ? "## Goal\nContinue after compaction" : `reply ${call}`,
+        };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd } = await startDaemon(context, model, "sandboxed", undefined, undefined, {
+    compaction: { keepRecentTokens: 1 },
+  });
+  const sender = await connectUnixClient(socketPath);
+  const controller = await connectUnixClient(socketPath);
+  context.after(() => {
+    sender.close();
+    controller.close();
+  });
+  const created = await sender.request("session.create", { cwd });
+  const subscription = await subscribeSession(controller, created.sessionId);
+  context.after(() => subscription.close());
+
+  for (const text of ["old prompt", "recent prompt"]) {
+    await sender.request("session.send", {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text }],
+    });
+  }
+  const active = sender.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "active prompt" }],
+  });
+  await activeStarted;
+  const queued = await controller.request("session.compact", {
+    sessionId: created.sessionId,
+    instructions: "Keep exact decisions",
+  });
+  assert.equal(queued.state, "queued");
+  releaseActive();
+  await active;
+  await waitFor(
+    () => subscription.projector.state.lastCompaction !== undefined,
+    "queued compaction completion",
+  );
+
+  const events = subscription.projector.state.records.flatMap((record) =>
+    record.kind === "event" ? [record.event] : [],
+  );
+  const responseIndex = events.findIndex(
+    (event) =>
+      event.type === "assistant.message" &&
+      event.payload.content.some((item) => item.type === "text" && item.text === "reply 3"),
+  );
+  const queuedIndex = events.findIndex((event) => event.type === "compaction.queued");
+  const compactedIndex = events.findIndex((event) => event.type === "context.compacted");
+  assert.ok(queuedIndex >= 0 && responseIndex > queuedIndex && compactedIndex > responseIndex);
 });
 
 test("daemon-owned queued prompts are canonical and execute in priority order", async (context) => {

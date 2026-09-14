@@ -290,6 +290,7 @@ export class SessionView {
       case "interrupt.requested":
       case "interrupt.updated":
       case "config.request":
+      case "config.compaction":
       case "model.request_configured":
       case "config.entitlement":
       case "config.profile":
@@ -468,6 +469,16 @@ export class SessionView {
         );
       case "context.injected":
         return this.wrap(dim(`+ context [${sanitizeTerminalText(event.payload.source)}]`));
+      case "compaction.queued":
+        return this.wrap(dim("· compaction queued after the active response"));
+      case "compaction.started":
+        return [];
+      case "compaction.failed":
+        return this.wrap(
+          (this.palette.warning ?? error)(
+            `! compaction failed: ${sanitizeTerminalText(event.payload.message)}`,
+          ),
+        );
       case "context.compacted":
         this.contextTokens = undefined;
         this.cacheHitPercent = undefined;

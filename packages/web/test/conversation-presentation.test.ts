@@ -397,6 +397,15 @@ test("hides compacted records and renders the retained summary", () => {
       {
         kind: "event",
         event: {
+          id: "queued-compaction",
+          timestamp: 1500,
+          type: "compaction.queued",
+          payload: { instructions: "Keep decisions" },
+        },
+      },
+      {
+        kind: "event",
+        event: {
           id: "compaction",
           timestamp: 2000,
           type: "context.compacted",
@@ -435,6 +444,8 @@ test("hides compacted records and renders the retained summary", () => {
 
   const html = renderToStaticMarkup(createElement(Conversation, { conversation: compacted }));
   assert.doesNotMatch(html, /obsolete transcript text/);
+  assert.match(html, /Compaction queued/);
+  assert.match(html, /active response/);
   assert.match(html, /Context compacted/);
   assert.match(html, /Retained context/);
   assert.match(html, /Original history remains in the canonical session log/);

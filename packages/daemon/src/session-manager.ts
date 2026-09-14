@@ -99,11 +99,13 @@ export interface SessionRuntime {
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
   readonly compaction?: Partial<CompactionSettings>;
+  readonly modelContextWindow?: number;
   readonly retry?: ModelRetryOptions | false;
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
   readonly configProvider?: EventPayloadMap["config.provider"];
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configRequest?: EventPayloadMap["config.request"];
+  readonly configCompaction?: EventPayloadMap["config.compaction"];
   readonly configThinking?: EventPayloadMap["config.thinking"];
   readonly configProfile?: EventPayloadMap["config.profile"];
   readonly configTools?: EventPayloadMap["config.tools"];
@@ -163,6 +165,11 @@ interface QueuedTurn {
   readonly priority: "front" | "back";
 }
 
+interface QueuedCompaction {
+  readonly operationId: OperationId;
+  readonly instructions?: string;
+}
+
 interface PendingInteraction {
   readonly request: SessionInteractionRequest;
   readonly resolve: (response: SessionInteractionResponse) => void;
@@ -194,6 +201,7 @@ interface ManagedSession {
   rebuilding?: Promise<void>;
   readonly interactions: Map<string, PendingInteraction>;
   readonly queue: QueuedTurn[];
+  readonly queuedCompactions: QueuedCompaction[];
   queueDraining: boolean;
   queueMutationActive: boolean;
   queueDrain?: Promise<void>;
@@ -507,10 +515,16 @@ export class SessionManager {
       },
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
       ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
+      ...(runtime.modelContextWindow === undefined
+        ? {}
+        : { modelContextWindow: runtime.modelContextWindow }),
       ...(runtime.retry === undefined ? {} : { retry: runtime.retry }),
       ...(runtime.sandbox === undefined ? {} : { sandbox: runtime.sandbox }),
       ...(runtime.configProvider === undefined ? {} : { configProvider: runtime.configProvider }),
       ...(runtime.configRequest === undefined ? {} : { configRequest: runtime.configRequest }),
+      ...(runtime.configCompaction === undefined
+        ? {}
+        : { configCompaction: runtime.configCompaction }),
       ...(runtime.configModel === undefined ? {} : { configModel: runtime.configModel }),
       ...(runtime.configThinking === undefined ? {} : { configThinking: runtime.configThinking }),
       ...(runtime.configProfile === undefined ? {} : { configProfile: runtime.configProfile }),
@@ -530,6 +544,9 @@ export class SessionManager {
           event.type === "user.shell" ||
           event.type === "assistant.message" ||
           event.type === "session.error" ||
+          event.type === "compaction.queued" ||
+          event.type === "compaction.started" ||
+          event.type === "compaction.failed" ||
           event.type === "context.compacted" ||
           event.type === "interaction.requested" ||
           event.type === "interaction.resolved"
@@ -597,6 +614,7 @@ export class SessionManager {
       queuedInputs: Promise.resolve(),
       interactions: new Map(),
       queue: [],
+      queuedCompactions: [],
       queueDraining: false,
       queueMutationActive: false,
       disposing: false,
@@ -2041,6 +2059,26 @@ export class SessionManager {
     managed.queueDraining = true;
     try {
       while (!this.stopping && !managed.disposing && !managed.activeTurn && !managed.rebuilding) {
+        const compaction = managed.queuedCompactions.shift();
+        if (compaction !== undefined) {
+          try {
+            await this.runCompaction(managed, compaction.instructions, compaction.operationId);
+          } catch (error) {
+            const terminal = managed.events.some(
+              (event) =>
+                event.operationId === compaction.operationId &&
+                (event.type === "context.compacted" || event.type === "compaction.failed"),
+            );
+            if (!terminal) {
+              await managed.session.recordCompactionFailed(
+                compaction.operationId,
+                error instanceof DaemonError ? error.code : "compaction_failed",
+                error instanceof Error ? error.message : "Queued compaction failed",
+              );
+            }
+          }
+          continue;
+        }
         const queued = managed.queue.shift();
         if (queued === undefined) break;
         await managed.session.recordQueueEvent(queued.operationId, "queue.started", {
@@ -2089,27 +2127,74 @@ export class SessionManager {
     }
   }
 
-  async compact(sessionId: unknown, customInstructions?: string): Promise<{ eventId: EventId }> {
+  async compact(
+    sessionId: unknown,
+    customInstructions?: string,
+    operationId = parseOperationId(randomUUID(), "operationId"),
+  ): Promise<
+    | { state: "completed"; operationId: OperationId; eventId: EventId }
+    | { state: "queued"; operationId: OperationId; eventId: EventId }
+  > {
     const managed = this.managed(sessionId);
+    const prior = managed.events.findLast(
+      (event) =>
+        event.operationId === operationId &&
+        (event.type === "context.compacted" || event.type === "compaction.queued"),
+    );
+    if (prior?.type === "context.compacted") {
+      return { state: "completed", operationId, eventId: prior.id };
+    }
+    if (prior?.type === "compaction.queued") {
+      return { state: "queued", operationId, eventId: prior.id };
+    }
+    const instructions = customInstructions?.trim();
+    if (customInstructions !== undefined && !instructions) {
+      throw new DaemonError("bad_request", "Compaction instructions must not be empty");
+    }
+    if (managed.activeTurn?.kind === "turn" && !managed.rebuilding) {
+      const queued = await managed.session.recordCompactionQueued(operationId, instructions);
+      managed.queuedCompactions.push({
+        operationId,
+        ...(instructions === undefined ? {} : { instructions }),
+      });
+      return { state: "queued", operationId, eventId: queued.id };
+    }
     if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
-    const active = deferredTurn("compaction");
+    try {
+      const event = await this.runCompaction(managed, instructions, operationId);
+      return { state: "completed", operationId, eventId: event.id };
+    } finally {
+      this.startQueueDrain(managed);
+    }
+  }
+
+  private async runCompaction(
+    managed: ManagedSession,
+    customInstructions: string | undefined,
+    operationId: OperationId,
+  ): Promise<CanonicalEvent<"context.compacted">> {
+    const active = deferredTurn("compaction", operationId);
     managed.activeTurn = active;
     try {
-      const event = await managed.session.compact(customInstructions, active.controller.signal);
-      return { eventId: event.id };
+      return await managed.session.compact(
+        customInstructions,
+        active.controller.signal,
+        active.operationId,
+      );
     } catch (error) {
-      if (active.controller.signal.aborted)
+      if (active.controller.signal.aborted) {
         throw new DaemonError("cancelled", "Compaction cancelled", { cause: error });
-      if (error instanceof CompactionUnavailableError)
+      }
+      if (error instanceof CompactionUnavailableError) {
         throw new DaemonError("bad_request", error.message, { cause: error });
+      }
       throw error;
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
       this.options.onSessionMetadataChange?.();
-      this.startQueueDrain(managed);
     }
   }
 

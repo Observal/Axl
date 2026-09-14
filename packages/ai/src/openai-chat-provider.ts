@@ -4,6 +4,7 @@
 import type { ProviderAuthentication, ResolvedAuth } from "./auth.ts";
 import { AuthError } from "./auth.ts";
 import { safeProviderMessage } from "./diagnostics.ts";
+import { consumeContextLimitResponse } from "./model-error.ts";
 import type {
   AuthMethod,
   ModelErrorCategory,
@@ -104,6 +105,7 @@ function wait(delayMs: number, signal: AbortSignal): Promise<void> {
 }
 
 function statusCategory(status: number): ModelErrorCategory {
+  if (status === 413) return "context_limit";
   if (status === 401) return "authentication";
   if (status === 403) return "authorization";
   if (status === 408) return "timeout";
@@ -307,13 +309,13 @@ export class OpenAiChatProvider implements ModelProvider {
         response = undefined;
         continue;
       }
-      await response.body?.cancel();
+      const contextLimit = await consumeContextLimitResponse(response, signal);
       yield {
         type: "error",
         code: `http_${response.status}`,
         message: `Provider ${this.id} returned ${response.status}`,
         retryable,
-        category: statusCategory(response.status),
+        category: contextLimit ? "context_limit" : statusCategory(response.status),
         requestPhase: "awaiting_response",
         ...(advisedDelay === undefined ? {} : { retryAfterMs: advisedDelay }),
       };

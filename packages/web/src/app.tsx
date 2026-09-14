@@ -1674,6 +1674,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         );
         return;
       }
+      if (outcome.state === "queued") {
+        showActionNotice(`/${outcome.command} queued after the active response`);
+        return;
+      }
       if (outcome.surface === "model" || outcome.surface === "thinking") {
         setModelPickerInitialFocus(outcome.surface);
         setModelPickerOpenRequest((current) => current + 1);

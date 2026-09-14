@@ -36,6 +36,7 @@ interface PortTurnRequest {
   readonly messages: readonly ModelMessage[];
   readonly tools: readonly ToolDeclaration[];
   readonly maxOutputTokens?: number | undefined;
+  readonly cacheRetention?: "none" | "short" | "long" | undefined;
   readonly toolChoice?: "auto" | "required" | "none" | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly estimatedInputTokens?: number | undefined;
@@ -65,6 +66,9 @@ async function configureRequest(
     tools: request.tools,
     ...(options.thinkingLevel === undefined ? {} : { thinkingLevel: options.thinkingLevel }),
     ...(requestedMaximum === undefined ? {} : { maxOutputTokens: requestedMaximum }),
+    ...(request.cacheRetention === undefined
+      ? {}
+      : { cache: { retention: request.cacheRetention } as const }),
     httpIdleTimeoutMs: settings.httpIdleTimeoutMs,
     ...(request.estimatedInputTokens === undefined
       ? {}

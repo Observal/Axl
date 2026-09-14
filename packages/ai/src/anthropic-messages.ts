@@ -6,6 +6,7 @@
 import type { JsonObject, JsonValue, Usage } from "@axl/protocol";
 
 import { safeProviderMessage } from "./diagnostics.ts";
+import { isContextLimitError } from "./model-error.ts";
 import type { AnthropicCompatibility, ModelInfo, ModelStreamEvent } from "./model.ts";
 import {
   isPreparedModelRequest,
@@ -601,6 +602,7 @@ export async function* decodeAnthropicMessagesStream(
         code,
         message,
         retryable: retryableProviderCode(code),
+        ...(isContextLimitError(code, message) ? { category: "context_limit" as const } : {}),
         ...(emittedContent ? { partial: true } : {}),
         response: responseMetadata(),
       };
