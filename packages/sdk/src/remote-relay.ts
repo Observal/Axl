@@ -729,6 +729,9 @@ export class RemoteHostedDelivery {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
+    // A process can stop after persisting `sending` but before receiving acceptance.
+    // No live transport attempt survives startup, so every such record is retryable.
+    await this.options.outbox.resetSendingAfterDisconnect();
     await this.options.connection.start();
     await this.flush();
   }
