@@ -9,7 +9,7 @@ defmodule AxlRelay.HttpControlPlaneClient do
   @impl true
   def consume_ticket(admission, relay_instance_id, options) do
     with {:ok, origin} <- Keyword.fetch(options, :origin),
-         true <- valid_origin?(origin),
+         true <- valid_origin?(origin, options),
          {:ok, headers} when headers != [] <- Keyword.fetch(options, :headers),
          body <-
            :json.encode(%{
@@ -29,18 +29,22 @@ defmodule AxlRelay.HttpControlPlaneClient do
     end
   end
 
-  defp valid_origin?(origin) when is_binary(origin) do
+  defp valid_origin?(origin, options) when is_binary(origin) do
     case URI.parse(origin) do
       %URI{scheme: "https", host: host, path: path, query: nil, fragment: nil, userinfo: nil}
       when is_binary(host) and path in [nil, ""] ->
         true
+
+      %URI{scheme: "http", host: host, path: path, query: nil, fragment: nil, userinfo: nil}
+      when host in ["127.0.0.1", "::1"] and path in [nil, ""] ->
+        Keyword.get(options, :allow_insecure_loopback_for_tests, false) == true
 
       _other ->
         false
     end
   end
 
-  defp valid_origin?(_origin), do: false
+  defp valid_origin?(_origin, _options), do: false
 
   defp post(origin, headers, body) do
     url = String.to_charlist(origin <> "/internal/v1/relay/tickets/consume")

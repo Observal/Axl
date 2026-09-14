@@ -15,5 +15,6 @@ export * from "./new-session.ts";
 export * from "./presentation.ts";
 export * from "./projector.ts";
 export * from "./remote-outbox.ts";
+export * from "./remote-relay.ts";
 export * from "./subscription.ts";
 export * from "./workspace.ts";

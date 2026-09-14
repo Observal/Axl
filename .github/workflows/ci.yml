@@ -6,7 +6,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main, RC, "release/**"]
   merge_group:
     types: [checks_requested]
   push:
@@ -51,6 +51,11 @@ jobs:
               - '.github/workflows/**'
             relay:
               - 'services/relay/**'
+              - 'services/control-plane/**'
+              - 'packages/daemon/src/remote-*.ts'
+              - 'packages/daemon/test/remote-*.test.ts'
+              - 'packages/sdk/src/remote-*.ts'
+              - 'packages/sdk/test/remote-*.test.ts'
               - 'packages/protocol/src/remote-transport.ts'
               - 'packages/protocol/test/fixtures/remote-transport-v1.json'
               - 'packages/protocol/test/fixtures/internal-relay-api-v1.json'
@@ -94,6 +99,18 @@ jobs:
         run: echo "No relay changes detected; required check reports success."
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         if: needs.changes.outputs.relay == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.relay == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.relay == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install Node dependencies
+        if: needs.changes.outputs.relay == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Set up Erlang and Elixir
         if: needs.changes.outputs.relay == 'true'
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
@@ -117,6 +134,11 @@ jobs:
         if: needs.changes.outputs.relay == 'true'
         working-directory: services/relay
         run: mix format --check-formatted && mix compile --warnings-as-errors && mix test && mix credo --strict && mix dialyzer && mix deps.audit
+      - name: Run disposable hosted-path integration
+        if: needs.changes.outputs.relay == 'true'
+        env:
+          AXL_RUN_HOSTED_PATH_INTEGRATION: '1'
+        run: pnpm --filter @axl/daemon test
 
   licenses:
     name: REUSE licenses

@@ -16,4 +16,4 @@ The first slice provides:
 - explicit inbound heartbeat deadlines, lease expiry, generation-bound revocation, and draining
 - fail-closed admission and internal-authentication interfaces
 
-Production control-plane origins, service authentication, TLS termination, and deployment configuration remain unselected. Tests use deterministic fake adapters.
+Production control-plane origins, service authentication, TLS termination, and deployment configuration remain unselected. Tests use deterministic fake adapters. The disposable cross-runtime hosted-path test may explicitly allow plain HTTP only for an exact loopback control-plane origin; production configuration remains HTTPS-only.

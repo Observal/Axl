@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ProtocolValidationError } from "./event-envelope.ts";
+import { parseServerMessage, type ServerMessage } from "./wire.ts";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const base64Pattern = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -168,11 +169,40 @@ export type RemoteDeliveryState =
 export interface OpaqueOutboxRecord {
   readonly requestId: RequestId;
   readonly idempotencyKey: IdempotencyKey;
-  readonly destinationRouteId: RouteId;
+  /** Stable crypto-session identity. Ephemeral relay routes must never be persisted here. */
+  readonly destinationCryptoSessionId: CryptoSessionId;
   readonly opaqueEnvelope: Uint8Array;
   readonly createdAt: number;
   readonly state: "queued_local" | "sending" | "daemon_accepted";
 }
+
+export type RemoteDaemonMessage =
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      readonly type: "daemon_accepted";
+      readonly requestId: RequestId;
+      readonly idempotencyKey: IdempotencyKey;
+    }
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      readonly type: "daemon_result";
+      readonly requestId: RequestId;
+      readonly method: string;
+      readonly result: unknown;
+    }
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      readonly type: "daemon_error";
+      readonly requestId: RequestId;
+      readonly code: string;
+      readonly message: string;
+      readonly retryable: boolean;
+    }
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      readonly type: "daemon_delivery";
+      readonly message: ServerMessage;
+    };
 
 export interface RelayPeerRoute {
   readonly routeId: RouteId;
@@ -589,7 +619,7 @@ export function parseOpaqueOutboxRecord(value: unknown): OpaqueOutboxRecord {
   exact(candidate, "outboxRecord", [
     "requestId",
     "idempotencyKey",
-    "destinationRouteId",
+    "destinationCryptoSessionId",
     "opaqueEnvelope",
     "createdAt",
     "state",
@@ -616,14 +646,103 @@ export function parseOpaqueOutboxRecord(value: unknown): OpaqueOutboxRecord {
   return {
     requestId: parseRemoteRequestId(candidate.requestId, "outboxRecord.requestId"),
     idempotencyKey: parseIdempotencyKey(candidate.idempotencyKey, "outboxRecord.idempotencyKey"),
-    destinationRouteId: parseRouteId(
-      candidate.destinationRouteId,
-      "outboxRecord.destinationRouteId",
+    destinationCryptoSessionId: parseCryptoSessionId(
+      candidate.destinationCryptoSessionId,
+      "outboxRecord.destinationCryptoSessionId",
     ),
     opaqueEnvelope: candidate.opaqueEnvelope.slice(),
     createdAt: timestamp(candidate.createdAt, "outboxRecord.createdAt"),
     state: candidate.state,
   };
+}
+
+export function parseRemoteDaemonMessage(value: unknown): RemoteDaemonMessage {
+  const candidate = object(value, "remoteDaemonMessage");
+  if (candidate.version !== REMOTE_TRANSPORT_VERSION) {
+    fail("remoteDaemonMessage.version", `must equal ${REMOTE_TRANSPORT_VERSION}`);
+  }
+  if (candidate.type === "daemon_accepted") {
+    exact(candidate, "remoteDaemonMessage", ["version", "type", "requestId", "idempotencyKey"]);
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_accepted",
+      requestId: parseRemoteRequestId(candidate.requestId, "remoteDaemonMessage.requestId"),
+      idempotencyKey: parseIdempotencyKey(
+        candidate.idempotencyKey,
+        "remoteDaemonMessage.idempotencyKey",
+      ),
+    };
+  }
+  if (candidate.type === "daemon_result") {
+    exact(candidate, "remoteDaemonMessage", ["version", "type", "requestId", "method", "result"]);
+    const method = boundedString(candidate.method, "remoteDaemonMessage.method", 128);
+    if (!methodPattern.test(method))
+      fail("remoteDaemonMessage.method", "has an invalid method name");
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_result",
+      requestId: parseRemoteRequestId(candidate.requestId, "remoteDaemonMessage.requestId"),
+      method,
+      result: candidate.result,
+    };
+  }
+  if (candidate.type === "daemon_error") {
+    exact(candidate, "remoteDaemonMessage", [
+      "version",
+      "type",
+      "requestId",
+      "code",
+      "message",
+      "retryable",
+    ]);
+    if (typeof candidate.retryable !== "boolean") {
+      fail("remoteDaemonMessage.retryable", "must be boolean");
+    }
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_error",
+      requestId: parseRemoteRequestId(candidate.requestId, "remoteDaemonMessage.requestId"),
+      code: boundedString(candidate.code, "remoteDaemonMessage.code", 128),
+      message: boundedString(candidate.message, "remoteDaemonMessage.message", 1_024),
+      retryable: candidate.retryable,
+    };
+  }
+  if (candidate.type === "daemon_delivery") {
+    exact(candidate, "remoteDaemonMessage", ["version", "type", "message"]);
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_delivery",
+      message: parseServerMessage(candidate.message),
+    };
+  }
+  return fail("remoteDaemonMessage.type", "is invalid");
+}
+
+export function encodeRemoteDaemonMessage(message: RemoteDaemonMessage): Uint8Array {
+  const validated = parseRemoteDaemonMessage(message);
+  const encoded = new TextEncoder().encode(JSON.stringify(validated));
+  if (encoded.byteLength > MAX_RELAY_OPAQUE_PAYLOAD_BYTES) {
+    fail(
+      "remoteDaemonMessage",
+      `must encode to no more than ${MAX_RELAY_OPAQUE_PAYLOAD_BYTES} bytes`,
+    );
+  }
+  return encoded;
+}
+
+export function decodeRemoteDaemonMessage(value: Uint8Array): RemoteDaemonMessage {
+  if (!(value instanceof Uint8Array)) fail("remoteDaemonMessage", "must be bytes");
+  if (value.byteLength === 0 || value.byteLength > MAX_RELAY_OPAQUE_PAYLOAD_BYTES) {
+    fail("remoteDaemonMessage", `must contain 1 through ${MAX_RELAY_OPAQUE_PAYLOAD_BYTES} bytes`);
+  }
+  try {
+    return parseRemoteDaemonMessage(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(value)),
+    );
+  } catch (error) {
+    if (error instanceof ProtocolValidationError) throw error;
+    fail("remoteDaemonMessage", "must be valid UTF-8 JSON");
+  }
 }
 
 export function parseRelayRevocationResult(value: unknown): RelayRevocationResult {

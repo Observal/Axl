@@ -7,20 +7,25 @@ import test from "node:test";
 
 import {
   decodeBase64,
+  decodeRemoteDaemonMessage,
   DEFAULT_RELAY_LIMITS,
   encodeBase64,
+  encodeRemoteDaemonMessage,
   encodeInternalConsumeRelayTicketRequest,
   encodeRelayBinaryFrame,
   MAX_RELAY_FRAME_BYTES,
   MAX_RELAY_OPAQUE_PAYLOAD_BYTES,
   parseInternalConsumeRelayTicketRequest,
   parseDeviceId,
+  parseIdempotencyKey,
   parseInternalConsumeRelayTicketResult,
   parseIssueRelayTicketRequest,
+  parseOpaqueOutboxRecord,
   parseRelayBinaryFrame,
   parseRelayDiscoveryMessage,
   parseRelayRevocationNotification,
   parseRemoteDeviceScopes,
+  parseRemoteRequestId,
   ProtocolValidationError,
   RELAY_FAILURE_CODE_VALUES,
   REMOTE_TRANSPORT_VERSION,
@@ -140,6 +145,62 @@ test("validates role-scoped route discovery messages", () => {
         peers: [],
       }),
     (error) => error instanceof ProtocolValidationError && error.path === "discovery.sourceRoute",
+  );
+});
+
+test("keeps durable outbox destinations stable and relay routes ephemeral", () => {
+  const opaqueEnvelope = Uint8Array.of(1, 2, 3);
+  assert.deepEqual(
+    parseOpaqueOutboxRecord({
+      requestId: "11111111-1111-4111-8111-111111111111",
+      idempotencyKey: "22222222-2222-4222-8222-222222222222",
+      destinationCryptoSessionId: "33333333-3333-4333-8333-333333333333",
+      opaqueEnvelope,
+      createdAt: 1_900_000_000_000,
+      state: "queued_local",
+    }),
+    {
+      requestId: "11111111-1111-4111-8111-111111111111",
+      idempotencyKey: "22222222-2222-4222-8222-222222222222",
+      destinationCryptoSessionId: "33333333-3333-4333-8333-333333333333",
+      opaqueEnvelope,
+      createdAt: 1_900_000_000_000,
+      state: "queued_local",
+    },
+  );
+  assert.throws(
+    () =>
+      parseOpaqueOutboxRecord({
+        requestId: "11111111-1111-4111-8111-111111111111",
+        idempotencyKey: "22222222-2222-4222-8222-222222222222",
+        destinationRouteId: "33333333-3333-4333-8333-333333333333",
+        opaqueEnvelope,
+        createdAt: 1_900_000_000_000,
+        state: "queued_local",
+      }),
+    (error) =>
+      error instanceof ProtocolValidationError && error.path === "outboxRecord.destinationRouteId",
+  );
+});
+
+test("validates daemon acceptance only inside the authenticated payload", () => {
+  const message = {
+    version: REMOTE_TRANSPORT_VERSION,
+    type: "daemon_accepted" as const,
+    requestId: parseRemoteRequestId("11111111-1111-4111-8111-111111111111"),
+    idempotencyKey: parseIdempotencyKey("22222222-2222-4222-8222-222222222222"),
+  };
+  assert.deepEqual(decodeRemoteDaemonMessage(encodeRemoteDaemonMessage(message)), message);
+  assert.throws(
+    () =>
+      decodeRemoteDaemonMessage(
+        new TextEncoder().encode(
+          JSON.stringify({ ...message, idempotencyKey: "not-an-idempotency-key" }),
+        ),
+      ),
+    (error) =>
+      error instanceof ProtocolValidationError &&
+      error.path === "remoteDaemonMessage.idempotencyKey",
   );
 });
 

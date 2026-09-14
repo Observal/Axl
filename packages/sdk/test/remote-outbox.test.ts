@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  parseCryptoSessionId,
   parseIdempotencyKey,
   parseRemoteRequestId,
   parseRouteId,
@@ -49,38 +50,52 @@ class MemoryOutboxStore implements OpaqueOutboxStore {
 
 const requestId = parseRemoteRequestId("11111111-1111-4111-8111-111111111111");
 const idempotencyKey = parseIdempotencyKey("22222222-2222-4222-8222-222222222222");
-const destinationRouteId = parseRouteId("33333333-3333-4333-8333-333333333333");
+const destinationCryptoSessionId = parseCryptoSessionId("33333333-3333-4333-8333-333333333333");
+const firstRouteId = parseRouteId("55555555-5555-4555-8555-555555555555");
+const secondRouteId = parseRouteId("66666666-6666-4666-8666-666666666666");
 
 function record(bytes = Uint8Array.of(0, 1, 2, 255)): OpaqueOutboxRecord {
   return {
     requestId,
     idempotencyKey,
-    destinationRouteId,
+    destinationCryptoSessionId,
     opaqueEnvelope: bytes,
     createdAt: 1_900_000_000_000,
     state: "queued_local",
   };
 }
 
-function outbox(): OpaqueOutbox {
+function outbox(route = () => firstRouteId): OpaqueOutbox {
   let attempt = 0;
-  return new OpaqueOutbox(new MemoryOutboxStore(), {
-    create() {
-      attempt += 1;
-      return parseTransportAttemptId(
-        `44444444-4444-4444-8444-${attempt.toString().padStart(12, "0")}`,
-      );
+  return new OpaqueOutbox(
+    new MemoryOutboxStore(),
+    {
+      create() {
+        attempt += 1;
+        return parseTransportAttemptId(
+          `44444444-4444-4444-8444-${attempt.toString().padStart(12, "0")}`,
+        );
+      },
     },
-  });
+    {
+      async resolve() {
+        return route();
+      },
+    },
+  );
 }
 
-test("retries exact opaque bytes under new transport attempt IDs", async () => {
-  const queue = outbox();
+test("resolves a fresh ephemeral route while retrying exact opaque bytes", async () => {
+  let currentRoute = firstRouteId;
+  const queue = outbox(() => currentRoute);
   await queue.enqueue(record());
 
   const first = await queue.beginAttempt(requestId);
+  currentRoute = secondRouteId;
   const second = await queue.beginAttempt(requestId);
   assert.notEqual(first.attemptId, second.attemptId);
+  assert.equal(first.destinationRouteId, firstRouteId);
+  assert.equal(second.destinationRouteId, secondRouteId);
   assert.deepEqual(first.opaqueEnvelope, Uint8Array.of(0, 1, 2, 255));
   assert.deepEqual(second.opaqueEnvelope, first.opaqueEnvelope);
   assert.equal((await queue.list())[0]?.state, "sending");
