@@ -104,6 +104,7 @@ test("configuration mutations run in order and retain field-scoped failures", as
         profile: "standard",
         webFetch: false,
         webSearch: false,
+        userQuestions: false,
         boundaryEventIds: [],
       };
     },

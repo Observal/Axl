@@ -9,6 +9,7 @@ import type { JsonObject, JsonValue, ModelErrorCategory, Usage } from "@axl/prot
 import { AuthError, type ProviderAuthentication, type ResolvedAuth } from "./auth.ts";
 import { assertModelSupports } from "./capabilities.ts";
 import { safeProviderMessage } from "./diagnostics.ts";
+import { consumeContextLimitResponse, isContextLimitError } from "./model-error.ts";
 import type {
   AuthMethod,
   ModelInfo,
@@ -387,7 +388,8 @@ function mapUsage(raw: unknown, model: ModelInfo, includeCost: boolean): Usage {
   return !includeCost || model.cost === undefined ? mapped : withUsageCost(model.cost, mapped);
 }
 
-function providerErrorCategory(code: string): ModelErrorCategory {
+function providerErrorCategory(code: string, message = ""): ModelErrorCategory {
+  if (isContextLimitError(code, message)) return "context_limit";
   const normalized = code.toLowerCase();
   if (RATE_LIMIT_CODES.has(normalized)) return "rate_limit";
   if (OVERLOADED_CODES.has(normalized)) return "overloaded";
@@ -765,7 +767,7 @@ export async function* decodeResponsesStream(
           : typeof event.message === "string"
             ? event.message
             : "Provider reported a failure";
-      const category = providerErrorCategory(code);
+      const category = providerErrorCategory(code, rawMessage);
       yield {
         type: "error",
         code,
@@ -919,7 +921,7 @@ export class OpenAiResponsesProvider implements ModelProvider {
     }
 
     if (!response.ok) {
-      await response.body?.cancel();
+      const contextLimit = await consumeContextLimitResponse(response, request.signal);
       const retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status);
       const retryDelay = retryable ? retryAfterMs(response.headers) : undefined;
       yield {
@@ -927,8 +929,9 @@ export class OpenAiResponsesProvider implements ModelProvider {
         code: `http_${response.status}`,
         message: `Provider ${this.id} returned ${response.status}`,
         retryable,
-        category:
-          response.status === 429
+        category: contextLimit
+          ? "context_limit"
+          : response.status === 429
             ? "rate_limit"
             : response.status >= 500
               ? "provider_internal"

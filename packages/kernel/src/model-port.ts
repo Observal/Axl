@@ -14,6 +14,7 @@ export interface ModelTurnRequest {
   readonly messages: readonly ModelMessage[];
   readonly tools: readonly ToolDeclaration[];
   readonly maxOutputTokens?: number | undefined;
+  readonly cacheRetention?: "none" | "short" | "long" | undefined;
   readonly estimatedInputTokens?: number | undefined;
   readonly onRequestConfigured?:
     | ((configuration: ModelRequestConfiguration) => Promise<void>)

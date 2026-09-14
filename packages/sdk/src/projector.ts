@@ -4,6 +4,7 @@
 
 import type {
   CanonicalEvent,
+  ContextResource,
   EventId,
   EventPayloadMap,
   JsonObject,
@@ -67,7 +68,13 @@ export interface UsageTotals extends Usage {
 
 export interface ProjectedOperation {
   readonly operationId: OperationId;
-  readonly status: "running" | "waiting_interaction" | "succeeded" | "failed" | "aborted";
+  readonly status:
+    | "queued"
+    | "running"
+    | "waiting_interaction"
+    | "succeeded"
+    | "failed"
+    | "aborted";
 }
 
 export interface UncertainShellOperation {
@@ -109,10 +116,13 @@ export interface ConversationState {
   readonly entitlement?: string;
   readonly thinking?: ThinkingLevel;
   readonly requestSettings?: EventPayloadMap["config.request"];
+  readonly compactionSettings?: EventPayloadMap["config.compaction"];
   readonly lastRequest?: EventPayloadMap["model.request_configured"];
   readonly profile?: SessionProfile;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly userQuestions?: boolean;
+  readonly contextResources: readonly ContextResource[];
   readonly sandbox?: { readonly provider: string; readonly enforced: boolean };
   readonly usage: UsageTotals;
   readonly activity?: ProjectedActivity;
@@ -218,10 +228,13 @@ export class ConversationProjector {
   private entitlement: string | undefined;
   private thinking: ThinkingLevel | undefined;
   private requestSettings: EventPayloadMap["config.request"] | undefined;
+  private compactionSettings: EventPayloadMap["config.compaction"] | undefined;
   private lastRequest: EventPayloadMap["model.request_configured"] | undefined;
   private profile: SessionProfile | undefined;
   private webFetch: boolean | undefined;
   private webSearch: boolean | undefined;
+  private userQuestions: boolean | undefined;
+  private contextResources: readonly ContextResource[] = [];
   private sandbox: ConversationState["sandbox"];
   private usage: UsageTotals = EMPTY_USAGE;
   private activity: ProjectedActivity | undefined;
@@ -270,11 +283,16 @@ export class ConversationProjector {
       ...(this.provider === undefined ? {} : { provider: this.provider }),
       ...(this.entitlement === undefined ? {} : { entitlement: this.entitlement }),
       ...(this.requestSettings === undefined ? {} : { requestSettings: this.requestSettings }),
+      ...(this.compactionSettings === undefined
+        ? {}
+        : { compactionSettings: this.compactionSettings }),
       ...(this.lastRequest === undefined ? {} : { lastRequest: this.lastRequest }),
       ...(this.thinking === undefined ? {} : { thinking: this.thinking }),
       ...(this.profile === undefined ? {} : { profile: this.profile }),
       ...(this.webFetch === undefined ? {} : { webFetch: this.webFetch }),
       ...(this.webSearch === undefined ? {} : { webSearch: this.webSearch }),
+      ...(this.userQuestions === undefined ? {} : { userQuestions: this.userQuestions }),
+      contextResources: this.contextResources,
       ...(this.sandbox === undefined ? {} : { sandbox: this.sandbox }),
       usage: this.usage,
       ...(this.activity === undefined ? {} : { activity: this.activity }),
@@ -312,10 +330,13 @@ export class ConversationProjector {
     this.entitlement = undefined;
     this.thinking = undefined;
     this.requestSettings = undefined;
+    this.compactionSettings = undefined;
     this.lastRequest = undefined;
     this.profile = undefined;
     this.webFetch = undefined;
     this.webSearch = undefined;
+    this.userQuestions = undefined;
+    this.contextResources = [];
     this.sandbox = undefined;
     this.usage = EMPTY_USAGE;
     this.activity = undefined;
@@ -506,6 +527,9 @@ export class ConversationProjector {
       case "config.request":
         this.requestSettings = event.payload;
         break;
+      case "config.compaction":
+        this.compactionSettings = event.payload;
+        break;
       case "model.request_configured":
         this.lastRequest = event.payload;
         break;
@@ -518,6 +542,10 @@ export class ConversationProjector {
       case "config.tools":
         this.webFetch = event.payload.webFetch;
         this.webSearch = event.payload.webSearch;
+        this.userQuestions = event.payload.userQuestions ?? false;
+        break;
+      case "context.resources":
+        this.contextResources = event.payload.resources;
         break;
       case "sandbox.configured":
         this.sandbox = { provider: event.payload.provider, enforced: event.payload.enforced };
@@ -538,10 +566,29 @@ export class ConversationProjector {
           this.clearActivity(event.operationId);
         }
         break;
+      case "compaction.queued":
+        this.updateOperation(event.operationId, "queued");
+        break;
+      case "compaction.started":
+        this.updateOperation(event.operationId, "running");
+        break;
+      case "compaction.failed":
+        this.updateOperation(event.operationId, "failed");
+        this.clearActivity(event.operationId);
+        break;
       case "context.compacted":
         this.usage = addUsage(this.usage, event.payload.usage);
         this.lastCompaction = event;
         for (const id of event.payload.replacedEventIds) this.compactedEvents.add(id);
+        this.updateOperation(
+          event.operationId,
+          event.payload.reason === undefined || event.payload.reason === "manual"
+            ? "succeeded"
+            : "running",
+        );
+        if (event.payload.reason === undefined || event.payload.reason === "manual") {
+          this.clearActivity(event.operationId);
+        }
         break;
       case "session.error":
         this.lastError = event;

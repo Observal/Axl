@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -14,6 +14,7 @@ import {
   AgentSession,
   buildStablePrompt,
   loadAgentsInstructions,
+  loadAgentsResources,
   makeMinimalProfileTools,
   type ModelPort,
   type ModelTurnRequest,
@@ -61,16 +62,36 @@ test("the stable prompt contains exactly the specified base and nothing more", (
     ],
   });
 
-  assert.match(prompt.text, /You are Axl/);
-  assert.match(prompt.text, /Working directory: \/workspace\/repo/);
-  assert.match(prompt.text, /- shell: Run a shell command/);
-  assert.match(prompt.text, /Use pnpm\./);
-  assert.match(prompt.text, /Never fabricate/);
+  assert.equal(
+    prompt.text,
+    `You are Axl, a coding agent. You help users inspect repositories, run commands, edit code, and verify changes.
+
+Available tools:
+- shell: Run a shell command
+- edit: Replace exact text in a file
+
+Guidelines:
+- Prefer small, verifiable steps and report what you actually did.
+- When a command or edit fails, show the failure rather than working around it silently.
+- Never fabricate file contents or command output.
+
+<project_context>
+
+Project-specific instructions and guidelines:
+
+<project_instructions path="/workspace/repo/AGENTS.md">
+Use pnpm.
+</project_instructions>
+
+</project_context>
+
+Current working directory: /workspace/repo`,
+  );
   // No subagent instructions, skill bodies, or feature catalogs, ever.
   assert.doesNotMatch(prompt.text, /subagent|delegate|skill|plugin|plan mode/i);
   assert.deepEqual(
     prompt.sections.map((section) => section.name),
-    ["identity", "workspace", "tools", "constraints", "agents-project"],
+    ["identity", "tools", "constraints", "project-context", "workspace"],
   );
 });
 
@@ -92,16 +113,64 @@ test("loadAgentsInstructions reads applicable files and skips missing ones", asy
   assert.deepEqual(
     both.map((section) => [section.name, section.content]),
     [
-      ["agents-global", "Global rules."],
-      ["agents-project", "Project rules."],
+      ["agents-global-0", "Global rules."],
+      ["agents-project-1", "Project rules."],
     ],
   );
 
   const projectOnly = await loadAgentsInstructions({ cwd });
   assert.equal(projectOnly.length, 1);
 
+  await mkdir(join(cwd, "empty-missing-dir"));
   const none = await loadAgentsInstructions({ cwd: join(cwd, "empty-missing-dir") });
   assert.deepEqual(none, []);
+});
+
+test("discovers hierarchical instructions and same-directory overrides", async (context) => {
+  const outside = await workspace(context);
+  const root = join(outside, "repo");
+  const cwd = join(root, "packages", "app");
+  const global = join(outside, ".axl");
+  await mkdir(join(root, ".git"), { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await mkdir(global);
+  await writeFile(join(outside, "AGENTS.md"), "Must not cross the repository root.\n");
+  await writeFile(join(global, "AGENTS.md"), "Global default.\n");
+  await writeFile(join(global, "AGENTS.override.md"), "Global override.\n");
+  await writeFile(join(root, "AGENTS.md"), "Repository rules.\n");
+  await writeFile(join(root, "packages", "AGENTS.md"), "Package rules.\n");
+  await writeFile(join(cwd, "AGENTS.md"), "App default.\n");
+  await writeFile(join(cwd, "AGENTS.override.md"), "App override.\n");
+
+  const resources = await loadAgentsResources({ cwd, globalPath: join(global, "AGENTS.md") });
+  assert.deepEqual(
+    resources.map(({ scope, path, content }) => [scope, path, content]),
+    [
+      ["global", join(global, "AGENTS.override.md"), "Global override."],
+      ["project", join(root, "AGENTS.md"), "Repository rules."],
+      ["project", join(root, "packages", "AGENTS.md"), "Package rules."],
+      ["project", join(cwd, "AGENTS.override.md"), "App override."],
+    ],
+  );
+});
+
+test("rejects unsafe AGENTS.md resources", async (context) => {
+  const root = await workspace(context);
+  const outside = await workspace(context);
+  await mkdir(join(root, ".git"));
+  await writeFile(join(outside, "rules.md"), "Escaped rules.\n");
+  await symlink(join(outside, "rules.md"), join(root, "AGENTS.md"));
+  await assert.rejects(
+    loadAgentsResources({ cwd: root }),
+    /AGENTS\.md path escapes its trusted root/,
+  );
+
+  await rm(join(root, "AGENTS.md"));
+  await writeFile(join(root, "AGENTS.md"), Buffer.from([0x61, 0x00, 0x62]));
+  await assert.rejects(loadAgentsResources({ cwd: root }), /AGENTS\.md file is binary/);
+
+  await writeFile(join(root, "AGENTS.md"), Buffer.alloc(512 * 1024 + 1, 0x61));
+  await assert.rejects(loadAgentsResources({ cwd: root }), /must not exceed 524288 bytes/);
 });
 
 test("a fresh session logs prompt sections once and freezes the prefix", async (context) => {
@@ -123,8 +192,11 @@ test("a fresh session logs prompt sections once and freezes the prefix", async (
   const sections = events.filter((event) => event.type === "prompt.section");
   assert.deepEqual(
     sections.map((event) => (event.type === "prompt.section" ? event.payload.name : "")),
-    ["identity", "workspace", "tools", "constraints"],
+    ["identity", "tools", "constraints", "workspace"],
   );
+  assert.deepEqual(events.find((event) => event.type === "context.resources")?.payload, {
+    resources: [],
+  });
 
   // Reopening logs no duplicate sections; the system prefix is byte-identical.
   const reopened = await AgentSession.open(path, sessionId, {
@@ -137,6 +209,7 @@ test("a fresh session logs prompt sections once and freezes the prefix", async (
   await reopened.dispose();
   const after = (await reopened.log.read()).events;
   assert.equal(after.filter((event) => event.type === "prompt.section").length, 4);
+  assert.equal(after.filter((event) => event.type === "context.resources").length, 1);
   assert.equal(requests[0]?.system, prompt.text);
   assert.equal(requests[1]?.system, prompt.text);
 });

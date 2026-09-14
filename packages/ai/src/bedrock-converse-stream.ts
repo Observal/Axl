@@ -6,6 +6,7 @@
 import type { JsonObject, JsonValue, Usage } from "@axl/protocol";
 
 import { safeProviderMessage } from "./diagnostics.ts";
+import { isContextLimitError } from "./model-error.ts";
 import type { BedrockCompatibility, ModelInfo, ModelStreamEvent } from "./model.ts";
 import {
   isPreparedModelRequest,
@@ -696,8 +697,9 @@ export async function* decodeBedrockConverseStream(
         code: failure.code,
         message,
         retryable,
-        category:
-          failure.code === "throttlingException"
+        category: isContextLimitError(failure.code, message)
+          ? "context_limit"
+          : failure.code === "throttlingException"
             ? "rate_limit"
             : failure.code === "serviceUnavailableException"
               ? "overloaded"

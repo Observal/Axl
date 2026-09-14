@@ -158,12 +158,6 @@ importers:
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon
-      '@axl/extension-mcp':
-        specifier: workspace:*
-        version: link:../extensions/mcp
-      '@axl/extension-skills':
-        specifier: workspace:*
-        version: link:../extensions/skills
       '@axl/kernel':
         specifier: workspace:*
         version: link:../kernel

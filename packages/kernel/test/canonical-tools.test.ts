@@ -12,6 +12,8 @@ import test, { type TestContext } from "node:test";
 import type { JsonObject } from "@axl/protocol";
 
 import {
+  makeAskUserQuestionTool,
+  makeCapabilitySearchTool,
   makeEditTool,
   makeReadTool,
   makeShellTool,
@@ -38,6 +40,74 @@ function shellIn(cwd: string, overrides: Partial<Parameters<typeof makeShellTool
 function text(result: { content: readonly { type: string; text?: string }[] }): string {
   return result.content[0]?.type === "text" ? (result.content[0].text ?? "") : "";
 }
+
+test("ask_user_question validates and returns only user-authored answers", async () => {
+  const requests: JsonObject[] = [];
+  const ask = makeAskUserQuestionTool(async (request) => {
+    requests.push(request.data);
+    return {
+      action: "accept",
+      content: { answers: [{ questionIndex: 0, selectedLabels: ["TypeScript"] }] },
+    };
+  });
+  const result = await ask.execute(
+    {
+      questions: [
+        {
+          header: "Language",
+          question: "Which language?",
+          options: [
+            { label: "TypeScript", description: "Use TypeScript", preview: "const value = 1" },
+            { label: "JavaScript", description: "Use JavaScript" },
+          ],
+        },
+      ],
+    },
+    noSignal,
+  );
+  assert.equal(ask.name, "ask_user_question");
+  assert.equal(result.isError, false);
+  assert.equal(text(result), "Which language?\nTypeScript");
+  assert.equal(text(result).includes("const value"), false);
+  assert.equal(requests.length, 1);
+
+  const cancelled = makeAskUserQuestionTool(async () => ({ action: "cancel" }));
+  const cancelledResult = await cancelled.execute(requests[0] as JsonObject, noSignal);
+  assert.equal(cancelledResult.isError, false);
+  assert.match(text(cancelledResult), /cancelled/);
+});
+
+test("ask_user_question rejects invalid requests and responses", async () => {
+  const ask = makeAskUserQuestionTool(async () => ({
+    action: "accept",
+    content: { answers: [{ questionIndex: 0, selectedLabels: ["Unknown"] }] },
+  }));
+  await assert.rejects(ask.execute({ questions: [] }, noSignal), ToolInputError);
+  await assert.rejects(
+    ask.execute(
+      {
+        questions: [
+          {
+            header: "Choice",
+            question: "Choose?",
+            options: [
+              { label: "One", description: "First" },
+              { label: "Two", description: "Second" },
+            ],
+          },
+        ],
+      },
+      noSignal,
+    ),
+    /must match an offered option/,
+  );
+});
+
+test("pending capability search fails explicitly", async () => {
+  const search = makeCapabilitySearchTool();
+  assert.equal(search.name, "capability_search");
+  await assert.rejects(search.execute({ query: "release" }, noSignal), /not implemented/);
+});
 
 test("shell runs a command and reports output and exit status", async (context) => {
   const cwd = await workspace(context);

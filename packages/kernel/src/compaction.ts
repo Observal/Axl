@@ -3,6 +3,7 @@
 
 import type {
   CanonicalEvent,
+  CompactionSettings,
   EventId,
   ModelMessage,
   ModelRequestConfiguration,
@@ -10,23 +11,20 @@ import type {
   ToolCallRequest,
   Usage,
 } from "@axl/protocol";
+import {
+  DEFAULT_COMPACTION_SETTINGS,
+  estimateModelInputTokens,
+  estimateModelMessageTokens,
+} from "@axl/protocol";
 
-import { estimateModelInputTokens, estimateModelMessageTokens } from "@axl/protocol";
-export { estimateModelMessageTokens } from "@axl/protocol";
+export type { CompactionSettings } from "@axl/protocol";
+export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = DEFAULT_COMPACTION_SETTINGS.keepRecentTokens;
+export const DEFAULT_COMPACTION_RESERVE_TOKENS = DEFAULT_COMPACTION_SETTINGS.reserveTokens;
 
 import type { ModelPort } from "./model-port.ts";
 import { ReplayError } from "./replay.ts";
 
-export const DEFAULT_COMPACTION_KEEP_RECENT_TOKENS = 20_000;
-export const DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS = 4_096;
-
-export interface CompactionSettings {
-  readonly keepRecentTokens: number;
-  readonly maxOutputTokens: number;
-}
-
 const TOOL_RESULT_MAX_CHARACTERS = 2_000;
-
 const COMPACTION_SUMMARY_PREFIX =
   "Earlier conversation history was compacted into this continuation summary:\n\n<summary>\n";
 const COMPACTION_SUMMARY_SUFFIX = "\n</summary>";
@@ -45,14 +43,27 @@ interface ProjectedContext {
 
 export interface CompactionPlan {
   readonly messagesToSummarize: readonly ModelMessage[];
+  readonly turnPrefixMessages: readonly ModelMessage[];
   readonly previousSummary?: string;
   readonly replacedEventIds: readonly EventId[];
   readonly splitTurn: boolean;
+  readonly readFiles: readonly string[];
+  readonly modifiedFiles: readonly string[];
 }
 
 export interface CompactionSummary {
   readonly summary: string;
   readonly usage: Usage;
+  readonly readFiles: readonly string[];
+  readonly modifiedFiles: readonly string[];
+}
+
+export function shouldCompact(
+  estimatedInputTokens: number,
+  contextWindow: number,
+  settings: CompactionSettings,
+): boolean {
+  return settings.enabled && estimatedInputTokens > contextWindow - settings.reserveTokens;
 }
 
 function replacementClosure(
@@ -71,9 +82,8 @@ function replacementClosure(
       throw new ReplayError(`Compaction ${compaction.id} replaces non-ancestor event ${id}`);
     }
     hidden.add(id);
-    if (found.event.type === "context.compacted") {
+    if (found.event.type === "context.compacted")
       pending.push(...found.event.payload.replacedEventIds);
-    }
   }
   return hidden;
 }
@@ -87,9 +97,7 @@ function projectContext(events: readonly CanonicalEvent[]): ProjectedContext {
       ? new Set<EventId>()
       : replacementClosure(events, previousCompaction);
   const groups: Array<
-    ContextGroup & {
-      message: ModelMessage & { toolCalls?: ToolCallRequest[] };
-    }
+    ContextGroup & { message: ModelMessage & { toolCalls?: ToolCallRequest[] } }
   > = [];
   let toolCallingAssistant: (typeof groups)[number] | undefined;
 
@@ -155,10 +163,9 @@ function projectContext(events: readonly CanonicalEvent[]): ProjectedContext {
         },
         eventIds: [event.id],
       });
-    } else if (event.type === "context.compacted") {
-      toolCallingAssistant = undefined;
-    }
+    } else if (event.type === "context.compacted") toolCallingAssistant = undefined;
   }
+
   const visibleGroups: ContextGroup[] = [];
   let foundReplacement = false;
   for (const group of groups) {
@@ -175,9 +182,7 @@ function projectContext(events: readonly CanonicalEvent[]): ProjectedContext {
         );
       }
       foundReplacement = true;
-    } else {
-      visibleGroups.push(group);
-    }
+    } else visibleGroups.push(group);
   }
   if (previousCompaction !== undefined && !foundReplacement) {
     throw new ReplayError(`Compaction ${previousCompaction.id} replaces no model-visible events`);
@@ -217,6 +222,25 @@ export function messagesFromCompactedLineage(
   ];
 }
 
+function fileLists(
+  messages: readonly ModelMessage[],
+  previous?: CanonicalEvent<"context.compacted">,
+): { readFiles: string[]; modifiedFiles: string[] } {
+  const read = new Set(previous?.payload.readFiles ?? []);
+  const modified = new Set(previous?.payload.modifiedFiles ?? []);
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.toolCalls ?? []) {
+      const path = typeof call.input.path === "string" ? call.input.path : undefined;
+      if (!path) continue;
+      if (call.name === "read") read.add(path);
+      else if (call.name === "write" || call.name === "edit") modified.add(path);
+    }
+  }
+  for (const path of modified) read.delete(path);
+  return { readFiles: [...read].sort(), modifiedFiles: [...modified].sort() };
+}
+
 export function prepareCompaction(
   events: readonly CanonicalEvent[],
   keepRecentTokens = DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
@@ -240,19 +264,35 @@ export function prepareCompaction(
   }
   if (crossedAt < 0) return undefined;
 
-  let firstKeptIndex = -1;
-  for (let index = crossedAt; index < projected.groups.length; index += 1) {
-    const role = projected.groups[index]?.message.role;
-    if (role === "user" || role === "assistant") {
-      firstKeptIndex = index;
-      break;
+  let firstKeptIndex = crossedAt;
+  if (projected.groups[firstKeptIndex]?.message.role === "tool") {
+    while (firstKeptIndex >= 0 && projected.groups[firstKeptIndex]?.message.role !== "assistant") {
+      firstKeptIndex -= 1;
     }
   }
   if (firstKeptIndex <= 0) return undefined;
 
+  const splitTurn = projected.groups[firstKeptIndex]?.message.role === "assistant";
+  let turnStartIndex = firstKeptIndex;
+  if (splitTurn) {
+    for (let index = firstKeptIndex - 1; index >= 0; index -= 1) {
+      if (projected.groups[index]?.message.role === "user") {
+        turnStartIndex = index;
+        break;
+      }
+    }
+  }
+  const historyEnd = splitTurn ? turnStartIndex : firstKeptIndex;
   const compacted = projected.groups.slice(0, firstKeptIndex);
+  const { readFiles, modifiedFiles } = fileLists(
+    compacted.map((group) => group.message),
+    projected.previousCompaction,
+  );
   return {
-    messagesToSummarize: compacted.map((group) => group.message),
+    messagesToSummarize: projected.groups.slice(0, historyEnd).map((group) => group.message),
+    turnPrefixMessages: splitTurn
+      ? projected.groups.slice(turnStartIndex, firstKeptIndex).map((group) => group.message)
+      : [],
     ...(projected.previousCompaction === undefined
       ? {}
       : { previousSummary: projected.previousCompaction.payload.summary }),
@@ -260,7 +300,9 @@ export function prepareCompaction(
       ...(projected.previousCompaction === undefined ? [] : [projected.previousCompaction.id]),
       ...compacted.flatMap((group) => group.eventIds),
     ],
-    splitTurn: projected.groups[firstKeptIndex]?.message.role === "assistant",
+    splitTurn,
+    readFiles,
+    modifiedFiles,
   };
 }
 
@@ -282,12 +324,19 @@ function truncateToolResult(text: string): string {
   return `${text.slice(0, TOOL_RESULT_MAX_CHARACTERS)}\n\n[${text.length - TOOL_RESULT_MAX_CHARACTERS} characters omitted]`;
 }
 
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "undefined";
+  } catch {
+    return "[unserializable]";
+  }
+}
+
 export function serializeCompactionMessages(messages: readonly ModelMessage[]): string {
   const parts: string[] = [];
   for (const message of messages) {
-    if (message.role === "user") {
-      parts.push(`[User]\n${contentText(message.content)}`);
-    } else if (message.role === "assistant") {
+    if (message.role === "user") parts.push(`[User]\n${contentText(message.content)}`);
+    else if (message.role === "assistant") {
       const thinking = message.content
         .filter((item) => item.type === "thinking")
         .map((item) => item.text)
@@ -300,9 +349,7 @@ export function serializeCompactionMessages(messages: readonly ModelMessage[]): 
       if (text) parts.push(`[Assistant]\n${text}`);
       if ((message.toolCalls?.length ?? 0) > 0) {
         parts.push(
-          `[Assistant tool calls]\n${message.toolCalls
-            ?.map((call) => `${call.name}(${JSON.stringify(call.input)})`)
-            .join("\n")}`,
+          `[Assistant tool calls]\n${message.toolCalls?.map((call) => `${call.name}(${safeJson(call.input)})`).join("\n")}`,
         );
       }
     } else {
@@ -319,29 +366,42 @@ function summaryPrompt(plan: CompactionPlan, customInstructions?: string): strin
     plan.previousSummary === undefined
       ? ""
       : `\n\n<previous-summary>\n${plan.previousSummary}\n</previous-summary>`;
-  const split = plan.splitTurn
-    ? "\n\nThe retained context begins partway through a turn. Preserve the original request and early work needed to understand that suffix."
-    : "";
   const focus = customInstructions
     ? `\n\nAdditional focus from the user: ${customInstructions}`
     : "";
-  return `<conversation>\n${serializeCompactionMessages(plan.messagesToSummarize)}\n</conversation>${previous}${split}${focus}\n\nWrite a concise continuation summary using exactly these sections:\n\n## Goal\n## Constraints & Preferences\n## Progress\n### Done\n### In Progress\n### Blocked\n## Key Decisions\n## Next Steps\n## Critical Context\n\nPreserve exact file paths, function names, commands, and error messages needed to continue.`;
+  return `<conversation>\n${serializeCompactionMessages(plan.messagesToSummarize)}\n</conversation>${previous}${focus}\n\nWrite a concise continuation summary using exactly these sections:\n\n## Goal\n## Constraints & Preferences\n## Progress\n### Done\n### In Progress\n### Blocked\n## Key Decisions\n## Next Steps\n## Critical Context\n\nPreserve exact file paths, function names, commands, and error messages needed to continue.`;
 }
 
-export async function summarizeCompaction(
-  plan: CompactionPlan,
+function turnPrefixPrompt(messages: readonly ModelMessage[]): string {
+  return `<conversation>\n${serializeCompactionMessages(messages)}\n</conversation>\n\nThis is the prefix of a turn whose recent suffix remains in context. Summarize only what is needed to understand that suffix using exactly these sections:\n\n## Original Request\n## Early Progress\n## Context for Suffix`;
+}
+
+function addUsage(first: Usage, second: Usage): Usage {
+  return {
+    inputTokens: first.inputTokens + second.inputTokens,
+    outputTokens: first.outputTokens + second.outputTokens,
+    cacheReadTokens: first.cacheReadTokens + second.cacheReadTokens,
+    cacheWriteTokens: first.cacheWriteTokens + second.cacheWriteTokens,
+    ...((first.reasoningTokens ?? second.reasoningTokens) === undefined
+      ? {}
+      : { reasoningTokens: (first.reasoningTokens ?? 0) + (second.reasoningTokens ?? 0) }),
+    ...((first.costUsd ?? second.costUsd) === undefined
+      ? {}
+      : { costUsd: (first.costUsd ?? 0) + (second.costUsd ?? 0) }),
+  };
+}
+
+async function summarizeText(
+  prompt: string,
   model: ModelPort,
-  customInstructions?: string,
-  signal?: AbortSignal,
-  maxOutputTokens = DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
+  signal: AbortSignal | undefined,
+  maxOutputTokens: number,
   onRequestConfigured?: (configuration: ModelRequestConfiguration) => Promise<void>,
-): Promise<CompactionSummary> {
+): Promise<{ text: string; usage: Usage }> {
   signal?.throwIfAborted();
-  let summary = "";
+  let text = "";
   let terminal: Extract<ModelStreamEvent, { type: "completed" }> | undefined;
-  const messages: ModelMessage[] = [
-    { role: "user", content: [{ type: "text", text: summaryPrompt(plan, customInstructions) }] },
-  ];
+  const messages: ModelMessage[] = [{ role: "user", content: [{ type: "text", text: prompt }] }];
   for await (const event of model.stream({
     onRequestConfigured,
     estimatedInputTokens: estimateModelInputTokens({
@@ -354,23 +414,68 @@ export async function summarizeCompaction(
     tools: [],
     maxOutputTokens,
     toolChoice: "none",
+    cacheRetention: "none",
     signal,
   })) {
-    if (event.type === "text_delta") summary += event.text;
+    if (event.type === "text_delta") text += event.text;
     else if (event.type === "tool_call") throw new Error("Compaction model attempted a tool call");
     else if (event.type === "error") throw new Error(`Compaction failed: ${event.message}`);
     else if (event.type === "aborted") throw new DOMException("Compaction aborted", "AbortError");
     else if (event.type === "completed") {
-      if (event.stopReason !== "stop") {
+      if (event.stopReason !== "stop")
         throw new Error(`Compaction summary ended with ${event.stopReason}`);
-      }
       terminal = event;
       break;
     }
   }
   signal?.throwIfAborted();
   if (terminal === undefined) throw new Error("Compaction model stream ended without completion");
-  summary = summary.trim();
-  if (!summary) throw new Error("Compaction model returned an empty summary");
-  return { summary, usage: terminal.usage };
+  text = text.trim();
+  if (!text) throw new Error("Compaction model returned an empty summary");
+  return { text, usage: terminal.usage };
+}
+
+export async function summarizeCompaction(
+  plan: CompactionPlan,
+  model: ModelPort,
+  customInstructions?: string,
+  signal?: AbortSignal,
+  reserveTokens = DEFAULT_COMPACTION_RESERVE_TOKENS,
+  onRequestConfigured?: (configuration: ModelRequestConfiguration) => Promise<void>,
+): Promise<CompactionSummary> {
+  const maxOutputTokens = Math.max(1, Math.floor(reserveTokens * 0.8));
+  let summary: string;
+  let usage: Usage;
+  if (plan.messagesToSummarize.length === 0) {
+    summary = plan.previousSummary ?? "No prior history.";
+    usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  } else {
+    const result = await summarizeText(
+      summaryPrompt(plan, customInstructions),
+      model,
+      signal,
+      maxOutputTokens,
+      onRequestConfigured,
+    );
+    summary = result.text;
+    usage = result.usage;
+  }
+  if (plan.turnPrefixMessages.length > 0) {
+    const prefix = await summarizeText(
+      turnPrefixPrompt(plan.turnPrefixMessages),
+      model,
+      signal,
+      Math.max(1, Math.floor(reserveTokens * 0.5)),
+      onRequestConfigured,
+    );
+    summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${prefix.text}`;
+    usage = addUsage(usage, prefix.usage);
+  }
+  const sections: string[] = [];
+  if (plan.readFiles.length > 0)
+    sections.push(`<read-files>\n${plan.readFiles.join("\n")}\n</read-files>`);
+  if (plan.modifiedFiles.length > 0)
+    sections.push(`<modified-files>\n${plan.modifiedFiles.join("\n")}\n</modified-files>`);
+  if (sections.length > 0) summary += `\n\n${sections.join("\n\n")}`;
+  return { summary, usage, readFiles: plan.readFiles, modifiedFiles: plan.modifiedFiles };
 }

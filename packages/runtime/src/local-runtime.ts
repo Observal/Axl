@@ -4,15 +4,17 @@
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-License-Identifier: Apache-2.0
 
-import { access, readdir } from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { CredentialStore } from "@axl/ai";
 import { type AxlDaemon, listStoredSessions } from "@axl/daemon";
 import {
+  type CompactionPreferences,
   DEFAULT_MODEL_REQUEST_SETTINGS,
   type ModelRequestSettings,
   parseModelRequestSettings,
+  resolveCompactionSettings,
   type SessionSummary,
   type ThinkingLevel,
 } from "@axl/protocol";
@@ -26,6 +28,7 @@ import {
 export interface LocalRuntimeDefaults {
   readonly providerId?: string;
   readonly requestSettings?: ModelRequestSettings;
+  readonly compaction?: CompactionPreferences;
   readonly modelId: string;
   readonly thinkingLevel: ThinkingLevel;
   readonly webFetch?: boolean;
@@ -165,16 +168,6 @@ async function migrateLegacyAzureCredential(store: CredentialStore): Promise<voi
   if (legacy === undefined || current !== undefined) return;
   await store.modify(providerId, (stored) => Promise.resolve(stored ?? legacy));
   await store.delete(legacyProviderId);
-}
-
-async function exists(path: string): Promise<boolean> {
-  try {
-    await access(path);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
-  }
 }
 
 export async function loginProviderFromTrustedHost(input: {
@@ -318,41 +311,31 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     providerManagement,
-    runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
+    runtime: async ({
+      sessionId,
+      cwd,
+      boundary,
+      selection,
+      contextResources,
+      interact,
+      readBlob,
+    }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";
-      const [hasMcpConfig, hasSkills] =
-        profile !== "standard"
-          ? [false, false]
-          : await Promise.all([
-              Promise.all([
-                exists(join(axlHome, "mcp.json")),
-                exists(join(cwd, ".axl", "mcp.json")),
-              ]).then((values) => values.some(Boolean)),
-              Promise.all([
-                exists(join(axlHome, "skills")),
-                exists(join(cwd, ".axl", "skills")),
-              ]).then((values) => values.some(Boolean)),
-            ]);
-      const [mcpPackage, skillsPackage] = await Promise.all([
-        hasMcpConfig ? import("@axl/extension-mcp") : Promise.resolve(undefined),
-        hasSkills ? import("@axl/extension-skills") : Promise.resolve(undefined),
-      ]);
-      const [instructions, skills, mcpServers] = await Promise.all([
-        kernel.loadAgentsInstructions({ cwd, globalPath: join(axlHome, "AGENTS.md") }),
-        skillsPackage === undefined
-          ? Promise.resolve([])
-          : skillsPackage.discoverSkills({ cwd, globalDirectory: join(axlHome, "skills") }),
-        mcpPackage === undefined
-          ? Promise.resolve([])
-          : mcpPackage.loadMcpConfig({ cwd, globalDirectory: axlHome }),
-      ]);
+      const resources =
+        contextResources ??
+        (await kernel.loadAgentsResources({
+          cwd,
+          globalPath: join(axlHome, "AGENTS.md"),
+        }));
+      const instructions = kernel.agentsInstructionsFromResources(resources);
       const active = {
         providerId: selection.providerId ?? defaults.providerId ?? "azure-openai-responses",
         modelId: selection.modelId ?? defaults.modelId,
         thinkingLevel: selection.thinkingLevel ?? defaults.thinkingLevel,
         webFetch: profile === "standard" && (selection.webFetch ?? defaults.webFetch ?? true),
         webSearch: profile === "standard" && (selection.webSearch ?? defaults.webSearch ?? true),
+        userQuestions: profile === "standard" && (selection.userQuestions ?? false),
       };
       const modelInfo = await validateProviderSelection(
         providers,
@@ -360,6 +343,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         active.modelId,
       );
       const thinking = ai.clampThinkingLevel(modelInfo, active.thinkingLevel);
+      const compaction = resolveCompactionSettings(
+        defaults.compaction,
+        active.providerId,
+        active.modelId,
+      );
       const policy = {
         workspace: cwd,
         readableRoots: [cwd],
@@ -402,29 +390,9 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           }),
         );
       }
+      if (active.userQuestions) tools.register(kernel.makeAskUserQuestionTool(interact));
+      if (profile === "standard") tools.register(kernel.makeCapabilitySearchTool());
 
-      if (skillsPackage !== undefined && skills.length > 0) {
-        tools.register(skillsPackage.makeSkillTool(skills));
-      }
-      const mcpSecrets = mcpPackage?.mcpSecretValues(mcpServers) ?? [];
-      const mcp =
-        mcpPackage === undefined || mcpServers.length === 0
-          ? undefined
-          : new mcpPackage.McpManager({
-              servers: mcpServers,
-              cwd,
-              sessionId,
-              stateDirectory: join(stateDirectory, "mcp"),
-              blobDirectory: join(stateDirectory, "blobs"),
-              model,
-              modelId: active.modelId,
-              secretValues: mcpSecrets,
-              interact,
-              wrapStdio: (input) => sandbox.wrapProcess({ policy, ...input }),
-            });
-      if (mcp) tools.register(mcp.makeTool());
-
-      const skillSection = skillsPackage?.skillCatalogSection(skills);
       const prompt = kernel.buildStablePrompt({
         cwd,
         tools: tools.declarations().map(({ name, description }) => ({ name, description })),
@@ -436,16 +404,17 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
               ],
             }
           : {}),
-        instructions: [...instructions, ...(skillSection === undefined ? [] : [skillSection])],
+        instructions,
       });
       return {
         model,
         tools,
-        ...(mcp === undefined ? {} : { extensionHost: mcp }),
         prompt,
+        contextResources: resources,
+        compaction,
+        modelContextWindow: modelInfo.contextWindow,
         log: {
           secretValues: () => [
-            ...mcpSecrets,
             ...(braveSearchKey === undefined ? [] : [braveSearchKey]),
             ...providerSecrets,
           ],
@@ -454,9 +423,14 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         configProvider: { providerId: active.providerId },
         configModel: { modelId: active.modelId },
         configRequest: requestSettings,
+        configCompaction: compaction,
         configThinking: thinking,
         configProfile: { profile },
-        configTools: { webFetch: active.webFetch, webSearch: active.webSearch },
+        configTools: {
+          webFetch: active.webFetch,
+          webSearch: active.webSearch,
+          userQuestions: active.userQuestions,
+        },
         ...(boundary === "config_change"
           ? {}
           : {

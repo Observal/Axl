@@ -20,18 +20,21 @@ import {
   type SessionId,
 } from "./event-envelope.ts";
 
+import { type CompactionSettings, parseCompactionSettings } from "./compaction.ts";
 import {
   type ModelRequestConfiguration,
   type ModelRequestSettings,
   parseModelRequestConfiguration,
   parseModelRequestSettings,
 } from "./model-request.ts";
+import { parseUserQuestionRequest } from "./user-question.ts";
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type SessionProfile = "minimal" | "standard" | "chat" | "exec";
 export type PermissionDecision = "allow_once" | "allow_session" | "deny";
 export type InteractionAction = "accept" | "decline" | "cancel";
 export type InteractionKind =
+  | "user_question"
   | "mcp_tool"
   | "mcp_sampling_request"
   | "mcp_sampling_response"
@@ -60,6 +63,13 @@ export type RestoredQueueItem = {
   readonly content: readonly UserContent[];
   readonly priority: "front" | "back";
   readonly source: "queue" | "steer" | "follow_up";
+};
+
+export type ContextResource = {
+  readonly kind: "agents";
+  readonly scope: "global" | "project";
+  readonly path: string;
+  readonly content: string;
 };
 
 export type Usage = {
@@ -127,6 +137,7 @@ export type EventPayloadMap = {
     readonly details?: JsonValue;
   };
   "config.request": ModelRequestSettings;
+  "config.compaction": CompactionSettings;
   "model.request_configured": ModelRequestConfiguration;
   "config.model": { readonly modelId: string };
   "config.provider": { readonly providerId: string };
@@ -140,6 +151,7 @@ export type EventPayloadMap = {
   "config.tools": {
     readonly webFetch: boolean;
     readonly webSearch: boolean;
+    readonly userQuestions?: boolean;
   };
   "config.dialect": {
     readonly dialectId: string;
@@ -147,6 +159,7 @@ export type EventPayloadMap = {
     readonly reason: DialectBoundaryReason;
   };
   "prompt.section": { readonly name: string; readonly source: string; readonly content: string };
+  "context.resources": { readonly resources: readonly ContextResource[] };
   "tool.schema": {
     readonly name: string;
     readonly description: string;
@@ -183,9 +196,27 @@ export type EventPayloadMap = {
     readonly details?: JsonObject;
   };
   "sandbox.violation": { readonly capability: string; readonly reason: string };
+  "compaction.queued": { readonly instructions?: string };
+  "compaction.started": {
+    readonly reason: "manual" | "threshold" | "overflow";
+    readonly estimatedInputTokens: number;
+    readonly contextWindow: number;
+    readonly reserveTokens: number;
+    readonly keepRecentTokens: number;
+  };
+  "compaction.failed": {
+    readonly reason: "manual" | "threshold" | "overflow";
+    readonly code: string;
+    readonly message: string;
+    readonly willRetry: boolean;
+  };
   "context.compacted": {
     readonly summary: string;
     readonly replacedEventIds: readonly EventId[];
+    readonly reason?: "manual" | "threshold" | "overflow";
+    readonly willRetry?: boolean;
+    readonly readFiles?: readonly string[];
+    readonly modifiedFiles?: readonly string[];
     readonly usage?: Usage;
   };
   "session.error": {
@@ -497,6 +528,7 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "config.request": (payload, path) => parseModelRequestSettings(payload, path),
+  "config.compaction": (payload, path) => parseCompactionSettings(payload, path),
   "model.request_configured": (payload, path) => parseModelRequestConfiguration(payload, path),
   "config.model": (payload, path) => {
     exact(payload, path, ["modelId"]);
@@ -527,9 +559,12 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "config.tools": (payload, path) => {
-    exact(payload, path, ["webFetch", "webSearch"]);
+    exact(payload, path, ["webFetch", "webSearch"], ["userQuestions"]);
     boolean(payload.webFetch, `${path}.webFetch`);
     boolean(payload.webSearch, `${path}.webSearch`);
+    if (payload.userQuestions !== undefined) {
+      boolean(payload.userQuestions, `${path}.userQuestions`);
+    }
     return payload;
   },
   "config.dialect": (payload, path) => {
@@ -549,6 +584,19 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.name, `${path}.name`);
     string(payload.source, `${path}.source`);
     string(payload.content, `${path}.content`, true);
+    return payload;
+  },
+  "context.resources": (payload, path) => {
+    exact(payload, path, ["resources"]);
+    for (const [index, value] of array(payload.resources, `${path}.resources`).entries()) {
+      const resourcePath = `${path}.resources[${index}]`;
+      const resource = object(value, resourcePath);
+      exact(resource, resourcePath, ["kind", "scope", "path", "content"]);
+      choice(resource.kind, `${resourcePath}.kind`, ["agents"]);
+      choice(resource.scope, `${resourcePath}.scope`, ["global", "project"]);
+      string(resource.path, `${resourcePath}.path`);
+      string(resource.content, `${resourcePath}.content`, true);
+    }
     return payload;
   },
   "tool.schema": (payload, path) => {
@@ -588,6 +636,7 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     exact(payload, path, ["interactionId", "kind", "source", "message"], ["data"]);
     string(payload.interactionId, `${path}.interactionId`);
     choice(payload.kind, `${path}.kind`, [
+      "user_question",
       "mcp_tool",
       "mcp_sampling_request",
       "mcp_sampling_response",
@@ -597,6 +646,10 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.source, `${path}.source`);
     string(payload.message, `${path}.message`);
     if (payload.data !== undefined) object(payload.data, `${path}.data`);
+    if (payload.kind === "user_question") {
+      if (payload.data === undefined) validationError(`${path}.data`, "is required");
+      parseUserQuestionRequest(payload.data, `${path}.data`);
+    }
     return payload;
   },
   "interaction.resolved": (payload, path) => {
@@ -620,13 +673,57 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.reason, `${path}.reason`);
     return payload;
   },
+  "compaction.queued": (payload, path) => {
+    exact(payload, path, [], ["instructions"]);
+    if (payload.instructions !== undefined) string(payload.instructions, `${path}.instructions`);
+    return payload;
+  },
+  "compaction.started": (payload, path) => {
+    exact(payload, path, [
+      "reason",
+      "estimatedInputTokens",
+      "contextWindow",
+      "reserveTokens",
+      "keepRecentTokens",
+    ]);
+    choice(payload.reason, `${path}.reason`, ["manual", "threshold", "overflow"]);
+    for (const field of [
+      "estimatedInputTokens",
+      "contextWindow",
+      "reserveTokens",
+      "keepRecentTokens",
+    ] as const) {
+      nonNegativeInteger(payload[field], `${path}.${field}`);
+    }
+    return payload;
+  },
+  "compaction.failed": (payload, path) => {
+    exact(payload, path, ["reason", "code", "message", "willRetry"]);
+    choice(payload.reason, `${path}.reason`, ["manual", "threshold", "overflow"]);
+    string(payload.code, `${path}.code`);
+    string(payload.message, `${path}.message`);
+    boolean(payload.willRetry, `${path}.willRetry`);
+    return payload;
+  },
   "context.compacted": (payload, path) => {
-    exact(payload, path, ["summary", "replacedEventIds"], ["usage"]);
+    exact(
+      payload,
+      path,
+      ["summary", "replacedEventIds"],
+      ["reason", "willRetry", "readFiles", "modifiedFiles", "usage"],
+    );
     string(payload.summary, `${path}.summary`);
     validateEventIds(payload.replacedEventIds, `${path}.replacedEventIds`);
     if ((payload.replacedEventIds as readonly JsonValue[]).length === 0) {
       validationError(`${path}.replacedEventIds`, "must not be empty");
     }
+    if (payload.reason !== undefined)
+      choice(payload.reason, `${path}.reason`, ["manual", "threshold", "overflow"]);
+    if (payload.willRetry !== undefined) boolean(payload.willRetry, `${path}.willRetry`);
+    if (payload.readFiles !== undefined)
+      validateStringArray(payload.readFiles, `${path}.readFiles`);
+    if (payload.modifiedFiles !== undefined)
+      validateStringArray(payload.modifiedFiles, `${path}.modifiedFiles`);
     if (payload.usage !== undefined) validateUsage(payload.usage, `${path}.usage`);
     return payload;
   },

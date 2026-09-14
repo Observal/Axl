@@ -66,6 +66,7 @@ export class NewSessionController {
     return client.request("session.create", {
       cwd: workspace,
       profile: draft.mode === "chat" ? "chat" : "standard",
+      ...(draft.mode === "chat" ? {} : { userQuestions: true }),
       ...(draft.providerId === undefined ? {} : { providerId: draft.providerId }),
       ...(draft.modelId === undefined ? {} : { modelId: draft.modelId }),
       ...(draft.thinkingLevel === undefined ? {} : { thinkingLevel: draft.thinkingLevel }),

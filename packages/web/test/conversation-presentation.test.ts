@@ -3,10 +3,10 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import type { ConversationState } from "@axl/sdk";
 import { Conversation } from "@axl/ui/react";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 const conversation = {
   compactedEventIds: [],
@@ -397,6 +397,15 @@ test("hides compacted records and renders the retained summary", () => {
       {
         kind: "event",
         event: {
+          id: "queued-compaction",
+          timestamp: 1500,
+          type: "compaction.queued",
+          payload: { instructions: "Keep decisions" },
+        },
+      },
+      {
+        kind: "event",
+        event: {
           id: "compaction",
           timestamp: 2000,
           type: "context.compacted",
@@ -435,8 +444,76 @@ test("hides compacted records and renders the retained summary", () => {
 
   const html = renderToStaticMarkup(createElement(Conversation, { conversation: compacted }));
   assert.doesNotMatch(html, /obsolete transcript text/);
+  assert.match(html, /Compaction queued/);
+  assert.match(html, /active response/);
   assert.match(html, /Context compacted/);
   assert.match(html, /Retained context/);
   assert.match(html, /Original history remains in the canonical session log/);
   assert.match(html, /Sandbox is not enforced/);
+});
+
+test("renders a pending user questionnaire as a stepped option list", () => {
+  const request = {
+    id: "question-event",
+    type: "interaction.requested",
+    payload: {
+      interactionId: "question-1",
+      kind: "user_question",
+      source: "ask_user_question",
+      message: "Which runtime?",
+      data: {
+        questions: [
+          {
+            header: "Runtime",
+            question: "Which runtime?",
+            options: [
+              { label: "Node", description: "Use Node.js", preview: "node index.js" },
+              { label: "Bun", description: "Use Bun" },
+            ],
+          },
+          {
+            header: "Checks",
+            question: "Which checks?",
+            multiSelect: true,
+            options: [
+              { label: "Test", description: "Run tests" },
+              { label: "Lint", description: "Run lint" },
+            ],
+          },
+        ],
+      },
+    },
+  };
+  const state = {
+    compactedEventIds: [],
+    records: [{ kind: "event", event: request }],
+    tools: [],
+    interactions: [{ interactionId: "question-1", request }],
+    operations: [],
+    uncertainShellOperations: [],
+    queue: [],
+    interruptDeliveries: [],
+    usage: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      reasoningTokens: 0,
+      costUsd: 0,
+    },
+    closed: false,
+  } as unknown as ConversationState;
+  const html = renderToStaticMarkup(
+    createElement(Conversation, {
+      conversation: state,
+      onRespondInteraction: async () => undefined,
+    }),
+  );
+  assert.match(html, /Which runtime\?/);
+  assert.match(html, />1\/2</);
+  assert.match(html, /Use Node\.js/);
+  assert.match(html, /Type something else…/);
+  assert.doesNotMatch(html, /type="radio"/);
+  assert.doesNotMatch(html, /type="checkbox"/);
+  assert.doesNotMatch(html, /Which checks\?/);
 });

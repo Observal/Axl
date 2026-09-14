@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import type { JsonObject, JsonValue, Usage } from "@axl/protocol";
 
 import { safeProviderMessage } from "./diagnostics.ts";
+import { isContextLimitError } from "./model-error.ts";
 import type { MistralCompatibility, ModelInfo, ModelStreamEvent } from "./model.ts";
 import {
   isPreparedModelRequest,
@@ -432,18 +433,20 @@ export async function* decodeMistralConversationsStream(
     const providerError = object(chunk.error);
     if (providerError !== undefined) {
       const code = String(providerError.code ?? providerError.type ?? "provider_error");
+      const message = safeProviderMessage(
+        typeof providerError.message === "string"
+          ? providerError.message
+          : "Mistral reported a failure",
+        options.secretValues,
+      );
       yield {
         type: "error",
         code,
-        message: safeProviderMessage(
-          typeof providerError.message === "string"
-            ? providerError.message
-            : "Mistral reported a failure",
-          options.secretValues,
-        ),
+        message,
         retryable: retryableCode(code),
-        category:
-          code === "rate_limit" || code === "rate_limit_exceeded"
+        category: isContextLimitError(code, message)
+          ? "context_limit"
+          : code === "rate_limit" || code === "rate_limit_exceeded"
             ? "rate_limit"
             : retryableCode(code)
               ? "provider_internal"

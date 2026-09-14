@@ -62,7 +62,27 @@ test("projects messages, configuration, usage, interactions, and generic tools d
       modelMaxOutputTokens: 64000,
     }),
     event("config.provider", { providerId: "fixture" }),
+    event("context.resources", {
+      resources: [
+        {
+          kind: "agents",
+          scope: "project",
+          path: "/workspace/AGENTS.md",
+          content: "Use pnpm.",
+        },
+      ],
+    }),
     event("config.thinking", { requested: "high", effective: "medium", clamped: true }),
+    event("context.resources", {
+      resources: [
+        {
+          kind: "agents",
+          scope: "project",
+          path: "/workspace/packages/AGENTS.override.md",
+          content: "Use the nearest rules.",
+        },
+      ],
+    }),
     event("tool.call", { callId: "future-1", name: "future_tool", input: { value: 1 } }),
     event("tool.result", {
       callId: "future-1",
@@ -101,6 +121,14 @@ test("projects messages, configuration, usage, interactions, and generic tools d
     maxOutputTokens: null,
     httpIdleTimeoutMs: 300_000,
   });
+  assert.deepEqual(one.state.contextResources, [
+    {
+      kind: "agents",
+      scope: "project",
+      path: "/workspace/packages/AGENTS.override.md",
+      content: "Use the nearest rules.",
+    },
+  ]);
   assert.equal(one.state.lastRequest?.maxOutputTokens, 64000);
   assert.equal(one.state.tools[0]?.renderIntent, "generic");
   assert.equal(one.state.tools[0]?.result?.content[0]?.type, "text");

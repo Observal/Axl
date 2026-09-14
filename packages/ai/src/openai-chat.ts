@@ -6,6 +6,7 @@
 import type { JsonObject, JsonValue, Usage } from "@axl/protocol";
 
 import { safeProviderMessage } from "./diagnostics.ts";
+import { isContextLimitError } from "./model-error.ts";
 import type { ModelInfo, ModelStreamEvent, OpenAiChatCompatibility } from "./model.ts";
 import {
   isPreparedModelRequest,
@@ -804,6 +805,7 @@ export async function* decodeOpenAiChatStream(
         code,
         message,
         retryable: retryableProviderCode(code),
+        ...(isContextLimitError(code, message) ? { category: "context_limit" as const } : {}),
         ...(emittedContent ? { partial: true } : {}),
         response: responseMetadata(),
       };
