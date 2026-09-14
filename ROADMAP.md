@@ -1361,7 +1361,7 @@ Requirements:
 
 The current mobile plan favors SwiftUI on iOS and Jetpack Compose on Android because native code supports Live Activities, Android foreground services, notification actions, widgets, share sheets, and efficient streaming text. This is not a binding stack decision. Choose the implementation when mobile work begins and its requirements are concrete.
 
-Remote transport uses pairwise application-level E2EE in addition to TLS. The approved direction is PQXDH for asynchronous session establishment and Triple Ratchet for ongoing messages. This direction supersedes any earlier Noise selection. Production cryptography remains blocked on Person 1's security RFC, exact suite, reviewed library, secure-state design, interoperability fixtures, and independent security review. Transport code treats encrypted envelopes and public prekey bundles as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic. The proposed remote action-binding and approval rules are in [`docs/architecture/remote-permission-authorization.md`](docs/architecture/remote-permission-authorization.md); that draft does not enable remote approval.
+Remote transport uses pairwise application-level E2EE in addition to TLS. The provisional direction is OpenMLS with one daemon-device group per relationship, opaque KeyPackage and Welcome rendezvous, daemon-only commits, phone Update proposals, and explicit draft-suite migration. Production cryptography remains blocked on Person 1's security RFC, exact suite, reviewed library, browser/WASM feasibility, secure-state transaction, interoperability fixtures, and independent security review. Transport code treats prepared envelopes and rendezvous objects as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic. The proposed remote action-binding and approval rules are in [`docs/architecture/remote-permission-authorization.md`](docs/architecture/remote-permission-authorization.md); that draft does not enable remote approval.
 
 The managed path uses two separately deployable services: the TypeScript control plane owns hosted state and one-use admission, while the Elixir/OTP relay owns bounded in-memory WebSocket routing. The daemon remains the command and session authority. Transport proof uses only disposable sessions, a deterministic fake provider, opaque fixtures, and a test-only fake E2EE adapter. Ordinary-session steering and remote permission approval remain disabled until the E2EE and release gates pass.
 
@@ -2358,13 +2358,13 @@ The private slice was created from clean `main` commit `ea906d0295ba67f833c49ace
 
 #### Remote transport preflight
 
-- [x] Record PQXDH plus Triple Ratchet as the approved direction and keep exact production cryptography blocked on Person 1's reviewed contract and library.
+- [x] Replace the obsolete PQXDH and Triple Ratchet direction with the provisional pairwise OpenMLS profile while keeping exact production cryptography blocked on Person 1's reviewed contract and library.
 - [x] Add the separately deployable TypeScript control plane under `services/control-plane/` with authenticated ticket issuance and atomic one-use consumption through injected interfaces.
 - [x] Add the separately deployable Elixir/OTP relay under `services/relay/` with authenticated admission, opaque bounded framing, in-memory installation-scoped routing, backpressure, heartbeat, lease, revocation, and draining behavior.
 - [x] Publish language-neutral admission, revocation, and exact binary accept/reject fixtures consumed by both implementations.
 - [x] Run TypeScript and Mix formatting, compilation, tests, static analysis, dependency auditing, package-boundary, and SPDX/REUSE checks in CI.
 - [x] Draft the daemon-owned remote permission action-binding contract without enabling it.
-- [x] Stop at the architecture checkpoint before daemon, SDK, prekey, attachment, or production integration work.
+- [x] Stop at the architecture checkpoint before daemon, SDK, cryptographic rendezvous, attachment, or production integration work.
 
 #### Remote daemon authority checkpoint
 
@@ -2383,11 +2383,16 @@ The transport checkpoint was approved. The next private slice remains disabled f
 #### Remote SDK delivery checkpoint
 
 - [x] Add an injected atomic durable-outbox interface for opaque encrypted requests.
+- [x] Persist a stable crypto-session destination and resolve ephemeral relay routes for each attempt.
 - [x] Retry byte-identical opaque envelopes with new transport attempt IDs.
+- [x] Acquire one-use tickets and perform bounded first-frame WebSocket admission.
+- [x] Track route snapshots, replacements, daemon availability, and bounded reconnect.
 - [x] Keep relay admission and forwarding receipts diagnostic only.
-- [x] Permit removal only after daemon acceptance.
+- [x] Permit removal only after authenticated daemon acceptance.
 - [x] Reset uncertain sending state to queued on reconnect without re-encryption.
-- [ ] Connect the opaque outbox to a reviewed real-E2EE transactional sealing API.
+- [x] Prove the real control plane, relay, daemon authority, SDK, cursor resume, restart, duplicate, revocation, and overflow boundaries in one disposable fake-E2EE test.
+- [ ] Connect the opaque outbox to Person 1's reviewed atomic OpenMLS prepared-envelope transaction.
+- [ ] Implement the reviewed bounded authority-audit sink described in [`docs/architecture/remote-hosted-path.md`](docs/architecture/remote-hosted-path.md).
 
 #### Mobile clients
 

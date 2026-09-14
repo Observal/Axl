@@ -7,7 +7,7 @@
 
 Status: working plan. This document accompanies [ROADMAP.md](ROADMAP.md) and [OPEN_SOURCE.md](OPEN_SOURCE.md).
 
-Updated: 2026-09-12
+Updated: 2026-09-13
 
 ## 1. Keep everything in one repository
 
@@ -71,7 +71,7 @@ These rules keep package ownership clear:
 - First-party extensions use the same public extension API as third-party extensions.
 - `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript presentation client creates a real need for generation. The Elixir relay implements only its narrow transport and internal-service framing against canonical byte and JSON fixtures; it is not a daemon-protocol client.
 - Apps use the public protocol SDK rather than package internals.
-- `services/control-plane` may depend on `packages/protocol`. It owns hosted account, installation, device, ticket, prekey, grant, upload-reservation, quota, and security-audit mutation. Identity providers, persistent datastores, and production service authentication stay behind injected interfaces until approved.
+- `services/control-plane` may depend on `packages/protocol`. It owns hosted account, installation, device, ticket, opaque KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit mutation. Identity providers, persistent datastores, and production service authentication stay behind injected interfaces until approved.
 - `services/relay` consumes versioned language-neutral fixtures. It must not import TypeScript package internals, access the control-plane datastore, decrypt envelopes, interpret daemon RPC, persist canonical history, or store attachment bodies. It calls the authenticated control-plane admission API once per new connection and accepts authenticated revocation notifications.
 - The control plane and relay are separate deployables. They share no private implementation imports and communicate only through their versioned internal HTTP contract.
 - `packages/runtime` assembles providers, tools, extensions, sandboxing, and the authoritative daemon without importing a presentation client.
@@ -118,7 +118,7 @@ Every required check reports a result. Path filters decide whether the full job 
 
 - Kernel, protocol, and SDK changes run all builds, including both mobile apps.
 - Control-plane changes run the root TypeScript checks and package-boundary checks.
-- Relay or shared remote-fixture changes run Mix formatting, compilation with warnings as errors, tests, Credo, Dialyzer, dependency audit, cross-language fixture checks, package-boundary checks, and REUSE.
+- Relay, control-plane, or shared remote-transport changes run Mix formatting, compilation with warnings as errors, tests, Credo, Dialyzer, dependency audit, the disposable cross-runtime hosted-path test, package-boundary checks, and REUSE.
 - App-only changes run that app and lint checks.
 - Documentation and plan changes run formatting, link checking, and REUSE checks.
 - CodeQL, Gitleaks, and dependency review run for every merge candidate.

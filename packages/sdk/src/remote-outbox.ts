@@ -3,8 +3,10 @@
 
 import {
   parseOpaqueOutboxRecord,
+  type CryptoSessionId,
   type OpaqueOutboxRecord,
   type RequestId,
+  type RouteId,
   type TransportAttemptId,
 } from "@axl/protocol";
 
@@ -26,10 +28,14 @@ export interface TransportAttemptIdFactory {
   create(): TransportAttemptId;
 }
 
+export interface OpaqueRouteResolver {
+  resolve(destinationCryptoSessionId: CryptoSessionId): Promise<RouteId>;
+}
+
 export interface OpaqueTransportAttempt {
   readonly attemptId: TransportAttemptId;
   readonly requestId: RequestId;
-  readonly destinationRouteId: OpaqueOutboxRecord["destinationRouteId"];
+  readonly destinationRouteId: RouteId;
   readonly opaqueEnvelope: Uint8Array;
 }
 
@@ -51,7 +57,7 @@ function sameRecord(left: OpaqueOutboxRecord, right: OpaqueOutboxRecord): boolea
   return (
     left.requestId === right.requestId &&
     left.idempotencyKey === right.idempotencyKey &&
-    left.destinationRouteId === right.destinationRouteId &&
+    left.destinationCryptoSessionId === right.destinationCryptoSessionId &&
     left.createdAt === right.createdAt &&
     sameBytes(left.opaqueEnvelope, right.opaqueEnvelope)
   );
@@ -61,10 +67,16 @@ function sameRecord(left: OpaqueOutboxRecord, right: OpaqueOutboxRecord): boolea
 export class OpaqueOutbox {
   private readonly store: OpaqueOutboxStore;
   private readonly attemptIds: TransportAttemptIdFactory;
+  private readonly routes: OpaqueRouteResolver;
 
-  constructor(store: OpaqueOutboxStore, attemptIds: TransportAttemptIdFactory) {
+  constructor(
+    store: OpaqueOutboxStore,
+    attemptIds: TransportAttemptIdFactory,
+    routes: OpaqueRouteResolver,
+  ) {
     this.store = store;
     this.attemptIds = attemptIds;
+    this.routes = routes;
   }
 
   enqueue(value: OpaqueOutboxRecord): Promise<void> {
@@ -83,8 +95,8 @@ export class OpaqueOutbox {
     });
   }
 
-  beginAttempt(requestId: RequestId): Promise<OpaqueTransportAttempt> {
-    return this.store.transact(requestId, (current) => {
+  async beginAttempt(requestId: RequestId): Promise<OpaqueTransportAttempt> {
+    const prepared = await this.store.transact(requestId, (current) => {
       if (current === undefined) {
         throw new OpaqueOutboxError("unknown_request", "Outbox request does not exist");
       }
@@ -97,9 +109,31 @@ export class OpaqueOutbox {
         result: {
           attemptId: this.attemptIds.create(),
           requestId: record.requestId,
-          destinationRouteId: record.destinationRouteId,
+          destinationCryptoSessionId: record.destinationCryptoSessionId,
           opaqueEnvelope: record.opaqueEnvelope.slice(),
         },
+      };
+    });
+    const destinationRouteId = await this.routes.resolve(prepared.destinationCryptoSessionId);
+    return {
+      attemptId: prepared.attemptId,
+      requestId: prepared.requestId,
+      destinationRouteId,
+      opaqueEnvelope: prepared.opaqueEnvelope,
+    };
+  }
+
+  markQueued(requestId: RequestId): Promise<void> {
+    return this.store.transact(requestId, (current) => {
+      if (current === undefined) {
+        throw new OpaqueOutboxError("unknown_request", "Outbox request does not exist");
+      }
+      if (current.state === "daemon_accepted") {
+        return { record: current, result: undefined };
+      }
+      return {
+        record: parseOpaqueOutboxRecord({ ...current, state: "queued_local" }),
+        result: undefined,
       };
     });
   }
