@@ -9,7 +9,7 @@
 
 Status: living product plan and delivery snapshot.
 
-Updated: 2026-09-12
+Updated: 2026-09-13
 
 This document records product intent, candidate designs, and a proposed implementation sequence. It is not normative agent instructions or the sole source of truth. Future features, ordering, languages, frameworks, and technology choices remain plans until adopted by current code or a focused architecture or policy document.
 
@@ -1361,7 +1361,7 @@ Requirements:
 
 The current mobile plan favors SwiftUI on iOS and Jetpack Compose on Android because native code supports Live Activities, Android foreground services, notification actions, widgets, share sheets, and efficient streaming text. This is not a binding stack decision. Choose the implementation when mobile work begins and its requirements are concrete.
 
-Remote transport uses pairwise application-level E2EE in addition to TLS. The provisional direction is OpenMLS with one daemon-device group per relationship, opaque KeyPackage and Welcome rendezvous, daemon-only commits, phone Update proposals, and explicit draft-suite migration. Production cryptography remains blocked on Person 1's security RFC, exact suite, reviewed library, browser/WASM feasibility, secure-state transaction, interoperability fixtures, and independent security review. Transport code treats prepared envelopes and rendezvous objects as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic. The proposed remote action-binding and approval rules are in [`docs/architecture/remote-permission-authorization.md`](docs/architecture/remote-permission-authorization.md); that draft does not enable remote approval.
+Remote transport uses pairwise application-level E2EE in addition to TLS. The prior PQXDH plus Triple Ratchet direction is superseded. The proposed direction is one two-member OpenMLS group per remote device and daemon installation using a versioned hybrid ML-KEM-768 plus X25519 profile. The daemon is the sole commit creator; a phone generates its own private replacement leaf and sends a signed self-Update proposal. Production cryptography remains blocked on approval of [`docs/architecture/remote-e2ee-openmls.md`](docs/architecture/remote-e2ee-openmls.md), exact pinned dependencies, transactional secure-state design, browser/WASM feasibility, cross-platform fixtures, mobile measurements, and independent security review. Transport code treats every MLS application message, proposal, commit, receipt, KeyPackage, and Welcome as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic. The proposed remote action-binding and approval rules are in [`docs/architecture/remote-permission-authorization.md`](docs/architecture/remote-permission-authorization.md); that draft does not enable remote approval.
 
 The managed path uses two separately deployable services: the TypeScript control plane owns hosted state and one-use admission, while the Elixir/OTP relay owns bounded in-memory WebSocket routing. The daemon remains the command and session authority. Transport proof uses only disposable sessions, a deterministic fake provider, opaque fixtures, and a test-only fake E2EE adapter. Ordinary-session steering and remote permission approval remain disabled until the E2EE and release gates pass.
 
@@ -2332,7 +2332,7 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 #### Shared remote connectivity
 
-- [ ] Write and approve the pairing and remote-transport security RFC before implementing remote access.
+- [ ] Approve the pairing and versioned hybrid OpenMLS security RFC before implementing production endpoint E2EE.
 - [ ] Add revocable device identities and observer, steering, approval, and session-management grants that the daemon maps to protocol capabilities.
 - [ ] Add bounded encrypted application frames, replay protection, reconnect, and published protocol test vectors.
 - [ ] Add the daemon's opt-in outbound connection and a ciphertext-only hosted relay with no public daemon port.
@@ -2345,7 +2345,7 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 - [ ] Serve a protocol-independent static account and installation shell from `app.axldev.ai`.
 - [ ] Retain immutable client bundles by compatible web-asset and wire version rather than placing multiple protocol implementations in one bundle.
-- [ ] Store a non-extractable browser device key through an IndexedDB adapter and require re-pairing when it is lost.
+- [ ] Store browser OpenMLS identity and group state through the reviewed transactional browser adapter and require re-pairing when protected state is lost. Browser/WASM and durable-storage feasibility must pass before this path is selected.
 - [ ] Obtain a one-use, device-bound relay ticket through the authenticated API, then authenticate the WebSocket with a bounded initial frame rather than a URL or subprotocol credential.
 - [ ] Terminate end-to-end encryption in the browser and expose decrypted validated messages through the normal SDK transport contract.
 - [ ] List installations through the control plane, but obtain sessions, transcripts, and live state only from the selected daemon after encrypted attachment.
@@ -2354,21 +2354,21 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 The transport-first remote-control slice is an approved exception to phase ordering. It may establish service boundaries, opaque framing, one-use ticket admission, bounded relay routing, daemon authorization behind a test-only fake E2EE adapter, and reusable SDK delivery machinery. It must not implement cryptography, select production identity or storage infrastructure, enable ordinary-session remote access, or advertise production remote control.
 
-The private slice was created from clean `main` commit `ea906d0295ba67f833c49ace408a9573551ea687` and rebased for integration onto clean `main` commit `57bd31b7e718a125fc51a0fcf3a554cb100ea708` on `feature/e2ee-transport`. Stop for architecture review after the documentation, separate service boundaries, versioned fixture contract, atomic ticket-consumption path, and first bounded relay slice land.
+The original private transport slice was integrated into the shared `RC` branch. Draft PR #394 is the aggregate `RC` to `main` review. Each remaining Person 1 or Person 2 milestone branches from current `RC`, opens a focused PR targeting `RC`, and stops at its own review gate. Contributors do not push implementation directly to `RC` or rewrite shared integration history.
 
 #### Remote transport preflight
 
-- [x] Replace the obsolete PQXDH and Triple Ratchet direction with the provisional pairwise OpenMLS profile while keeping exact production cryptography blocked on Person 1's reviewed contract and library.
+- [x] Record the prior PQXDH plus Triple Ratchet direction as superseded and propose the versioned pairwise hybrid OpenMLS profile for architecture and security review.
 - [x] Add the separately deployable TypeScript control plane under `services/control-plane/` with authenticated ticket issuance and atomic one-use consumption through injected interfaces.
 - [x] Add the separately deployable Elixir/OTP relay under `services/relay/` with authenticated admission, opaque bounded framing, in-memory installation-scoped routing, backpressure, heartbeat, lease, revocation, and draining behavior.
 - [x] Publish language-neutral admission, revocation, and exact binary accept/reject fixtures consumed by both implementations.
 - [x] Run TypeScript and Mix formatting, compilation, tests, static analysis, dependency auditing, package-boundary, and SPDX/REUSE checks in CI.
 - [x] Draft the daemon-owned remote permission action-binding contract without enabling it.
-- [x] Stop at the architecture checkpoint before daemon, SDK, cryptographic rendezvous, attachment, or production integration work.
+- [x] Stop at the transport architecture checkpoint before daemon, SDK, cryptographic rendezvous, attachment, or production integration work.
 
 #### Remote daemon authority checkpoint
 
-The transport checkpoint was approved. The next private slice remains disabled for ordinary sessions and uses only the test fake E2EE adapter.
+The transport checkpoint was approved. The next integration slice remains disabled for ordinary sessions and uses only the test fake E2EE adapter.
 
 - [x] Define independent `observe`, `steer`, `approve_within_policy`, and `manage_sessions` scopes.
 - [x] Persist installation-bound local device grants and hosted narrowing generations in the daemon data directory.
@@ -2391,7 +2391,7 @@ The transport checkpoint was approved. The next private slice remains disabled f
 - [x] Permit removal only after authenticated daemon acceptance.
 - [x] Reset uncertain sending state to queued on reconnect without re-encryption.
 - [x] Prove the real control plane, relay, daemon authority, SDK, cursor resume, restart, duplicate, revocation, and overflow boundaries in one disposable fake-E2EE test.
-- [ ] Connect the opaque outbox to Person 1's reviewed atomic OpenMLS prepared-envelope transaction.
+- [ ] Replace the standalone opaque-outbox transaction with Person 1's reviewed OpenMLS transaction that persists state advancement and exact ciphertext together.
 - [ ] Implement the reviewed bounded authority-audit sink described in [`docs/architecture/remote-hosted-path.md`](docs/architecture/remote-hosted-path.md).
 
 #### Mobile clients
