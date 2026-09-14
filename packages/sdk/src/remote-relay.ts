@@ -331,6 +331,7 @@ export class RemoteRelayConnection {
   private sourceRoute: RelayPeerRoute | undefined;
   private peers = new Map<RouteId, RelayPeerRoute>();
   private generation = 0;
+  private lifecycleGeneration = 0;
   private stopped = true;
   private starting: Promise<void> | undefined;
   private reconnecting: Promise<void> | undefined;
@@ -365,7 +366,8 @@ export class RemoteRelayConnection {
     if (this.starting !== undefined) return this.starting;
     if (this.reconnecting !== undefined) return this.reconnecting;
     this.stopped = false;
-    const operation = this.connectWithRetry("connecting");
+    const lifecycleGeneration = ++this.lifecycleGeneration;
+    const operation = this.connectWithRetry("connecting", lifecycleGeneration);
     const starting = operation.finally(() => {
       if (this.starting === starting) this.starting = undefined;
     });
@@ -376,6 +378,7 @@ export class RemoteRelayConnection {
   close(): void {
     if (this.stopped && this.currentState === "closed") return;
     this.stopped = true;
+    this.lifecycleGeneration += 1;
     this.generation += 1;
     this.socket?.close(1000, "client_closed");
     this.socket = undefined;
@@ -466,20 +469,28 @@ export class RemoteRelayConnection {
     socket.send(frame);
   }
 
-  private async connectWithRetry(state: "connecting" | "reconnecting"): Promise<void> {
+  private async connectWithRetry(
+    state: "connecting" | "reconnecting",
+    lifecycleGeneration: number,
+  ): Promise<void> {
+    if (!this.lifecycleIsActive(lifecycleGeneration)) return;
     this.setState(state);
     let latest: unknown;
-    for (let attempt = 0; attempt < this.policy.maximumAttempts && !this.stopped; attempt += 1) {
-      if (attempt > 0) await this.sleep(this.retryDelay(attempt - 1));
+    for (let attempt = 0; attempt < this.policy.maximumAttempts; attempt += 1) {
+      if (attempt > 0) {
+        await this.sleep(this.retryDelay(attempt - 1));
+        if (!this.lifecycleIsActive(lifecycleGeneration)) return;
+      }
       try {
-        await this.connectOnce();
+        await this.connectOnce(lifecycleGeneration);
         return;
       } catch (error) {
         latest = error;
         this.discardFailedSocket();
+        if (!this.lifecycleIsActive(lifecycleGeneration)) return;
       }
     }
-    if (this.stopped) return;
+    if (!this.lifecycleIsActive(lifecycleGeneration)) return;
     this.stopped = true;
     this.setState("disconnected");
     throw new RemoteRelayError("connection_failed", "Relay reconnect attempts were exhausted", {
@@ -487,8 +498,13 @@ export class RemoteRelayConnection {
     });
   }
 
-  private async connectOnce(): Promise<void> {
+  private lifecycleIsActive(generation: number): boolean {
+    return !this.stopped && generation === this.lifecycleGeneration;
+  }
+
+  private async connectOnce(lifecycleGeneration: number): Promise<void> {
     const credential = await this.options.tickets.acquire();
+    if (!this.lifecycleIsActive(lifecycleGeneration)) return;
     if (credential.expiresAt <= Date.now()) {
       throw new RemoteRelayError("invalid_admission", "Relay ticket is already expired");
     }
@@ -573,6 +589,7 @@ export class RemoteRelayConnection {
   ): Promise<boolean> {
     if (generation !== this.generation || this.stopped) return false;
     const bytes = await messageBytes(value, maximumBytes);
+    if (generation !== this.generation || this.stopped) return false;
     if (!isRelayFrame(bytes)) {
       let parsed: unknown;
       try {
@@ -665,7 +682,9 @@ export class RemoteRelayConnection {
     this.clearRoutes();
     this.rejectRouteWaiters(error);
     if (!wasConnected || this.stopped || this.reconnecting !== undefined) return;
-    const reconnecting = this.connectWithRetry("reconnecting").catch(() => undefined);
+    const reconnecting = this.connectWithRetry("reconnecting", this.lifecycleGeneration).catch(
+      () => undefined,
+    );
     this.reconnecting = reconnecting;
     void reconnecting.finally(() => {
       if (this.reconnecting === reconnecting) this.reconnecting = undefined;
