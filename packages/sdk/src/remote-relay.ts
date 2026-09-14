@@ -216,7 +216,8 @@ export type RemoteRelayErrorCode =
   | "connection_closed"
   | "daemon_offline"
   | "wrong_destination"
-  | "bad_relay_message";
+  | "bad_relay_message"
+  | "frame_too_large";
 
 export class RemoteRelayError extends Error {
   readonly code: RemoteRelayErrorCode;
@@ -251,23 +252,34 @@ function reconnectPolicy(value: Partial<RemoteReconnectPolicy> = {}): RemoteReco
   return policy;
 }
 
-async function messageBytes(value: unknown): Promise<Uint8Array> {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+function rejectOversizedMessage(): never {
+  throw new RemoteRelayError("frame_too_large", "Relay message exceeds the negotiated frame limit");
+}
+
+function boundedBytes(bytes: Uint8Array, maximumBytes: number): Uint8Array {
+  if (bytes.byteLength > maximumBytes) rejectOversizedMessage();
+  return bytes;
+}
+
+async function messageBytes(value: unknown, maximumBytes: number): Promise<Uint8Array> {
+  if (value instanceof Uint8Array) return boundedBytes(value, maximumBytes);
+  if (value instanceof ArrayBuffer) {
+    if (value.byteLength > maximumBytes) rejectOversizedMessage();
+    return new Uint8Array(value);
+  }
   if (ArrayBuffer.isView(value)) {
+    if (value.byteLength > maximumBytes) rejectOversizedMessage();
     return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
   }
-  if (
-    typeof value === "object" &&
-    value !== null &&
-    "arrayBuffer" in value &&
-    typeof value.arrayBuffer === "function"
-  ) {
-    const buffer = await (value as { arrayBuffer(): Promise<ArrayBuffer> }).arrayBuffer();
-    return new Uint8Array(buffer);
+  if (typeof Blob !== "undefined" && value instanceof Blob) {
+    if (value.size > maximumBytes) rejectOversizedMessage();
+    return boundedBytes(new Uint8Array(await value.arrayBuffer()), maximumBytes);
   }
-  if (typeof value === "string") return new TextEncoder().encode(value);
-  throw new RemoteRelayError("bad_relay_message", "Relay message is not binary data");
+  if (typeof value === "string") {
+    if (value.length > maximumBytes) rejectOversizedMessage();
+    return boundedBytes(new TextEncoder().encode(value), maximumBytes);
+  }
+  throw new RemoteRelayError("bad_relay_message", "Relay message is not supported binary data");
 }
 
 function isRelayFrame(bytes: Uint8Array): boolean {
@@ -320,7 +332,9 @@ export class RemoteRelayConnection {
   private peers = new Map<RouteId, RelayPeerRoute>();
   private generation = 0;
   private stopped = true;
+  private starting: Promise<void> | undefined;
   private reconnecting: Promise<void> | undefined;
+  private activeMaxFrameBytes: number | undefined;
   private currentState: RemoteRelayConnectionState = "disconnected";
 
   constructor(options: RemoteRelayConnectionOptions) {
@@ -346,10 +360,17 @@ export class RemoteRelayConnection {
     return this.sourceRoute;
   }
 
-  async start(): Promise<void> {
-    if (!this.stopped) return;
+  start(): Promise<void> {
+    if (this.currentState === "connected") return Promise.resolve();
+    if (this.starting !== undefined) return this.starting;
+    if (this.reconnecting !== undefined) return this.reconnecting;
     this.stopped = false;
-    await this.connectWithRetry("connecting");
+    const operation = this.connectWithRetry("connecting");
+    const starting = operation.finally(() => {
+      if (this.starting === starting) this.starting = undefined;
+    });
+    this.starting = starting;
+    return starting;
   }
 
   close(): void {
@@ -358,6 +379,7 @@ export class RemoteRelayConnection {
     this.generation += 1;
     this.socket?.close(1000, "client_closed");
     this.socket = undefined;
+    this.activeMaxFrameBytes = undefined;
     this.clearRoutes();
     this.rejectRouteWaiters(
       new RemoteRelayError("connection_closed", "Relay connection is closed"),
@@ -425,14 +447,23 @@ export class RemoteRelayConnection {
     if (this.currentState !== "connected" || socket === undefined || socket.readyState !== 1) {
       throw new RemoteRelayError("connection_closed", "Relay connection is not connected");
     }
-    socket.send(
-      encodeRelayBinaryFrame({
-        transportVersion: REMOTE_TRANSPORT_VERSION,
-        attemptId,
-        destinationRouteId,
-        opaquePayload: payload,
-      }),
-    );
+    const maximumBytes = this.activeMaxFrameBytes;
+    if (maximumBytes === undefined) {
+      throw new RemoteRelayError("connection_closed", "Relay connection has no active limits");
+    }
+    const frame = encodeRelayBinaryFrame({
+      transportVersion: REMOTE_TRANSPORT_VERSION,
+      attemptId,
+      destinationRouteId,
+      opaquePayload: payload,
+    });
+    if (frame.byteLength > maximumBytes) {
+      throw new RemoteRelayError(
+        "frame_too_large",
+        "Relay frame exceeds the negotiated frame limit",
+      );
+    }
+    socket.send(frame);
   }
 
   private async connectWithRetry(state: "connecting" | "reconnecting"): Promise<void> {
@@ -445,9 +476,11 @@ export class RemoteRelayConnection {
         return;
       } catch (error) {
         latest = error;
+        this.discardFailedSocket();
       }
     }
     if (this.stopped) return;
+    this.stopped = true;
     this.setState("disconnected");
     throw new RemoteRelayError("connection_failed", "Relay reconnect attempts were exhausted", {
       cause: latest,
@@ -482,7 +515,14 @@ export class RemoteRelayConnection {
       );
       const open: RemoteWebSocketListener = () => {
         try {
-          socket.send(admissionBytes(credential));
+          const admission = admissionBytes(credential);
+          if (admission.byteLength > credential.limits.maxFrameBytes) {
+            throw new RemoteRelayError(
+              "frame_too_large",
+              "Relay admission exceeds the negotiated frame limit",
+            );
+          }
+          socket.send(admission);
         } catch (cause) {
           finish(
             new RemoteRelayError("invalid_admission", "Could not send relay admission", { cause }),
@@ -491,7 +531,7 @@ export class RemoteRelayConnection {
       };
       const message: RemoteWebSocketListener = (event) => {
         if (event.type !== "message") return;
-        void this.handleMessage(event.data, generation)
+        void this.handleMessage(event.data, generation, credential.limits.maxFrameBytes)
           .then((snapshot) => {
             if (snapshot) finish();
           })
@@ -522,12 +562,17 @@ export class RemoteRelayConnection {
       socket.close(1000, "stale_connection");
       throw new RemoteRelayError("connection_closed", "Relay connection became stale");
     }
+    this.activeMaxFrameBytes = credential.limits.maxFrameBytes;
     this.setState("connected");
   }
 
-  private async handleMessage(value: unknown, generation: number): Promise<boolean> {
+  private async handleMessage(
+    value: unknown,
+    generation: number,
+    maximumBytes: number,
+  ): Promise<boolean> {
     if (generation !== this.generation || this.stopped) return false;
-    const bytes = await messageBytes(value);
+    const bytes = await messageBytes(value, maximumBytes);
     if (!isRelayFrame(bytes)) {
       let parsed: unknown;
       try {
@@ -552,6 +597,15 @@ export class RemoteRelayConnection {
       throw new RemoteRelayError("bad_relay_message", "Relay sent a client-only frame");
     }
     return false;
+  }
+
+  private discardFailedSocket(): void {
+    const socket = this.socket;
+    this.generation += 1;
+    this.socket = undefined;
+    this.activeMaxFrameBytes = undefined;
+    socket?.close(1000, "connection_attempt_failed");
+    this.clearRoutes();
   }
 
   private applyDiscovery(message: ReturnType<typeof parseRelayDiscoveryMessage>): void {
@@ -607,6 +661,7 @@ export class RemoteRelayConnection {
     if (generation !== this.generation) return;
     const wasConnected = this.currentState === "connected";
     this.socket = undefined;
+    this.activeMaxFrameBytes = undefined;
     this.clearRoutes();
     this.rejectRouteWaiters(error);
     if (!wasConnected || this.stopped || this.reconnecting !== undefined) return;
@@ -671,6 +726,7 @@ export class RemoteHostedDelivery {
   private flushTail: Promise<void> = Promise.resolve();
   private inboundTail: Promise<void> = Promise.resolve();
   private started = false;
+  private starting: Promise<void> | undefined;
 
   constructor(options: RemoteHostedDeliveryOptions) {
     this.options = options;
@@ -726,14 +782,25 @@ export class RemoteHostedDelivery {
     return () => this.errorListeners.delete(listener);
   }
 
-  async start(): Promise<void> {
-    if (this.started) return;
+  start(): Promise<void> {
+    if (this.started && this.starting === undefined) return Promise.resolve();
+    if (this.starting !== undefined) return this.starting;
     this.started = true;
-    // A process can stop after persisting `sending` but before receiving acceptance.
-    // No live transport attempt survives startup, so every such record is retryable.
-    await this.options.outbox.resetSendingAfterDisconnect();
-    await this.options.connection.start();
-    await this.flush();
+    const operation = (async () => {
+      // A process can stop after persisting `sending` but before receiving acceptance.
+      // No live transport attempt survives startup, so every such record is retryable.
+      await this.options.outbox.resetSendingAfterDisconnect();
+      await this.options.connection.start();
+      await this.flush();
+    })().catch((error: unknown) => {
+      this.started = false;
+      throw error;
+    });
+    const starting = operation.finally(() => {
+      if (this.starting === starting) this.starting = undefined;
+    });
+    this.starting = starting;
+    return starting;
   }
 
   close(): void {
