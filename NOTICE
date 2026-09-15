@@ -24,3 +24,9 @@ Its JavaScript package includes an MIT notice, and its platform launcher package
 are distributed under BSD-3-Clause. Those notices remain in the installed dependency
 packages. Axl invokes the launcher as an external process and does not copy or modify
 its source.
+
+Axl's endpoint E2EE core uses OpenMLS 0.9.0, `openmls_basic_credential` 0.6.0,
+and `openmls_libcrux_crypto` 0.4.0 as unmodified external dependencies under MIT.
+Their dependency graph includes the unmodified `hpke-rs`, `hpke-rs-crypto`, and
+`hpke-rs-libcrux` 0.7.0 crates under MPL-2.0. Applicable license texts and notices
+remain in Cargo source distributions and must be included in distributed packages.
