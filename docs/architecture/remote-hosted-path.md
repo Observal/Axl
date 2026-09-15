@@ -47,11 +47,11 @@ The explicit hosted-path integration test starts:
 
 It verifies ticket issuance and consumption, route discovery, fake authenticated opening, daemon authorization, durable command acceptance, response delivery, relay restart, changed-route retry with byte-identical ciphertext, cursor-based subscription resume, daemon restart, duplicate idempotency, revocation, and oversized-payload rejection. The test is opt-in outside the relay CI job because it requires the pinned Elixir toolchain.
 
-## Provisional cryptographic direction
+## Selected cryptographic direction
 
-The provisional endpoint direction is OpenMLS with one pairwise group for each daemon-device relationship. Pairing uses an opaque KeyPackage and Welcome rendezvous owned by the control plane. The daemon is the only committer. A phone may submit Update proposals but does not commit group state. Draft suite versions are explicit and migrations create a new versioned session rather than silently reinterpreting persisted state.
+The selected endpoint direction is revision 1 of the Axl-private `axl-e2ee-mls-pq-v1` profile with one pairwise group for each daemon-device relationship. Pairing uses an opaque KeyPackage and Welcome rendezvous owned by the control plane. The daemon is the only committer. A phone may submit Update proposals but does not commit group state. Pairing, persistence, and migration authenticate the profile ID and revision; incompatible changes require authenticated migration or re-pairing.
 
-This document defines no OpenMLS fields, algorithms, validation rules, storage representation, or transaction implementation. Person 1 must supply those details, browser/WASM feasibility, interoperability fixtures, and an independently reviewed prepared-envelope transaction before real E2EE integration.
+This document defines no OpenMLS fields, algorithms, validation rules, storage representation, or transaction implementation. The approved [OpenMLS RFC](remote-e2ee-openmls.md) owns those decisions. Session 40 supplies the transport-independent core and prepared-envelope transaction. Session 50 supplies mandatory browser/WASM persistence and cross-platform fixtures before real E2EE integration can enable remote web.
 
 ## Authority audit gate
 

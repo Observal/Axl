@@ -58,9 +58,9 @@ The built-in web transport uses pinned public DNS results, rejects private and r
 
 ## Remote endpoint E2EE direction
 
-Proposed decision from 2026-09-13: replace the prior PQXDH plus Triple Ratchet plan with the versioned pairwise hybrid OpenMLS direction in [`remote-e2ee-openmls.md`](remote-e2ee-openmls.md). The proposal uses one two-member group per remote device and daemon installation, hybrid ML-KEM-768 plus X25519 confidentiality, Ed25519 authentication initially, daemon-only commits, phone self-Update proposals, and atomic MLS-state plus exact-ciphertext persistence.
+Decision from 2026-09-14: replace the prior PQXDH plus Triple Ratchet plan with the versioned pairwise OpenMLS direction in [`remote-e2ee-openmls.md`](remote-e2ee-openmls.md). Revision 1 of the Axl-private profile `axl-e2ee-mls-pq-v1` binds OpenMLS 0.9.0 at tag `openmls-v0.9.0`, commit `3a3e35de3feeca8f6605143c464d5452ae584d43`, `openmls_libcrux_crypto` 0.4.0, suite value `0x004e`, `XWingDraft06`, and the named hybrid suite. It makes no IETF draft-06 interoperability claim.
 
-This is an architecture review decision, not approval to add production dependencies or expose remote control. Exact profile, dependency, browser/WASM, persistence, interoperability, mobile, and independent-review gates remain open.
+The decision approves the exact OpenMLS/libcrux candidates to enter Session 40 after the RFC and dependency decision receive human approval and merge into `RC`. Session 40 must pin the toolchain and lockfile and preserve the owned transactional persistence boundary. Browser/WASM remains mandatory work for Session 50. Remote access and production release stay disabled until their browser, native, interoperability, packaging, recovery, and independent-review gates pass.
 
 ## Generated files
 

@@ -3,87 +3,195 @@
 
 # Remote endpoint E2EE with OpenMLS
 
-Status: proposed for architecture and security review
+Status: Session 30 Axl-private profile approved for implementation; production release gates remain closed
 
-## Purpose
+Reviewed: 2026-09-14
 
-This document selects the provisional endpoint-E2EE direction for Axl remote control. It replaces the earlier PQXDH plus Triple Ratchet proposal. It does not approve production dependencies, enable remote access, or make a release security claim.
+## Decision and scope
 
-The transport and daemon boundaries remain unchanged:
+Axl reserves one transport-independent Rust endpoint core for remote E2EE. It uses one two-member MLS group per remote device and daemon installation. The daemon is the sole commit creator. A remote device creates its own replacement leaf and sends a self-Update proposal.
+
+This RFC fixes the Axl behavior that Session 40 and later implementation must satisfy. It adds no dependency, does not approve any dependency for production release, and does not enable remote access. It approves the exact Axl-private profile and OpenMLS/libcrux candidate graph to enter Session 40 after this decision receives human approval and merges into `RC`.
+
+The transport and authority boundaries do not change:
 
 ```text
 remote client
-  -> application-level encrypted envelope
+  -> application-level MLS ciphertext
   -> ciphertext-only relay
   -> daemon endpoint
-  -> authenticated device identity
+  -> authenticated paired-device identity
   -> daemon authorization and durable acceptance
   -> canonical session behavior
 ```
 
-TLS protects each network hop. OpenMLS protects application content end to end. Successful decryption authenticates a paired device but never authorizes an operation by itself.
+TLS protects network hops. MLS protects application content end to end. Successful MLS authentication identifies a paired device. It does not authorize an operation.
 
-## Proposed profile
+## Profile registry
 
-The first reviewed implementation should use one Axl-versioned profile:
+The profile identifier is the ASCII string `axl-e2ee-mls-pq-v1`. Pairing and migration authenticate both that identifier and profile revision `1`. There is no algorithm negotiation within revision 1.
+
+| Property | Revision 1 binding |
+| --- | --- |
+| Profile ID | `axl-e2ee-mls-pq-v1` |
+| Profile revision | `1` |
+| MLS base protocol | RFC 9420 as implemented by the pinned OpenMLS source |
+| Cipher suite name | `MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519` |
+| OpenMLS suite value | `0x004e` |
+| OpenMLS KEM implementation | `XWingDraft06` |
+| Confidentiality components | ML-KEM-768 plus X25519 in the pinned upstream implementation |
+| MLS KDF and transcript hash | HKDF-SHA-384 and SHA-384 in the pinned upstream implementation |
+| AEAD | AES-256-GCM |
+| Authentication signature | Ed25519 |
+| MLS encoding | RFC 9420 TLS Presentation Language encoding produced by the pinned source |
+| Credential type | MLS `basic` credential containing the Axl credential described below |
+| Library | `openmls` 0.9.0, crates.io checksum `b6b08d90fc020cb5354d5f08ca17711b84c82e2bcc7331753fd94f000d99a8c8` |
+| Provider | `openmls_libcrux_crypto` 0.4.0, crates.io checksum `41e6367fb30f91f21e4d30f4f58a8d3b41f96f55c3e4b5acfa1d6d18c9dd4855` |
+| Upstream source | OpenMLS tag `openmls-v0.9.0`, commit `3a3e35de3feeca8f6605143c464d5452ae584d43` dated 2026-08-25 |
+| Enabled Cargo features | `openmls/draft-ietf-mls-pq-ciphersuites`; `openmls/js` only for browser/WASM; `openmls_libcrux_crypto/draft-ietf-mls-pq-ciphersuites`; default features disabled |
+| Toolchain and graph lock | Exact Rust toolchain, Cargo version, target components, and committed `Cargo.lock` selected and recorded by Session 40 |
+| OpenMLS storage contract | `openmls_traits` 0.6.0, storage provider version 1 |
+
+Axl is not defining, patching, or assigning a cipher suite. Both endpoints use the same exact pinned upstream OpenMLS implementation. The Axl profile binds its private interoperability contract to those bytes and behaviors.
+
+This profile does not claim to implement or interoperate with `draft-ietf-mls-pq-ciphersuites-06`, any final IETF PQ MLS specification, or any implementation selected only by the same suite name. The draft is research context, not part of revision 1's wire contract.
+
+The cryptographic meaning remains deliberately split:
+
+- Confidentiality uses the pinned upstream hybrid ML-KEM-768 plus X25519 construction. Revision 1 never accepts a classical-only KEM or epoch.
+- Authentication is Ed25519 and is classical. Revision 1 does not provide post-quantum signatures.
+
+Every pairing invitation, claim, KeyPackage reservation, Welcome activation, persisted group record, and migration transcript binds the profile ID and revision. Any incompatible source, suite value, KEM construction, algorithm, encoding, credential, AAD, state schema, feature, or behavior-fixture change requires a new authenticated profile revision or profile ID and an authenticated migration or re-pairing. Toolchain and lockfile changes require dependency review and complete compatibility fixtures; they require a new profile revision only when they change wire bytes, persisted state, security behavior, or another profile binding. Stored state is never silently reinterpreted under another binding.
+
+## Pairwise group and identity mapping
+
+A group has exactly two leaves:
 
 ```text
-profile ID:       axl-e2ee-mls-pq-v1
-MLS library:      OpenMLS 0.9.0, exactly pinned
-crypto provider:  openmls_libcrux_crypto 0.4.0, exactly pinned
-cipher suite:     MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519
-confidentiality:  hybrid ML-KEM-768 and X25519
-signatures:       Ed25519
+daemon installation <-> one remote device
 ```
 
-This profile provides hybrid post-quantum confidentiality and classical authentication. It does not provide post-quantum signatures.
+Every additional phone or browser gets an independent group. An offline device cannot block another device's epoch progress. Removal or reset affects one pair.
 
-The IETF post-quantum MLS suite is draft material. The profile ID binds the exact draft revision, OpenMLS and provider versions, cipher suite, encoding, credential format, AAD format, storage schema, and behavior fixtures. An incompatible change requires a new Axl profile and an authenticated migration or re-pairing. An implementation must not silently reinterpret persisted state or accept a classical-only epoch.
-
-Production dependency addition remains blocked on a focused dependency and license review. The feasibility spike is evidence, not production code.
-
-## Group topology
-
-Axl uses one two-member group for each remote-device and daemon-installation pair:
+The durable mapping is one-to-one:
 
 ```text
-phone A <-> daemon installation: group A
-phone B <-> daemon installation: group B
-browser C <-> daemon installation: group C
+(account_id, installation_id, device_id, profile_id, profile_revision)
+  -> crypto_session_id
+  -> MLS group_id
+  -> daemon credential fingerprint
+  -> device credential fingerprint
+  -> active epoch and epoch authenticator
 ```
 
-This topology keeps an offline or updating device from blocking another device. Revocation and re-pairing affect one pair. Axl does not initially create one group containing every remote device.
+Identifiers have these forms:
 
-Group membership does not grant daemon scope. Device grants remain independent daemon authority records.
+- `installation_id`, `device_id`, and `crypto_session_id` are canonical 16-byte UUIDv7 values.
+- `group_id` is 32 random bytes generated by the daemon. It is never reused.
+- A credential fingerprint is `SHA-384(credential_tls_bytes)`.
+- An Axl basic credential is the canonical TLS encoding of version `1`, role (`daemon` or `device`), account UUID, installation UUID, device UUID, profile ID, profile revision, and Ed25519 public verification key. The daemon credential uses the all-zero device UUID; a device credential may not.
 
-## Endpoint ownership
+The daemon leaf uses the installation's Ed25519 identity. The device leaf uses a new per-pair Ed25519 identity. Private keys remain at their endpoint. Plaintext identifiers cannot override the credential and group mapping.
 
-Each endpoint generates and retains its private identity, signing, leaf, and group secrets. The control plane and relay receive no private cryptographic state.
+## QR pairing and possession proof
 
-The remote device owns its replacement leaf private key. It sends a signed MLS self-Update proposal containing only public update material. The daemon must not generate or learn the remote device's replacement private key.
+The QR payload is canonical TLS encoding, not JSON. It contains:
 
-The daemon is the only MLS commit creator. It validates pending proposals, may add its own update, creates one ordered commit, and persists that transition. Remote devices do not independently create competing commits.
+```text
+struct {
+  uint16 version = 1;
+  opaque profile_id<1..255>;
+  uint16 profile_revision = 1;
+  opaque account_id[16];
+  opaque installation_id[16];
+  opaque crypto_session_id[16];
+  opaque daemon_credential<1..512>;
+  uint64 issued_at_ms;
+  uint64 expires_at_ms;
+  opaque invitation_nonce[32];
+  opaque daemon_signature<64>;
+} PairingInvitation;
+```
 
-This rule prevents two valid successors to one epoch. Any authenticator mismatch or incompatible successor is a fork or corruption and fails closed.
+`daemon_signature` is Ed25519 over `"Axl pairing invitation v1" || TLS(fields before daemon_signature)`. The invitation expires after 10 minutes, is single-use, and is cancelled after five failed claims. `invitation_nonce` is a 256-bit random possession secret. It must not enter URLs, logs, metrics, analytics, or canonical events. A QR image is therefore a short-lived credential and the UI must say so.
 
-## Pairing and asynchronous establishment
+The device validates the profile, times, expected signed-in account, installation name shown by the local daemon, daemon credential, and signature. It then generates its credential and KeyPackage. Its claim contains the invitation identifiers, `SHA-384(invitation_nonce)`, the device credential, KeyPackage bytes, and:
 
-The proposed establishment flow is:
+```text
+device_signature = Ed25519.Sign(
+  device_private_key,
+  "Axl pairing claim v1" ||
+  SHA-384(PairingInvitation) ||
+  SHA-384(KeyPackage) ||
+  device_credential_fingerprint
+)
+```
 
-1. The daemon creates a time-bounded pairing invitation containing non-secret identifiers and transcript commitments.
-2. The remote device validates the QR invitation and binds it to the expected account, installation, daemon identity, and Axl profile.
-3. The remote device creates its credential and one bounded OpenMLS KeyPackage.
-4. The control plane stores the KeyPackage as opaque bounded bytes for the intended installation.
-5. The daemon consumes the intended KeyPackage once, creates the pairwise group, and produces a Welcome.
-6. The Welcome is delivered as opaque ciphertext through the approved rendezvous or relay path.
-7. Both endpoints verify the pairing transcript, group identity, peer credential, and profile before activating the pair.
-8. The daemon creates the local grant. Hosted state may narrow that grant.
+The daemon accepts a claim only when it has the original nonce, all hashes match, the device signature validates, the invitation is live and unconsumed, and the user confirms the device name and a 12-digit comparison value derived as the first 39 bits of `SHA-384("Axl pairing compare v1" || invitation || claim)` rendered with leading zeroes as four three-digit groups. The comparison value is a UX check, not an additional cryptographic primitive or authorization grant.
 
-The final RFC must define invitation expiry, possession proof, one-use reservation, simultaneous claims, transcript encoding, device naming, reset, and user-visible comparison or confirmation. Account authentication alone cannot complete pairing.
+Account authentication alone cannot complete pairing. The control plane sees only identifiers, expiry, the nonce hash, credentials, signatures, and opaque KeyPackage or Welcome bytes. It never receives the QR nonce or private MLS state.
 
-## Epoch transition
+## KeyPackage and Welcome lifecycle
 
-An active pair follows this state machine:
+A device creates exactly one KeyPackage for one invitation. The surrounding signed pairing transcript binds it to `axl-e2ee-mls-pq-v1`, revision `1`, the selected cipher suite, the device basic credential, and capabilities needed by this profile.
+
+Limits and lifecycle:
+
+| Artifact | Limit | Lifetime and consumption |
+| --- | ---: | --- |
+| Pairing invitation | 2 KiB | 10 minutes, one successful claim |
+| KeyPackage | 16 KiB | 10 minutes, reserved atomically for 60 seconds, consumed once by the daemon |
+| Welcome | 16 KiB | 10 minutes, byte-identical retry until device activation acknowledgement |
+
+A KeyPackage reservation binds account, installation, device, crypto session, profile ID, profile revision, credential fingerprint, and KeyPackage hash. One concurrent reservation wins. Failed group creation releases the reservation only while it remains live and no Welcome exists. Successful group creation consumes it permanently. A consumed, expired, malformed, wrong-profile, or wrong-credential KeyPackage is deleted and cannot be retried.
+
+The daemon creates a fresh group ID, adds the reserved KeyPackage, persists the group transition and exact Welcome bytes atomically, and only then publishes the Welcome. The device validates the complete pairing transcript, profile, group ID, daemon credential, member count of two, and its own leaf before persisting the joined state. It returns an MLS-protected activation acknowledgement. The control plane deletes the Welcome after that acknowledgement or expiry. Expiry or ambiguous state requires a new invitation and KeyPackage. KeyPackages and Welcomes never authorize daemon scopes.
+
+## Canonical authenticated data
+
+Every MLS private message sets authenticated data explicitly. The encoding is TLS Presentation Language encoding with fixed field order and minimal integer encodings:
+
+```text
+struct {
+  uint16 aad_version = 1;
+  opaque profile_id<1..255>;
+  uint16 profile_revision = 1;
+  opaque crypto_session_id[16];
+  opaque group_id[32];
+  opaque source_device_id[16];
+  opaque destination_device_id[16];
+  opaque installation_id[16];
+  uint8 message_class;
+  opaque logical_message_id[16];
+  uint64 hosted_grant_generation;
+} AxlMlsAadV1;
+```
+
+The maximum encoded AAD is 512 bytes. IDs are raw canonical bytes. Strings are UTF-8 and profile IDs are ASCII. An endpoint reconstructs expected AAD from durable local mapping and compares it byte for byte before releasing plaintext. The sender cannot select identity fields from plaintext.
+
+Relay `attempt_id` and ephemeral route IDs are excluded. Retries retain identical MLS bytes while those transport values change.
+
+## Message classes and bounds
+
+| Value | Class | Direction | Plaintext maximum | Ordering |
+| ---: | --- | --- | ---: | --- |
+| 1 | `application_request` | device to daemon | 60,000 bytes | durable outbox, daemon acceptance required |
+| 2 | `application_delivery` | daemon to device | 60,000 bytes | cursor-resumable, re-encrypt after epoch sync |
+| 3 | `update_proposal` | device to daemon | 16 KiB | before commit, exact retry |
+| 4 | `commit` | daemon to device | 16 KiB | highest priority, exact retry |
+| 5 | `epoch_ready` | device to daemon | 2 KiB | highest priority, exact retry |
+| 6 | `pair_activation` | either direction | 2 KiB | pairing only |
+| 7 | `resync_control` | either direction | 2 KiB | no application authority |
+
+The complete relay payload remains at most 65,497 bytes. The endpoint rejects an MLS envelope that exceeds this value before allocation or parsing. It also bounds decoded TLS vectors, credentials to 512 bytes, AAD to 512 bytes, and the plaintext limits above. Attachments are not part of this profile and require a later profile and key-schedule review.
+
+Control classes are processed before application delivery, but the relay remains opaque and supplies no semantic priority. The endpoint maintains separate bounded queues. There is no durable cloud mailbox.
+
+## Commit ownership and epoch barrier
+
+Only the daemon creates commits. A device that needs a new leaf generates the private replacement leaf locally and sends a signed MLS self-Update proposal. The daemon validates the proposal, rejects proposals that change identity or profile, optionally adds its own update, and creates the one successor commit.
+
+Each pair follows:
 
 ```text
 ACTIVE(E)
@@ -93,221 +201,192 @@ ACTIVE(E)
   -> ACTIVE(E+1)
 ```
 
-Rules:
+The daemon stops accepting new old-epoch mutations, drains accepted mutations to `daemon_accepted` or a typed terminal result, and atomically persists next MLS state plus exact commit bytes. It sends those bytes until acknowledged. The device atomically applies the commit and persists its next state, then sends:
 
-1. Stop accepting new old-epoch mutations for that pair.
-2. Drain old-epoch mutations through daemon acceptance or an explicit terminal state.
-3. Commit local MLS state advancement and exact commit bytes in one transaction.
-4. Send the exact persisted commit bytes.
-5. The remote endpoint applies and persists the commit atomically.
-6. The remote endpoint sends an encrypted `epoch-ready` receipt binding the profile, group, commit ID, target epoch, and epoch authenticator.
-7. The daemon compares the expected authenticator before enabling new-epoch application sends.
+```text
+struct {
+  uint16 version = 1;
+  opaque profile_id<1..255>;
+  uint16 profile_revision = 1;
+  opaque crypto_session_id[16];
+  opaque group_id[32];
+  opaque commit_id[48];
+  uint64 target_epoch;
+  opaque epoch_authenticator[48];
+} EpochReadyV1;
+```
 
-A lost commit causes byte-identical retransmission. A lost receipt causes the receiver to recognize the already-applied commit and resend the receipt without applying the commit twice. Application ciphertext for epoch `E+1` must not overtake its commit barrier.
+`commit_id` is `SHA-384(exact_commit_bytes)`. The receipt is an MLS application message with class `epoch_ready`. The daemon compares every field and the expected epoch authenticator in constant time where applicable. A duplicate commit causes a byte-identical receipt retry, not a second apply. A duplicate valid receipt is harmless. New-epoch application ciphertext cannot pass the commit barrier in either direction.
 
-Updates are serialized per pairwise group, not under a global lock.
+Updates serialize per crypto session. There is no global MLS lock.
+
+## Epoch windows
+
+The fixed initial limits are:
+
+```text
+past receive-only epochs: 2
+past epoch maximum age:   5 minutes from local commit persistence
+future epochs buffered:   only E+1
+future message count:     32 per crypto session
+future ciphertext bytes:  512 KiB per crypto session
+future wait:              10 seconds
+```
+
+Past epochs never permit sending. Current revocation, hosted generation, scope, policy, replay, and idempotency checks still run after old-epoch decryption. A future application message triggers one bounded commit retransmission request. Commits and epoch-ready receipts have reserved queue capacity and cannot be displaced by application traffic.
+
+Too-old, too-far-future, missing-commit, wrong-profile, wrong-suite, and authenticator mismatch errors are typed and bounded. They quarantine the pair for explicit resynchronization or re-pairing. There is no silent reset or downgrade.
 
 ## Update policy
 
-Application messages use the MLS secret tree. The epoch encryption secret derives a sender-specific leaf secret, which feeds separate handshake and application hash ratchets. Each ratchet generation derives a one-use key and nonce and then advances one way. This chain-like symmetric ratchet is not Signal's Double Ratchet and does not perform X25519 or ML-KEM for each message. ML-KEM runs during pairing and update commits.
+A hybrid update is due at the earliest of:
 
-The first policy should trigger a hybrid update at the earliest of:
+- 24 hours since the last successful hybrid commit while both endpoints are reachable;
+- 1,000 sent plus received MLS application messages in the current epoch;
+- reconnect after at least 15 minutes without an authenticated endpoint exchange;
+- device membership, credential, local grant, hosted grant, or revocation change;
+- suspected endpoint or state exposure;
+- before a policy-marked sensitive action when the last successful hybrid update predates that action's authorization context.
 
-- approximately 24 hours while both endpoints are reachable
-- 1,000 application messages
-- a significant reconnect
-- a membership, credential, or revocation event
-- suspected state exposure
-- before a sensitive operation when policy requires fresh recovery
+The 24-hour and message-count triggers are routine. Routine work may batch until both endpoints are reachable. Low-power or background state may defer a routine update for at most seven days, after which remote mutation is blocked until update completion. Observation may continue only if current policy allows it and the epoch is otherwise valid.
 
-Routine updates wait while that device is offline. On reconnect, the pair resumes its existing valid epoch, drains accepted work, and performs a required hybrid update before policy-marked sensitive actions.
+Reconnect, membership, credential, revocation, suspected-exposure, and sensitive-action triggers are security-required. A security-required action is blocked until the update and epoch-ready barrier complete. Low-power mode never changes the suite, removes ML-KEM, or enables a classical fallback.
 
-Low-power or background operation may defer a routine update. It must not downgrade the suite. A security-required action remains blocked until the update completes.
+The thresholds are profile behavior, not security proofs. Gate D must measure them on representative phones before release. Changing them requires a reviewed profile-policy revision and compatible behavior fixtures.
 
-These thresholds are provisional and require real mobile battery, thermal, and latency measurements.
+## Atomic state and ciphertext persistence
 
-## Transactional state and exact retries
-
-Every state-advancing send follows one logical transaction:
+Every state-advancing send is one logical storage transaction:
 
 ```text
-BEGIN
-  persist next OpenMLS state
-  insert exact ciphertext and stable logical destination into outbox
-COMMIT
+BEGIN IMMEDIATE / strict read-write transaction
+  compare stored generation and rollback counter
+  write complete next OpenMLS state
+  insert exact ciphertext, logical message ID, class, epoch,
+    stable crypto_session_id, and retry state
+  update receive replay or send generation state
+COMMIT DURABLY
 ```
 
-Network transmission begins only after commit. A rollback invalidates the in-memory group object; the endpoint reloads committed state before another operation.
+Network transmission begins only after durable commit. A durable record stores `crypto_session_id`, never a relay route. Every attempt resolves the current route and creates a new transport attempt ID. A retry sends byte-identical ciphertext. It never calls MLS encryption again.
 
-A retry reuses the exact stored ciphertext and encrypted request identity. It creates a new relay transport attempt ID and resolves the peer's current ephemeral route at attempt time. Durable cryptographic or outbox state must not retain an ephemeral relay route as the destination identity.
+Any storage error or rollback invalidates the in-memory `MlsGroup` and all prepared handles. The endpoint closes the provider, reloads committed state, verifies the rollback counter and epoch authenticator, and only then permits another operation. The public core API returns immutable prepared envelopes and typed transaction outcomes. It never exposes mutable `MlsGroup` state.
 
-Receive-side replay state and durable accepted-message identity advance together before plaintext is released to daemon authorization or client projection.
+Receive-side replay advancement and durable accepted-message identity commit before plaintext is released to daemon authorization or a client projection.
 
-The committed next state contains the next sender-ratchet generation and must not retain the used message key. The outbox stores ciphertext, not that key. Logical deletion inside the serialized MLS state is insufficient if an older plaintext state remains recoverable from SQLite pages, a write-ahead log, temporary files, crash dumps, backups, or platform snapshots. The storage review must therefore define the exact at-rest encryption and cryptographic-erasure boundary, test rollback and forensic remnants, and state which snapshot or backup attackers are outside the claim. Static full-database encryption alone does not erase an old message secret from stale database pages when the same database key can still decrypt them.
+### Erasure boundary
 
-The production adapter must not expose mutable `MlsGroup` internals. It should expose transaction-oriented operations that return immutable prepared envelopes and typed outcomes.
+Used message keys must be absent from the committed next state. Serialized state records are encrypted under per-state data-encryption keys. A superseded state's wrapping record is destroyed only after the successor transaction is durable. WAL, rollback journals, temporary files, crash dumps, exported diagnostics, and unencrypted backups must not retain plaintext state or wrapping keys.
 
-## Delivery meanings
+This is a required design, not a completed claim. Static whole-database encryption with one long-lived key is insufficient because it leaves stale pages decryptable. Native and browser adapters must pass forensic-remnant and fault-injection tests and document platform backup and snapshot exclusions. Until they do, Axl makes no forward-secrecy claim for persisted-state compromise.
 
-Relay receipts do not prove endpoint or daemon acceptance:
+## Loss, fork, reset, migration, and re-pairing
 
-```text
-admitted:         relay accepted a bounded frame
-forwarded:        relay enqueued it toward the current destination route
-daemon_accepted:  daemon decrypted, authenticated, authorized, and durably accepted the request
-```
+- **Identity or group-state loss:** revoke the old device record when possible, quarantine remaining artifacts, create a new device ID, crypto session, group ID, invitation, KeyPackage, and grant. Never reconstruct missing secrets from hosted data.
+- **Rollback:** a lower rollback counter, epoch, or unexpected authenticator quarantines the pair. Reload once from durable state. Persistent mismatch requires re-pairing.
+- **Fork:** two valid successors, a commit hash mismatch, or epoch-authenticator mismatch quarantines both branches. No branch is selected automatically. Re-pair with a fresh group ID.
+- **Local reset:** requires explicit user confirmation and revocation. It never preserves the old group ID or device credential.
+- **Profile migration:** create a second pairwise group under the new profile. Authenticate the migration transcript inside the old group and require activation in the new group before revoking the old pair. If the old group is unavailable or suspect, use QR re-pairing. State is never decoded under a different profile.
+- **Hosted artifact loss:** retry from endpoint durable state when exact bytes exist. Otherwise expire the pairing and start again. Hosted state is not a recovery copy of MLS secrets.
 
-Only `daemon_accepted` permits removal of a mutation from durable retry storage. Non-mutating event delivery continues to use canonical cursor and snapshot recovery after the endpoint synchronizes its epoch.
+## Platform feasibility
 
-There is no durable cloud command mailbox. A disconnected remote client retains drafts or its approved local encrypted outbox. The relay stores only bounded in-memory queues.
+| Platform | Evidence as of 2026-09-14 | Decision |
+| --- | --- | --- |
+| Node daemon | Rust crates support the native target. The external spike exercised two-member groups and SQLite reopen, but it is research only. Node FFI and crash-safe storage are untested. | Feasible in principle; blocked before production. |
+| Browser/WASM | With Rust 1.96.0, `openmls` 0.9.0 plus `js` and the libcrux provider compile for `wasm32-unknown-unknown`. Web Crypto supplies a CSPRNG. IndexedDB can atomically update multiple records and offers a `strict` durability hint. No browser executed the core, no IndexedDB adapter joined MLS state and ciphertext, no multi-tab ownership protocol was tested, and erasure cannot be inferred from IndexedDB deletion. | Compilation gate passed for Session 40. Mandatory Session 50 implementation and remote-web shipping gates remain closed. |
+| Swift/iOS | A Rust static library and thin generated/manual C ABI are conventional. Keychain can hold a wrapping key. The spike did not build an XCFramework, exercise background execution, or prove database/Keychain crash ordering. Secure Enclave support for this Ed25519 identity is not assumed. | Feasible in principle; blocked pending fixture and device tests. |
+| Kotlin/Android | A Rust library can be called through JNI. Android Keystore can hold an AES wrapping key, but hardware properties vary. The spike did not build an AAR, test supported ABIs, or prove database/Keystore crash ordering. | Feasible in principle; blocked pending fixture and device tests. |
 
-## Associated data
+Browser/WASM compilation is sufficient to begin the shared Rust core in Session 40. Session 40 must keep persistence behind an Axl-owned platform-neutral transaction abstraction. The core must not depend exclusively on native SQLite. The abstraction must atomically persist advanced OpenMLS state with exact ciphertext, require discard and reload after rollback, and support native and browser adapters with the same typed outcomes.
 
-OpenMLS authenticated data is per message and must be set explicitly before every outgoing message. The exact canonical encoding remains a security-profile decision.
+Browser execution and persistence remain mandatory implementation and shipping gates assigned to Session 50. Session 50 must run OpenMLS in real browsers and prove the reviewed IndexedDB or replacement adapter across atomic state-plus-ciphertext commit, abort, crash, reload, exact-byte retry, rollback and epoch mismatch, storage loss and eviction, and single-writer or multi-tab ownership. It must test Chrome, Firefox, and Safari, refuse pairing without durable storage, use realistic identity-at-rest protection, and require fail-closed re-pairing after protected-state loss. Remote web remains disabled until those tests pass.
 
-It must bind at least:
-
-- Axl E2EE profile and envelope version
-- Pairwise group or crypto-session identifier
-- Source and destination device identifiers
-- Installation identifier
-- Message class
-- Stable request, event, proposal, commit, or receipt identifier
-- Current hosted authorization generation where applicable
-
-Transport attempt ID and ephemeral route ID must not enter cryptographic message identity because retries and reconnects change them.
-
-## Epoch tolerance and bounds
-
-Initial review targets are:
-
-```text
-previous epochs retained receive-only: 2
-previous-epoch maximum age:             5 minutes
-future epochs buffered:                 1
-future messages:                        32
-future bytes:                           512 KiB
-future wait:                            10 seconds
-```
-
-These values are provisional until deterministic failure tests and load measurements approve them. All queues have count, byte, and time bounds.
-
-Past epochs are delivery tolerance only. Current device revocation, grant generation, daemon policy, request replay checks, and idempotency still apply after decryption.
-
-Too-old, too-far-future, missing-commit, suite-mismatch, and authenticator-mismatch cases fail with bounded typed errors. They trigger explicit resynchronization or re-pairing, never a silent reset or downgrade.
-
-## Authorization boundary
-
-After a successful open, the daemon performs:
-
-1. Map authenticated MLS credential and group to one paired device record.
-2. Validate the plaintext protocol request.
-3. Load current local grant, hosted narrowing generation, and terminal revocation state.
-4. Require the RPC's explicit remote scope.
-5. Enforce current session, sandbox, and policy constraints.
-6. Apply durable command idempotency.
-7. Record durable acceptance before the effect.
-8. Execute through the existing daemon dispatcher.
-
-The device cannot supply or override its authenticated identity in plaintext. A hosted grant can only narrow local authority. Revocation overrides previous-epoch decryptability.
-
-## Platform boundary
-
-One independent Rust core is proposed for protocol state transitions and shared behavior. It must remain transport-independent and expose thin adapters for:
-
-- Node on the daemon
-- Browser/WASM for hosted remote web
-- Swift on iOS
-- Kotlin/JNI on Android
-
-Node, browser, Swift, and Kotlin code must not independently implement MLS rules. Shared cross-platform fixtures must prove compatible messages, persistence, errors, and update behavior.
-
-Browser/WASM is a pre-implementation feasibility gate. The review must prove a secure random source, supported libcrux/OpenMLS target, protected device identity, and a durable transaction spanning MLS state plus exact ciphertext. A browser implementation must not be assumed from native compilation results. If this gate fails, remote web remains disabled while the architecture is reconsidered.
-
-Native endpoints should use platform secure storage for identity-wrapping keys and an approved transactional local database for group state and outbox data. Loss or rollback of protected identity or unrecoverable group state requires explicit re-pairing.
+Browser revision 1 explicitly makes no forensic-deletion claim for browser profiles, backups, snapshots, or physical media. That non-claim does not relax live-state key deletion, transaction, rollback, or re-pairing requirements.
 
 ## Security claims and non-claims
 
-The proposed profile is intended to provide:
+After all implementation and review gates pass, this profile is intended to provide:
 
-- End-to-end confidentiality and integrity against the relay and control plane
-- Unique MLS application-message keys and deletion of used secrets
-- Forward secrecy for past message keys that are erased from live and recoverable persisted state under the approved storage threat model
-- Classical post-compromise recovery after a successful X25519-bearing update when the attacker has lost endpoint access
-- Post-quantum confidentiality recovery after a successful ML-KEM-bearing update when the attacker has lost endpoint access
-- Replay rejection and explicit fork detection
+- end-to-end confidentiality and integrity against the relay and control plane;
+- hybrid confidentiality when either ML-KEM-768 or X25519 retains its applicable security property, subject to the reviewed combiner and implementation;
+- classical device authentication through Ed25519;
+- unique MLS application keys and deletion of used live secrets;
+- forward secrecy for message keys erased from live and recoverable persisted state, only within the approved storage threat model;
+- classical post-compromise confidentiality recovery after a successful X25519-bearing update and epoch-ready barrier, after the attacker loses endpoint access;
+- post-quantum confidentiality recovery after a successful ML-KEM-bearing update and epoch-ready barrier, after the attacker loses endpoint access;
+- bounded replay rejection and explicit fork detection.
 
-It does not claim:
+Axl does not claim:
 
-- Signal wire compatibility
-- Triple Ratchet or SPQR behavior
-- Per-message public-key ratcheting
-- Post-quantum authentication
-- Recovery while malware still controls an endpoint
-- Recovery of a stolen durable device identity without revocation and re-pairing
-- Protection from plaintext endpoints
-- Production security before review and independent assurance
+- post-quantum authentication or signatures;
+- final IETF interoperability or stable IANA code points;
+- production security from an Internet-Draft or a successful compile;
+- Signal compatibility, Double Ratchet, Triple Ratchet, or SPQR behavior;
+- public-key ratcheting on every application message;
+- recovery while malware still controls an endpoint;
+- recovery of a stolen durable identity without revocation and re-pairing;
+- protection from a compromised plaintext endpoint;
+- deletion from device snapshots, backups, crash dumps, or forensic media until each platform threat model says so;
+- security of the libcrux provider or Axl storage wrapper from the 2025 OpenMLS audit, because both were outside that audit's scope.
 
-## Dependency and provenance gates
+## Dependency and assurance decision
 
-Before production adoption:
+The candidate graph and obligations are recorded in [OpenMLS dependency decision](openmls-dependency-decision.md). The candidates are approved for implementation in Session 40, not for production release.
 
-1. Pin every Rust dependency and toolchain input.
-2. Review complete transitive licenses and MPL obligations.
-3. Run `cargo audit` and `cargo deny` under CI.
-4. Produce an SBOM and preserve notices.
-5. Confirm PQ path and provider maintenance expectations with upstream maintainers.
-6. Review side-channel posture for target platforms.
-7. Record the upstream audit commit and excluded provider/storage scope.
-8. Add fuzzing, known-answer fixtures, negative fixtures, and storage fault injection.
-9. Obtain independent review of this profile and the Axl wrapper.
+The SRLabs report version 1.2, dated 2026-03-11, reviewed OpenMLS through commit `a3402f2` from 2025-10-22. It excluded crypto and storage providers. It recorded one acknowledged low-severity state/storage desynchronization risk and accepted an informational unbounded-allocation risk. OpenMLS 0.9.0 commit `3a3e35d` and the libcrux provider are therefore outside that assurance scope. An independent review must cover the exact pinned source, enabled PQ feature, provider, Axl wrapper, parsers, bounds, and storage adapters.
 
-AGPL-only libsignal and SPQR implementations must not be linked, copied, translated, vendored, or added to the lockfile. Public specifications may inform an independently reviewed implementation only under the repository's provenance rules.
+The implementation and release gates are sequenced as follows.
 
-## Implementation gates
+Before Session 40:
 
-### Gate A: profile approval
+1. Approve and merge this exact Axl-private profile definition.
+2. Approve the candidate versions, complete license inventory, and narrow maintenance exception in the dependency decision.
+3. Approve the platform-neutral transactional persistence contract above.
+4. Preserve the security claims and non-claims in this RFC.
 
-Approve exact dependencies, profile, AAD, identity, pairing, storage, browser, migration, and security claims.
+During Sessions 40 and 50:
 
-### Gate B: transport-independent core
+1. Build the shared Rust core and commit its exact Rust toolchain and `Cargo.lock`.
+2. Configure and run `cargo audit` and `cargo deny`, including the explicit time-bounded maintenance exception.
+3. Implement native persistence and transaction fault injection in Session 40.
+4. Implement Node, browser/WASM, Swift, and Kotlin bindings and positive and negative cross-platform fixtures in Session 50.
+5. Complete browser persistence tests and package all required license texts and notices.
+6. Propose the smallest native storage adapter and obtain approval before adding any production storage dependency beyond the approved OpenMLS/libcrux graph. Select browser-specific dependencies separately in Session 50.
 
-Two fixture endpoints pair, exchange messages, reject replays, perform a daemon-created hybrid update, detect a fork, and survive deterministic loss and duplication.
+Before production release:
 
-### Gate C: crash-safe persistence
+1. Complete the platform interoperability matrix and mobile and browser runtime measurements.
+2. Review the provider, wrapper, bindings, native and browser storage, operational recovery, and side-channel posture.
+3. Obtain independent implementation review.
+4. Verify final MPL-2.0 and all third-party packaging and notice obligations.
+5. Pass every native, browser, interoperability, fault-injection, recovery, and release gate.
 
-Fault injection around every write proves no state/ciphertext split, no key reuse, exact retries, and mandatory reload after rollback.
+Completed platform bindings are not prerequisites for Session 40. Session 40 creates the shared core those bindings consume.
 
-### Gate D: platform interoperability
+AGPL libsignal and SPQR implementations must not be linked, copied, translated, vendored, or added to the lockfile.
 
-Node, browser/WASM, Swift, and Kotlin run the same positive and negative fixtures. Representative phones pass latency, battery, thermal, background, and secure-storage tests.
+## Gate result
 
-### Gate E: hosted integration
+Session 30 approves revision 1 of the exact Axl-private OpenMLS profile for implementation. It makes no IETF draft-06 interoperability claim. OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 are approved to enter Session 40 under exact pinning, committed-lock, audit, and maintenance-exception requirements. This session adds no production dependency or production E2EE.
 
-The reviewed adapter replaces fake E2EE through the real control plane and relay. Pairing, route replacement, restart, revocation, commits, receipts, and daemon idempotency pass end to end.
+Browser/WASM remains mandatory and is assigned to Session 50. Remote web stays disabled until its browser execution and persistence tests pass. Production release remains fail-closed until all browser, native, interoperability, packaging, recovery, and independent-review gates pass.
 
-### Gate F: safety and assurance
+Session 40 may begin after this RFC and the dependency decision receive human approval and merge into `RC`.
 
-Observer access, steering, and then remote `allow_once` approval pass separate authorization gates and independent security review. No earlier gate authorizes user release.
+## Primary sources
 
-## Open review decisions
-
-The security-profile review must resolve:
-
-- Exact draft revision and code-point binding
-- Credential encoding and identity proof
-- QR transcript and confirmation UX
-- KeyPackage reservation, expiry, and deletion
-- Welcome transport and expiry
-- Canonical AAD encoding
-- Commit ID construction
-- Epoch-ready receipt schema
-- Storage schema, rollback detection, and cryptographic erasure of stale state pages and logs
-- Browser/WASM transactional storage
-- Secure-storage APIs, crash-dump behavior, snapshot exclusions, and backup policy
-- Profile migration versus mandatory re-pairing
-- Final epoch-retention limits
-- Mobile update thresholds
-- Attachment key schedule and chunk format
-
-Until those decisions are approved, the implementation remains behind fake E2EE and ordinary sessions remain unavailable remotely.
+- [RFC 9420](https://www.rfc-editor.org/rfc/rfc9420.html)
+- [`draft-ietf-mls-pq-ciphersuites-06`, non-binding research context, 2026-07-21](https://datatracker.ietf.org/doc/html/draft-ietf-mls-pq-ciphersuites-06)
+- [OpenMLS 0.9.0 release](https://blog.openmls.tech/posts/2026-08-25-0.9.0-release/)
+- [`openmls` 0.9.0 crates.io metadata](https://crates.io/api/v1/crates/openmls/0.9.0)
+- [`openmls_libcrux_crypto` 0.4.0 crates.io metadata](https://crates.io/api/v1/crates/openmls_libcrux_crypto/0.4.0)
+- [OpenMLS persistence requirements](https://book.openmls.tech/user_manual/persistence.html)
+- [SRLabs OpenMLS security assessment v1.2](https://blog.openmls.tech/SRL-OpenMLS_security_assurance_assessment.pdf)
+- [Indexed Database API 3.0](https://www.w3.org/TR/IndexedDB-3/)
+- [MDN `IDBTransaction`](https://developer.mozilla.org/en-US/docs/Web/API/IDBTransaction)
+- [MDN `Crypto.getRandomValues`](https://developer.mozilla.org/en-US/docs/Web/API/Crypto/getRandomValues)
+- [Rust `wasm32-unknown-unknown` support](https://doc.rust-lang.org/nightly/rustc/platform-support/wasm32-unknown-unknown.html)
+- [SQLite WASM persistence](https://sqlite.org/wasm/doc/trunk/persistence.md)
+- [Apple Keychain key storage](https://developer.apple.com/documentation/cryptokit/storing-cryptokit-keys-in-the-keychain)
+- [Android Keystore](https://developer.android.com/privacy-and-security/keystore)
