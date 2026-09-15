@@ -5,23 +5,24 @@ use std::{
     collections::BTreeMap,
     fs,
     path::PathBuf,
+    process::Command,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use redb::{Database, Durability, ReadableTable, TableDefinition};
+use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::{
     Clock, Error, Identity, PairContext, SystemClock, TransactionalProvider,
     persistence::{
-        DurableDaemon, DurablePhone, EnvelopeKeyStore, FaultInjector, FaultPoint,
-        NativeTransactionalProvider, NoFaults, PersistenceError, RollbackAnchor, RollbackState,
-        RuntimeHooks, discard_interrupted_creation,
+        CommittedOperation, DurableDaemon, DurablePhone, EnvelopeKeyStore, FaultInjector,
+        FaultPoint, NativeTransactionalProvider, NoFaults, PersistenceError, RollbackAnchor,
+        RollbackState, RuntimeHooks, discard_interrupted_creation,
     },
 };
 
@@ -67,6 +68,24 @@ fn context(seed: u8) -> PairContext {
     }
 }
 
+fn database_path(root: &std::path::Path, session: [u8; 16]) -> PathBuf {
+    root.join(format!(
+        "{}.redb",
+        session
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ))
+}
+
+fn marker_path(root: &std::path::Path, session: [u8; 16]) -> PathBuf {
+    database_path(root, session).with_extension("redb.initializing")
+}
+
+fn lifecycle_claim_path(root: &std::path::Path, session: [u8; 16]) -> PathBuf {
+    database_path(root, session).with_extension("redb.lifecycle.lock")
+}
+
 fn tamper_record(path: &std::path::Path, table_name: &'static str, key: [u8; 16]) {
     let database = Database::open(path).unwrap();
     let mut write = database.begin_write().unwrap();
@@ -105,10 +124,13 @@ struct TestKeyRecord {
     active: bool,
 }
 
+type TestKeySnapshot = ([u8; 16], [u8; 16], [u8; 32], Vec<u8>, bool);
+
 #[derive(Default)]
 struct TestKeys {
     keys: Mutex<BTreeMap<[u8; 16], TestKeyRecord>>,
     available: Mutex<bool>,
+    destroy_calls: AtomicU64,
 }
 
 impl TestKeys {
@@ -116,6 +138,7 @@ impl TestKeys {
         Arc::new(Self {
             keys: Mutex::new(BTreeMap::new()),
             available: Mutex::new(true),
+            destroy_calls: AtomicU64::new(0),
         })
     }
 
@@ -132,6 +155,27 @@ impl TestKeys {
         let keys = self.keys.lock().unwrap();
         let active = keys.values().filter(|record| record.active).count();
         (active, keys.len() - active)
+    }
+
+    fn snapshot(&self) -> Vec<TestKeySnapshot> {
+        self.keys
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key_id, record)| {
+                (
+                    *key_id,
+                    record.crypto_session_id,
+                    record.data_key,
+                    record.context.clone(),
+                    record.active,
+                )
+            })
+            .collect()
+    }
+
+    fn destroy_calls(&self) -> u64 {
+        self.destroy_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -230,6 +274,7 @@ impl EnvelopeKeyStore for TestKeys {
     }
 
     fn destroy_session(&self, crypto_session_id: [u8; 16]) -> Result<(), PersistenceError> {
+        self.destroy_calls.fetch_add(1, Ordering::SeqCst);
         self.keys
             .lock()
             .unwrap()
@@ -1031,6 +1076,609 @@ fn unsupported_schema_identity_mismatch_and_rollback_quarantine() {
 }
 
 #[test]
+fn ready_commit_fault_recovers_without_losing_database_or_external_state() {
+    let root = temp_root("ready-marker-crash");
+    let pair_context = context(140);
+    let operation_id = id(150);
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let faults = OneShotFault::new();
+    let clock = ManualClock::new(1_000_000);
+    faults.arm(FaultPoint::AfterInitializationReadyCommit);
+
+    assert!(matches!(
+        DurableDaemon::create_with_runtime(
+            &root,
+            Identity::daemon(pair_context.account_id, pair_context.installation_id),
+            pair_context.clone(),
+            operation_id,
+            keys.clone(),
+            anchor.clone(),
+            RuntimeHooks {
+                faults: faults.clone(),
+                clock: clock.clone(),
+            },
+        ),
+        Err(PersistenceError::InjectedFault)
+    ));
+
+    let database = database_path(&root, pair_context.crypto_session_id);
+    let marker = marker_path(&root, pair_context.crypto_session_id);
+    let database_bytes = fs::read(&database).unwrap();
+    assert!(!database_bytes.is_empty());
+    let key_records = keys.snapshot();
+    let rollback_anchor = anchor.state.lock().unwrap().clone();
+    assert!(marker.is_file());
+    assert_eq!(keys.activity_counts(), (1, 0));
+    assert_eq!(keys.destroy_calls(), 0);
+
+    assert_eq!(
+        discard_interrupted_creation(&root, pair_context.crypto_session_id, keys.clone())
+            .unwrap_err(),
+        PersistenceError::AlreadyExists
+    );
+    assert!(database.is_file());
+    assert!(!fs::read(&database).unwrap().is_empty());
+    assert_eq!(keys.snapshot(), key_records);
+    assert_eq!(*anchor.state.lock().unwrap(), rollback_anchor);
+    assert_eq!(keys.destroy_calls(), 0);
+
+    let opened = DurableDaemon::open_with_runtime(
+        &root,
+        pair_context.crypto_session_id,
+        keys.clone(),
+        anchor.clone(),
+        RuntimeHooks { faults, clock },
+    )
+    .unwrap();
+    assert!(!marker.exists());
+    assert!(database.is_file());
+    assert!(!fs::read(&database).unwrap().is_empty());
+    assert_eq!(keys.snapshot(), key_records);
+    assert_eq!(*anchor.state.lock().unwrap(), rollback_anchor);
+    let exact_operation = opened.store().operation(operation_id).unwrap().unwrap();
+    let CommittedOperation::Accepted(initialized) = &exact_operation else {
+        panic!("creation operation must remain the exact accepted result");
+    };
+    assert_eq!(initialized.operation_id, operation_id);
+    assert_eq!(
+        initialized.crypto_session_id,
+        pair_context.crypto_session_id
+    );
+    assert_eq!(initialized.logical_message_id, operation_id);
+    assert_eq!(initialized.epoch, rollback_anchor.epoch);
+    assert_eq!(
+        opened.store().rollback_counter().unwrap(),
+        rollback_anchor.counter
+    );
+    assert_eq!(opened.store().rollback_state().unwrap(), rollback_anchor);
+    assert_eq!(rollback_anchor.epoch_authenticator.len(), 48);
+
+    opened.store().close().unwrap();
+    let reopened = DurableDaemon::open(
+        &root,
+        pair_context.crypto_session_id,
+        keys.clone(),
+        anchor.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.store().operation(operation_id).unwrap(),
+        Some(exact_operation)
+    );
+    assert!(database.is_file());
+    assert!(!fs::read(&database).unwrap().is_empty());
+    assert_eq!(keys.snapshot(), key_records);
+    assert_eq!(*anchor.state.lock().unwrap(), rollback_anchor);
+}
+
+#[test]
+fn injected_marker_cannot_authorize_ready_database_cleanup() {
+    let pair = durable_pair(141);
+    pair.phone.store().close().unwrap();
+    let database = pair.phone.store().path().to_path_buf();
+    let marker = database.with_extension("redb.initializing");
+    fs::write(&marker, []).unwrap();
+    let database_bytes = fs::read(&database).unwrap();
+    assert!(!database_bytes.is_empty());
+    let key_records = pair.phone_keys.snapshot();
+
+    for _ in 0..2 {
+        assert_eq!(
+            discard_interrupted_creation(
+                database.parent().unwrap(),
+                pair.phone.store().crypto_session_id(),
+                pair.phone_keys.clone(),
+            )
+            .unwrap_err(),
+            PersistenceError::AlreadyExists
+        );
+        assert!(database.is_file());
+        assert!(!fs::read(&database).unwrap().is_empty());
+        assert_eq!(pair.phone_keys.snapshot(), key_records);
+        assert_eq!(pair.phone_keys.destroy_calls(), 0);
+    }
+
+    let opened = DurablePhone::open(
+        database.parent().unwrap(),
+        pair.phone.store().crypto_session_id(),
+        pair.phone_keys.clone(),
+        pair.phone_anchor.clone(),
+    )
+    .unwrap();
+    assert!(!marker.exists());
+    assert!(database.is_file());
+    assert!(!fs::read(&database).unwrap().is_empty());
+    assert_eq!(pair.phone_keys.snapshot(), key_records);
+    opened.store().close().unwrap();
+    DurablePhone::open(
+        database.parent().unwrap(),
+        pair.phone.store().crypto_session_id(),
+        pair.phone_keys.clone(),
+        pair.phone_anchor.clone(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn committed_prejoin_phone_initialization_recovers_exact_key_package() {
+    const META: TableDefinition<u8, &[u8]> = TableDefinition::new("metadata_v1");
+    const OPERATIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("operations_v1");
+    const OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outbox_v1");
+    const META_LIFECYCLE: u8 = 10;
+    const META_EPOCH: u8 = 7;
+    const META_AUTHENTICATOR: u8 = 8;
+
+    let pair_context = context(159);
+    let session = pair_context.crypto_session_id;
+    let operation_id = id(160);
+    let root = temp_root("prejoin-phone-recovery");
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let faults = OneShotFault::new();
+    faults.arm(FaultPoint::BeforeInitializationReady);
+    assert!(matches!(
+        DurablePhone::create_with_runtime(
+            &root,
+            Identity::device(
+                pair_context.account_id,
+                pair_context.installation_id,
+                pair_context.device_id,
+            )
+            .unwrap(),
+            session,
+            operation_id,
+            keys.clone(),
+            anchor.clone(),
+            RuntimeHooks {
+                faults,
+                clock: ManualClock::new(1_000_000),
+            },
+        ),
+        Err(PersistenceError::InjectedFault)
+    ));
+
+    let database_path = database_path(&root, session);
+    let marker = marker_path(&root, session);
+    let database = Database::open(&database_path).unwrap();
+    let read = database.begin_read().unwrap();
+    let meta = read.open_table(META).unwrap();
+    assert_eq!(meta.get(META_LIFECYCLE).unwrap().unwrap().value(), &[1]);
+    assert_eq!(
+        meta.get(META_EPOCH).unwrap().unwrap().value(),
+        0_u64.to_be_bytes()
+    );
+    assert!(
+        meta.get(META_AUTHENTICATOR)
+            .unwrap()
+            .unwrap()
+            .value()
+            .is_empty()
+    );
+    drop(meta);
+    let operation_bytes = read
+        .open_table(OPERATIONS)
+        .unwrap()
+        .get(operation_id.as_slice())
+        .unwrap()
+        .unwrap()
+        .value()
+        .to_vec();
+    let outbox_bytes = read
+        .open_table(OUTBOX)
+        .unwrap()
+        .get(operation_id.as_slice())
+        .unwrap()
+        .unwrap()
+        .value()
+        .to_vec();
+    drop(read);
+    drop(database);
+    assert!(!operation_bytes.is_empty());
+    assert!(!outbox_bytes.is_empty());
+
+    assert_eq!(
+        discard_interrupted_creation(&root, session, keys.clone()).unwrap_err(),
+        PersistenceError::InitializationIncomplete
+    );
+    assert_eq!(keys.destroy_calls(), 0);
+    assert!(database_path.is_file());
+    assert!(marker.is_file());
+
+    let opened = DurablePhone::open(&root, session, keys.clone(), anchor.clone()).unwrap();
+    let outbox = opened.store().outbox(operation_id).unwrap().unwrap();
+    let operation = opened.store().operation(operation_id).unwrap().unwrap();
+    assert_eq!(operation, CommittedOperation::Envelope(outbox.clone()));
+    assert!(!outbox.ciphertext.is_empty());
+    assert_eq!(outbox.class, crate::MessageClass::PairActivation);
+    assert_eq!(outbox.epoch, 0);
+    assert_eq!(
+        opened.store().rollback_state().unwrap(),
+        RollbackState {
+            counter: 1,
+            epoch: 0,
+            epoch_authenticator: Vec::new(),
+        }
+    );
+    assert!(!marker.exists());
+    assert_eq!(keys.destroy_calls(), 0);
+    opened.store().close().unwrap();
+    drop(opened);
+
+    let database = Database::open(&database_path).unwrap();
+    let read = database.begin_read().unwrap();
+    assert_eq!(
+        read.open_table(OPERATIONS)
+            .unwrap()
+            .get(operation_id.as_slice())
+            .unwrap()
+            .unwrap()
+            .value(),
+        operation_bytes
+    );
+    assert_eq!(
+        read.open_table(OUTBOX)
+            .unwrap()
+            .get(operation_id.as_slice())
+            .unwrap()
+            .unwrap()
+            .value(),
+        outbox_bytes
+    );
+    drop(read);
+    drop(database);
+
+    let reopened = DurablePhone::open(&root, session, keys, anchor).unwrap();
+    assert_eq!(reopened.store().outbox(operation_id).unwrap(), Some(outbox));
+    assert_eq!(
+        reopened.store().rollback_state().unwrap(),
+        RollbackState {
+            counter: 1,
+            epoch: 0,
+            epoch_authenticator: Vec::new(),
+        }
+    );
+    reopened.store().close().unwrap();
+}
+
+#[test]
+fn malformed_prejoin_phone_state_fails_authenticated_recovery() {
+    const STATE: TableDefinition<u8, &[u8]> = TableDefinition::new("encrypted_state_v1");
+    const STATE_CURRENT: u8 = 1;
+
+    let pair_context = context(161);
+    let session = pair_context.crypto_session_id;
+    let root = temp_root("malformed-prejoin-phone");
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let faults = OneShotFault::new();
+    faults.arm(FaultPoint::BeforeInitializationReady);
+    assert!(matches!(
+        DurablePhone::create_with_runtime(
+            &root,
+            Identity::device(
+                pair_context.account_id,
+                pair_context.installation_id,
+                pair_context.device_id,
+            )
+            .unwrap(),
+            session,
+            id(162),
+            keys.clone(),
+            anchor.clone(),
+            RuntimeHooks {
+                faults,
+                clock: ManualClock::new(1_000_000),
+            },
+        ),
+        Err(PersistenceError::InjectedFault)
+    ));
+
+    let database_path = database_path(&root, session);
+    let database = Database::open(&database_path).unwrap();
+    let mut write = database.begin_write().unwrap();
+    write.set_durability(Durability::Immediate).unwrap();
+    write.set_two_phase_commit(true);
+    let mut state = write.open_table(STATE).unwrap();
+    let mut sealed = state.get(STATE_CURRENT).unwrap().unwrap().value().to_vec();
+    let last = sealed.last_mut().unwrap();
+    *last ^= 0x01;
+    state.insert(STATE_CURRENT, sealed.as_slice()).unwrap();
+    drop(state);
+    write.commit().unwrap();
+    drop(database);
+
+    assert_eq!(
+        discard_interrupted_creation(&root, session, keys.clone()).unwrap_err(),
+        PersistenceError::InitializationIncomplete
+    );
+    assert_eq!(keys.destroy_calls(), 0);
+    assert!(matches!(
+        DurablePhone::open(&root, session, keys.clone(), anchor),
+        Err(PersistenceError::Corrupt) | Err(PersistenceError::Quarantined)
+    ));
+    assert_eq!(keys.destroy_calls(), 0);
+    assert!(database_path.is_file());
+    assert!(marker_path(&root, session).is_file());
+}
+
+#[test]
+fn altered_ready_lifecycle_cannot_authorize_destructive_cleanup() {
+    const META: TableDefinition<u8, &[u8]> = TableDefinition::new("metadata_v1");
+    const META_LIFECYCLE: u8 = 10;
+    const LIFECYCLE_INITIALIZING: u8 = 1;
+
+    let pair = durable_pair(149);
+    let root = pair.phone.store().path().parent().unwrap().to_path_buf();
+    let session = pair.phone.store().crypto_session_id();
+    let database_path = pair.phone.store().path().to_path_buf();
+    let marker = marker_path(&root, session);
+    pair.phone.store().close().unwrap();
+
+    let database = Database::open(&database_path).unwrap();
+    let mut write = database.begin_write().unwrap();
+    write.set_durability(Durability::Immediate).unwrap();
+    write.set_two_phase_commit(true);
+    write
+        .open_table(META)
+        .unwrap()
+        .insert(META_LIFECYCLE, &[LIFECYCLE_INITIALIZING] as &[u8])
+        .unwrap();
+    write.commit().unwrap();
+    drop(database);
+    fs::write(&marker, []).unwrap();
+
+    let database_bytes = fs::read(&database_path).unwrap();
+    assert!(!database_bytes.is_empty());
+    let key_records = pair.phone_keys.snapshot();
+    assert_eq!(
+        discard_interrupted_creation(&root, session, pair.phone_keys.clone()).unwrap_err(),
+        PersistenceError::InitializationIncomplete
+    );
+    assert!(!fs::read(&database_path).unwrap().is_empty());
+    assert_eq!(pair.phone_keys.snapshot(), key_records);
+    assert_eq!(pair.phone_keys.destroy_calls(), 0);
+
+    let opened = DurablePhone::open(
+        &root,
+        session,
+        pair.phone_keys.clone(),
+        pair.phone_anchor.clone(),
+    )
+    .unwrap();
+    assert!(database_path.is_file());
+    assert!(!marker.exists());
+    assert_eq!(pair.phone_keys.destroy_calls(), 0);
+    opened.store().close().unwrap();
+}
+
+#[test]
+fn lifecycle_claim_serializes_ready_publication_against_cleanup() {
+    let root = temp_root("ready-publication-claim");
+    let pair_context = context(150);
+    let session = pair_context.crypto_session_id;
+    let creator_identity = Identity::daemon(pair_context.account_id, pair_context.installation_id);
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let faults = OneShotFault::new();
+    faults.block_at(FaultPoint::BeforeInitializationReady);
+
+    let creator_root = root.clone();
+    let creator_keys = keys.clone();
+    let creator_anchor = anchor.clone();
+    let creator_faults = faults.clone();
+    let creator = thread::spawn(move || {
+        DurableDaemon::create_with_runtime(
+            &creator_root,
+            creator_identity,
+            pair_context,
+            id(152),
+            creator_keys,
+            creator_anchor,
+            RuntimeHooks {
+                faults: creator_faults,
+                clock: ManualClock::new(1_000_000),
+            },
+        )
+    });
+
+    faults.wait_until_blocked();
+    assert!(marker_path(&root, session).is_file());
+    assert!(database_path(&root, session).is_file());
+    assert_eq!(
+        discard_interrupted_creation(&root, session, keys.clone()).unwrap_err(),
+        PersistenceError::LifecycleBusy
+    );
+    assert_eq!(keys.destroy_calls(), 0);
+    assert!(marker_path(&root, session).is_file());
+    assert!(database_path(&root, session).is_file());
+
+    faults.release();
+    let daemon = creator.join().unwrap().unwrap();
+    assert!(!marker_path(&root, session).exists());
+    assert!(database_path(&root, session).is_file());
+    assert_eq!(keys.destroy_calls(), 0);
+    daemon.store().close().unwrap();
+    drop(daemon);
+    DurableDaemon::open(&root, session, keys, anchor).unwrap();
+}
+
+#[test]
+fn lifecycle_claim_serializes_marker_publication_against_cleanup() {
+    let root = temp_root("marker-publication-claim");
+    let pair_context = context(153);
+    let session = pair_context.crypto_session_id;
+    let creator_identity = Identity::device(
+        pair_context.account_id,
+        pair_context.installation_id,
+        pair_context.device_id,
+    )
+    .unwrap();
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let faults = OneShotFault::new();
+    faults.block_at(FaultPoint::AfterInitializationMarkerCreation);
+
+    let creator_root = root.clone();
+    let creator_keys = keys.clone();
+    let creator_anchor = anchor.clone();
+    let creator_faults = faults.clone();
+    let creator = thread::spawn(move || {
+        DurablePhone::create_with_runtime(
+            &creator_root,
+            creator_identity,
+            session,
+            id(155),
+            creator_keys,
+            creator_anchor,
+            RuntimeHooks {
+                faults: creator_faults,
+                clock: ManualClock::new(1_000_000),
+            },
+        )
+    });
+
+    faults.wait_until_blocked();
+    assert!(marker_path(&root, session).is_file());
+    assert!(!database_path(&root, session).exists());
+    assert_eq!(
+        discard_interrupted_creation(&root, session, keys.clone()).unwrap_err(),
+        PersistenceError::LifecycleBusy
+    );
+    assert_eq!(keys.destroy_calls(), 0);
+    assert!(marker_path(&root, session).is_file());
+
+    faults.release();
+    let (phone, _) = creator.join().unwrap().unwrap();
+    assert!(!marker_path(&root, session).exists());
+    assert!(database_path(&root, session).is_file());
+    assert_eq!(keys.destroy_calls(), 0);
+    phone.store().close().unwrap();
+    drop(phone);
+    DurablePhone::open(&root, session, keys, anchor).unwrap();
+}
+
+#[test]
+fn stale_marker_recovery_holds_lifecycle_claim_against_cleanup() {
+    let pair = durable_pair(156);
+    let root = pair.phone.store().path().parent().unwrap().to_path_buf();
+    let session = pair.phone.store().crypto_session_id();
+    let marker = marker_path(&root, session);
+    pair.phone.store().close().unwrap();
+    fs::write(&marker, []).unwrap();
+
+    let faults = OneShotFault::new();
+    faults.block_at(FaultPoint::DuringRestartReload);
+    let opener_root = root.clone();
+    let opener_keys = pair.phone_keys.clone();
+    let opener_anchor = pair.phone_anchor.clone();
+    let opener_faults = faults.clone();
+    let opener = thread::spawn(move || {
+        DurablePhone::open_with_runtime(
+            &opener_root,
+            session,
+            opener_keys,
+            opener_anchor,
+            RuntimeHooks {
+                faults: opener_faults,
+                clock: ManualClock::new(1_000_000),
+            },
+        )
+    });
+
+    faults.wait_until_blocked();
+    assert_eq!(
+        discard_interrupted_creation(&root, session, pair.phone_keys.clone()).unwrap_err(),
+        PersistenceError::LifecycleBusy
+    );
+    assert_eq!(pair.phone_keys.destroy_calls(), 0);
+    assert!(marker.is_file());
+    assert!(database_path(&root, session).is_file());
+
+    faults.release();
+    let opened = opener.join().unwrap().unwrap();
+    assert!(!marker.exists());
+    assert!(database_path(&root, session).is_file());
+    assert_eq!(pair.phone_keys.destroy_calls(), 0);
+    opened.store().close().unwrap();
+}
+
+#[test]
+fn lifecycle_claim_recovers_after_process_death() {
+    const CHILD_ROOT: &str = "AXL_E2EE_LIFECYCLE_CLAIM_CHILD_ROOT";
+    let session = id(158);
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let _store = NativeTransactionalProvider::create(
+            &root,
+            session,
+            TestKeys::enabled(),
+            TestAnchor::new(),
+            Arc::new(NoFaults),
+            Arc::new(SystemClock),
+        )
+        .unwrap();
+        fs::write(root.join("child-holds-claim"), []).unwrap();
+        loop {
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    let root = temp_root("process-lifecycle-claim");
+    let signal = root.join("child-holds-claim");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "persistence_tests::lifecycle_claim_recovers_after_process_death",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, &root)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !signal.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(signal.exists());
+
+    let keys = TestKeys::enabled();
+    assert_eq!(
+        discard_interrupted_creation(&root, session, keys.clone()).unwrap_err(),
+        PersistenceError::LifecycleBusy
+    );
+    assert_eq!(keys.destroy_calls(), 0);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    fs::remove_file(signal).unwrap();
+
+    discard_interrupted_creation(&root, session, keys.clone()).unwrap();
+    assert_eq!(keys.destroy_calls(), 1);
+    assert!(!database_path(&root, session).exists());
+    assert!(!marker_path(&root, session).exists());
+    assert!(lifecycle_claim_path(&root, session).is_file());
+}
+
+#[test]
 fn orphan_prepared_keys_are_reconciled_on_restart() {
     let root = temp_root("orphan-key");
     let session = id(83);
@@ -1055,11 +1703,12 @@ fn orphan_prepared_keys_are_reconciled_on_restart() {
     );
     assert_eq!(keys.activity_counts(), (0, 0));
     store.close().unwrap();
+    drop(store);
     discard_interrupted_creation(&root, session, keys).unwrap();
 }
 
 #[test]
-fn initialization_boundaries_reopen_as_incomplete_and_are_cleanable() {
+fn initialization_boundaries_clean_or_recover_by_committed_state() {
     let marker_only_root = temp_root("marker-only");
     let marker_only_session = id(129);
     let marker_name = format!(
@@ -1080,10 +1729,65 @@ fn initialization_boundaries_reopen_as_incomplete_and_are_cleanable() {
         ),
         Err(PersistenceError::InitializationIncomplete)
     ));
-    discard_interrupted_creation(&marker_only_root, marker_only_session, marker_keys).unwrap();
+    discard_interrupted_creation(&marker_only_root, marker_only_session, marker_keys.clone())
+        .unwrap();
+    assert_eq!(marker_keys.destroy_calls(), 1);
+    assert_eq!(
+        discard_interrupted_creation(&marker_only_root, marker_only_session, marker_keys)
+            .unwrap_err(),
+        PersistenceError::NotFound
+    );
+
+    let malformed_root = temp_root("pre-schema-boundary");
+    let malformed_context = context(128);
+    let malformed_keys = TestKeys::enabled();
+    let malformed_faults = OneShotFault::new();
+    malformed_faults.arm(FaultPoint::AfterInitializationFileCreation);
+    assert!(matches!(
+        DurableDaemon::create_with_runtime(
+            &malformed_root,
+            Identity::daemon(
+                malformed_context.account_id,
+                malformed_context.installation_id,
+            ),
+            malformed_context.clone(),
+            id(127),
+            malformed_keys.clone(),
+            TestAnchor::new(),
+            RuntimeHooks {
+                faults: malformed_faults,
+                clock: ManualClock::new(1_000_000),
+            },
+        ),
+        Err(PersistenceError::InjectedFault)
+    ));
+    let malformed_database = database_path(&malformed_root, malformed_context.crypto_session_id);
+    let malformed_bytes = fs::read(&malformed_database).unwrap();
+    assert!(!malformed_bytes.is_empty());
+    malformed_keys
+        .prepare(
+            malformed_context.crypto_session_id,
+            id(126),
+            &[7; 32],
+            b"unproven",
+        )
+        .unwrap();
+    let malformed_key_records = malformed_keys.snapshot();
+    assert_eq!(
+        discard_interrupted_creation(
+            &malformed_root,
+            malformed_context.crypto_session_id,
+            malformed_keys.clone(),
+        )
+        .unwrap_err(),
+        PersistenceError::Corrupt
+    );
+    assert!(malformed_database.is_file());
+    assert!(!fs::read(malformed_database).unwrap().is_empty());
+    assert_eq!(malformed_keys.snapshot(), malformed_key_records);
+    assert_eq!(malformed_keys.destroy_calls(), 0);
 
     for (index, point) in [
-        FaultPoint::AfterInitializationFileCreation,
         FaultPoint::AfterInitializationSchemaCommit,
         FaultPoint::DuringPreparedKeyReconciliation,
         FaultPoint::BeforeOpenMlsStateWrites,
@@ -1120,11 +1824,32 @@ fn initialization_boundaries_reopen_as_incomplete_and_are_cleanable() {
             ),
             Err(PersistenceError::InjectedFault)
         ));
-        assert!(matches!(
-            DurableDaemon::open(&root, context.crypto_session_id, keys.clone(), anchor,),
-            Err(PersistenceError::InitializationIncomplete)
-        ));
-        discard_interrupted_creation(&root, context.crypto_session_id, keys).unwrap();
+        if matches!(
+            point,
+            FaultPoint::DuringCurrentKeyActivation
+                | FaultPoint::BeforeAnchorRecovery
+                | FaultPoint::AfterAnchorRecoveryBeforeErasure
+                | FaultPoint::BeforeInitializationReady
+        ) {
+            assert_eq!(
+                discard_interrupted_creation(&root, context.crypto_session_id, keys.clone())
+                    .unwrap_err(),
+                PersistenceError::InitializationIncomplete
+            );
+            assert_eq!(keys.destroy_calls(), 0);
+            let opened =
+                DurableDaemon::open(&root, context.crypto_session_id, keys.clone(), anchor)
+                    .unwrap();
+            assert!(!marker_path(&root, context.crypto_session_id).exists());
+            assert_eq!(keys.destroy_calls(), 0);
+            opened.store().close().unwrap();
+        } else {
+            assert!(matches!(
+                DurableDaemon::open(&root, context.crypto_session_id, keys.clone(), anchor,),
+                Err(PersistenceError::InitializationIncomplete)
+            ));
+            discard_interrupted_creation(&root, context.crypto_session_id, keys).unwrap();
+        }
     }
 }
 
@@ -1135,7 +1860,7 @@ fn interrupted_creation_is_explicitly_cleanable() {
     let keys = TestKeys::enabled();
     let anchor = TestAnchor::new();
     let faults = OneShotFault::new();
-    faults.arm(FaultPoint::BeforeInitializationReady);
+    faults.arm(FaultPoint::AfterInitializationSchemaCommit);
     assert!(matches!(
         DurableDaemon::create_with_runtime(
             &root,
@@ -1172,8 +1897,131 @@ fn interrupted_creation_is_explicitly_cleanable() {
         Err(PersistenceError::InitializationIncomplete) | Err(PersistenceError::Quarantined)
     ));
     discard_interrupted_creation(&root, context.crypto_session_id, keys.clone()).unwrap();
-    assert!(fs::read_dir(&root).unwrap().next().is_none());
+    assert_eq!(
+        fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>(),
+        vec![lifecycle_claim_path(&root, context.crypto_session_id)]
+    );
     assert!(keys.keys.lock().unwrap().is_empty());
+    assert_eq!(keys.destroy_calls(), 1);
+    assert_eq!(
+        discard_interrupted_creation(&root, context.crypto_session_id, keys).unwrap_err(),
+        PersistenceError::NotFound
+    );
+}
+
+#[test]
+fn cleanup_rejects_unsupported_wrong_session_unreadable_and_symlinked_databases() {
+    const META: TableDefinition<u8, &[u8]> = TableDefinition::new("metadata_v1");
+
+    let unsupported = durable_pair(142);
+    unsupported.phone.store().close().unwrap();
+    let unsupported_database = unsupported.phone.store().path().to_path_buf();
+    fs::write(unsupported_database.with_extension("redb.initializing"), []).unwrap();
+    let database = Database::open(&unsupported_database).unwrap();
+    let mut write = database.begin_write().unwrap();
+    write.set_durability(Durability::Immediate).unwrap();
+    write.set_two_phase_commit(true);
+    {
+        let mut meta = write.open_table(META).unwrap();
+        meta.insert(1, 99_u16.to_be_bytes().as_slice()).unwrap();
+    }
+    write.commit().unwrap();
+    drop(database);
+    let unsupported_bytes = fs::read(&unsupported_database).unwrap();
+    assert!(!unsupported_bytes.is_empty());
+    let unsupported_keys = unsupported.phone_keys.snapshot();
+    assert_eq!(
+        discard_interrupted_creation(
+            unsupported_database.parent().unwrap(),
+            unsupported.phone.store().crypto_session_id(),
+            unsupported.phone_keys.clone(),
+        )
+        .unwrap_err(),
+        PersistenceError::UnsupportedSchema
+    );
+    assert!(unsupported_database.is_file());
+    assert!(!fs::read(&unsupported_database).unwrap().is_empty());
+    assert_eq!(unsupported.phone_keys.snapshot(), unsupported_keys);
+    assert_eq!(unsupported.phone_keys.destroy_calls(), 0);
+
+    let wrong = durable_pair(143);
+    wrong.phone.store().close().unwrap();
+    let wrong_session = id(200);
+    let wrong_database = database_path(wrong.phone.store().path().parent().unwrap(), wrong_session);
+    fs::copy(wrong.phone.store().path(), &wrong_database).unwrap();
+    fs::write(wrong_database.with_extension("redb.initializing"), []).unwrap();
+    let wrong_bytes = fs::read(&wrong_database).unwrap();
+    assert!(!wrong_bytes.is_empty());
+    let wrong_keys = wrong.phone_keys.snapshot();
+    for _ in 0..2 {
+        assert_eq!(
+            discard_interrupted_creation(
+                wrong_database.parent().unwrap(),
+                wrong_session,
+                wrong.phone_keys.clone(),
+            )
+            .unwrap_err(),
+            PersistenceError::IdentityMismatch
+        );
+        assert!(wrong_database.is_file());
+        assert!(!fs::read(&wrong_database).unwrap().is_empty());
+        assert_eq!(wrong.phone_keys.snapshot(), wrong_keys);
+        assert_eq!(wrong.phone_keys.destroy_calls(), 0);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let unreadable = durable_pair(144);
+        unreadable.phone.store().close().unwrap();
+        let unreadable_database = unreadable.phone.store().path().to_path_buf();
+        fs::write(unreadable_database.with_extension("redb.initializing"), []).unwrap();
+        let unreadable_bytes = fs::read(&unreadable_database).unwrap();
+        assert!(!unreadable_bytes.is_empty());
+        let unreadable_keys = unreadable.phone_keys.snapshot();
+        fs::set_permissions(&unreadable_database, fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(
+            discard_interrupted_creation(
+                unreadable_database.parent().unwrap(),
+                unreadable.phone.store().crypto_session_id(),
+                unreadable.phone_keys.clone(),
+            )
+            .unwrap_err(),
+            PersistenceError::Corrupt
+        );
+        fs::set_permissions(&unreadable_database, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(unreadable_database.is_file());
+        assert!(!fs::read(&unreadable_database).unwrap().is_empty());
+        assert_eq!(unreadable.phone_keys.snapshot(), unreadable_keys);
+        assert_eq!(unreadable.phone_keys.destroy_calls(), 0);
+
+        let symlinked = durable_pair(145);
+        symlinked.phone.store().close().unwrap();
+        let symlink_session = id(201);
+        let symlink_database = database_path(
+            symlinked.phone.store().path().parent().unwrap(),
+            symlink_session,
+        );
+        symlink(symlinked.phone.store().path(), &symlink_database).unwrap();
+        fs::write(symlink_database.with_extension("redb.initializing"), []).unwrap();
+        let symlink_keys = symlinked.phone_keys.snapshot();
+        assert_eq!(
+            discard_interrupted_creation(
+                symlink_database.parent().unwrap(),
+                symlink_session,
+                symlinked.phone_keys.clone(),
+            )
+            .unwrap_err(),
+            PersistenceError::IdentityMismatch
+        );
+        assert!(symlinked.phone.store().path().exists());
+        assert_eq!(symlinked.phone_keys.snapshot(), symlink_keys);
+        assert_eq!(symlinked.phone_keys.destroy_calls(), 0);
+    }
 }
 
 #[test]
