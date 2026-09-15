@@ -19,7 +19,10 @@ It provides:
   plaintext behavior, authenticated metadata manifests, restart-stable previous-epoch windows, and
   deterministic fault injection;
 - injected active-only envelope-key and monotonic rollback-anchor interfaces with crash
-  reconciliation for prepared keys.
+  reconciliation for prepared keys;
+- fail-closed creation recovery serialized across threads and processes by an OS-backed per-session
+  lifecycle claim; cleanup requires proof that no cryptographic state committed, while open finishes
+  publication of authenticated state and removes only a stale `.initializing` marker.
 
 The package does not provide transport, relay routing, accounts, authorization, platform bindings,
 browser persistence, or presentation behavior. The durable API reloads committed OpenMLS and signer

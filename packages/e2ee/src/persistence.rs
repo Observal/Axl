@@ -11,7 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error as StdError,
     fmt,
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -22,7 +22,8 @@ use openmls_traits::{
     OpenMlsProvider, crypto::OpenMlsCrypto as _, random::OpenMlsRand as _, types::AeadType,
 };
 use redb::{
-    Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, WriteTransaction,
+    Database, Durability, ReadableDatabase, ReadableTable, TableDefinition, TableHandle,
+    WriteTransaction,
 };
 
 use crate::{
@@ -88,9 +89,11 @@ pub(crate) enum FaultPoint {
     AfterAnchorRecoveryBeforeErasure,
     DuringDuplicateOperation,
     DuringGenerationConflict,
+    AfterInitializationMarkerCreation,
     AfterInitializationFileCreation,
     AfterInitializationSchemaCommit,
     BeforeInitializationReady,
+    AfterInitializationReadyCommit,
 }
 
 /// Injected deterministic fault policy. Production uses [`NoFaults`].
@@ -229,6 +232,7 @@ pub enum PersistenceError {
     IdentityMismatch,
     InitializationIncomplete,
     Io,
+    LifecycleBusy,
     KeyUnavailable,
     NotFound,
     Quarantined,
@@ -256,6 +260,7 @@ pub(crate) struct NativeTransactionalProvider {
     path: PathBuf,
     initialization_marker: PathBuf,
     crypto_session_id: Id,
+    lifecycle_claim: Mutex<Option<SessionLifecycleClaim>>,
     database: Mutex<Option<Database>>,
     operation_lock: Mutex<()>,
     envelope_keys: Arc<dyn EnvelopeKeyStore>,
@@ -272,32 +277,53 @@ pub fn discard_interrupted_creation(
     crypto_session_id: Id,
     envelope_keys: Arc<dyn EnvelopeKeyStore>,
 ) -> Result<(), PersistenceError> {
-    if fs::symlink_metadata(root)
-        .map_err(|_| PersistenceError::Io)?
-        .file_type()
-        .is_symlink()
-    {
-        return Err(PersistenceError::IdentityMismatch);
-    }
-    let root = root.canonicalize().map_err(|_| PersistenceError::Io)?;
+    let root = canonical_storage_root(root)?;
+    let _lifecycle_claim = acquire_session_lifecycle_claim(&root, crypto_session_id)?;
     let path = root.join(format!("{}.redb", hex_id(crypto_session_id)));
     let marker = initializing_marker_for_database(&path);
-    let marker_metadata = fs::symlink_metadata(&marker).map_err(|_| PersistenceError::NotFound)?;
-    if marker_metadata.file_type().is_symlink() || !marker_metadata.is_file() {
+    validate_regular_file(&marker, PersistenceError::NotFound)?;
+
+    let database_metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(PersistenceError::Io),
+    };
+    let Some(database_metadata) = database_metadata else {
+        envelope_keys.destroy_session(crypto_session_id)?;
+        fs::remove_file(marker).map_err(|_| PersistenceError::Io)?;
+        return sync_parent_directory(&path);
+    };
+    if database_metadata.file_type().is_symlink() || !database_metadata.is_file() {
         return Err(PersistenceError::IdentityMismatch);
     }
-    if path.exists() {
-        let database_metadata = fs::symlink_metadata(&path).map_err(|_| PersistenceError::Io)?;
-        if database_metadata.file_type().is_symlink() || !database_metadata.is_file() {
-            return Err(PersistenceError::IdentityMismatch);
+    let canonical = path.canonicalize().map_err(|_| PersistenceError::Io)?;
+    if canonical.parent() != Some(root.as_path()) {
+        return Err(PersistenceError::IdentityMismatch);
+    }
+
+    // The lifecycle claim excludes creators and openers, so writable open is safe here and lets
+    // redb recover its own bookkeeping after an abruptly terminated process before inspection.
+    let database = Database::open(&canonical).map_err(map_database_error)?;
+    match (
+        inspect_database_lifecycle(&database, crypto_session_id)?,
+        inspect_initialization_state(&database, crypto_session_id)?,
+    ) {
+        (LIFECYCLE_INITIALIZING, InitializationState::Pristine) => {}
+        (LIFECYCLE_INITIALIZING, InitializationState::Committed) => {
+            return Err(PersistenceError::InitializationIncomplete);
         }
+        (LIFECYCLE_INITIALIZING, InitializationState::Inconsistent) => {
+            return Err(PersistenceError::Corrupt);
+        }
+        (LIFECYCLE_READY, _) => return Err(PersistenceError::AlreadyExists),
+        _ => return Err(PersistenceError::Corrupt),
     }
+    drop(database);
+
     envelope_keys.destroy_session(crypto_session_id)?;
-    if path.exists() {
-        fs::remove_file(&path).map_err(|_| PersistenceError::Io)?;
-    }
+    fs::remove_file(&canonical).map_err(|_| PersistenceError::Io)?;
     fs::remove_file(marker).map_err(|_| PersistenceError::Io)?;
-    sync_parent_directory(&path)
+    sync_parent_directory(&canonical)
 }
 
 impl NativeTransactionalProvider {
@@ -321,7 +347,9 @@ impl NativeTransactionalProvider {
         {
             return Err(PersistenceError::IdentityMismatch);
         }
-        let path = database_path(root, crypto_session_id, true)?;
+        let root = prepare_storage_root(root, true)?;
+        let lifecycle_claim = acquire_session_lifecycle_claim(&root, crypto_session_id)?;
+        let path = database_path(&root, crypto_session_id, true, Some(&*faults))?;
         let database = Database::create(&path).map_err(map_database_error)?;
         restrict_file(&path)?;
         let initialization_marker = initializing_marker_for_database(&path);
@@ -329,6 +357,7 @@ impl NativeTransactionalProvider {
             path,
             initialization_marker,
             crypto_session_id,
+            lifecycle_claim: Mutex::new(Some(lifecycle_claim)),
             database: Mutex::new(Some(database)),
             operation_lock: Mutex::new(()),
             envelope_keys,
@@ -355,17 +384,30 @@ impl NativeTransactionalProvider {
         clock: Arc<dyn Clock>,
     ) -> Result<Arc<Self>, PersistenceError> {
         require_dependencies(&*envelope_keys, &*rollback_anchor)?;
-        let path = database_path(root, crypto_session_id, false)?;
+        let root = prepare_storage_root(root, false)?;
+        let lifecycle_claim = acquire_session_lifecycle_claim(&root, crypto_session_id)?;
+        let path = database_path(&root, crypto_session_id, false, None)?;
         let initialization_marker = initializing_marker_for_database(&path);
-        if initialization_marker.exists() {
-            return Err(PersistenceError::InitializationIncomplete);
-        }
+        regular_file_exists(&initialization_marker)?;
         faults.check(FaultPoint::DuringRestartReload)?;
         let database = Database::open(&path).map_err(map_database_error)?;
+        let lifecycle = inspect_database_lifecycle(&database, crypto_session_id)?;
+        if lifecycle == LIFECYCLE_INITIALIZING {
+            match inspect_initialization_state(&database, crypto_session_id)? {
+                InitializationState::Pristine => {
+                    return Err(PersistenceError::InitializationIncomplete);
+                }
+                InitializationState::Committed => {}
+                InitializationState::Inconsistent => return Err(PersistenceError::Corrupt),
+            }
+        } else if lifecycle != LIFECYCLE_READY {
+            return Err(PersistenceError::Corrupt);
+        }
         let this = Arc::new(Self {
             path,
             initialization_marker,
             crypto_session_id,
+            lifecycle_claim: Mutex::new(Some(lifecycle_claim)),
             database: Mutex::new(Some(database)),
             operation_lock: Mutex::new(()),
             envelope_keys,
@@ -374,8 +416,42 @@ impl NativeTransactionalProvider {
             clock,
         });
         this.recover_storage()?;
-        this.validate_ready()?;
+        if lifecycle == LIFECYCLE_READY {
+            this.validate_ready()?;
+        }
         Ok(this)
+    }
+
+    fn remove_stale_initialization_marker(&self) -> Result<(), PersistenceError> {
+        if !regular_file_exists(&self.initialization_marker)? {
+            return Ok(());
+        }
+        fs::remove_file(&self.initialization_marker).map_err(|_| PersistenceError::Io)?;
+        sync_parent_directory(&self.path)
+    }
+
+    fn finish_opening(&self) -> Result<(), PersistenceError> {
+        let lifecycle = {
+            let database = self.database_lock()?;
+            let database = database.as_ref().ok_or(PersistenceError::Storage)?;
+            inspect_database_lifecycle(database, self.crypto_session_id)?
+        };
+        if lifecycle == LIFECYCLE_INITIALIZING {
+            self.mark_ready()
+        } else if lifecycle == LIFECYCLE_READY {
+            self.remove_stale_initialization_marker()?;
+            self.release_lifecycle_claim()
+        } else {
+            Err(PersistenceError::Corrupt)
+        }
+    }
+
+    fn release_lifecycle_claim(&self) -> Result<(), PersistenceError> {
+        self.lifecycle_claim
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?
+            .take();
+        Ok(())
     }
 
     fn mark_ready(&self) -> Result<(), PersistenceError> {
@@ -392,8 +468,11 @@ impl NativeTransactionalProvider {
                 .map_err(map_storage_error)?;
         }
         write.commit().map_err(|_| PersistenceError::Storage)?;
+        self.faults
+            .check(FaultPoint::AfterInitializationReadyCommit)?;
         fs::remove_file(&self.initialization_marker).map_err(|_| PersistenceError::Io)?;
-        sync_parent_directory(&self.path)
+        sync_parent_directory(&self.path)?;
+        self.release_lifecycle_claim()
     }
 
     fn validate_ready(&self) -> Result<(), PersistenceError> {
@@ -464,6 +543,11 @@ impl NativeTransactionalProvider {
 
     pub(crate) fn rollback_counter(&self) -> Result<u64, PersistenceError> {
         self.read_u64_meta(META_ROLLBACK_COUNTER)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rollback_state(&self) -> Result<RollbackState, PersistenceError> {
+        self.database_rollback_state()
     }
 
     pub(crate) fn operation(
@@ -1415,6 +1499,7 @@ impl DurableDaemon {
             transaction.accepted_ids.clone(),
         )?;
         transaction.rollback()?;
+        store.finish_opening()?;
         Ok(Self { store })
     }
 
@@ -1828,6 +1913,7 @@ impl DurablePhone {
             transaction.accepted_ids.clone(),
         )?;
         transaction.rollback()?;
+        store.finish_opening()?;
         Ok(Self { store })
     }
 
@@ -2621,38 +2707,81 @@ fn require_dependencies(
     Ok(())
 }
 
-fn database_path(root: &Path, session: Id, create: bool) -> Result<PathBuf, PersistenceError> {
-    if root.exists()
-        && fs::symlink_metadata(root)
-            .map_err(|_| PersistenceError::Io)?
-            .file_type()
-            .is_symlink()
-    {
-        return Err(PersistenceError::IdentityMismatch);
-    }
+struct SessionLifecycleClaim {
+    _file: File,
+}
+
+fn prepare_storage_root(root: &Path, create: bool) -> Result<PathBuf, PersistenceError> {
     if create {
+        if root.exists()
+            && fs::symlink_metadata(root)
+                .map_err(|_| PersistenceError::Io)?
+                .file_type()
+                .is_symlink()
+        {
+            return Err(PersistenceError::IdentityMismatch);
+        }
         fs::create_dir_all(root).map_err(|_| PersistenceError::Io)?;
         restrict_directory(root)?;
     }
-    let root = root.canonicalize().map_err(|_| PersistenceError::Io)?;
-    let metadata = fs::symlink_metadata(&root).map_err(|_| PersistenceError::Io)?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err(PersistenceError::IdentityMismatch);
+    canonical_storage_root(root)
+}
+
+fn acquire_session_lifecycle_claim(
+    root: &Path,
+    session: Id,
+) -> Result<SessionLifecycleClaim, PersistenceError> {
+    let path = root.join(format!("{}.redb.lifecycle.lock", hex_id(session)));
+    let (file, created) = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => (file, true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            validate_regular_file(&path, PersistenceError::Io)?;
+            (
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .map_err(|_| PersistenceError::Io)?,
+                false,
+            )
+        }
+        Err(_) => return Err(PersistenceError::Io),
+    };
+    restrict_file(&path)?;
+    if created {
+        sync_parent_directory(&path)?;
     }
+    file.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => PersistenceError::LifecycleBusy,
+        fs::TryLockError::Error(_) => PersistenceError::Io,
+    })?;
+    Ok(SessionLifecycleClaim { _file: file })
+}
+
+fn database_path(
+    root: &Path,
+    session: Id,
+    create: bool,
+    faults: Option<&dyn FaultInjector>,
+) -> Result<PathBuf, PersistenceError> {
+    let root = canonical_storage_root(root)?;
     let filename = format!("{}.redb", hex_id(session));
     let path = root.join(filename);
     let initialization_marker = initializing_marker_for_database(&path);
-    if path.exists() {
+    let database_exists = regular_file_exists(&path)?;
+    let marker_exists = regular_file_exists(&initialization_marker)?;
+    if database_exists {
         if create {
-            return if initialization_marker.exists() {
+            return if marker_exists {
                 Err(PersistenceError::InitializationIncomplete)
             } else {
                 Err(PersistenceError::AlreadyExists)
             };
-        }
-        let file = fs::symlink_metadata(&path).map_err(|_| PersistenceError::Io)?;
-        if file.file_type().is_symlink() || !file.is_file() {
-            return Err(PersistenceError::IdentityMismatch);
         }
         let canonical = path.canonicalize().map_err(|_| PersistenceError::Io)?;
         if canonical.parent() != Some(root.as_path()) {
@@ -2661,15 +2790,18 @@ fn database_path(root: &Path, session: Id, create: bool) -> Result<PathBuf, Pers
         restrict_file(&canonical)?;
         Ok(canonical)
     } else if create {
-        if initialization_marker.exists() {
+        if marker_exists {
             return Err(PersistenceError::InitializationIncomplete);
         }
         create_private_file(&initialization_marker)?;
         sync_parent_directory(&initialization_marker)?;
+        if let Some(faults) = faults {
+            faults.check(FaultPoint::AfterInitializationMarkerCreation)?;
+        }
         create_private_file(&path)?;
         sync_parent_directory(&path)?;
         Ok(path)
-    } else if initialization_marker.exists() {
+    } else if marker_exists {
         Err(PersistenceError::InitializationIncomplete)
     } else {
         Err(PersistenceError::NotFound)
@@ -2678,6 +2810,221 @@ fn database_path(root: &Path, session: Id, create: bool) -> Result<PathBuf, Pers
 
 fn initializing_marker_for_database(database: &Path) -> PathBuf {
     database.with_extension("redb.initializing")
+}
+
+fn canonical_storage_root(root: &Path) -> Result<PathBuf, PersistenceError> {
+    let metadata = fs::symlink_metadata(root).map_err(|_| PersistenceError::Io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PersistenceError::IdentityMismatch);
+    }
+    root.canonicalize().map_err(|_| PersistenceError::Io)
+}
+
+fn regular_file_exists(path: &Path) -> Result<bool, PersistenceError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(PersistenceError::IdentityMismatch)
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(PersistenceError::Io),
+    }
+}
+
+fn validate_regular_file(path: &Path, missing: PersistenceError) -> Result<(), PersistenceError> {
+    if regular_file_exists(path)? {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
+fn inspect_database_lifecycle(
+    database: &impl ReadableDatabase,
+    crypto_session_id: Id,
+) -> Result<u8, PersistenceError> {
+    let read = database.begin_read().map_err(map_transaction_error)?;
+    let meta = read.open_table(META).map_err(map_table_error)?;
+    if read_u16(&meta, META_SCHEMA)? != STORAGE_SCHEMA_VERSION {
+        return Err(PersistenceError::UnsupportedSchema);
+    }
+    if read_bytes(&meta, META_SESSION)? != crypto_session_id
+        || read_bytes(&meta, META_PROFILE)? != PROFILE_ID.as_bytes()
+        || read_u16(&meta, META_PROFILE_REVISION)? != PROFILE_REVISION
+    {
+        return Err(PersistenceError::IdentityMismatch);
+    }
+    match read_bytes(&meta, META_LIFECYCLE)?.as_slice() {
+        [lifecycle @ (LIFECYCLE_INITIALIZING | LIFECYCLE_READY)] => Ok(*lifecycle),
+        _ => Err(PersistenceError::Corrupt),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InitializationState {
+    Pristine,
+    Committed,
+    Inconsistent,
+}
+
+fn inspect_initialization_state(
+    database: &impl ReadableDatabase,
+    crypto_session_id: Id,
+) -> Result<InitializationState, PersistenceError> {
+    let read = database.begin_read().map_err(map_transaction_error)?;
+    let expected_tables = BTreeSet::from([
+        META.name().to_owned(),
+        STATE.name().to_owned(),
+        OPERATIONS.name().to_owned(),
+        OUTBOX.name().to_owned(),
+        ACCEPTED.name().to_owned(),
+    ]);
+    let actual_tables = read
+        .list_tables()
+        .map_err(map_storage_error)?
+        .map(|table| table.name().to_owned())
+        .collect::<BTreeSet<_>>();
+    if actual_tables != expected_tables
+        || read
+            .list_multimap_tables()
+            .map_err(map_storage_error)?
+            .next()
+            .is_some()
+    {
+        return Ok(InitializationState::Inconsistent);
+    }
+
+    let meta = read.open_table(META).map_err(map_table_error)?;
+    let mut metadata_entries = 0_usize;
+    for entry in meta.iter().map_err(map_storage_error)? {
+        entry.map_err(map_storage_error)?;
+        metadata_entries += 1;
+    }
+    let generation = read_u64(&meta, META_GENERATION)?;
+    let rollback_counter = read_u64(&meta, META_ROLLBACK_COUNTER)?;
+    let epoch = read_u64(&meta, META_EPOCH)?;
+    let authenticator = read_bytes(&meta, META_EPOCH_AUTHENTICATOR)?;
+    let pending_erase = read_bytes(&meta, META_PENDING_ERASE)?;
+    drop(meta);
+
+    let state_entries = read
+        .open_table(STATE)
+        .map_err(map_table_error)?
+        .iter()
+        .map_err(map_storage_error)?
+        .count();
+    let operation_entries = read
+        .open_table(OPERATIONS)
+        .map_err(map_table_error)?
+        .iter()
+        .map_err(map_storage_error)?
+        .count();
+    let outbox_entries = read
+        .open_table(OUTBOX)
+        .map_err(map_table_error)?
+        .iter()
+        .map_err(map_storage_error)?
+        .count();
+    let accepted_entries = read
+        .open_table(ACCEPTED)
+        .map_err(map_table_error)?
+        .iter()
+        .map_err(map_storage_error)?
+        .count();
+
+    if metadata_entries == 10
+        && generation == 0
+        && rollback_counter == 0
+        && epoch == 0
+        && authenticator.is_empty()
+        && pending_erase.is_empty()
+        && state_entries == 0
+        && operation_entries == 0
+        && outbox_entries == 0
+        && accepted_entries == 0
+    {
+        return Ok(InitializationState::Pristine);
+    }
+
+    let creation_operation = if operation_entries == 1 {
+        let operations = read.open_table(OPERATIONS).map_err(map_table_error)?;
+        let mut entries = operations.iter().map_err(map_storage_error)?;
+        let Some(entry) = entries.next() else {
+            return Ok(InitializationState::Inconsistent);
+        };
+        let (key, value) = entry.map_err(map_storage_error)?;
+        let (fingerprint, operation_generation, operation) =
+            decode_operation_record(value.value())?;
+        Some((
+            key.value().to_vec(),
+            fingerprint,
+            operation_generation,
+            operation,
+        ))
+    } else {
+        None
+    };
+
+    let valid_creation_shape = match creation_operation {
+        Some((key, fingerprint, 1, CommittedOperation::Envelope(record))) => {
+            let outbox = read.open_table(OUTBOX).map_err(map_table_error)?;
+            let persisted = outbox
+                .get(record.operation_id.as_slice())
+                .map_err(map_storage_error)?
+                .map(|value| decode_outbox(value.value()))
+                .transpose()?;
+            epoch == 0
+                && authenticator.is_empty()
+                && outbox_entries == 1
+                && accepted_entries == 0
+                && key.as_slice() == record.operation_id
+                && fingerprint == operation_fingerprint(10, &[])?
+                && record.crypto_session_id == crypto_session_id
+                && record.logical_message_id == record.operation_id
+                && record.class == MessageClass::PairActivation
+                && record.epoch == 0
+                && record.profile_revision == PROFILE_REVISION
+                && record.retry_state == RetryState::Pending
+                && !record.ciphertext.is_empty()
+                && record.commit.is_none()
+                && persisted.as_ref() == Some(&record)
+        }
+        Some((key, fingerprint, 1, CommittedOperation::Accepted(record))) => {
+            let accepted = read.open_table(ACCEPTED).map_err(map_table_error)?;
+            let persisted = accepted
+                .get(record.operation_id.as_slice())
+                .map_err(map_storage_error)?
+                .map(|value| decode_accepted(value.value()))
+                .transpose()?;
+            authenticator.len() == 48
+                && outbox_entries == 0
+                && accepted_entries == 1
+                && key.as_slice() == record.operation_id
+                && fingerprint == operation_fingerprint(1, &[])?
+                && record == initialized_record(record.operation_id, crypto_session_id)
+                && persisted.as_ref() == Some(&record)
+        }
+        _ => false,
+    };
+
+    let group_state_candidate = generation > 0
+        && rollback_counter == generation
+        && authenticator.len() == 48
+        && matches!(pending_erase.len(), 0 | 16)
+        && state_entries == 1
+        && operation_entries > 0
+        && outbox_entries + accepted_entries > 0;
+    let initial_state_candidate = generation == 1
+        && rollback_counter == 1
+        && pending_erase.is_empty()
+        && state_entries == 1
+        && valid_creation_shape;
+
+    if metadata_entries == 10 && (group_state_candidate || initial_state_candidate) {
+        Ok(InitializationState::Committed)
+    } else {
+        Ok(InitializationState::Inconsistent)
+    }
 }
 
 fn create_private_file(path: &Path) -> Result<(), PersistenceError> {

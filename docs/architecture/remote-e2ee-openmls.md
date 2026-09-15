@@ -279,9 +279,15 @@ Session 40B implements this contract for native hosts with one redb database per
 redb's two-phase commit mode. OpenMLS runs against transaction-local storage only after the write
 transaction starts. The complete encrypted provider image and exact outbox or accepted-message
 record then commit together. An AEAD-protected manifest authenticates every durable metadata table.
-Initializing databases require explicit publication or cleanup, prepared external key records are
-reconciled on restart, and active-only current-key recovery completes before anchor advancement and
-obsolete-key erasure. Previous-epoch deadlines and rollback-safe clock state survive restart.
+Initializing databases require explicit publication or cleanup, and marker presence alone never
+proves that lifecycle. Creation, open recovery, and cleanup hold one exclusive OS-backed per-session
+lifecycle claim across their complete filesystem transition; a competing operation fails closed and
+a process exit automatically releases the claim. Cleanup is destructive only for a bound
+`initializing` database with no committed cryptographic state. Open authenticates and publishes
+complete committed `initializing` state instead of deleting it. A stale marker beside authenticated
+`ready` state is removed only after current-key activation, durable-state authentication, anchor
+reconciliation, and obsolete-key erasure complete in that order. Previous-epoch deadlines and
+rollback-safe clock state survive restart.
 Acknowledged idempotency and replay records have a 4,096-generation retry horizon; pending records
 are never pruned, and outbox acknowledgement is durable. Only the safe durable daemon and phone
 operations are public; the native provider, transaction handles, mutation staging, and fault

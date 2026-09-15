@@ -12,14 +12,34 @@ Each redb file is permanently bound to one `crypto_session_id`, profile
 encoding of the 16-byte crypto session ID. Relay route IDs are never persisted.
 
 Creation and opening are separate operations. The initial anchor is validated before a durable file
-is created. A restrictive external `.initializing` marker is created before the database file, and
-the database lifecycle remains `initializing` until the first encrypted state, operation record,
-anchor advancement, and wrapping-key activation complete. Normal opening accepts only `ready`
-files after atomic marker removal and parent-directory synchronization. An abandoned initializing file can be removed only through
-`discard_interrupted_creation`; ready storage is never reset or removed by that API, and a consumed
-anchor requires a fresh crypto session ID. Creation otherwise rejects an existing file, and opening
-rejects a missing file. Paths are canonicalized, symlink roots and database files are rejected, and
-Unix directories and files are restricted to modes `0700` and `0600` respectively.
+is created. Creation acquires an exclusive operating-system lock on a permanent per-session
+`.lifecycle.lock` file before publishing a restrictive external `.initializing` marker. It holds the
+claim through the `ready` commit, marker removal, and parent-directory synchronization. The database
+lifecycle remains `initializing` until the first encrypted state, operation record, anchor
+advancement, and wrapping-key activation complete. Marker presence does not prove the database
+lifecycle. `mark_ready` first commits `ready`, then removes the marker and synchronizes the parent
+directory. If a crash leaves either complete authenticated `initializing` state or a marker beside a
+`ready` database, opening holds the same lifecycle claim while it validates the schema, session and
+profile binding, authenticated durable state, current external key, rollback anchor, epoch, and
+authenticator. It finishes an interrupted `ready` commit when necessary, removes only the stale
+marker, and opens normally. Committed initialization recognizes both daemon group state with a
+48-byte epoch authenticator and pre-join phone KeyPackage state at epoch zero with an intentionally
+empty authenticator. In both cases final publication still requires AEAD decryption, durable-manifest
+validation, typed daemon or phone loading, external-key reconciliation, and rollback reconciliation.
+
+`discard_interrupted_creation` acquires the lifecycle claim before inspecting either path. It removes
+a marker with no database or a bound `initializing` database only when generation, rollback, epoch,
+authenticator, pending erasure, encrypted state, operations, outbox, and accepted-message tables all
+prove that no cryptographic state committed. Complete committed state is recovered by normal open,
+not deleted. Cleanup rejects `ready`, committed, malformed, unreadable, unsupported, mismatched,
+symlinked, or otherwise unprovable databases without calling session-key destruction or deleting the
+database. The claim remains held through key destruction, database and marker deletion, and parent
+synchronization. A competing creator, opener, or cleanup receives `LifecycleBusy`. The lock file is
+never used as lifecycle evidence and is deliberately retained; the operating system releases its
+claim automatically when a process exits. A consumed anchor requires a fresh crypto session ID.
+Creation otherwise rejects an existing file, and opening rejects a missing file. Paths are
+canonicalized, symlink roots and database files are rejected, and Unix directories and files are
+restricted to modes `0700` and `0600` respectively.
 
 Every security-sensitive write transaction explicitly selects `redb::Durability::Immediate` and
 enables redb two-phase commit. Persistent savepoints are not used.
@@ -118,7 +138,11 @@ The native close/reopen suite injects deterministic failures at every Session 40
 | During current-key activation, prepared-key reconciliation, anchor recovery, wrapping-record replacement, or erasure | Recovery activates and authenticates current state, advances the anchor, and only then erases the obsolete key |
 | During duplicate operation IDs | Matching input recovers the prior exact result; conflicting input is rejected |
 | During generation conflicts | A queued real operation reloads the committed generation and succeeds exactly once |
-| After marker/file creation, after schema commit, and throughout initial cryptographic commit/publication | Reopen reports `InitializationIncomplete`; explicit cleanup removes the marker, file, and all session key records |
+| After marker creation but before a provable schema | Reopen and cleanup reject the malformed database without deleting its file or external keys |
+| After schema commit but before any cryptographic state commits | Reopen reports `InitializationIncomplete`; explicit cleanup verifies the binding, `initializing` lifecycle, and absence of committed state before removing the marker, file, and session key records |
+| After cryptographic state commits but before the `ready` lifecycle commit | Cleanup refuses destruction; open authenticates and reconciles the committed state, commits `ready`, and finishes publication |
+| After the `ready` lifecycle commit but before marker removal | Open authenticates and reconciles committed state, removes only the stale marker, synchronizes the parent directory, and preserves exact operation results, epoch state, database contents, and external keys |
+| While another creator, opener, or cleanup holds the lifecycle claim | The competing operation fails closed with `LifecycleBusy`; no path or external key record is changed |
 
 Additional real temporary-database tests close and reopen after application sends, receives, update
 proposals, commits, and epoch changes. They verify per-group writer serialization, parallel progress
