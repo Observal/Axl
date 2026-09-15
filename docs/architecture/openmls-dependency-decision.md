@@ -24,11 +24,18 @@ No Rust dependency is added to Axl by this Session 30 change. The repository own
 | OpenMLS storage contract | `openmls_traits` 0.6.0, provider schema version 1 |
 | Disposable research lock | Generated 2026-09-14; SHA-256 `c0a6fc287e663ce4ae9fedd6907c5ba4b20eb136318b69337d3be4a7a268f504` |
 
-The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. The table below is the complete 155-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40A reconciled the implementation graph against this table and received explicit human approval for `openmls_basic_credential` 0.6.0 and its additional normal/build closure. Cargo's lockfile also records optional and dependency-development alternatives that are not selected by this command.
+The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. After Session 40B, the table below is the complete 156-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40A reconciled the implementation graph and received explicit human approval for `openmls_basic_credential` 0.6.0 and its additional normal/build closure. Session 40B adds only `redb` 4.2.0; its sole normal dependency, `libc` 0.2.189, was already selected. Cargo's lockfile also records optional and dependency-development alternatives that are not selected by this command.
 
 `openmls_basic_credential` 0.6.0 is an approved direct implementation dependency for revision 1. It supplies the OpenMLS `SignatureKeyPair` implementation used to create and retain endpoint signing keys. Its helper graph contains implementations for Ed25519, ECDSA over P-256 and P-384, and ML-DSA, but revision 1 selects only Ed25519 through the fixed suite. Axl exposes no signature-scheme negotiation and does not enable any additional MLS cipher suite, signature scheme, or algorithm negotiation. The presence of unused implementations in the helper graph does not make them part of the revision 1 profile.
 
-The native storage dependency is intentionally not preselected. `openmls_sqlite_storage` 0.3.0 does not support `wasm32`, and its API does not by itself establish Axl's transaction across OpenMLS state and the ciphertext outbox. Session 40 may begin with an Axl-owned platform-neutral transaction abstraction. It must propose the smallest native adapter and obtain dependency approval before adding any production storage dependency beyond the OpenMLS/libcrux graph. Session 50 owns browser-specific adapter dependencies. Native and browser engines may differ, but both must implement the same atomic state, exact-ciphertext, rollback, reload, and typed-outcome contract.
+Session 40B selected `redb` 4.2.0 after separate human approval. It is a pure-Rust,
+MIT-or-Apache-2.0 ACID engine and adds no native database library or external database binary.
+Axl uses one database per `crypto_session_id`, explicitly selects immediate durability and two-phase
+commit for each security-sensitive transaction, and does not use persistent savepoints. The Axl
+adapter, rather than redb, owns encrypted OpenMLS state envelopes, exact-ciphertext records,
+idempotency, rollback anchors, and envelope-key lifecycle. Session 50 still owns browser-specific
+adapter dependencies. Native and browser engines may differ, but both implement the same atomic
+state, exact-ciphertext, rollback, reload, and typed-outcome contract.
 
 ## Complete selected dependency and license table
 
@@ -149,6 +156,7 @@ The native storage dependency is intentionally not preselected. `openmls_sqlite_
 | `rand_core v0.6.4` | `MIT OR Apache-2.0` |
 | `rayon v1.12.0` | `MIT OR Apache-2.0` |
 | `rayon-core v1.13.0` | `MIT OR Apache-2.0` |
+| `redb v4.2.0` | `MIT OR Apache-2.0` |
 | `regex v1.13.1` | `MIT OR Apache-2.0` |
 | `regex-automata v0.4.18` | `MIT OR Apache-2.0` |
 | `regex-syntax v0.8.11` | `MIT OR Apache-2.0` |
