@@ -9,7 +9,7 @@
 
 Status: living product plan and delivery snapshot.
 
-Updated: 2026-09-13
+Updated: 2026-09-16
 
 This document records product intent, candidate designs, and a proposed implementation sequence. It is not normative agent instructions or the sole source of truth. Future features, ordering, languages, frameworks, and technology choices remain plans until adopted by current code or a focused architecture or policy document.
 
@@ -1577,7 +1577,7 @@ Phases 0 through 4 are complete. Selected TUI, web-tool, Agent Skills, and MCP w
 8. Add one focused runnable check for every non-trivial behavior.
 9. Do not implement a later phase merely to prepare for hypothetical use. Preserve the seam and stop.
 10. Complete security prerequisites before activating the feature that depends on them.
-11. The current plan defers protocol code generation until a second implementation language creates a real need.
+11. The current plan defers Swift and Kotlin bindings, daemon-protocol code generation, mobile secure storage, and mobile application stack selection until Phase 13 and a real native client creates the need. Session 50 is limited to the Rust pairing contract and Node and browser/WASM endpoint bindings.
 
 ### Foundational dependency decisions
 
@@ -2113,7 +2113,7 @@ Child sessions remain inspectable, budgeted, cancellable, policy-narrowed, repla
 
 The local web client and only the TypeScript SDK, wire-protocol, transport, security, workspace, packaging, and transport-neutral browser boundaries required for it are brought forward as an explicit exception to phase ordering. This work may proceed while the current dogfood follow-up remains incomplete, but those prerequisites still block expanded dogfooding of credentialed or untrusted capabilities. Unavailable features remain explicitly unsupported. This exception does not bring forward remote accounts, pairing, encrypted relay transport, hosted-service deployment, the session viewer, media roles, public SDK publication, multi-language generation, cloud placement, or unrelated protocol work, and it does not mark Phase 9 complete.
 
-The current plan defers public or multi-language SDKs until a real second client creates the need.
+The current plan defers public or multi-language daemon SDKs until a real second client creates the need. Session 50 adds no Swift, Kotlin, C ABI, JNI, generated SDK, or mobile application code.
 
 #### Wire protocol
 
@@ -2133,7 +2133,7 @@ The current plan defers public or multi-language SDKs until a real second client
 - [ ] Make in-tree clients consume the public SDK surface.
 - [ ] Publish the SDK only when an external consumer exists.
 - [ ] Choose TypeSpec, Protobuf, or another generator only when the first non-TypeScript client creates a concrete need.
-- [ ] Keep Swift and Kotlin generation in Phase 13 with mobile implementation.
+- [ ] Keep Swift and Kotlin bindings, daemon-protocol generation, mobile secure storage, and mobile implementation in Phase 13. Session 50 is limited to the Rust pairing contract and Node and browser/WASM endpoint bindings.
 
 #### Web client
 
@@ -2345,7 +2345,7 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 - [ ] Serve a protocol-independent static account and installation shell from `app.axldev.ai`.
 - [ ] Retain immutable client bundles by compatible web-asset and wire version rather than placing multiple protocol implementations in one bundle.
-- [ ] In Session 50, store browser OpenMLS identity and group state through the reviewed transactional browser adapter and require re-pairing when protected state is lost. Browser execution and durable-storage tests must pass before remote web is enabled, but they do not block Session 40's shared-core implementation.
+- [ ] In Session 50, exercise browser OpenMLS identity and group state through the reviewed transactional browser adapter and require re-pairing when protected state is lost. Browser execution and durable-storage tests must pass before remote web is enabled, but they do not block Session 40's shared-core implementation. Pure-browser pairing remains disabled until an independent monotonic rollback anchor or a separately reviewed authenticated peer-witness design satisfies the endpoint storage contract.
 - [ ] Obtain a one-use, device-bound relay ticket through the authenticated API, then authenticate the WebSocket with a bounded initial frame rather than a URL or subprotocol credential.
 - [ ] Terminate end-to-end encryption in the browser and expose decrypted validated messages through the normal SDK transport contract.
 - [ ] List installations through the control plane, but obtain sessions, transcripts, and live state only from the selected daemon after encrypted attachment.
@@ -2396,7 +2396,7 @@ The transport checkpoint was approved. The next integration slice remains disabl
 
 #### Mobile clients
 
-- [ ] Choose mobile implementation stacks when work begins, based on concrete platform and product requirements.
+- [ ] Choose mobile implementation stacks when work begins, based on concrete platform and product requirements. Session 50 adds no Swift, Kotlin, C ABI, JNI, or mobile secure-storage implementation.
 - [ ] Add client SDKs through the current protocol contract, introducing schema generation only when the selected implementations need it.
 - [ ] Build the selected mobile clients with session list, start, open, live events, steering, permissions, diff review, detach, and reconnect.
 - [ ] Reuse the reviewed remote pairing, encryption, scope, relay, and revocation contracts.

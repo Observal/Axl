@@ -32,7 +32,7 @@ Codex offers a useful contrast. Its CLI and Rust core share a repository, while 
 - Use **TypeScript** for the kernel, protocol, daemon, adoption compiler, terminal client, web client, extensions, and hosted control plane. It matches the ecosystems and standards Axl integrates with.
 - Use **Elixir/OTP only for the hosted ciphertext relay** under `services/relay/`. The relay is a bounded transport process and must not own daemon, RPC, account, persistence, or cryptographic behavior.
 - Use **Kotlin with Jetpack Compose** for Android and **Swift with SwiftUI** for iOS. Choose protocol code generation when the first of these clients is built.
-- A narrowly scoped **Rust endpoint-E2EE core** is the only approved exception. It may be added in Session 40 after human approval and merge of [`docs/architecture/remote-e2ee-openmls.md`](docs/architecture/remote-e2ee-openmls.md) and its dependency and license decision. Successful browser/WASM compilation is sufficient to begin the platform-neutral core. Session 50 must add and test thin Node, browser/WASM, Swift, and Kotlin bindings, and remote web stays disabled until mandatory browser persistence tests pass. The core must not absorb daemon, SDK, relay, account, authorization, persistence-engine, or presentation behavior.
+- A narrowly scoped **Rust endpoint-E2EE core** is the only approved exception. It may be added in Session 40 after human approval and merge of [`docs/architecture/remote-e2ee-openmls.md`](docs/architecture/remote-e2ee-openmls.md) and its dependency and license decision. Successful browser/WASM compilation is sufficient to begin the platform-neutral core. Session 50 adds and tests private Node and browser/WASM binding surfaces and artifacts as specified in [`docs/architecture/e2ee-platform-bindings.md`](docs/architecture/e2ee-platform-bindings.md). Build and fixture support does not establish production storage readiness. Swift, Kotlin, C ABI, JNI, generated public SDKs, mobile stack selection, iOS and Android applications, and production mobile secure storage remain in Phase 13. Remote web stays disabled until mandatory browser persistence tests pass and a reviewed rollback-anchor design exists. The core must not absorb daemon, SDK, relay, account, authorization, persistence-engine, or presentation behavior.
 - Do not add another application language outside that reviewed exception. Other tooling should use TypeScript or POSIX shell.
 
 ## 3. Repository layout
@@ -89,7 +89,7 @@ The protocol package owns the contract between the daemon and every client.
 
 - TypeScript definitions are authoritative while all clients use TypeScript.
 - A schema change requires prior design discussion and compatibility notes.
-- The first Swift or Kotlin client triggers a decision on the schema language and generator. The relay's bounded outer-frame parser does not trigger client SDK generation because it does not parse daemon RPC or canonical events.
+- The first Swift or Kotlin client triggers a decision on the schema language, binding mechanism, and generator. Session 50 adds no Swift, Kotlin, C ABI, or JNI surface. The relay's bounded outer-frame parser does not trigger client SDK generation because it does not parse daemon RPC or canonical events.
 - Generated SDKs then ship through their native package systems so external and in-tree clients use the same contract.
 
 ## 5. Independent implementation

@@ -3,9 +3,9 @@
 
 # Remote endpoint E2EE with OpenMLS
 
-Status: Session 40B native durable adapter implemented; platform and production release gates remain closed
+Status: Session 40B native durable adapter implemented; Session 50 platform reconciliation pending RC review; platform and production release gates remain closed
 
-Reviewed: 2026-09-14
+Reviewed: 2026-09-16
 
 ## Decision and scope
 
@@ -113,23 +113,48 @@ struct {
 } PairingInvitation;
 ```
 
-`daemon_signature` is Ed25519 over `"Axl pairing invitation v1" || TLS(fields before daemon_signature)`. The invitation expires after 10 minutes, is single-use, and is cancelled after five failed claims. `invitation_nonce` is a 256-bit random possession secret. It must not enter URLs, logs, metrics, analytics, or canonical events. A QR image is therefore a short-lived credential and the UI must say so.
+`daemon_signature` is Ed25519 over `"Axl pairing invitation v1" || TLS(fields before daemon_signature)`. The invitation expires after 10 minutes, is single-use, and is cancelled after five distinct eligible failed claims under the accounting rules below. `invitation_nonce` is a 256-bit random possession secret. It must not enter URLs, logs, metrics, analytics, or canonical events. A QR image is therefore a short-lived credential and the UI must say so.
 
-The device validates the profile, times, expected signed-in account, installation name shown by the local daemon, daemon credential, and signature. It then generates its credential and KeyPackage. Its claim contains the invitation identifiers, `SHA-384(invitation_nonce)`, the device credential, KeyPackage bytes, and:
+The device validates the profile, times, expected signed-in account, installation name shown by the local daemon, daemon credential, and signature. It then generates its credential and KeyPackage. The claim is canonical TLS encoding, not JSON:
+
+```text
+struct {
+  uint16 version = 1;
+  opaque profile_id<1..255>;
+  uint16 profile_revision = 1;
+  opaque account_id[16];
+  opaque installation_id[16];
+  opaque crypto_session_id[16];
+  opaque invitation_nonce_hash[48];
+  opaque device_credential<1..512>;
+  opaque key_package<1..16384>;
+  opaque device_signature<64>;
+} PairingClaimV1;
+```
+
+This completes a previously unspecified, unimplemented revision 1 transcript. No deployed encoding, checked-in claim fixture, or persisted pairing state is being changed. After Session 50 PR 50.1 commits canonical fixtures, an incompatible transcript change requires a new authenticated profile revision.
+
+`device_signature` is excluded from its own signed prefix and is:
 
 ```text
 device_signature = Ed25519.Sign(
   device_private_key,
   "Axl pairing claim v1" ||
-  SHA-384(PairingInvitation) ||
-  SHA-384(KeyPackage) ||
-  device_credential_fingerprint
+  SHA-384(complete PairingInvitation TLS bytes) ||
+  SHA-384(KeyPackage TLS bytes) ||
+  SHA-384(device credential TLS bytes)
 )
 ```
 
-The daemon accepts a claim only when it has the original nonce, all hashes match, the device signature validates, the invitation is live and unconsumed, and the user confirms the device name and a 12-digit comparison value derived as the first 39 bits of `SHA-384("Axl pairing compare v1" || invitation || claim)` rendered with leading zeroes as four three-digit groups. The comparison value is a UX check, not an additional cryptographic primitive or authorization grant.
+The daemon accepts a claim only when it has the original nonce, all hashes match, the device signature validates, the invitation is live and unconsumed, and the user confirms the device name and a 12-digit comparison value. That value is the first 39 bits of `SHA-384("Axl pairing compare v1" || complete PairingInvitation TLS bytes || complete PairingClaimV1 TLS bytes)`, interpreted as an unsigned big-endian integer and rendered with leading zeroes as four three-digit groups. The comparison value is a UX check, not an additional cryptographic primitive or authorization grant.
 
 Account authentication alone cannot complete pairing. The control plane sees only identifiers, expiry, the nonce hash, credentials, signatures, and opaque KeyPackage or Welcome bytes. It never receives the QR nonce or private MLS state.
+
+Before a group exists, the daemon owns an encrypted pending-invitation record in the same per-session transactional store that will own its group. The record contains the original nonce, invitation hash, profile and identity binding, expiry, a bounded set of at most five distinct eligible failed-claim hashes and terminal results, and issued, pending, confirmed, consumed, cancelled, or expired state. It commits before QR bytes are returned. This is endpoint state, not canonical session state or hosted rendezvous state.
+
+Oversized, non-canonical, wrong-version, wrong-profile, wrong-session, unknown, expired, consumed, and cancelled requests do not count. Only a canonically decoded claim matching the invitation identifiers and nonce hash is eligible. The daemon records the hash of the complete canonical claim bytes with its terminal typed result. Repeating that failed claim returns the recorded result without incrementing again. The fifth distinct eligible failed claim commits cancellation. Group creation, the complete successor provider image, exact Welcome bytes, accepted claim hash and result, and invitation consumption commit atomically. Repeating the accepted claim returns the exact stored Welcome. A different claim after confirmation or consumption fails closed without changing the accepted result.
+
+The device owns its pre-join Ed25519 signer, KeyPackage private material, exact KeyPackage and claim bytes, invitation hash, profile binding, expiry, and operation records in its per-session transactional store. It commits that state before publishing the claim. A retry publishes the same bytes. Expiry, cancellation, protected-state loss, or an ambiguous Welcome without a durable exact copy requires a fresh invitation, device ID, crypto session ID, KeyPackage, and group ID. Detailed ownership and transitions are specified in [Endpoint E2EE platform bindings](e2ee-platform-bindings.md).
 
 ## KeyPackage and Welcome lifecycle
 
@@ -140,6 +165,7 @@ Limits and lifecycle:
 | Artifact | Limit | Lifetime and consumption |
 | --- | ---: | --- |
 | Pairing invitation | 2 KiB | 10 minutes, one successful claim |
+| Pairing claim | 17,320 bytes | exact-byte retry until accepted, rejected, cancelled, or expired |
 | KeyPackage | 16 KiB | 10 minutes, reserved atomically for 60 seconds, consumed once by the daemon |
 | Welcome | 16 KiB | 10 minutes, byte-identical retry until device activation acknowledgement |
 
@@ -268,6 +294,8 @@ BEGIN IMMEDIATE / strict read-write transaction
 COMMIT DURABLY
 ```
 
+A synchronous native provider begins its physical write transaction before calling OpenMLS and supplies transaction-local provider state. IndexedDB cannot safely remain active across arbitrary asynchronous browser work. The reviewed browser equivalent therefore holds an exclusive per-session Web Lock, authenticates one committed snapshot, performs one OpenMLS transition in a private worker, and then opens one short strict IndexedDB read-write transaction. That transaction rechecks the generation and rollback evidence and atomically writes the complete successor state, operation result, and exact ciphertext or accepted-message record. The pending mutation is internal to the binding and is never a public transaction handle. Any conflict, abort, worker loss, or ambiguous completion destroys the transient WASM endpoint and reloads only committed state. Full sequencing is specified in [Endpoint E2EE platform bindings](e2ee-platform-bindings.md).
+
 Network transmission begins only after durable commit. A durable record stores `crypto_session_id`, never a relay route. Every attempt resolves the current route and creates a new transport attempt ID. A retry sends byte-identical ciphertext. It never calls MLS encryption again.
 
 Any storage error or rollback invalidates the in-memory `MlsGroup` and all prepared handles. The endpoint closes the provider, reloads committed state, verifies the rollback counter and epoch authenticator, and only then permits another operation. The public core API returns immutable prepared envelopes and typed transaction outcomes. It never exposes mutable `MlsGroup` state.
@@ -317,15 +345,17 @@ This is a required design, not a completed claim. Static whole-database encrypti
 | Platform | Evidence as of 2026-09-14 | Decision |
 | --- | --- | --- |
 | Node daemon | Rust crates support the native target. The external spike exercised two-member groups and SQLite reopen, but it is research only. Node FFI and crash-safe storage are untested. | Feasible in principle; blocked before production. |
-| Browser/WASM | With Rust 1.96.0, `openmls` 0.9.0 plus `js` and the libcrux provider compile for `wasm32-unknown-unknown`. Web Crypto supplies a CSPRNG. IndexedDB can atomically update multiple records and offers a `strict` durability hint. No browser executed the core, no IndexedDB adapter joined MLS state and ciphertext, no multi-tab ownership protocol was tested, and erasure cannot be inferred from IndexedDB deletion. | Compilation gate passed for Session 40. Mandatory Session 50 implementation and remote-web shipping gates remain closed. |
-| Swift/iOS | A Rust static library and thin generated/manual C ABI are conventional. Keychain can hold a wrapping key. The spike did not build an XCFramework, exercise background execution, or prove database/Keychain crash ordering. Secure Enclave support for this Ed25519 identity is not assumed. | Feasible in principle; blocked pending fixture and device tests. |
-| Kotlin/Android | A Rust library can be called through JNI. Android Keystore can hold an AES wrapping key, but hardware properties vary. The spike did not build an AAR, test supported ABIs, or prove database/Keystore crash ordering. | Feasible in principle; blocked pending fixture and device tests. |
+| Browser/WASM | With Rust 1.96.0, `openmls` 0.9.0 plus `js`, the libcrux provider, and the required `getrandom` 0.2 `js` feature compile for `wasm32-unknown-unknown`. Web Crypto supplies a CSPRNG. IndexedDB can atomically update multiple records and offers a `strict` durability hint. While the worker and lock callback remain alive, the reviewed adapter uses an exclusive Web Lock to prevent another cooperative same-origin endpoint from becoming the writer. Suspension, freezing, restoration, and termination behavior must be verified separately in every supported browser. No reviewed browser API supplies the independent monotonic rollback anchor required by the native contract. | Session 50 must execute the core and persistence fault matrix in real browsers. Pairing and remote web remain disabled until an independent anchor or reviewed peer-witness design is approved. |
+| Swift/iOS | A Rust static library and a reviewed binding are feasible in principle. Keychain can hold a wrapping key, but hardware backing and an independent monotonic rollback anchor are not assumed. | Swift bindings, binding generation, iOS packaging, secure storage, and device tests remain Phase 13. |
+| Kotlin/Android | A Rust library can be called through a reviewed Android binding. Android Keystore can hold an AES wrapping key, but hardware properties vary and it is not a generic monotonic counter. | Kotlin bindings, JNI or another selected mechanism, Android packaging, secure storage, and device tests remain Phase 13. |
 
 Browser/WASM compilation is sufficient to begin the shared Rust core in Session 40. Session 40 must keep persistence behind an Axl-owned platform-neutral transaction abstraction. The core must not depend exclusively on native SQLite. The abstraction must atomically persist advanced OpenMLS state with exact ciphertext, require discard and reload after rollback, and support native and browser adapters with the same typed outcomes.
 
-Browser execution and persistence remain mandatory implementation and shipping gates assigned to Session 50. Session 50 must run OpenMLS in real browsers and prove the reviewed IndexedDB or replacement adapter across atomic state-plus-ciphertext commit, abort, crash, reload, exact-byte retry, rollback and epoch mismatch, storage loss and eviction, and single-writer or multi-tab ownership. It must test Chrome, Firefox, and Safari, refuse pairing without durable storage, use realistic identity-at-rest protection, and require fail-closed re-pairing after protected-state loss. Remote web remains disabled until those tests pass.
+Browser execution and persistence remain mandatory implementation and shipping gates assigned to Session 50. Session 50 must run OpenMLS in real browsers and prove the reviewed IndexedDB adapter across atomic state-plus-ciphertext commit, abort, crash, reload, exact-byte retry, rollback and epoch mismatch, storage loss and eviction, and Web Locks single-writer ownership. It must test Chrome, Firefox, Playwright WebKit, and actual Safari. Compile-only WASM and Playwright WebKit alone are not Safari evidence.
 
-Browser revision 1 explicitly makes no forensic-deletion claim for browser profiles, backups, snapshots, or physical media. That non-claim does not relax live-state key deletion, transaction, rollback, or re-pairing requirements.
+A non-extractable WebCrypto key stored through IndexedDB does not provide an independent monotonic rollback anchor. IndexedDB transactions and persistent-storage permission do not add that property. No supported pure-browser configuration currently satisfies the native `RollbackAnchor` guarantee. Browser pairing therefore remains disabled with `rollback_anchor_unavailable`, even after transaction feasibility tests pass, until an independent platform anchor or a separately reviewed authenticated peer-witness protocol is approved. Storage loss, eviction, or protected-key loss requires fail-closed re-pairing.
+
+Browser revision 1 explicitly makes no forensic-deletion claim for browser profiles, backups, snapshots, caches, crash dumps, WASM linear memory after termination, or physical media. That non-claim does not relax live-state key deletion, transaction, rollback, or re-pairing requirements.
 
 ## Security claims and non-claims
 
@@ -373,8 +403,8 @@ During Sessions 40 and 50:
 1. Build the shared Rust core and commit its exact Rust toolchain and `Cargo.lock`.
 2. Configure and run `cargo audit` and `cargo deny`, including the explicit time-bounded maintenance exception.
 3. Implement native persistence and transaction fault injection in Session 40.
-4. Implement Node, browser/WASM, Swift, and Kotlin bindings and positive and negative cross-platform fixtures in Session 50.
-5. Complete browser persistence tests and package all required license texts and notices.
+4. Implement Node and browser/WASM bindings and positive and negative fixtures in Session 50. Swift, Kotlin, C ABI, JNI, generated SDKs, mobile secure storage, and mobile applications remain Phase 13.
+5. Complete browser persistence tests, keep browser pairing disabled while the rollback-anchor gate is unresolved, and package all required license texts and notices.
 6. Propose the smallest native storage adapter and obtain approval before adding any production storage dependency beyond the approved OpenMLS/libcrux graph. Select browser-specific dependencies separately in Session 50.
 
 Before production release:
