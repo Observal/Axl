@@ -25,12 +25,13 @@ selected. Cargo's lock resolution records OpenMLS's optional/development SQLite 
 `cargo tree --locked --target all --edges normal,build` confirms they are not in this package's
 selected build graph.
 
-The selected normal/build closure contains 155 external packages on `--target all`. It differs
-from Session 30's 115-row inventory by the 40-package signing implementation closure pulled by
-`openmls_basic_credential` 0.6.0. The Session 30 disposable spike declared the same credential
-crate, but its inventory table omitted that branch. `Cargo.lock` is authoritative for this package
-and also records optional, target-specific, and dependency-development alternatives that are not
-selected by the normal/build tree.
+The selected normal/build closure contains 155 external packages on `--target all`, a net increase
+of 40 over Session 30's 115-row inventory. Reconciliation adds 54 exact entries, primarily the
+signing implementation closure pulled by `openmls_basic_credential` 0.6.0, and removes 14
+browser-only entries that are not selected without OpenMLS's Session 50 `js` feature. The Session
+30 disposable spike declared the same credential crate, but its inventory table omitted that
+branch. `Cargo.lock` is authoritative for this package and also records optional, target-specific,
+and dependency-development alternatives that are not selected by the normal/build tree.
 
 ## Maintenance exception
 
