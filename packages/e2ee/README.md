@@ -24,12 +24,15 @@ It provides:
   lifecycle claim; cleanup requires proof that no cryptographic state committed, while open finishes
   publication of authenticated state and removes only a stale `.initializing` marker.
 
-The package does not provide transport, relay routing, accounts, authorization, platform bindings,
-browser persistence, or presentation behavior. The durable API reloads committed OpenMLS and signer
-state inside every transaction, so rolled-back state and prepared handles cannot be reused. See
-[`STORAGE.md`](STORAGE.md) for the schema, transaction order, migrations, rollback detection,
-erasure boundary, and explicit exclusions. Keychain, Android Keystore, and browser storage remain
-Session 50 work.
+The package does not provide transport, relay routing, accounts, authorization, completed platform
+bindings, browser persistence, or presentation behavior. The durable API reloads committed OpenMLS
+and signer state inside every native transaction, so rolled-back state and prepared handles cannot
+be reused. See [`STORAGE.md`](STORAGE.md) for the schema, transaction order, migrations, rollback
+detection, erasure boundary, and explicit exclusions. Session 50's approved platform boundary is in
+[`../../docs/architecture/e2ee-platform-bindings.md`](../../docs/architecture/e2ee-platform-bindings.md).
+Browser transaction evidence remains required, but browser pairing stays disabled until an
+independent rollback anchor or reviewed peer-witness design is approved. Keychain, Android Keystore,
+generated mobile SDKs, and mobile applications remain Phase 13 work.
 
 Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
 upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim

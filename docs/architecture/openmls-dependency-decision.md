@@ -3,9 +3,9 @@
 
 # OpenMLS dependency decision
 
-Status: OpenMLS/libcrux candidates approved to enter Session 40; production release approval deferred
+Status: OpenMLS/libcrux candidates approved to enter Session 40; Session 50 binding candidates approved for evaluation only; production release approval deferred
 
-Reviewed: 2026-09-14
+Reviewed: 2026-09-16
 
 ## Decision
 
@@ -24,7 +24,30 @@ No Rust dependency is added to Axl by this Session 30 change. The repository own
 | OpenMLS storage contract | `openmls_traits` 0.6.0, provider schema version 1 |
 | Disposable research lock | Generated 2026-09-14; SHA-256 `c0a6fc287e663ce4ae9fedd6907c5ba4b20eb136318b69337d3be4a7a268f504` |
 
-The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. After Session 40B, the table below is the complete 156-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40A reconciled the implementation graph and received explicit human approval for `openmls_basic_credential` 0.6.0 and its additional normal/build closure. Session 40B adds only `redb` 4.2.0; its sole normal dependency, `libc` 0.2.189, was already selected. Cargo's lockfile also records optional and dependency-development alternatives that are not selected by this command.
+The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. After Session 40B, the table below is the complete 156-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40A reconciled the implementation graph and received explicit human approval for `openmls_basic_credential` 0.6.0 and its additional normal/build closure. Session 40B adds only `redb` 4.2.0; its sole normal dependency, `libc` 0.2.189, was already selected. Cargo's lockfile also records optional, target-specific, and dependency-development alternatives that are not selected by this command.
+
+## Session 50 evaluation candidates
+
+The following versions are approved only for isolated evaluation and planning. This approval does not permit changing a repository manifest or lockfile. Each dependency-bearing Session 50 PR must present its exact resulting lock, selected normal/build/development graph, licenses, advisories, build scripts, downloaded binaries, and target evidence for separate human approval before insertion.
+
+| Use | Exact evaluation candidate | Source and integrity | Scope |
+| --- | --- | --- | --- |
+| Node runtime | `napi` 3.12.5, Node-API 9, default features disabled | MIT; crates.io checksum `f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e`; tag `napi-v3.12.5`, commit `c69066bc9b2fc848aea9fd83f478e815085fbe1e` | Proposed production dependency for the private Node binding only |
+| Node macros | `napi-derive` 3.6.6 with `strict` and `type-def` | MIT; checksum `e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb`; tag commit `718349e1e4c8ec666ce8ba0b6eee59babd7e0dd6` | Proposed build-time macro dependency for the private Node binding |
+| Node build | `napi-build` 2.4.2, default features disabled | MIT; checksum `860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7`; tag commit `fce13f61caff9b4c0d1d6d093d1ea24dcdd7af31` | Proposed build dependency; no runtime npm package |
+| WASM ABI | `wasm-bindgen` 0.2.128 | MIT OR Apache-2.0; checksum `aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf`; tag `0.2.128`, commit `246946fddd62163e778c3a1f6afe7264347adceb` | Already resolved in the current Cargo lock; proposed direct binding dependency |
+| WASM build tool | `wasm-bindgen-cli` 0.2.128 | MIT OR Apache-2.0; checksum `2e29140c04e81832902b70e5d37b9ce1bfa811c8fe4563bea08f76df8388cf20`; same upstream tag | Proposed pinned build tool only |
+| Legacy RNG bridge | `getrandom` 0.2.17 with `js` | MIT OR Apache-2.0; checksum `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | Already resolved transitively; proposed direct target dependency to enable browser Web Crypto for the credential helper graph |
+| WASM time | `web-time` 1.1.0 | MIT OR Apache-2.0; checksum `5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb` | New transitive dependency selected by `openmls/js` |
+| Browser tests | `@playwright/test` 1.63.0 | Apache-2.0; npm integrity `sha512-oxMK4vllB9RK5NQ2l1pq1IfOf2AvnEuj/vYGDj0H2nMtmtZpKtCwt/l00GEO6xjGfpBNAvjovvYdCm50dRQkpQ==`; tag `v1.63.0`, commit `1b025d7e20a026371cd5f98ba0cdce48892737c8` | Proposed development dependency; resolves `playwright` and `playwright-core` 1.63.0 and downloads pinned browser builds |
+
+No IndexedDB wrapper, Web Locks package, WebCrypto package, `@napi-rs/cli`, UniFFI, cbindgen, JNI crate, Swift package dependency, Kotlin library, Android Gradle plugin, or mobile SDK is selected. Browser persistence uses standard Web APIs. Swift, Kotlin, C ABI, JNI, generated SDKs, mobile secure storage, and mobile applications remain Phase 13.
+
+A temporary Node candidate graph contained 19 new external package/version pairs beyond the current core graph. Its isolated build passed. Its license evaluation passed the existing allow-list; the temporary path dependency intentionally tripped the repository wildcard-dependency ban. `cargo audit` found no vulnerability and reported only the existing `proc-macro-error2` maintenance warning when the graph was combined with the OpenMLS core.
+
+A direct `openmls/js` check against `wasm32-unknown-unknown` currently fails because the credential helper's `getrandom` 0.2.17 branch lacks its `js` feature. An isolated candidate that enabled `getrandom/js` compiled successfully on the real target, selected 124 normal/build package names, and added only `web-time` 1.1.0 to the lock. This is compile evidence, not browser execution evidence.
+
+An isolated pnpm lock for `@playwright/test` 1.63.0 selected only `@playwright/test`, `playwright`, and `playwright-core` at 1.63.0. `pnpm audit --audit-level high` reported no known vulnerability. The downloaded Chromium, Firefox, and WebKit revisions and their binary checksums must be recorded by the dependency-bearing PR. Playwright WebKit does not count as actual Safari evidence.
 
 `openmls_basic_credential` 0.6.0 is an approved direct implementation dependency for revision 1. It supplies the OpenMLS `SignatureKeyPair` implementation used to create and retain endpoint signing keys. Its helper graph contains implementations for Ed25519, ECDSA over P-256 and P-384, and ML-DSA, but revision 1 selects only Ed25519 through the fixed suite. Axl exposes no signature-scheme negotiation and does not enable any additional MLS cipher suite, signature scheme, or algorithm negotiation. The presence of unused implementations in the helper graph does not make them part of the revision 1 profile.
 
@@ -251,9 +274,10 @@ During Sessions 40 and 50:
 - exact committed Rust toolchain and `Cargo.lock`;
 - configured `cargo audit` and `cargo deny`;
 - native persistence and fault injection;
-- Node, browser/WASM, Swift, and Kotlin bindings;
-- positive and negative cross-platform fixtures;
-- browser persistence tests;
+- Node and browser/WASM bindings;
+- Swift, Kotlin, C ABI, JNI, generated SDKs, and mobile work deferred to Phase 13;
+- positive and negative native Rust, Node, and browser fixtures;
+- browser persistence tests with pairing disabled until the rollback-anchor gate is resolved;
 - packaging and license notices.
 
 Before production release:
@@ -264,7 +288,7 @@ Before production release:
 - final MPL-2.0 and third-party notice verification;
 - all native, browser, fault-injection, and release gates.
 
-OpenMLS/libcrux are approved implementation candidates for Session 40. Production release remains fail-closed until the later gates pass.
+OpenMLS/libcrux are approved implementation candidates for Session 40. Session 50 binding versions above are evaluation candidates only and require dependency-specific approval before any manifest or lockfile change. Production release remains fail-closed until the later gates pass.
 
 ## Primary sources
 

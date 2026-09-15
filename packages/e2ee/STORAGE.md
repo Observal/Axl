@@ -106,6 +106,55 @@ Every operation reconstructs `MlsGroup` and its signer from the committed encryp
 transaction starts. Failed, rolled-back, and completed operations retain no reusable in-memory group
 or prepared handle.
 
+## Browser transaction equivalence
+
+The transaction order above is normative for synchronous native stores. IndexedDB transactions
+cannot safely remain active across arbitrary asynchronous OpenMLS and WebCrypto work because they
+become inactive when control returns to the event loop without another queued request. The browser
+adapter therefore uses the serialized prepare-and-compare protocol in
+[`docs/architecture/e2ee-platform-bindings.md`](../../docs/architecture/e2ee-platform-bindings.md).
+
+While the worker and lock callback remain alive, the reviewed adapter uses an exclusive per-session
+Web Lock to prevent another cooperative same-origin endpoint from becoming the writer. One short
+strict IndexedDB read-write transaction then compares the generation and rollback evidence and
+atomically writes the complete successor state, operation result, and exact outbox or
+accepted-message record. Nothing is sent and no plaintext is released before the transaction
+completes. Conflict, abort, worker loss, or ambiguous completion destroys transient state and reloads
+only committed state. The internal pending mutation is not part of the public platform ABI and is
+not a reusable transaction handle. Suspension, freezing, restoration, and termination behavior
+must be verified separately in every supported browser.
+
+This equivalence does not relax rollback detection. IndexedDB, persistent-storage permission, and a
+non-extractable WebCrypto key do not supply an independent monotonic anchor. Browser pairing remains
+disabled until that requirement is met by a separately approved design.
+
+## Planned Session 50.2 pre-pair records
+
+The current Session 40B schema implements and recovers device pre-join state. It does not implement
+or recover daemon pending-invitation state. Daemon pending-invitation storage is a Session 50.2
+requirement, not an implemented Session 40B capability.
+
+Before implementation, PR 50.2 must define the pending-invitation table or encrypted-state
+representation, schema-version and migration decision, initialization recovery, lifecycle-lock
+behavior, authenticated-manifest coverage, cleanup behavior, and fault-injection tests. The planned
+record includes the nonce, invitation and identity binding, lifecycle state, a bounded set of at most
+five eligible failed-claim hashes and terminal results, and the accepted claim hash and exact result.
+It must live in the daemon's per-session transactional store and commit before QR bytes are returned.
+Until that work merges, the current implementation cannot create or recover daemon
+pending-invitation state.
+
+The currently implemented device side owns its durable pre-join signer, KeyPackage private
+material, exact KeyPackage bytes, KeyPackage operation record, and existing profile and session
+binding. A pre-join device database is valid at epoch zero with an empty epoch authenticator only
+when its authenticated manifest and typed device state prove that the KeyPackage operation
+committed. Cleanup never turns an ambiguous pre-join database into a reusable empty store.
+
+PR 50.1 and PR 50.2 must add the invitation hash, exact claim bytes, claim expiry and accounting, and
+associated lifecycle metadata before claim publication can use the planned contract. Once those
+records exist, pairing expiry or protected-state loss requires a fresh device ID, crypto session ID,
+KeyPackage, and group ID. Neither endpoint stores a relay route. Hosted services may later store only
+the reviewed nonce hash and opaque artifacts.
+
 ## Retry, replay, and clock retention
 
 Pending outbox and unacknowledged receive operations are never pruned. Public acknowledgement APIs
@@ -177,7 +226,9 @@ Deletion of an obsolete wrapping record makes the old encrypted image unusable o
 security properties of the future platform key implementation. This implementation does not claim
 forensic erasure from redb page reuse, file deletion, checkpointing, compaction, or filesystem
 operations. Filesystem snapshots, backups, crash dumps, storage-controller caches, and physical
-media are excluded. Keychain, Android Keystore, and browser implementations remain Session 50 work.
+media are excluded. Session 50 evaluates browser WebCrypto and IndexedDB behavior without claiming
+that they supply an independent rollback anchor. Keychain, Android Keystore, generated mobile SDKs,
+and production mobile applications remain Phase 13 work.
 
 The monotonic anchor detects a database older than the last anchored commit. The peer epoch
 authenticator detects a divergent epoch once authenticated peer evidence is available. Rollback of
