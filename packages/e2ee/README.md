@@ -3,8 +3,8 @@
 
 # Axl endpoint E2EE core
 
-This package is the transport-independent, in-memory OpenMLS core for revision 1 of
-Axl's private `axl-e2ee-mls-pq-v1` profile.
+This package is the transport-independent OpenMLS core and native durable adapter for revision 1
+of Axl's private `axl-e2ee-mls-pq-v1` profile.
 
 It provides:
 
@@ -13,12 +13,20 @@ It provides:
 - canonical Axl credential and AAD validation;
 - bidirectional private application messages;
 - phone-owned self-Update proposals and daemon-only commits;
-- immutable prepared envelopes and a platform-neutral transaction contract.
+- immutable prepared envelopes and a platform-neutral transaction contract;
+- a native redb adapter with per-pair databases, immediate-durability two-phase commits, exact-byte
+  outbox recovery, durable acknowledgement and bounded retry retention, accepted-message-before-
+  plaintext behavior, authenticated metadata manifests, restart-stable previous-epoch windows, and
+  deterministic fault injection;
+- injected active-only envelope-key and monotonic rollback-anchor interfaces with crash
+  reconciliation for prepared keys.
 
-The package does not provide durable persistence, transport, relay routing, accounts,
-authorization, platform bindings, or presentation behavior. In-memory tests do not make a
-durability claim. A rollback invalidates the in-memory group and requires a future durable adapter
-to reload committed state before use.
+The package does not provide transport, relay routing, accounts, authorization, platform bindings,
+browser persistence, or presentation behavior. The durable API reloads committed OpenMLS and signer
+state inside every transaction, so rolled-back state and prepared handles cannot be reused. See
+[`STORAGE.md`](STORAGE.md) for the schema, transaction order, migrations, rollback detection,
+erasure boundary, and explicit exclusions. Keychain, Android Keystore, and browser storage remain
+Session 50 work.
 
 Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
 upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim
@@ -28,6 +36,7 @@ IETF draft-06 interoperability.
 
 ```sh
 cargo test --locked
+cargo test --locked persistence_tests
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo audit --deny warnings
