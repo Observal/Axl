@@ -3,7 +3,7 @@
 
 # Remote endpoint E2EE with OpenMLS
 
-Status: Session 30 Axl-private profile approved for implementation; production release gates remain closed
+Status: Session 40B native durable adapter implemented; platform and production release gates remain closed
 
 Reviewed: 2026-09-14
 
@@ -273,6 +273,23 @@ Network transmission begins only after durable commit. A durable record stores `
 Any storage error or rollback invalidates the in-memory `MlsGroup` and all prepared handles. The endpoint closes the provider, reloads committed state, verifies the rollback counter and epoch authenticator, and only then permits another operation. The public core API returns immutable prepared envelopes and typed transaction outcomes. It never exposes mutable `MlsGroup` state.
 
 Receive-side replay advancement and durable accepted-message identity commit before plaintext is released to daemon authorization or a client projection.
+
+Session 40B implements this contract for native hosts with one redb database per
+`crypto_session_id`. Every security-sensitive write explicitly uses immediate durability and
+redb's two-phase commit mode. OpenMLS runs against transaction-local storage only after the write
+transaction starts. The complete encrypted provider image and exact outbox or accepted-message
+record then commit together. An AEAD-protected manifest authenticates every durable metadata table.
+Initializing databases require explicit publication or cleanup, prepared external key records are
+reconciled on restart, and active-only current-key recovery completes before anchor advancement and
+obsolete-key erasure. Previous-epoch deadlines and rollback-safe clock state survive restart.
+Acknowledged idempotency and replay records have a 4,096-generation retry horizon; pending records
+are never pruned, and outbox acknowledgement is durable. Only the safe durable daemon and phone
+operations are public; the native provider, transaction handles, mutation staging, and fault
+injector remain crate-private. Operations reconstruct the group from committed storage, and
+uncertain commit recovery closes and reopens the database before consulting the authenticated
+operation record. The schema and limitations are documented in
+[`packages/e2ee/STORAGE.md`](../../packages/e2ee/STORAGE.md).
+Browser persistence and secure platform key implementations remain Session 50 gates.
 
 ### Erasure boundary
 

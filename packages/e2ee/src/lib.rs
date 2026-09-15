@@ -10,13 +10,19 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error as StdError,
     fmt,
-    time::{Duration, Instant},
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use openmls::prelude::*;
 use openmls_basic_credential::SignatureKeyPair;
-use openmls_libcrux_crypto::Provider;
+use openmls_libcrux_crypto::CryptoProvider;
+use openmls_memory_storage::MemoryStorage;
+use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod persistence;
 
 /// The only profile accepted by revision 1.
 pub const PROFILE_ID: &str = "axl-e2ee-mls-pq-v1";
@@ -39,8 +45,107 @@ pub const MAX_PAST_EPOCHS: u32 = 2;
 /// Maximum local grace period for a retained previous epoch.
 pub const PAST_EPOCH_MAX_AGE: Duration = Duration::from_secs(5 * 60);
 
+/// Wall-clock source used to preserve bounded previous-epoch receive windows across restarts.
+pub(crate) trait Clock: Send + Sync {
+    fn now_ms(&self) -> Result<u64, Error>;
+}
+
+/// Host wall clock. Durable state rejects clock rollback instead of extending a grace window.
+pub(crate) struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> Result<u64, Error> {
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::ClockRollback)?;
+        u64::try_from(duration.as_millis()).map_err(|_| Error::ClockRollback)
+    }
+}
+
 const SUITE: Ciphersuite = Ciphersuite::MLS_128_MLKEM768X25519_AES256GCM_SHA384_Ed25519;
 const ZERO_ID: [u8; 16] = [0; 16];
+
+/// The libcrux cryptographic provider paired with Axl-owned replaceable storage.
+///
+/// Durable operations clone the committed storage image into this provider only after opening
+/// their native transaction. The image is staged back into that same transaction before commit.
+pub(crate) struct CoreProvider {
+    crypto: CryptoProvider,
+    storage: MemoryStorage,
+}
+
+impl CoreProvider {
+    fn new() -> Result<Self, openmls_traits::types::CryptoError> {
+        Ok(Self {
+            crypto: CryptoProvider::new()?,
+            storage: MemoryStorage::default(),
+        })
+    }
+
+    pub(crate) fn from_storage_values(
+        values: BTreeMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<Self, openmls_traits::types::CryptoError> {
+        Ok(Self {
+            crypto: CryptoProvider::new()?,
+            storage: MemoryStorage {
+                values: std::sync::RwLock::new(values.into_iter().collect()),
+            },
+        })
+    }
+
+    pub(crate) fn storage_values(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
+        self.storage
+            .values
+            .read()
+            .expect("OpenMLS memory storage lock poisoned")
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
+    pub(crate) fn insert_internal(&self, key: Vec<u8>, value: Vec<u8>) {
+        self.storage
+            .values
+            .write()
+            .expect("OpenMLS memory storage lock poisoned")
+            .insert(key, value);
+    }
+
+    pub(crate) fn internal(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.storage
+            .values
+            .read()
+            .expect("OpenMLS memory storage lock poisoned")
+            .get(key)
+            .cloned()
+    }
+
+    pub(crate) fn remove_internal(&self, key: &[u8]) {
+        self.storage
+            .values
+            .write()
+            .expect("OpenMLS memory storage lock poisoned")
+            .remove(key);
+    }
+}
+
+impl OpenMlsProvider for CoreProvider {
+    type CryptoProvider = CryptoProvider;
+    type RandProvider = CryptoProvider;
+    type StorageProvider = MemoryStorage;
+
+    fn storage(&self) -> &Self::StorageProvider {
+        &self.storage
+    }
+
+    fn crypto(&self) -> &Self::CryptoProvider {
+        &self.crypto
+    }
+
+    fn rand(&self) -> &Self::RandProvider {
+        &self.crypto
+    }
+}
 
 /// A stable 16-byte UUID representation. Canonical UUID validation belongs to the caller that
 /// parses textual UUIDs; this core accepts only the already-canonical bytes.
@@ -337,9 +442,9 @@ pub enum TransactionOutcome {
 /// adapter then stages the immutable envelope or accepted-message identity in that same
 /// transaction. Network transmission and plaintext release are forbidden until `commit` returns.
 /// No relay route appears in this contract.
-pub trait TransactionalProvider: OpenMlsProvider {
+pub trait TransactionalProvider {
     type TransactionError: StdError + Send + Sync + 'static;
-    type Transaction<'a>: GroupTransaction<Provider = Self, Error = Self::TransactionError>
+    type Transaction<'a>: GroupTransaction<Error = Self::TransactionError>
     where
         Self: 'a;
 
@@ -419,6 +524,7 @@ impl PreparedPlaintext {
 pub enum Error {
     BoundExceeded(&'static str),
     ConsumedKeyPackage,
+    ClockRollback,
     CompetingCommit,
     Crypto(&'static str),
     DuplicateCiphertext,
@@ -450,14 +556,16 @@ impl fmt::Display for Error {
 impl StdError for Error {}
 
 struct Endpoint {
-    provider: Provider,
+    provider: CoreProvider,
     signer: SignatureKeyPair,
     group: Option<MlsGroup>,
     identity: Identity,
     peer: Identity,
     context: PairContext,
     accepted: BTreeSet<Id>,
-    previous_epoch_deadlines: BTreeMap<u64, Instant>,
+    previous_epoch_deadlines: BTreeMap<u64, u64>,
+    last_wall_time_ms: u64,
+    clock: Arc<dyn Clock>,
     transaction_pending: bool,
 }
 
@@ -478,7 +586,18 @@ impl Endpoint {
         }
     }
 
-    fn validate_incoming(&self, message: &ProtocolMessage) -> Result<(), Error> {
+    fn checked_now_ms(&mut self) -> Result<u64, Error> {
+        let now = self.clock.now_ms()?;
+        if now < self.last_wall_time_ms {
+            self.invalidate();
+            return Err(Error::ClockRollback);
+        }
+        self.last_wall_time_ms = now;
+        Ok(now)
+    }
+
+    fn validate_incoming(&mut self, message: &ProtocolMessage) -> Result<(), Error> {
+        let now = self.checked_now_ms()?;
         let group = self.group()?;
         if message.group_id() != group.group_id() {
             return Err(Error::WrongGroup);
@@ -492,22 +611,27 @@ impl Endpoint {
             && self
                 .previous_epoch_deadlines
                 .get(&incoming)
-                .is_none_or(|deadline| Instant::now() > *deadline)
+                .is_none_or(|deadline| now > *deadline)
         {
             return Err(Error::StaleEpoch);
         }
         Ok(())
     }
 
-    fn mark_epoch_advanced(&mut self, old_epoch: u64) {
+    fn mark_epoch_advanced(&mut self, old_epoch: u64) -> Result<(), Error> {
+        let now = self.checked_now_ms()?;
         let current = self
             .group
             .as_ref()
             .map_or(old_epoch, |group| group.epoch().as_u64());
-        self.previous_epoch_deadlines
-            .insert(old_epoch, Instant::now() + PAST_EPOCH_MAX_AGE);
+        self.previous_epoch_deadlines.insert(
+            old_epoch,
+            now.checked_add(PAST_EPOCH_MAX_AGE.as_millis() as u64)
+                .ok_or(Error::ClockRollback)?,
+        );
         self.previous_epoch_deadlines
             .retain(|epoch, _| current.saturating_sub(*epoch) <= u64::from(MAX_PAST_EPOCHS));
+        Ok(())
     }
 
     fn expected_aad(&self, class: MessageClass, id: Id, generation: u64) -> Aad {
@@ -606,6 +730,7 @@ impl Endpoint {
         })
     }
 
+    #[cfg(test)]
     fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         if !self.transaction_pending {
             return Err(Error::NoPreparedTransaction);
@@ -627,13 +752,13 @@ impl Endpoint {
 }
 
 /// Daemon member. This is the only type that exposes commit creation.
-pub struct Daemon {
+pub(crate) struct Daemon {
     endpoint: Endpoint,
     key_package_consumed: bool,
 }
 
 impl Daemon {
-    pub fn create(identity: Identity, context: PairContext) -> Result<Self, Error> {
+    pub(crate) fn create(identity: Identity, context: PairContext) -> Result<Self, Error> {
         if identity.role != Role::Daemon
             || identity.account_id != context.account_id
             || identity.installation_id != context.installation_id
@@ -641,7 +766,7 @@ impl Daemon {
             return Err(Error::InvalidIdentity("daemon does not match pair context"));
         }
         let provider =
-            Provider::new().map_err(|_| Error::Crypto("provider initialization failed"))?;
+            CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?;
         ensure_suite(&provider)?;
         let (credential, signer) = make_credential(&provider, &identity)?;
         let group = MlsGroup::builder()
@@ -657,6 +782,8 @@ impl Daemon {
             context.installation_id,
             context.device_id,
         )?;
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let last_wall_time_ms = clock.now_ms()?;
         Ok(Self {
             endpoint: Endpoint {
                 provider,
@@ -667,13 +794,18 @@ impl Daemon {
                 context,
                 accepted: BTreeSet::new(),
                 previous_epoch_deadlines: BTreeMap::new(),
+                last_wall_time_ms,
+                clock,
                 transaction_pending: false,
             },
             key_package_consumed: false,
         })
     }
 
-    pub fn consume_key_package(&mut self, package: PhoneKeyPackage) -> Result<PairWelcome, Error> {
+    pub(crate) fn consume_key_package(
+        &mut self,
+        package: PhoneKeyPackage,
+    ) -> Result<PairWelcome, Error> {
         if self.key_package_consumed {
             return Err(Error::ConsumedKeyPackage);
         }
@@ -731,7 +863,7 @@ impl Daemon {
         })
     }
 
-    pub fn prepare_application(
+    pub(crate) fn prepare_application(
         &mut self,
         id: Id,
         generation: u64,
@@ -745,7 +877,7 @@ impl Daemon {
         )
     }
 
-    pub fn receive_application(
+    pub(crate) fn receive_application(
         &mut self,
         bytes: &[u8],
         id: Id,
@@ -755,7 +887,7 @@ impl Daemon {
             .receive_application(bytes, MessageClass::ApplicationRequest, id, generation)
     }
 
-    pub fn receive_update_proposal(
+    pub(crate) fn receive_update_proposal(
         &mut self,
         bytes: &[u8],
         id: Id,
@@ -799,7 +931,11 @@ impl Daemon {
         Ok(())
     }
 
-    pub fn prepare_commit(&mut self, id: Id, generation: u64) -> Result<PreparedEnvelope, Error> {
+    pub(crate) fn prepare_commit(
+        &mut self,
+        id: Id,
+        generation: u64,
+    ) -> Result<PreparedEnvelope, Error> {
         self.endpoint.ensure_ready()?;
         let aad = self
             .endpoint
@@ -840,7 +976,10 @@ impl Daemon {
             .try_into()
             .map_err(|_| Error::Crypto("unexpected epoch authenticator length"))?;
         let target_epoch = group.epoch().as_u64();
-        self.endpoint.mark_epoch_advanced(epoch);
+        if let Err(error) = self.endpoint.mark_epoch_advanced(epoch) {
+            self.endpoint.invalidate();
+            return Err(error);
+        }
         let mut envelope = bounded_envelope(
             bytes,
             self.endpoint.context.crypto_session_id,
@@ -857,33 +996,36 @@ impl Daemon {
         Ok(envelope)
     }
 
-    pub fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint.finish_transaction(outcome)
     }
-    pub fn epoch(&self) -> Result<u64, Error> {
+    #[cfg(test)]
+    pub(crate) fn epoch(&self) -> Result<u64, Error> {
         self.endpoint.epoch()
     }
-    pub fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
+    #[cfg(test)]
+    pub(crate) fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
         self.endpoint.epoch_authenticator()
     }
 }
 
 /// Phone member. It may create self-Update proposals but cannot create commits.
-pub struct Phone {
+pub(crate) struct Phone {
     endpoint: Option<Endpoint>,
-    provider: Provider,
+    provider: CoreProvider,
     signer: SignatureKeyPair,
     identity: Identity,
 }
 
 impl Phone {
-    pub fn create(identity: Identity) -> Result<(Self, PhoneKeyPackage), Error> {
+    pub(crate) fn create(identity: Identity) -> Result<(Self, PhoneKeyPackage), Error> {
         if identity.role != Role::Device {
             return Err(Error::InvalidIdentity("phone must use device role"));
         }
         identity.validate()?;
         let provider =
-            Provider::new().map_err(|_| Error::Crypto("provider initialization failed"))?;
+            CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?;
         ensure_suite(&provider)?;
         let (credential, signer) = make_credential(&provider, &identity)?;
         let bundle = KeyPackage::builder()
@@ -911,7 +1053,11 @@ impl Phone {
         ))
     }
 
-    pub fn join(&mut self, welcome: PairWelcome, expected: &PairContext) -> Result<(), Error> {
+    pub(crate) fn join(
+        &mut self,
+        welcome: PairWelcome,
+        expected: &PairContext,
+    ) -> Result<(), Error> {
         if &welcome.context != expected {
             return Err(Error::WrongGroup);
         }
@@ -939,10 +1085,12 @@ impl Phone {
         let group = staged
             .into_group(&self.provider)
             .map_err(|_| Error::Crypto("Welcome persistence failed"))?;
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let last_wall_time_ms = clock.now_ms()?;
         let endpoint = Endpoint {
             provider: std::mem::replace(
                 &mut self.provider,
-                Provider::new().map_err(|_| Error::Crypto("provider initialization failed"))?,
+                CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?,
             ),
             signer: std::mem::replace(
                 &mut self.signer,
@@ -955,12 +1103,15 @@ impl Phone {
             context: expected.clone(),
             accepted: BTreeSet::new(),
             previous_epoch_deadlines: BTreeMap::new(),
+            last_wall_time_ms,
+            clock,
             transaction_pending: true,
         };
         self.endpoint = Some(endpoint);
         Ok(())
     }
 
+    #[cfg(test)]
     fn endpoint(&self) -> Result<&Endpoint, Error> {
         self.endpoint.as_ref().ok_or(Error::WrongGroup)
     }
@@ -968,7 +1119,7 @@ impl Phone {
         self.endpoint.as_mut().ok_or(Error::WrongGroup)
     }
 
-    pub fn prepare_application(
+    pub(crate) fn prepare_application(
         &mut self,
         id: Id,
         generation: u64,
@@ -981,7 +1132,7 @@ impl Phone {
             plaintext,
         )
     }
-    pub fn receive_application(
+    pub(crate) fn receive_application(
         &mut self,
         bytes: &[u8],
         id: Id,
@@ -994,7 +1145,7 @@ impl Phone {
             generation,
         )
     }
-    pub fn prepare_self_update(
+    pub(crate) fn prepare_self_update(
         &mut self,
         id: Id,
         generation: u64,
@@ -1029,7 +1180,12 @@ impl Phone {
         endpoint.transaction_pending = true;
         Ok(envelope)
     }
-    pub fn apply_commit(&mut self, bytes: &[u8], id: Id, generation: u64) -> Result<(), Error> {
+    pub(crate) fn apply_commit(
+        &mut self,
+        bytes: &[u8],
+        id: Id,
+        generation: u64,
+    ) -> Result<(), Error> {
         let endpoint = self.endpoint_mut()?;
         endpoint.ensure_ready()?;
         let protocol = decode_protocol(bytes)?;
@@ -1069,23 +1225,29 @@ impl Phone {
             .merge_staged_commit(provider, *staged)
             .map_err(|_| Error::CompetingCommit)?;
         validate_members(endpoint.group()?, &endpoint.peer, &endpoint.identity)?;
-        endpoint.mark_epoch_advanced(old_epoch);
+        if let Err(error) = endpoint.mark_epoch_advanced(old_epoch) {
+            endpoint.invalidate();
+            return Err(error);
+        }
         endpoint.transaction_pending = true;
         Ok(())
     }
-    pub fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint_mut()?.finish_transaction(outcome)
     }
-    pub fn epoch(&self) -> Result<u64, Error> {
+    #[cfg(test)]
+    pub(crate) fn epoch(&self) -> Result<u64, Error> {
         self.endpoint()?.epoch()
     }
-    pub fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
+    #[cfg(test)]
+    pub(crate) fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
         self.endpoint()?.epoch_authenticator()
     }
 }
 
 fn make_credential(
-    provider: &Provider,
+    provider: &CoreProvider,
     identity: &Identity,
 ) -> Result<(CredentialWithKey, SignatureKeyPair), Error> {
     let signer = SignatureKeyPair::new(SUITE.signature_algorithm())
@@ -1103,7 +1265,7 @@ fn make_credential(
     ))
 }
 
-fn ensure_suite(provider: &Provider) -> Result<(), Error> {
+fn ensure_suite(provider: &CoreProvider) -> Result<(), Error> {
     if u16::from(SUITE) != SUITE_VALUE {
         return Err(Error::WrongSuite);
     }
@@ -1253,7 +1415,7 @@ mod tests {
             context.device_id,
         )
         .unwrap();
-        let provider = Provider::new().unwrap();
+        let provider = CoreProvider::new().unwrap();
         let other_suite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
         let signer = SignatureKeyPair::new(other_suite.signature_algorithm()).unwrap();
         signer.store(provider.storage()).unwrap();
@@ -1281,3 +1443,9 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod core_tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod persistence_tests;

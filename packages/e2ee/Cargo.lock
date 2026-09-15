@@ -70,6 +70,9 @@ dependencies = [
  "openmls",
  "openmls_basic_credential",
  "openmls_libcrux_crypto",
+ "openmls_memory_storage",
+ "openmls_traits",
+ "redb",
  "tls_codec",
 ]
 
@@ -1832,6 +1835,15 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "redb"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

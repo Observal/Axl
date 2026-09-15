@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-use axl_e2ee::{
+use crate::{
     APPLICATION_MAX_BYTES, Aad, Daemon, Error, Identity, MessageClass, PROFILE_ID,
     PROFILE_REVISION, PairContext, Phone, SUITE_VALUE, TransactionOutcome,
 };
