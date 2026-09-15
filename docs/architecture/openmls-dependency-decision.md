@@ -15,6 +15,7 @@ No Rust dependency is added to Axl by this Session 30 change. The repository own
 | --- | --- |
 | `openmls` | 0.9.0; crates.io checksum `b6b08d90fc020cb5354d5f08ca17711b84c82e2bcc7331753fd94f000d99a8c8`; MIT |
 | `openmls_libcrux_crypto` | 0.4.0; crates.io checksum `41e6367fb30f91f21e4d30f4f58a8d3b41f96f55c3e4b5acfa1d6d18c9dd4855`; MIT |
+| `openmls_basic_credential` | 0.6.0; crates.io checksum `dbd3f0c3422e7c7a8496f042b547b0c28d0793f8ba97feb401966e58196a1e40`; MIT; approved direct implementation dependency |
 | OpenMLS source | tag `openmls-v0.9.0`, commit `3a3e35de3feeca8f6605143c464d5452ae584d43`, 2026-08-25 |
 | Features | `openmls/draft-ietf-mls-pq-ciphersuites`, `openmls/js` for WASM, `openmls_libcrux_crypto/draft-ietf-mls-pq-ciphersuites`; default features disabled |
 | Research toolchain | Rust 1.96.0 (`ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96`, 2026-05-25); both direct crates declare MSRV 1.91.0 |
@@ -23,7 +24,9 @@ No Rust dependency is added to Axl by this Session 30 change. The repository own
 | OpenMLS storage contract | `openmls_traits` 0.6.0, provider schema version 1 |
 | Disposable research lock | Generated 2026-09-14; SHA-256 `c0a6fc287e663ce4ae9fedd6907c5ba4b20eb136318b69337d3be4a7a268f504` |
 
-The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. The table below is the complete 115-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40 must report and review any difference between this inventory and its committed graph.
+The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. The table below is the complete 155-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40A reconciled the implementation graph against this table and received explicit human approval for `openmls_basic_credential` 0.6.0 and its additional normal/build closure. Cargo's lockfile also records optional and dependency-development alternatives that are not selected by this command.
+
+`openmls_basic_credential` 0.6.0 is an approved direct implementation dependency for revision 1. It supplies the OpenMLS `SignatureKeyPair` implementation used to create and retain endpoint signing keys. Its helper graph contains implementations for Ed25519, ECDSA over P-256 and P-384, and ML-DSA, but revision 1 selects only Ed25519 through the fixed suite. Axl exposes no signature-scheme negotiation and does not enable any additional MLS cipher suite, signature scheme, or algorithm negotiation. The presence of unused implementations in the helper graph does not make them part of the revision 1 profile.
 
 The native storage dependency is intentionally not preselected. `openmls_sqlite_storage` 0.3.0 does not support `wasm32`, and its API does not by itself establish Axl's transaction across OpenMLS state and the ciphertext outbox. Session 40 may begin with an Axl-owned platform-neutral transaction abstraction. It must propose the smallest native adapter and obtain dependency approval before adding any production storage dependency beyond the OpenMLS/libcrux graph. Session 50 owns browser-specific adapter dependencies. Native and browser engines may differ, but both must implement the same atomic state, exact-ciphertext, rollback, reload, and typed-outcome contract.
 
@@ -32,36 +35,61 @@ The native storage dependency is intentionally not preselected. `openmls_sqlite_
 | Package and version | Declared SPDX expression |
 | --- | --- |
 | `autocfg v1.5.1` | `Apache-2.0 OR MIT` |
+| `base16ct v0.2.0` | `Apache-2.0 OR MIT` |
+| `base64ct v1.8.3` | `Apache-2.0 OR MIT` |
 | `bindgen v0.72.1` | `BSD-3-Clause` |
 | `bitflags v2.13.2` | `MIT OR Apache-2.0` |
-| `bumpalo v3.20.3` | `MIT OR Apache-2.0` |
+| `block-buffer v0.10.4` | `MIT OR Apache-2.0` |
 | `cc v1.4.6` | `MIT OR Apache-2.0` |
 | `cexpr v0.6.0` | `Apache-2.0/MIT` |
 | `cfg-if v1.0.4` | `MIT OR Apache-2.0` |
 | `chacha20 v0.10.2` | `MIT OR Apache-2.0` |
 | `clang-sys v1.9.1` | `Apache-2.0` |
+| `cmov v0.5.4` | `Apache-2.0 OR MIT` |
+| `const-oid v0.10.2` | `Apache-2.0 OR MIT` |
+| `const-oid v0.9.6` | `Apache-2.0 OR MIT` |
 | `core-models v0.0.7` | `Apache-2.0` |
+| `cpufeatures v0.2.17` | `MIT OR Apache-2.0` |
 | `cpufeatures v0.3.1` | `MIT OR Apache-2.0` |
 | `crabgrind v0.2.6` | `MIT` |
 | `crossbeam-deque v0.8.8` | `MIT OR Apache-2.0` |
 | `crossbeam-epoch v0.9.21` | `MIT OR Apache-2.0` |
 | `crossbeam-utils v0.8.23` | `MIT OR Apache-2.0` |
+| `crypto-bigint v0.5.5` | `Apache-2.0 OR MIT` |
+| `crypto-common v0.1.7` | `MIT OR Apache-2.0` |
+| `crypto-common v0.2.2` | `MIT OR Apache-2.0` |
+| `ctutils v0.4.2` | `Apache-2.0 OR MIT` |
+| `curve25519-dalek v4.1.3` | `BSD-3-Clause` |
+| `curve25519-dalek-derive v0.1.1` | `MIT/Apache-2.0` |
+| `der v0.7.10` | `Apache-2.0 OR MIT` |
+| `der v0.8.2` | `Apache-2.0 OR MIT` |
+| `digest v0.10.7` | `MIT OR Apache-2.0` |
+| `digest v0.11.3` | `MIT OR Apache-2.0` |
+| `ecdsa v0.16.9` | `Apache-2.0 OR MIT` |
+| `ed25519 v2.2.3` | `Apache-2.0 OR MIT` |
+| `ed25519-dalek v2.2.0` | `BSD-3-Clause` |
 | `either v1.18.0` | `MIT OR Apache-2.0` |
+| `elliptic-curve v0.13.8` | `Apache-2.0 OR MIT` |
+| `ff v0.13.1` | `MIT/Apache-2.0` |
+| `fiat-crypto v0.2.9` | `MIT OR Apache-2.0 OR BSD-1-Clause` |
 | `find-msvc-tools v0.1.12` | `MIT OR Apache-2.0` |
-| `futures-core v0.3.34` | `MIT OR Apache-2.0` |
-| `futures-task v0.3.34` | `MIT OR Apache-2.0` |
-| `futures-util v0.3.34` | `MIT OR Apache-2.0` |
+| `generic-array v0.14.7` | `MIT` |
+| `getrandom v0.2.17` | `MIT OR Apache-2.0` |
 | `getrandom v0.4.3` | `MIT OR Apache-2.0` |
 | `glob v0.3.4` | `MIT OR Apache-2.0` |
+| `group v0.13.0` | `MIT/Apache-2.0` |
 | `hax-lib v0.3.7` | `Apache-2.0` |
 | `hax-lib-macros v0.3.7` | `Apache-2.0` |
 | `hax-lib-macros-types v0.3.7` | `Apache-2.0` |
+| `hkdf v0.12.4` | `MIT OR Apache-2.0` |
+| `hmac v0.12.1` | `MIT OR Apache-2.0` |
 | `hpke-rs v0.7.0` | `MPL-2.0` |
 | `hpke-rs-crypto v0.7.0` | `MPL-2.0` |
 | `hpke-rs-libcrux v0.7.0` | `MPL-2.0` |
+| `hybrid-array v0.4.15` | `MIT OR Apache-2.0` |
 | `itertools v0.13.0` | `MIT OR Apache-2.0` |
 | `itoa v1.0.18` | `MIT OR Apache-2.0` |
-| `js-sys v0.3.105` | `MIT OR Apache-2.0` |
+| `keccak v0.2.2` | `Apache-2.0 OR MIT` |
 | `libc v0.2.189` | `MIT OR Apache-2.0` |
 | `libcrux-aead v0.0.9` | `Apache-2.0` |
 | `libcrux-aes v0.0.9` | `Apache-2.0` |
@@ -88,21 +116,28 @@ The native storage dependency is intentionally not preselected. `openmls_sqlite_
 | `log v0.4.34` | `MIT OR Apache-2.0` |
 | `memchr v2.8.3` | `Unlicense OR MIT` |
 | `minimal-lexical v0.2.1` | `MIT/Apache-2.0` |
+| `ml-dsa v0.1.1` | `Apache-2.0 OR MIT` |
+| `module-lattice v0.2.3` | `Apache-2.0 OR MIT` |
 | `nom v7.1.3` | `MIT` |
 | `num-bigint v0.4.8` | `MIT OR Apache-2.0` |
 | `num-integer v0.1.47` | `MIT OR Apache-2.0` |
 | `num-traits v0.2.19` | `MIT OR Apache-2.0` |
-| `once_cell v1.21.4` | `MIT OR Apache-2.0` |
 | `openmls v0.9.0` | `MIT` |
+| `openmls_basic_credential v0.6.0` | `MIT` |
 | `openmls_libcrux_crypto v0.4.0` | `MIT` |
 | `openmls_memory_storage v0.6.0` | `MIT` |
 | `openmls_serialization_helpers v0.1.0` | `MIT` |
 | `openmls_traits v0.6.0` | `MIT` |
+| `p256 v0.13.2` | `Apache-2.0 OR MIT` |
+| `p384 v0.13.1` | `Apache-2.0 OR MIT` |
 | `pastey v0.2.3` | `MIT OR Apache-2.0` |
-| `pin-project-lite v0.2.17` | `Apache-2.0 OR MIT` |
+| `pem-rfc7468 v0.7.0` | `Apache-2.0 OR MIT` |
+| `pkcs8 v0.10.2` | `Apache-2.0 OR MIT` |
+| `pkcs8 v0.11.0` | `Apache-2.0 OR MIT` |
 | `pkg-config v0.3.34` | `MIT OR Apache-2.0` |
 | `ppv-lite86 v0.2.21` | `MIT OR Apache-2.0` |
 | `prettyplease v0.2.37` | `MIT OR Apache-2.0` |
+| `primeorder v0.13.6` | `Apache-2.0 OR MIT` |
 | `proc-macro-error-attr2 v2.0.0` | `MIT OR Apache-2.0` |
 | `proc-macro-error2 v2.0.1` | `MIT OR Apache-2.0` |
 | `proc-macro2 v1.0.107` | `MIT OR Apache-2.0` |
@@ -111,21 +146,31 @@ The native storage dependency is intentionally not preselected. `openmls_sqlite_
 | `rand v0.10.2` | `MIT OR Apache-2.0` |
 | `rand_chacha v0.10.0` | `MIT OR Apache-2.0` |
 | `rand_core v0.10.1` | `MIT OR Apache-2.0` |
+| `rand_core v0.6.4` | `MIT OR Apache-2.0` |
 | `rayon v1.12.0` | `MIT OR Apache-2.0` |
 | `rayon-core v1.13.0` | `MIT OR Apache-2.0` |
 | `regex v1.13.1` | `MIT OR Apache-2.0` |
 | `regex-automata v0.4.18` | `MIT OR Apache-2.0` |
 | `regex-syntax v0.8.11` | `MIT OR Apache-2.0` |
+| `rfc6979 v0.4.0` | `Apache-2.0 OR MIT` |
+| `rustc_version v0.4.1` | `MIT OR Apache-2.0` |
 | `rustc-hash v2.1.3` | `Apache-2.0 OR MIT` |
-| `rustversion v1.0.23` | `MIT OR Apache-2.0` |
+| `sec1 v0.7.3` | `Apache-2.0 OR MIT` |
+| `semver v1.0.28` | `MIT OR Apache-2.0` |
 | `serde v1.0.229` | `MIT OR Apache-2.0` |
 | `serde_bytes v0.11.19` | `MIT OR Apache-2.0` |
 | `serde_core v1.0.229` | `MIT OR Apache-2.0` |
 | `serde_derive v1.0.229` | `MIT OR Apache-2.0` |
 | `serde_json v1.0.151` | `MIT OR Apache-2.0` |
+| `sha2 v0.10.9` | `MIT OR Apache-2.0` |
+| `shake v0.1.0` | `MIT OR Apache-2.0` |
 | `shlex v1.3.0` | `MIT OR Apache-2.0` |
 | `shlex v2.0.1` | `MIT OR Apache-2.0` |
-| `slab v0.4.12` | `MIT` |
+| `signature v2.2.0` | `Apache-2.0 OR MIT` |
+| `signature v3.0.0` | `Apache-2.0 OR MIT` |
+| `spki v0.7.3` | `Apache-2.0 OR MIT` |
+| `spki v0.8.0` | `Apache-2.0 OR MIT` |
+| `sponge-cursor v0.1.0` | `MIT OR Apache-2.0` |
 | `subtle v2.6.1` | `BSD-3-Clause` |
 | `syn v2.0.119` | `MIT OR Apache-2.0` |
 | `syn v3.0.5` | `MIT OR Apache-2.0` |
@@ -133,13 +178,11 @@ The native storage dependency is intentionally not preselected. `openmls_sqlite_
 | `thiserror-impl v2.0.20` | `MIT OR Apache-2.0` |
 | `tls_codec v0.5.0` | `Apache-2.0 OR MIT` |
 | `tls_codec_derive v0.5.0` | `Apache-2.0 OR MIT` |
+| `typenum v1.20.1` | `MIT OR Apache-2.0` |
 | `unicode-ident v1.0.24` | `(MIT OR Apache-2.0) AND Unicode-3.0` |
 | `uuid v1.26.1` | `Apache-2.0 OR MIT` |
-| `wasm-bindgen v0.2.128` | `MIT OR Apache-2.0` |
-| `wasm-bindgen-macro v0.2.128` | `MIT OR Apache-2.0` |
-| `wasm-bindgen-macro-support v0.2.128` | `MIT OR Apache-2.0` |
-| `wasm-bindgen-shared v0.2.128` | `MIT OR Apache-2.0` |
-| `web-time v1.1.0` | `MIT OR Apache-2.0` |
+| `version_check v0.9.5` | `MIT/Apache-2.0` |
+| `wasi v0.11.1+wasi-snapshot-preview1` | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` |
 | `windows-link v0.2.1` | `MIT OR Apache-2.0` |
 | `zerocopy v0.8.57` | `BSD-2-Clause OR Apache-2.0 OR MIT` |
 | `zerocopy-derive v0.8.57` | `BSD-2-Clause OR Apache-2.0 OR MIT` |
