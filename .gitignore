@@ -4,6 +4,7 @@
 
 node_modules/
 dist/
+target/
 .release/
 # Read-only reference checkouts (see AGENTS.md). Never tracked.
 .reference/

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "axl-e2ee"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+openmls = { version = "=0.9.0", default-features = false, features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = { version = "=0.6.0", default-features = false }
+openmls_libcrux_crypto = { version = "=0.4.0", default-features = false, features = ["draft-ietf-mls-pq-ciphersuites"] }
+tls_codec = { version = "=0.5.0", default-features = false, features = ["std"] }
