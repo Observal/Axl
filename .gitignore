@@ -4,6 +4,7 @@
 
 node_modules/
 dist/
+target/
 .release/
 coverage/
 services/relay/_build/
