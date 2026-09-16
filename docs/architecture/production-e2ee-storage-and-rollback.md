@@ -106,7 +106,7 @@ The production storage design considers an attacker who can:
 - attempt access from another process under the same ordinary user, with protection claimed only where the selected platform store enforces a verified per-application boundary; and
 - cause the secure store or witness to be absent, locked, unavailable, revoked, or partially failed.
 
-The witness quorum is trusted for monotonicity while at least two of its three replicas preserve their monotonic histories and signing authorities. One replica may be unavailable, restored, or malicious without allowing a conflicting quorum certificate. A coordinated rollback or compromise of two replicas can defeat hosted rollback detection and is outside the claim. This threshold assumption is explicit and must be reflected in deployment, credentials, monitoring, backup, and disaster-recovery evidence.
+The witness quorum is trusted for monotonicity while at least one of its three replicas preserves its monotonic history and signing authority. One or two unavailable, restored, or malicious replicas cannot create a conflicting unanimous certificate, but any unavailable replica stops progress. Only coordinated rollback or compromise of all three replicas can defeat hosted rollback detection. This unanimity assumption is explicit and must be reflected in deployment, credentials, monitoring, backup, and disaster-recovery evidence.
 
 ### Adversaries and failures outside the claim
 
@@ -549,7 +549,7 @@ Restart repeats the load algorithm. It loads and authenticates the exact pending
 | `(n, Cn)` | `(n+1, Cn+1)` | Local successor lost or an old backup was restored | `stale_local_state`, quarantine, revoke when possible, re-pair. The witness cannot reconstruct private state. |
 | `(n+1, Cx)` | `(n+1, Cy)`, `Cx != Cy` | Fork or corruption | `witness_conflict`, quarantine both branches, re-pair. |
 | local ahead by more than one | any lower witness head | Violated serialization or corruption | `corrupt_state`, quarantine. |
-| quorum behind by more than one | local current | Two-replica rollback, correlated failure, or service corruption outside the one-replica tolerance claim | `witness_inconsistent`, freeze service and endpoint. |
+| quorum behind by more than one | local current | Correlated three-replica rollback or service corruption outside the high-water guarantee | `witness_inconsistent`, freeze service and endpoint. |
 | local state absent, witness exists | any | State loss | `state_loss`, revoke and re-pair. |
 | local state exists, witness lineage absent after registration should have completed | any | Witness loss or wrong account | `witness_inconsistent`, no re-registration under the old lineage. |
 
@@ -598,7 +598,7 @@ Production E2EE is online-only with respect to the witness.
 - A witness outage may leave one locally committed transition pending. The endpoint remains frozen until reconciliation.
 - The daemon may report local diagnostics that reveal no E2EE content. It may not decrypt queued content, create fresh ciphertext, release sealed plaintext, or advance MLS offline.
 - There is no bounded offline counter lease in version 1. Such a lease would weaken rollback detection and require a separate RFC.
-- Headless machines without an approved key store and all pure-browser configurations remain unsupported even when the witness is online.
+- Headless machines without an approved key store remain unsupported even when the witness is online. Browser production remains disabled until the production persistence adapter, witness integration, artifact isolation, and required runtime evidence pass.
 
 ## Error taxonomy
 
