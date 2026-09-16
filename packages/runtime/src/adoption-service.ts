@@ -38,7 +38,9 @@ import type { AdoptionAcquisitionCoordinator } from "./adoption-acquisition.ts";
 
 const CACHE_ENTRIES = 8;
 const CURSOR_ENTRIES = 512;
-const CACHE_LIFETIME_MS = 30_000;
+// A discovery snapshot must remain selectable for normal human review in the
+// picker. Inspection still performs a fresh fingerprint revalidation.
+const CACHE_LIFETIME_MS = 5 * 60_000;
 const CURSOR_LIFETIME_MS = 5 * 60_000;
 
 interface ScanCacheEntry {

@@ -93,6 +93,41 @@ test("local adoption service discovers, pages, and revalidates inspection", asyn
   await service.dispose();
 });
 
+test("default discovery snapshots remain inspectable during human review", async (context) => {
+  const { home, project } = await fixture(context);
+  const service = new LocalAdoptionService({ homeDirectory: home, environment: {} });
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  try {
+    const discovered = await service.discover(
+      {
+        ecosystems: ["pi"],
+        scopes: ["project"],
+        projectRoot: project,
+        includeMalformed: true,
+        pageSize: 10,
+      },
+      { ...requestContext, openedProjectRoots: [project] },
+    );
+    const candidate = discovered.candidates[0];
+    assert.ok(candidate);
+    now += 31_000;
+    const inspected = await service.inspect(
+      {
+        candidateId: candidate.candidateId,
+        expectedDiscoveryFingerprint: candidate.discoveryFingerprint,
+        pageSize: 10,
+      },
+      { ...requestContext, openedProjectRoots: [project] },
+    );
+    assert.equal(inspected.candidate.candidateId, candidate.candidateId);
+  } finally {
+    Date.now = originalNow;
+    await service.dispose();
+  }
+});
+
 test("local adoption service pages every safe diagnostic without disclosing source", async (context) => {
   const home = await mkdtemp(join(tmpdir(), "axl-adoption-diagnostics-"));
   const themes = join(home, ".pi", "agent", "themes");
