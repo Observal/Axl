@@ -44,9 +44,12 @@ export interface ResourceSurface {
   readonly metadata: Readonly<Record<string, string | number | boolean>>;
 }
 
+export type PackageInstallationKind = "npm" | "git" | "local";
+
 export interface PackageInventory {
   readonly packageName?: string;
   readonly version?: string;
+  readonly installationKind: PackageInstallationKind;
   readonly dependencies: readonly string[];
   readonly peerDependencies: readonly string[];
   readonly lifecycleScripts: readonly string[];

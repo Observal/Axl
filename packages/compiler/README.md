@@ -17,7 +17,7 @@ The v1 adapters inspect these documented roots. Project roots are read only afte
 | --- | --- | --- | --- |
 | Pi | `$PI_CODING_AGENT_DIR` or `~/.pi/agent`; `$PI_PACKAGE_DIR` adds package storage | `.pi` and ancestor `.agents` skill roots | `pi-package-v1` |
 | OpenCode | `~/.config/opencode` | `.opencode` | `opencode-v1` |
-| DSH | `~/.dsh` | `.dsh` | `dsh-v1` |
+| DSH | `$DSH_HOME` or `~/.dsh` | `.dsh` | bounded `cordis.yml`/`cordis.yaml` (`cordis-v1`) |
 | Claude Code | `~/.claude` | `.claude` | `claude-plugin-v1` |
 
-Unknown explicit schema versions produce an error diagnostic. Missing optional roots produce typed diagnostics and do not cause execution or fallback to another location. Pi authentication, model cache, trust state, and sessions are excluded before file reads. `PI_PACKAGE_DIR` only adds a discovery root; it never grants activation or runtime capabilities.
+Cordis YAML is parsed with a bounded mapping-only reader. Tags, anchors, aliases, merge keys, expressions, directives, block scalars, and flow collections are rejected rather than evaluated. Candidate fingerprints bind normalized candidate metadata, adapter and source-schema versions, effective scanner limits, all bytes and stable metadata in the bounded source snapshot, and symlink or special-file decisions. Unknown explicit schema versions produce an error diagnostic. Missing optional roots produce typed diagnostics and do not cause execution or fallback to another location. Pi authentication, model cache, trust state, and sessions are excluded before file reads. `PI_PACKAGE_DIR` only adds a discovery root; it never grants activation or runtime capabilities.

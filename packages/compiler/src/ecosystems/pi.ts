@@ -51,6 +51,13 @@ interface PiManifest {
   readonly dynamicDiscovery: boolean;
 }
 
+function packageInstallationKind(relativePath: string): PackageInventory["installationKind"] {
+  const segments = relativePath.split("/");
+  if (segments.includes("node_modules") || segments[0] === "npm") return "npm";
+  if (segments[0] === "git" || segments.includes("repos")) return "git";
+  return "local";
+}
+
 function parsePiManifest(
   file: SnapshotFile,
   maximumBytes: number,
@@ -170,6 +177,7 @@ function parsePiManifest(
     inventory: {
       ...(packageName !== undefined && validPackageName ? { packageName } : {}),
       ...(typeof json.version === "string" ? { version: json.version } : {}),
+      installationKind: packageInstallationKind(file.relativePath),
       dependencies: Object.keys(dependencies).sort(),
       peerDependencies: Object.keys(peers).sort(),
       lifecycleScripts: lifecycle,
@@ -593,9 +601,6 @@ function discoverSnapshot(
             relativePath,
             ...(displayName === undefined ? {} : { displayName }),
             executable,
-            ...(kind === "skill" && relativePath.endsWith("/SKILL.md")
-              ? { sourcePrefix: dirname(relativePath) }
-              : {}),
             ...(surface === undefined ? {} : { surfaces: [surface] }),
             diagnostics: resourceDiagnostics,
           },
@@ -719,6 +724,7 @@ export const piAdapter: SourceAdapter = {
     const roots: { root: string; scope: Scope; contextOnly?: boolean }[] = [
       { root: globalRoot, scope: "global" },
     ];
+    const policyDiagnostics: DiscoveryDiagnostic[] = [];
     const packageRoot = environment.PI_PACKAGE_DIR;
     if (packageRoot !== undefined && packageRoot !== globalRoot)
       roots.push({ root: packageRoot, scope: "global" });
@@ -736,16 +742,11 @@ export const piAdapter: SourceAdapter = {
           ancestor = parent;
         }
       } else {
-        return {
-          candidates: [],
-          diagnostics: [
-            {
-              code: "project-untrusted",
-              severity: "error",
-              message: "Pi project resources require Axl project trust",
-            },
-          ],
-        };
+        policyDiagnostics.push({
+          code: "adoption_project_untrusted",
+          severity: "error",
+          message: "Pi project resources require Axl project trust",
+        });
       }
     }
     const uniqueRoots = [...new Map(roots.map((entry) => [entry.root, entry])).values()];
@@ -775,7 +776,7 @@ export const piAdapter: SourceAdapter = {
     );
     return {
       candidates: results.flatMap((result) => result.candidates),
-      diagnostics: results.flatMap((result) => result.diagnostics),
+      diagnostics: [...policyDiagnostics, ...results.flatMap((result) => result.diagnostics)],
     };
   },
 };

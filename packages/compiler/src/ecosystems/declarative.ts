@@ -36,7 +36,7 @@ interface DeclarativeAdapterOptions {
   readonly adapterId: string;
   readonly adapterVersion: string;
   readonly sourceSchemaVersion: string;
-  readonly globalRoot: (home: string) => string;
+  readonly globalRoot: (context: DiscoveryContext) => string;
   readonly projectRoot: (project: string) => string;
   readonly conventions: readonly Convention[];
   readonly manifestNames: readonly string[];
@@ -125,11 +125,124 @@ function packageInventory(
   return {
     ...(packageName !== undefined && validPackageName ? { packageName } : {}),
     ...(typeof json.version === "string" ? { version: json.version } : {}),
+    installationKind: "local",
     dependencies: Object.keys(stringRecord(json.dependencies, "dependencies")).sort(),
     peerDependencies: Object.keys(stringRecord(json.peerDependencies, "peerDependencies")).sort(),
     lifecycleScripts,
     gallery: {},
   };
+}
+
+interface CordisConfig {
+  readonly pluginNames: readonly string[];
+  readonly diagnostics: readonly DiscoveryDiagnostic[];
+}
+
+function stripYamlComment(line: string): string {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index] ?? "";
+    if (quote !== undefined) {
+      if (quote === '"' && escaped) escaped = false;
+      else if (quote === '"' && character === "\\") escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') quote = character;
+    else if (character === "#") return line.slice(0, index);
+  }
+  return line;
+}
+
+function splitYamlMapping(
+  line: string,
+): { indent: number; key: string; scalar: string } | undefined {
+  const indent = /^ */u.exec(line)?.[0].length ?? 0;
+  const content = line.slice(indent);
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  for (let index = 0; index < content.length; index += 1) {
+    const character = content[index] ?? "";
+    if (quote !== undefined) {
+      if (quote === '"' && escaped) escaped = false;
+      else if (quote === '"' && character === "\\") escaped = true;
+      else if (character === quote) quote = undefined;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+    if (character === ":" && /\s|^$/u.test(content[index + 1] ?? "")) {
+      const rawKey = content.slice(0, index).trim();
+      const key =
+        (rawKey.startsWith('"') && rawKey.endsWith('"')) ||
+        (rawKey.startsWith("'") && rawKey.endsWith("'"))
+          ? rawKey.slice(1, -1)
+          : rawKey;
+      return { indent, key, scalar: content.slice(index + 1).trim() };
+    }
+  }
+  return undefined;
+}
+
+function parseCordisConfig(file: SnapshotFile, maximumBytes: number): CordisConfig {
+  if (file.bytes.byteLength > maximumBytes) {
+    throw new Error("Cordis manifest exceeds byte limit");
+  }
+  const text = decodeUtf8(file);
+  if (/\t/u.test(text)) throw new Error("Cordis YAML tabs are unsupported");
+  if (/(?:^|[\s:])[!&*](?![\s])/mu.test(text) || /<<\s*:|\$\{|\{\{/u.test(text)) {
+    throw new Error("Cordis YAML tags, anchors, aliases, merges, and expressions are unsupported");
+  }
+  const pluginNames: string[] = [];
+  let pluginsIndent: number | undefined;
+  let directPluginIndent: number | undefined;
+  let version: string | undefined;
+  const lines = text.split(/\r?\n/u);
+  if (lines.length > 10_000) throw new Error("Cordis YAML line limit exceeded");
+  for (const rawLine of lines) {
+    const line = stripYamlComment(rawLine).trimEnd();
+    if (line.trim() === "" || line.trim() === "---") continue;
+    const hasFlowCollection = ["[", "]", "{", "}"].some((character) => line.includes(character));
+    if (/^\s*[%]/u.test(line) || /:\s*[|>]\s*$/u.test(line) || hasFlowCollection) {
+      throw new Error(
+        "Cordis YAML directives, block scalars, and flow collections are unsupported",
+      );
+    }
+    const mapping = splitYamlMapping(line);
+    if (mapping === undefined) throw new Error("Cordis YAML must use bounded mapping syntax");
+    const { indent, key, scalar } = mapping;
+    if (indent > 64 || indent % 2 !== 0) throw new Error("Cordis YAML indentation is unsupported");
+    if (Buffer.byteLength(key, "utf8") > 256) throw new Error("Cordis YAML key exceeds limit");
+    if (indent === 0 && key === "version" && scalar !== "")
+      version = scalar.replace(/^['"]|['"]$/gu, "");
+    if (indent === 0 && key === "plugins") {
+      pluginsIndent = indent;
+      directPluginIndent = undefined;
+      continue;
+    }
+    if (pluginsIndent !== undefined) {
+      if (indent <= pluginsIndent) {
+        pluginsIndent = undefined;
+        directPluginIndent = undefined;
+      } else {
+        directPluginIndent ??= indent;
+        if (indent === directPluginIndent) pluginNames.push(key);
+      }
+    }
+  }
+  const diagnostics: DiscoveryDiagnostic[] = [];
+  if (version !== undefined && !["1", "1.0", "1.0.0"].includes(version)) {
+    diagnostics.push({
+      code: "source-schema-unsupported",
+      severity: "error",
+      message: `unsupported Cordis configuration version ${version}`,
+      relativePath: file.relativePath,
+    });
+  }
+  return { pluginNames: [...new Set(pluginNames)].sort(), diagnostics };
 }
 
 function checkSchema(
@@ -207,6 +320,63 @@ function discoverSnapshot(
   for (const file of snapshot.files) {
     const base = file.relativePath.split("/").at(-1) ?? "";
     if (!options.manifestNames.includes(base) && !options.configNames.includes(base)) continue;
+    if (options.ecosystem === "dsh" && (base === "cordis.yml" || base === "cordis.yaml")) {
+      try {
+        const cordis = parseCordisConfig(file, limits.maxManifestBytes);
+        diagnostics.push(...cordis.diagnostics);
+        const surfaces: ResourceSurface[] =
+          cordis.pluginNames.length === 0
+            ? [
+                {
+                  kind: "package",
+                  name: base,
+                  relativePath: file.relativePath,
+                  primary: true,
+                  executable: false,
+                  registrations: [],
+                  dynamicBehavior: false,
+                  metadata: { format: "cordis-yaml" },
+                },
+              ]
+            : cordis.pluginNames.map((name, index) => ({
+                kind: "extension",
+                name,
+                relativePath: file.relativePath,
+                primary: index === 0,
+                executable: true,
+                registrations: [`cordis-plugin:${name}`],
+                dynamicBehavior: false,
+                metadata: { format: "cordis-yaml" },
+              }));
+        candidates.push(
+          createCandidate(
+            {
+              ecosystem: options.ecosystem,
+              scope,
+              snapshot,
+              adapterId: options.adapterId,
+              adapterVersion: options.adapterVersion,
+              sourceSchemaVersion: options.sourceSchemaVersion,
+              kind: "package",
+              relativePath: file.relativePath,
+              displayName: base,
+              executable: surfaces.some((surface) => surface.executable),
+              surfaces,
+              diagnostics: cordis.diagnostics,
+            },
+            limits,
+          ),
+        );
+      } catch (error) {
+        diagnostics.push({
+          code: "cordis-config-invalid",
+          severity: "error",
+          message: error instanceof Error ? error.message : String(error),
+          relativePath: file.relativePath,
+        });
+      }
+      continue;
+    }
     let json: Record<string, unknown>;
     try {
       json = file.relativePath.endsWith(".jsonc")
@@ -346,7 +516,6 @@ function discoverSnapshot(
           ...(inventory.packageName === undefined
             ? {}
             : { packageIdentity: inventory.packageName }),
-          sourcePrefix: packageRoot,
           surfaces,
           inventory,
           diagnostics: packageDiagnostics,
@@ -358,6 +527,52 @@ function discoverSnapshot(
   return candidates;
 }
 
+const excludedStateByEcosystem: Readonly<Record<Exclude<Ecosystem, "pi">, ReadonlySet<string>>> = {
+  opencode: new Set([
+    "auth.json",
+    "credentials.json",
+    "cache",
+    "logs",
+    "sessions",
+    "storage",
+    "telemetry",
+  ]),
+  dsh: new Set([
+    "auth.json",
+    "credentials.json",
+    "cache",
+    "history.jsonl",
+    "logs",
+    "sessions",
+    "telemetry",
+  ]),
+  "claude-code": new Set([
+    ".credentials.json",
+    "auth.json",
+    "credentials.json",
+    "cache",
+    "debug",
+    "history.jsonl",
+    "logs",
+    "projects",
+    "sessions",
+    "shell-snapshots",
+    "statsig",
+    "telemetry",
+    "todos",
+  ]),
+};
+
+function shouldExcludeState(
+  ecosystem: Exclude<Ecosystem, "pi">,
+  scope: Scope,
+  relativePath: string,
+): boolean {
+  if (scope !== "global") return false;
+  const first = relativePath.split("/")[0]?.toLowerCase() ?? "";
+  return excludedStateByEcosystem[ecosystem].has(first);
+}
+
 function makeAdapter(options: DeclarativeAdapterOptions): SourceAdapter {
   const inspectRoot = async (
     root: string,
@@ -366,7 +581,11 @@ function makeAdapter(options: DeclarativeAdapterOptions): SourceAdapter {
     fileSystem: BoundedFileSystem,
   ): Promise<AdapterResult> => {
     try {
-      const snapshot = await snapshotTree(root, fileSystem, mergeLimits(context.limits));
+      const snapshot = await snapshotTree(root, fileSystem, mergeLimits(context.limits), {
+        exclude(relativePath) {
+          return shouldExcludeState(options.ecosystem, scope, relativePath);
+        },
+      });
       const diagnostics = [...snapshot.diagnostics];
       return {
         candidates: discoverSnapshot(options, snapshot, scope, context, diagnostics),
@@ -383,28 +602,26 @@ function makeAdapter(options: DeclarativeAdapterOptions): SourceAdapter {
     sourceSchemaVersions: [options.sourceSchemaVersion],
     async discover(context, fileSystem) {
       const roots: { root: string; scope: Scope }[] = [
-        { root: options.globalRoot(context.homeDirectory), scope: "global" },
+        { root: options.globalRoot(context), scope: "global" },
       ];
+      const policyDiagnostics: DiscoveryDiagnostic[] = [];
       if (context.projectDirectory !== undefined) {
-        if (!context.projectTrusted)
-          return {
-            candidates: [],
-            diagnostics: [
-              {
-                code: "project-untrusted",
-                severity: "error",
-                message: `${options.ecosystem} project resources require Axl project trust`,
-              },
-            ],
-          };
-        roots.push({ root: options.projectRoot(context.projectDirectory), scope: "project" });
+        if (!context.projectTrusted) {
+          policyDiagnostics.push({
+            code: "adoption_project_untrusted",
+            severity: "error",
+            message: `${options.ecosystem} project resources require Axl project trust`,
+          });
+        } else {
+          roots.push({ root: options.projectRoot(context.projectDirectory), scope: "project" });
+        }
       }
       const results = await Promise.all(
         roots.map((entry) => inspectRoot(entry.root, entry.scope, context, fileSystem)),
       );
       return {
         candidates: results.flatMap((result) => result.candidates),
-        diagnostics: results.flatMap((result) => result.diagnostics),
+        diagnostics: [...policyDiagnostics, ...results.flatMap((result) => result.diagnostics)],
       };
     },
   };
@@ -415,7 +632,7 @@ export const openCodeAdapter = makeAdapter({
   adapterId: "axl.opencode.discovery",
   adapterVersion: "1.0.0",
   sourceSchemaVersion: "opencode-v1",
-  globalRoot: (home) => join(home, ".config", "opencode"),
+  globalRoot: (context) => join(context.homeDirectory, ".config", "opencode"),
   projectRoot: (project) => join(project, ".opencode"),
   conventions: [
     { directory: "tools", kind: "extension", executable: true, suffixes: [".ts", ".js"] },
@@ -433,8 +650,8 @@ export const dshAdapter = makeAdapter({
   ecosystem: "dsh",
   adapterId: "axl.dsh.discovery",
   adapterVersion: "1.0.0",
-  sourceSchemaVersion: "dsh-v1",
-  globalRoot: (home) => join(home, ".dsh"),
+  sourceSchemaVersion: "cordis-v1",
+  globalRoot: (context) => context.environment?.DSH_HOME || join(context.homeDirectory, ".dsh"),
   projectRoot: (project) => join(project, ".dsh"),
   conventions: [
     { directory: "tools", kind: "extension", executable: true, suffixes: [".ts", ".js"] },
@@ -444,7 +661,7 @@ export const dshAdapter = makeAdapter({
     { directory: "workflows", kind: "workflow", executable: false, suffixes: [".json", ".md"] },
   ],
   manifestNames: ["package.json"],
-  configNames: ["dsh.json"],
+  configNames: ["cordis.yml", "cordis.yaml"],
 });
 
 export const claudeCodeAdapter = makeAdapter({
@@ -452,7 +669,7 @@ export const claudeCodeAdapter = makeAdapter({
   adapterId: "axl.claude-code.discovery",
   adapterVersion: "1.0.0",
   sourceSchemaVersion: "claude-plugin-v1",
-  globalRoot: (home) => join(home, ".claude"),
+  globalRoot: (context) => join(context.homeDirectory, ".claude"),
   projectRoot: (project) => join(project, ".claude"),
   conventions: [
     { directory: "plugins", kind: "extension", executable: true, suffixes: [".js", ".ts"] },

@@ -194,6 +194,12 @@ test("Pi discovery inventories all supported global resources without executing 
     ".pi/agent/npm/node_modules/example/package.json":
       '{"name":"example","version":"1.0.0","scripts":{"postinstall":"touch bad"},"dependencies":{"a":"1"},"peerDependencies":{"b":"1"},"pi":{"schemaVersion":"99","extensions":["entry.ts"],"resources_discover":"dynamic"},"gallery":{"category":"demo"}}',
     ".pi/agent/npm/node_modules/example/entry.ts": "pi.registerTool('package-tool', {})",
+    ".pi/agent/git/example/package.json":
+      '{"name":"git-example","version":"1.0.0","pi":{"prompts":["prompt.md"]}}',
+    ".pi/agent/git/example/prompt.md": "Git prompt",
+    ".pi/agent/local-example/package.json":
+      '{"name":"local-example","version":"1.0.0","pi":{"themes":["theme.json"]}}',
+    ".pi/agent/local-example/theme.json": '{"colors":{}}',
   });
   const readPaths: string[] = [];
   const observingFileSystem: BoundedFileSystem = {
@@ -234,6 +240,17 @@ test("Pi discovery inventories all supported global resources without executing 
   assert.deepEqual(packageCandidate?.inventory?.dependencies, ["a"]);
   assert.deepEqual(packageCandidate?.inventory?.peerDependencies, ["b"]);
   assert.deepEqual(packageCandidate?.inventory?.lifecycleScripts, ["postinstall"]);
+  assert.equal(packageCandidate?.inventory?.installationKind, "npm");
+  assert.equal(
+    result.candidates.find((candidate) => candidate.packageIdentity === "git-example")?.inventory
+      ?.installationKind,
+    "git",
+  );
+  assert.equal(
+    result.candidates.find((candidate) => candidate.packageIdentity === "local-example")?.inventory
+      ?.installationKind,
+    "local",
+  );
   assert.equal(
     packageCandidate?.surfaces.some((surface) => surface.dynamicBehavior),
     true,
@@ -271,8 +288,14 @@ test("Pi project discovery requires trust and honors environment roots and exact
     },
     { ecosystems: ["pi"] },
   );
-  assert.equal(blocked.candidates.length, 0);
-  assert.ok(blocked.diagnostics.some((entry) => entry.code === "project-untrusted"));
+  assert.ok(
+    blocked.candidates.some(
+      (candidate) =>
+        candidate.scope === "global" && candidate.provenance.relativePath === "extensions/keep.ts",
+    ),
+  );
+  assert.ok(blocked.candidates.every((candidate) => candidate.scope === "global"));
+  assert.ok(blocked.diagnostics.some((entry) => entry.code === "adoption_project_untrusted"));
   const trusted = await discover(
     { ...context(home, project, true), environment: { PI_CODING_AGENT_DIR: join(home, "custom") } },
     { ecosystems: ["pi"] },
@@ -299,6 +322,36 @@ test("inspection detects a changed discovery fingerprint", async () => {
   );
 });
 
+test("fingerprints bind settings and symlink decisions outside candidate-local source", async () => {
+  const outside = await fixture({ value: "outside" });
+  const home = await fixture({
+    ".pi/agent/extensions/tool.ts": "pi.registerTool('tool', {})",
+    ".pi/agent/settings.json": "{}",
+  });
+  const first = await discover(context(home), { ecosystems: ["pi"] });
+  const firstCandidate = first.candidates.find(
+    (candidate) => candidate.provenance.relativePath === "extensions/tool.ts",
+  );
+  assert.ok(firstCandidate);
+
+  await writeFile(join(home, ".pi/agent/settings.json"), '{"theme":"dark"}');
+  const second = await discover(context(home), { ecosystems: ["pi"] });
+  const secondCandidate = second.candidates.find(
+    (candidate) => candidate.candidateId === firstCandidate.candidateId,
+  );
+  assert.ok(secondCandidate);
+  assert.notEqual(secondCandidate.discoveryFingerprint, firstCandidate.discoveryFingerprint);
+
+  await symlink(join(outside, "value"), join(home, ".pi/agent/escape"));
+  const third = await discover(context(home), { ecosystems: ["pi"] });
+  const thirdCandidate = third.candidates.find(
+    (candidate) => candidate.candidateId === firstCandidate.candidateId,
+  );
+  assert.ok(thirdCandidate);
+  assert.ok(third.diagnostics.some((diagnostic) => diagnostic.code === "symlink-escape"));
+  assert.notEqual(thirdCandidate.discoveryFingerprint, secondCandidate.discoveryFingerprint);
+});
+
 test("OpenCode discovery covers global and trusted project resources", async () => {
   const home = await fixture({
     ".config/opencode/tools/math.ts": "tool({}); registerTool('math', {})",
@@ -321,11 +374,98 @@ test("OpenCode discovery covers global and trusted project resources", async () 
   );
 });
 
+test("untrusted projects do not suppress global declarative discovery and sensitive state is not read", async () => {
+  const home = await fixture({
+    ".config/opencode/tools/global.ts": "registerTool('global', {})",
+    ".config/opencode/auth.json": '{"token":"secret"}',
+    ".config/opencode/sessions/private.json": "secret",
+    ".dsh/tools/global.ts": "registerTool('global', {})",
+    ".dsh/credentials.json": '{"token":"secret"}',
+    ".dsh/logs/private.log": "secret",
+    ".claude/skills/global/SKILL.md": "---\nname: global\n---\nSkill",
+    ".claude/.credentials.json": '{"token":"secret"}',
+    ".claude/history.jsonl": "secret",
+    ".claude/projects/project/session.jsonl": "secret",
+    ".claude/cache/cache.json": "secret",
+    ".claude/logs/log.txt": "secret",
+    ".claude/telemetry/event.json": "secret",
+  });
+  const project = await fixture({
+    ".opencode/tools/project.ts": "registerTool('project', {})",
+    ".dsh/tools/project.ts": "registerTool('project', {})",
+    ".claude/skills/project/SKILL.md": "---\nname: project\n---\nSkill",
+  });
+  const readPaths: string[] = [];
+  const observingFileSystem: BoundedFileSystem = {
+    ...nodeFileSystem,
+    async readStableFile(path, maximumBytes, canonicalRoot) {
+      readPaths.push(path);
+      return nodeFileSystem.readStableFile(path, maximumBytes, canonicalRoot);
+    },
+  };
+  const result = await discover(context(home, project, false), {
+    ecosystems: ["opencode", "dsh", "claude-code"],
+    fileSystem: observingFileSystem,
+  });
+  assert.deepEqual(
+    new Set(result.candidates.map((candidate) => candidate.ecosystem)),
+    new Set(["opencode", "dsh", "claude-code"]),
+  );
+  assert.ok(result.candidates.every((candidate) => candidate.scope === "global"));
+  assert.equal(
+    result.diagnostics.filter((diagnostic) => diagnostic.code === "adoption_project_untrusted")
+      .length,
+    3,
+  );
+  assert.ok(
+    !readPaths.some((path) =>
+      /(?:auth|credential|history|\/projects\/|\/sessions\/|\/cache\/|\/logs\/|\/telemetry\/)/u.test(
+        path,
+      ),
+    ),
+  );
+});
+
+test("DSH discovery honors DSH_HOME and parses bounded Cordis YAML as data", async () => {
+  const home = await fixture({
+    ".dsh/tools/ignored.ts": "registerTool('ignored', {})",
+    "custom-dsh/tools/todo.ts": "registerTool('todo_write', {})",
+    "custom-dsh/cordis.yml":
+      "version: 1\nplugins:\n  group:todo:\n    enabled: true\n  logger:\n    level: info\n",
+    "custom-dsh/unsafe/cordis.yaml": "plugins:\n  evil: !javascript/function payload\n",
+  });
+  const result = await discover(
+    { ...context(home), environment: { DSH_HOME: join(home, "custom-dsh") } },
+    { ecosystems: ["dsh"] },
+  );
+  assert.ok(
+    !result.candidates.some((candidate) =>
+      candidate.surfaces.some((surface) => surface.registrations.includes("registerTool:ignored")),
+    ),
+  );
+  assert.ok(
+    result.candidates.some((candidate) =>
+      candidate.surfaces.some((surface) =>
+        surface.registrations.includes("registerTool:todo_write"),
+      ),
+    ),
+  );
+  const cordis = result.candidates.find(
+    (candidate) => candidate.provenance.relativePath === "cordis.yml",
+  );
+  assert.ok(cordis);
+  assert.deepEqual(
+    cordis.surfaces.map((surface) => surface.registrations[0]),
+    ["cordis-plugin:group:todo", "cordis-plugin:logger"],
+  );
+  assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "cordis-config-invalid"));
+});
+
 test("DSH discovery inventories executable and declarative surfaces", async () => {
   const home = await fixture({
     ".dsh/tools/todo.ts": "registerTool('todo_write', {})",
     ".dsh/workflows/review.json": "{}",
-    ".dsh/dsh.json": '{"version":"2"}',
+    ".dsh/cordis.yaml": "version: 2\nplugins:\n  todo:\n",
     ".dsh/bad/package.json": "{bad",
     ".dsh/package.json": '{"name":"dsh-package","version":"1.0.0","scripts":{"install":"bad"}}',
   });

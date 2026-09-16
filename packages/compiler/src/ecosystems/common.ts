@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import { basename, posix } from "node:path";
+import { basename } from "node:path";
 import { DiscoveryError } from "../errors.ts";
 import type { InspectionLimits } from "../limits.ts";
 import { finalizeCandidate, sha256 } from "../identity.ts";
@@ -32,7 +32,6 @@ export interface CandidateInput {
   readonly surfaces?: readonly ResourceSurface[];
   readonly inventory?: PackageInventory;
   readonly sourcePrecedence?: number;
-  readonly sourcePrefix?: string;
   readonly diagnostics?: readonly DiscoveryDiagnostic[];
 }
 
@@ -53,19 +52,17 @@ export function createCandidate(
       metadata: {},
     },
   ];
-  const packageRoot = input.sourcePrefix ?? posix.dirname(input.relativePath);
-  const packagePrefix = packageRoot === "." || packageRoot === "" ? "" : `${packageRoot}/`;
-  const relevant = input.snapshot.files.filter((file) =>
-    input.kind === "package"
-      ? file.relativePath.startsWith(packagePrefix)
-      : file.relativePath === input.relativePath ||
-        file.relativePath.startsWith(`${input.relativePath}/`),
-  );
-  const sourceFiles = relevant.map((file) => ({
+  // Bind the complete bounded root. This conservative superset ensures that
+  // settings, manifests, and safety decisions affecting a candidate invalidate it.
+  const sourceFiles = input.snapshot.files.map((file) => ({
     path: file.relativePath,
     sha256: sha256(file.bytes),
     size: file.bytes.byteLength,
+    mode: file.stat.mode,
+    mtimeMs: file.stat.mtimeMs,
+    nlink: file.stat.nlink,
   }));
+  const primarySource = sourceFiles.find((file) => file.path === input.relativePath);
   return finalizeCandidate(
     {
       ecosystem: input.ecosystem,
@@ -76,7 +73,7 @@ export function createCandidate(
       provenance: {
         canonicalRoot: input.snapshot.canonicalRoot,
         relativePath: input.relativePath,
-        ...(sourceFiles[0] === undefined ? {} : { sourceFileSha256: sourceFiles[0].sha256 }),
+        ...(primarySource === undefined ? {} : { sourceFileSha256: primarySource.sha256 }),
         ...(input.sourcePrecedence === undefined
           ? {}
           : { sourcePrecedence: input.sourcePrecedence }),
@@ -92,6 +89,7 @@ export function createCandidate(
       diagnostics: input.diagnostics ?? [],
     },
     sourceFiles,
+    [...input.snapshot.diagnostics, ...(input.diagnostics ?? [])],
     limits as unknown as Readonly<Record<string, number>>,
   );
 }

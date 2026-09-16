@@ -4,9 +4,9 @@
 import { createHash } from "node:crypto";
 import type {
   DiscoveryCandidate,
+  DiscoveryDiagnostic,
   Ecosystem,
   ResourceKind,
-  ResourceSurface,
   Scope,
 } from "./types.ts";
 
@@ -68,16 +68,23 @@ export function candidateId(input: {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export interface FingerprintSourceFile {
+  readonly path: string;
+  readonly sha256: string;
+  readonly size: number;
+  readonly mode: number;
+  readonly mtimeMs: number;
+  readonly nlink: number;
+}
+
 export function discoveryFingerprint(input: {
   readonly adapterId: string;
   readonly adapterVersion: string;
+  readonly sourceSchemaVersion: string;
   readonly candidateId: string;
-  readonly sourceFiles: readonly {
-    readonly path: string;
-    readonly sha256: string;
-    readonly size: number;
-  }[];
-  readonly surfaces: readonly ResourceSurface[];
+  readonly candidateMetadata: unknown;
+  readonly sourceFiles: readonly FingerprintSourceFile[];
+  readonly inspectionDecisions: readonly DiscoveryDiagnostic[];
   readonly limits: Readonly<Record<string, number>>;
 }): string {
   return sha256(canonicalize(input));
@@ -85,7 +92,8 @@ export function discoveryFingerprint(input: {
 
 export function finalizeCandidate(
   candidate: Omit<DiscoveryCandidate, "candidateId" | "discoveryFingerprint">,
-  sourceFiles: readonly { readonly path: string; readonly sha256: string; readonly size: number }[],
+  sourceFiles: readonly FingerprintSourceFile[],
+  inspectionDecisions: readonly DiscoveryDiagnostic[],
   limits: Readonly<Record<string, number>>,
 ): DiscoveryCandidate {
   const id = candidateId({
@@ -104,9 +112,24 @@ export function finalizeCandidate(
     discoveryFingerprint: discoveryFingerprint({
       adapterId: candidate.adapterId,
       adapterVersion: candidate.adapterVersion,
+      sourceSchemaVersion: candidate.sourceSchemaVersion,
       candidateId: id,
+      candidateMetadata: {
+        ecosystem: candidate.ecosystem,
+        scope: candidate.scope,
+        kind: candidate.kind,
+        displayName: candidate.displayName,
+        packageIdentity: candidate.packageIdentity ?? null,
+        provenance: candidate.provenance,
+        primary: candidate.primary,
+        executable: candidate.executable,
+        malformed: candidate.malformed,
+        surfaces: candidate.surfaces,
+        inventory: candidate.inventory ?? null,
+        diagnostics: candidate.diagnostics,
+      },
       sourceFiles,
-      surfaces: candidate.surfaces,
+      inspectionDecisions,
       limits,
     }),
   };
