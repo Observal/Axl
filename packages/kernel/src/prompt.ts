@@ -64,6 +64,16 @@ export function buildStablePrompt(input: StablePromptInput): StablePrompt {
               .map((tool) => `- ${tool.name}: ${tool.description}`)
               .join("\n")}`,
     },
+    ...(input.tools.some((tool) => tool.name === "capability_search")
+      ? [
+          {
+            name: "capability-discovery",
+            source: "core",
+            content:
+              "Optional Skills and tools are discoverable but are not listed here. When a task may benefit from specialized instructions or an ability not shown under Available tools, call capability_search with action search before answering or trying a substitute. Activate relevant results once; they remain active for the rest of the session. User-interface slash commands are not shell commands: when asked to run one, search for an equivalent capability and never pass the slash command to bash. Use capability_search with action read for referenced Skill files instead of filesystem tools.",
+          },
+        ]
+      : []),
     {
       name: "constraints",
       source: "core",

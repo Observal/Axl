@@ -163,7 +163,7 @@ function previewLayout(): WebPreferences {
 }
 
 const EMPTY_STATE: ConversationState = {
-  records: [], compactedEventIds: [], tools: [], interactions: [], operations: [], uncertainShellOperations: [], queue: [], interruptDeliveries: [], contextResources: [],
+  records: [], compactedEventIds: [], tools: [], interactions: [], capabilitySearches: [], activeCapabilities: [], capabilityDenials: [], operations: [], uncertainShellOperations: [], queue: [], interruptDeliveries: [], contextResources: [],
   usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0, costUsd: 0 },
   closed: false,
 };

@@ -103,10 +103,46 @@ test("ask_user_question rejects invalid requests and responses", async () => {
   );
 });
 
-test("pending capability search fails explicitly", async () => {
-  const search = makeCapabilitySearchTool();
-  assert.equal(search.name, "capability_search");
-  await assert.rejects(search.execute({ query: "release" }, noSignal), /not implemented/);
+test("capability search validates actions and emits canonical effects", async () => {
+  const capability = {
+    identity: "skill:release",
+    kind: "skill" as const,
+    name: "release",
+    description: "Prepare releases",
+    path: "/workspace/.agents/skills/release/SKILL.md",
+    scope: "project" as const,
+    provenance: "project:/workspace/.agents/skills",
+  };
+  const search = makeCapabilitySearchTool({
+    async search() {
+      return { results: [capability] };
+    },
+    async activate() {
+      return { activated: [{ capability, content: "Release instructions" }], denied: [] };
+    },
+    async read() {
+      return "Reference";
+    },
+  });
+  const found = await search.execute(
+    { action: "search", query: "  publish   release  ", limit: 3 },
+    noSignal,
+  );
+  assert.deepEqual(found.sessionEffects, [
+    {
+      type: "capability.searched",
+      payload: { query: "publish release", limit: 3, results: [capability] },
+    },
+  ]);
+  const activated = await search.execute(
+    { action: "activate", identities: ["skill:release"] },
+    noSignal,
+  );
+  assert.equal(activated.sessionEffects?.[0]?.type, "capability.activated");
+  await assert.rejects(
+    search.execute({ action: "activate", identities: [] }, noSignal),
+    ToolInputError,
+  );
 });
 
 test("shell runs a command and reports output and exit status", async (context) => {

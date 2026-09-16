@@ -20,6 +20,7 @@ import {
   type SessionId,
 } from "./event-envelope.ts";
 
+import { CAPABILITY_LIMITS, type CapabilitySummary } from "./capability.ts";
 import { type CompactionSettings, parseCompactionSettings } from "./compaction.ts";
 import {
   type ModelRequestConfiguration,
@@ -171,6 +172,16 @@ export type EventPayloadMap = {
     readonly source: string;
     readonly content: string;
   };
+  "capability.searched": {
+    readonly query: string;
+    readonly limit: number;
+    readonly results: readonly CapabilitySummary[];
+  };
+  "capability.activated": {
+    readonly capability: CapabilitySummary;
+    readonly content: string;
+  };
+  "capability.denied": { readonly identity: string; readonly reason: string };
   "permission.requested": { readonly capability: string; readonly description: string };
   "permission.resolved": {
     readonly requestId: EventId;
@@ -311,6 +322,18 @@ function optionalString(value: JsonValue | undefined, path: string): void {
   if (value !== undefined) string(value, path);
 }
 
+function boundedUtf8String(
+  value: JsonValue | undefined,
+  path: string,
+  maximumBytes: number,
+): string {
+  const parsed = string(value, path);
+  if (new TextEncoder().encode(parsed).byteLength > maximumBytes) {
+    validationError(path, `must not exceed ${maximumBytes} UTF-8 bytes`);
+  }
+  return parsed;
+}
+
 function validateBlob(value: JsonValue, path: string): void {
   const blob = object(value, path);
   exact(blob, path, ["sha256", "mediaType", "sizeBytes"], ["name"]);
@@ -372,6 +395,30 @@ function validateUsage(value: JsonValue, path: string): void {
 
 function validateStringArray(value: JsonValue | undefined, path: string): void {
   for (const [index, item] of array(value, path).entries()) string(item, `${path}[${index}]`);
+}
+
+function validateCapabilitySummary(value: JsonValue | undefined, path: string): void {
+  const capability = object(value, path);
+  exact(capability, path, [
+    "identity",
+    "kind",
+    "name",
+    "description",
+    "path",
+    "scope",
+    "provenance",
+  ]);
+  boundedUtf8String(capability.identity, `${path}.identity`, CAPABILITY_LIMITS.identityBytes);
+  choice(capability.kind, `${path}.kind`, ["skill", "tool"]);
+  boundedUtf8String(capability.name, `${path}.name`, CAPABILITY_LIMITS.nameBytes);
+  boundedUtf8String(
+    capability.description,
+    `${path}.description`,
+    CAPABILITY_LIMITS.descriptionBytes,
+  );
+  boundedUtf8String(capability.path, `${path}.path`, CAPABILITY_LIMITS.pathBytes);
+  choice(capability.scope, `${path}.scope`, ["global", "project"]);
+  boundedUtf8String(capability.provenance, `${path}.provenance`, CAPABILITY_LIMITS.provenanceBytes);
 }
 
 function validateEventIds(value: JsonValue | undefined, path: string): void {
@@ -617,6 +664,32 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     string(payload.extensionId, `${path}.extensionId`);
     string(payload.source, `${path}.source`);
     string(payload.content, `${path}.content`, true);
+    return payload;
+  },
+  "capability.searched": (payload, path) => {
+    exact(payload, path, ["query", "limit", "results"]);
+    boundedUtf8String(payload.query, `${path}.query`, CAPABILITY_LIMITS.queryBytes);
+    const limit = nonNegativeInteger(payload.limit, `${path}.limit`);
+    if (limit < 1 || limit > CAPABILITY_LIMITS.searchResults) {
+      validationError(`${path}.limit`, `must be from 1 through ${CAPABILITY_LIMITS.searchResults}`);
+    }
+    const results = array(payload.results, `${path}.results`);
+    if (results.length > limit) validationError(`${path}.results`, "must not exceed limit");
+    for (const [index, result] of results.entries()) {
+      validateCapabilitySummary(result, `${path}.results[${index}]`);
+    }
+    return payload;
+  },
+  "capability.activated": (payload, path) => {
+    exact(payload, path, ["capability", "content"]);
+    validateCapabilitySummary(payload.capability, `${path}.capability`);
+    string(payload.content, `${path}.content`);
+    return payload;
+  },
+  "capability.denied": (payload, path) => {
+    exact(payload, path, ["identity", "reason"]);
+    boundedUtf8String(payload.identity, `${path}.identity`, CAPABILITY_LIMITS.identityBytes);
+    string(payload.reason, `${path}.reason`);
     return payload;
   },
   "permission.requested": (payload, path) => {

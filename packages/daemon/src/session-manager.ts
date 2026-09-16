@@ -143,6 +143,8 @@ export type SessionRuntimeFactory = (input: {
     request: SessionInteractionRequest,
     signal?: AbortSignal,
   ) => Promise<SessionInteractionResponse>;
+  readonly compact: (instructions?: string) => Promise<unknown>;
+  readonly reload: () => Promise<unknown>;
   readonly readBlob: (reference: BlobReference) => Promise<Uint8Array>;
 }) => SessionRuntime | Promise<SessionRuntime>;
 
@@ -171,6 +173,10 @@ interface QueuedTurn {
 interface QueuedCompaction {
   readonly operationId: OperationId;
   readonly instructions?: string;
+}
+
+interface QueuedReload {
+  readonly operationId: OperationId;
 }
 
 interface PendingInteraction {
@@ -205,6 +211,7 @@ interface ManagedSession {
   readonly interactions: Map<string, PendingInteraction>;
   readonly queue: QueuedTurn[];
   readonly queuedCompactions: QueuedCompaction[];
+  readonly queuedReloads: QueuedReload[];
   queueDraining: boolean;
   queueMutationActive: boolean;
   queueDrain?: Promise<void>;
@@ -505,6 +512,8 @@ export class SessionManager {
         ? {}
         : { contextResources: previousResources.payload.resources }),
       interact: (request, signal) => this.interact(sessionId, request, signal),
+      compact: (instructions) => this.compact(sessionId, instructions),
+      reload: () => this.queueReload(sessionId),
       readBlob: (reference) => this.blobs.readAll(sessionId, reference),
     });
     return AgentSession.open(this.logPath(sessionId), sessionId, {
@@ -627,6 +636,7 @@ export class SessionManager {
       interactions: new Map(),
       queue: [],
       queuedCompactions: [],
+      queuedReloads: [],
       queueDraining: false,
       queueMutationActive: false,
       disposing: false,
@@ -1408,6 +1418,23 @@ export class SessionManager {
     );
   }
 
+  private async queueReload(sessionId: SessionId): Promise<{
+    readonly state: "completed" | "queued";
+    readonly operationId: OperationId;
+  }> {
+    const managed = this.managed(sessionId);
+    const operationId = parseOperationId(randomUUID(), "operationId");
+    if (managed.activeTurn?.kind === "turn" && !managed.rebuilding) {
+      managed.queuedReloads.push({ operationId });
+      return { state: "queued", operationId };
+    }
+    if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
+      throw new DaemonError("operation_active", "An operation already owns this branch");
+    }
+    await this.rebuild(managed, "reload", managed.selection, operationId);
+    return { state: "completed", operationId };
+  }
+
   async reload(
     sessionId: unknown,
     operationId?: OperationId,
@@ -2100,6 +2127,19 @@ export class SessionManager {
                 error instanceof Error ? error.message : "Queued compaction failed",
               );
             }
+          }
+          continue;
+        }
+        const reload = managed.queuedReloads.shift();
+        if (reload !== undefined) {
+          try {
+            await this.rebuild(managed, "reload", managed.selection, reload.operationId);
+          } catch (error) {
+            await managed.session.recordSessionError(reload.operationId, {
+              code: "reload_failed",
+              message: error instanceof Error ? error.message : "Queued reload failed",
+              retryable: false,
+            });
           }
           continue;
         }

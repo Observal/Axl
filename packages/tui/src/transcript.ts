@@ -299,6 +299,9 @@ export class SessionView {
       case "prompt.section":
       case "tool.schema":
       case "context.extension":
+      case "capability.searched":
+      case "capability.activated":
+      case "capability.denied":
       case "interaction.requested":
       case "interaction.resolved":
       case "child.result":

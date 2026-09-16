@@ -271,6 +271,7 @@ export class AgentSession {
   private acceptingQueuedMessages = false;
   private readonly steeringMessages: Array<readonly UserContent[]> = [];
   private readonly followUpMessages: Array<readonly UserContent[]> = [];
+  private readonly activeCapabilityContent = new Map<string, string>();
 
   private constructor(
     log: JsonlEventLog,
@@ -307,6 +308,12 @@ export class AgentSession {
     }
     this.tip = events.at(-1)?.id ?? null;
     this.messages = [...messagesFromLineage(events)];
+    for (const event of events) {
+      if (event.type === "capability.activated") {
+        this.activeCapabilityContent.set(event.payload.capability.identity, event.payload.content);
+        this.tools.activateCapability(event.payload.capability.identity);
+      }
+    }
   }
 
   /**
@@ -561,10 +568,16 @@ export class AgentSession {
     }
   }
 
+  private effectiveSystem(): string | undefined {
+    const capabilities = [...this.activeCapabilityContent.values()];
+    if (capabilities.length === 0) return this.system;
+    return [this.system, ...capabilities].filter((value) => value !== undefined).join("\n\n");
+  }
+
   private estimatedInputTokens(): number {
     return this.contextUsage === undefined
       ? estimateModelInputTokens({
-          system: this.system,
+          system: this.effectiveSystem(),
           messages: this.messages,
           tools: this.tools.declarations(),
         })
@@ -914,7 +927,7 @@ export class AgentSession {
         onRequestConfigured: async (configuration) => {
           appended.push(await this.append(operationId, "model.request_configured", configuration));
         },
-        system: this.system,
+        system: this.effectiveSystem(),
         messages: [...this.messages],
         tools: this.tools.declarations(),
         signal,
@@ -1093,6 +1106,20 @@ export class AgentSession {
         content: resultEvent.payload.content,
         isError: result.isError,
       });
+      for (const effect of result.sessionEffects ?? []) {
+        appended.push(await this.append(operationId, effect.type, effect.payload as never));
+        if (effect.type === "capability.activated") {
+          this.activeCapabilityContent.set(
+            effect.payload.capability.identity,
+            effect.payload.content,
+          );
+          const declaration = this.tools.activateCapability(effect.payload.capability.identity);
+          if (declaration !== undefined) {
+            appended.push(await this.append(operationId, "tool.schema", declaration));
+          }
+          this.contextUsage = undefined;
+        }
+      }
       if (signal?.aborted) return true;
     }
     return false;
@@ -1113,7 +1140,13 @@ export class AgentSession {
       };
     }
     try {
-      return { result: await tool.execute(call.input, signal ?? new AbortController().signal) };
+      const result = await tool.execute(call.input, signal ?? new AbortController().signal, {
+        activeCapabilities: new Set(this.activeCapabilityContent.keys()),
+      });
+      if (result.sessionEffects !== undefined && call.name !== "capability_search") {
+        throw new Error(`Tool ${call.name} cannot emit session effects`);
+      }
+      return { result };
     } catch (error) {
       const failure = {
         content: [

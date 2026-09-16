@@ -13,6 +13,7 @@
     { "path": "../kernel/tsconfig.build.json" },
     { "path": "../ai/tsconfig.build.json" },
     { "path": "../daemon/tsconfig.build.json" },
+    { "path": "../extensions/skills/tsconfig.build.json" },
     { "path": "../sandbox/tsconfig.build.json" }
   ]
 }

@@ -5,7 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { CredentialStore } from "@axl/ai";
 import { type AxlDaemon, listStoredSessions } from "@axl/daemon";
@@ -279,7 +279,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
   // Sandboxed startup fails closed before listening. Unsafe startup may listen
   // first because its lack of isolation is already explicit and logged.
   const initialAssembly = unsafe ? undefined : await loadAssembly();
-  const { AxlDaemon } = await import("@axl/daemon");
+  const { AxlDaemon, installDaemonCommandCapabilities } = await import("@axl/daemon");
   const providerManagement = {
     list: async (...args: Parameters<import("@axl/daemon").ProviderManagementService["list"]>) =>
       createProviderManagementService((await loadAssembly()).providers).list(...args),
@@ -318,6 +318,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       selection,
       contextResources,
       interact,
+      compact,
+      reload,
       readBlob,
     }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
@@ -391,19 +393,45 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         );
       }
       if (active.userQuestions) tools.register(kernel.makeAskUserQuestionTool(interact));
-      if (profile === "standard") tools.register(kernel.makeCapabilitySearchTool());
+      if (profile === "standard") {
+        const { discoverSkills, SkillCapabilityService } = await import("@axl/extension-skills");
+        const skills = await discoverSkills({
+          cwd,
+          globalDirectories: [join(axlHome, "skills"), join(dirname(axlHome), ".agents", "skills")],
+        });
+        const daemonCapabilities = installDaemonCommandCapabilities({
+          tools,
+          compact,
+          reload,
+        });
+        const grantedAuthorities = new Set([
+          "skills.activate",
+          ...daemonCapabilities.grantedAuthorities,
+        ]);
+        const skillService = new SkillCapabilityService(skills, { grantedAuthorities });
+        tools.register(
+          kernel.makeCapabilitySearchTool(
+            new kernel.CompositeCapabilityService(
+              [{ records: skillService.records, service: skillService }, daemonCapabilities.source],
+              grantedAuthorities,
+            ),
+          ),
+        );
+      }
 
       const prompt = kernel.buildStablePrompt({
         cwd,
         tools: tools.declarations().map(({ name, description }) => ({ name, description })),
-        ...(unsafe
-          ? {
-              constraints: [
-                ...kernel.ESSENTIAL_CONSTRAINTS,
+        constraints: [
+          ...kernel.ESSENTIAL_CONSTRAINTS,
+          ...(unsafe
+            ? [
                 "No operating-system sandbox is active. Commands and file tools have the user's full host access.",
-              ],
-            }
-          : {}),
+              ]
+            : [
+                "Commands run inside an isolated sandbox that masks the host home directory and blocks network access. A missing executable or inaccessible host path means unavailable inside the sandbox, not absent from the host.",
+              ]),
+        ],
         instructions,
       });
       return {

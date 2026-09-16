@@ -148,6 +148,35 @@ const eventPayloads = {
     source: "hook",
     content: "Additional context",
   },
+  "capability.searched": {
+    query: "publish release",
+    limit: 5,
+    results: [
+      {
+        identity: "skill:release",
+        kind: "skill",
+        name: "release",
+        description: "Prepare and publish releases",
+        path: "/workspace/.agents/skills/release/SKILL.md",
+        scope: "project",
+        provenance: "project:/workspace/.agents/skills",
+      },
+    ],
+  },
+  "capability.activated": {
+    capability: {
+      identity: "skill:release",
+      kind: "skill",
+      name: "release",
+      description: "Prepare and publish releases",
+      path: "/workspace/.agents/skills/release/SKILL.md",
+      scope: "project",
+      provenance: "project:/workspace/.agents/skills",
+    },
+    content:
+      '<skill name="release" path="/workspace/.agents/skills/release/SKILL.md">\nPublish safely.\n</skill>',
+  },
+  "capability.denied": { identity: "skill:unsafe", reason: "capability is not trusted" },
   "permission.requested": { capability: "filesystem.write", description: "Write README.md" },
   "permission.resolved": { requestId: eventId, decision: "allow_once" },
   "interaction.requested": {

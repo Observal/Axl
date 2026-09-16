@@ -143,6 +143,47 @@ test("projects messages, configuration, usage, interactions, and generic tools d
   });
 });
 
+test("projects capability discovery and retains activation across operations", () => {
+  const projector = new ConversationProjector(sessionId);
+  const first = parseOperationId("00000000-0000-4000-8000-000000000091");
+  const second = parseOperationId("00000000-0000-4000-8000-000000000092");
+  const capability = {
+    identity: "skill:release",
+    kind: "skill" as const,
+    name: "release",
+    description: "Prepare releases",
+    path: "/workspace/.agents/skills/release/SKILL.md",
+    scope: "project" as const,
+    provenance: "project:/workspace/.agents/skills",
+  };
+  projector.applyEvent(event("session.created", { cwd: "/workspace" }));
+  projector.applyEvent(
+    event("user.message", { content: [{ type: "text", text: "release" }] }, null, first),
+  );
+  projector.applyEvent(
+    event(
+      "capability.searched",
+      { query: "release", limit: 5, results: [capability] },
+      null,
+      first,
+    ),
+  );
+  projector.applyEvent(
+    event("capability.activated", { capability, content: "instructions" }, null, first),
+  );
+  projector.applyEvent(
+    event("capability.denied", { identity: "skill:other", reason: "denied" }, null, first),
+  );
+  assert.equal(projector.state.capabilitySearches.length, 1);
+  assert.equal(projector.state.activeCapabilities[0]?.payload.capability.identity, "skill:release");
+  assert.equal(projector.state.capabilityDenials.length, 1);
+
+  projector.applyEvent(
+    event("user.message", { content: [{ type: "text", text: "next" }] }, null, second),
+  );
+  assert.equal(projector.state.activeCapabilities[0]?.payload.capability.identity, "skill:release");
+});
+
 test("classifies first-party tool presentation intents", () => {
   const projector = new ConversationProjector(sessionId);
   projector.applyEvent(event("session.created", { cwd: "/workspace" }));
@@ -342,6 +383,9 @@ test("overview reads remain history-free for a 100,000-event session", () => {
     compactedEventIds: _compactedEventIds,
     tools: _tools,
     interactions: _interactions,
+    capabilitySearches: _capabilitySearches,
+    activeCapabilities: _activeCapabilities,
+    capabilityDenials: _capabilityDenials,
     operations: _operations,
     queue: _queue,
     interruptDeliveries: _interruptDeliveries,

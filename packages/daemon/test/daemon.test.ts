@@ -72,7 +72,13 @@ import {
 } from "@axl/sdk";
 import { connectUnixClient, nodeIdempotencyKeys, UnixSocketTransportFactory } from "@axl/sdk/unix";
 import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
-import { AxlDaemon, DaemonError, normalizeDaemonRpcErrorCode } from "../src/index.ts";
+import {
+  AxlDaemon,
+  commandCatalog,
+  DaemonError,
+  installDaemonCommandCapabilities,
+  normalizeDaemonRpcErrorCode,
+} from "../src/index.ts";
 import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -752,6 +758,22 @@ test("expires an initialized attachment that stops sending heartbeats", async (c
   assert.equal(initialized.kind, "success");
   await waitFor(() => snapshots.includes(2), "stale attachment presence");
   await waitFor(() => snapshots.at(-1) === 1, "stale attachment expiry");
+});
+
+test("derives model-callable tools from the daemon command registry", () => {
+  const tools = new ToolRegistry();
+  const installed = installDaemonCommandCapabilities({
+    tools,
+    compact: () => Promise.resolve({ state: "queued" }),
+    reload: () => Promise.resolve({ state: "queued" }),
+  });
+  const commands = commandCatalog(new Set(["session.compact", "session.reload"]));
+
+  assert.deepEqual(
+    installed.source.records.map((record) => record.provenance),
+    commands.commands.map((command) => command.id),
+  );
+  assert.deepEqual(tools.declarations(), []);
 });
 
 test("publishes a capability-filtered command catalog", async (context) => {

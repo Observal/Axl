@@ -133,6 +133,34 @@ const validPayloads = {
     source: "hook",
     content: "Additional context",
   },
+  "capability.searched": {
+    query: "release",
+    limit: 5,
+    results: [
+      {
+        identity: "skill:release",
+        kind: "skill",
+        name: "release",
+        description: "Prepare releases",
+        path: "/workspace/.agents/skills/release/SKILL.md",
+        scope: "project",
+        provenance: "fixture",
+      },
+    ],
+  },
+  "capability.activated": {
+    capability: {
+      identity: "skill:release",
+      kind: "skill",
+      name: "release",
+      description: "Prepare releases",
+      path: "/workspace/.agents/skills/release/SKILL.md",
+      scope: "project",
+      provenance: "fixture",
+    },
+    content: "Release safely.",
+  },
+  "capability.denied": { identity: "skill:unsafe", reason: "not trusted" },
   "permission.requested": { capability: "filesystem.write", description: "Write README.md" },
   "permission.resolved": { requestId: eventId, decision: "allow_once" },
   "interaction.requested": {

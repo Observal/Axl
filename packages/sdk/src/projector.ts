@@ -53,6 +53,10 @@ export interface ProjectedInteraction {
   readonly resolution?: CanonicalEvent<"interaction.resolved">;
 }
 
+export type ProjectedCapabilitySearch = CanonicalEvent<"capability.searched">;
+export type ProjectedActiveCapability = CanonicalEvent<"capability.activated">;
+export type ProjectedCapabilityDenial = CanonicalEvent<"capability.denied">;
+
 export interface ProjectedActivity {
   readonly operationId: OperationId;
   readonly sequence: number;
@@ -106,6 +110,9 @@ export interface ConversationState {
   readonly compactedEventIds: readonly EventId[];
   readonly tools: readonly ProjectedToolCall[];
   readonly interactions: readonly ProjectedInteraction[];
+  readonly capabilitySearches: readonly ProjectedCapabilitySearch[];
+  readonly activeCapabilities: readonly ProjectedActiveCapability[];
+  readonly capabilityDenials: readonly ProjectedCapabilityDenial[];
   readonly operations: readonly ProjectedOperation[];
   readonly activeOperationId?: OperationId;
   readonly uncertainShellOperations: readonly UncertainShellOperation[];
@@ -138,6 +145,9 @@ export type ConversationOverview = Omit<
   | "compactedEventIds"
   | "tools"
   | "interactions"
+  | "capabilitySearches"
+  | "activeCapabilities"
+  | "capabilityDenials"
   | "operations"
   | "queue"
   | "interruptDeliveries"
@@ -218,6 +228,9 @@ export class ConversationProjector {
   private readonly events = new Map<string, string>();
   private readonly tools = new Map<string, ProjectedToolCall>();
   private readonly interactions = new Map<string, ProjectedInteraction>();
+  private readonly capabilitySearches: ProjectedCapabilitySearch[] = [];
+  private readonly activeCapabilities = new Map<string, ProjectedActiveCapability>();
+  private readonly capabilityDenials: ProjectedCapabilityDenial[] = [];
   private readonly operations = new Map<OperationId, ProjectedOperation>();
   private readonly uncertainShellOperations = new Map<OperationId, UncertainShellOperation>();
   private readonly queue = new Map<EventId, ProjectedQueueItem>();
@@ -264,6 +277,9 @@ export class ConversationProjector {
       compactedEventIds: Object.freeze([...this.compactedEvents]),
       tools: Object.freeze([...this.tools.values()]),
       interactions: Object.freeze([...this.interactions.values()]),
+      capabilitySearches: Object.freeze([...this.capabilitySearches]),
+      activeCapabilities: Object.freeze([...this.activeCapabilities.values()]),
+      capabilityDenials: Object.freeze([...this.capabilityDenials]),
       operations: Object.freeze([...this.operations.values()]),
       uncertainShellOperations: Object.freeze([...this.uncertainShellOperations.values()]),
       queue: Object.freeze([...this.queue.values()]),
@@ -320,6 +336,9 @@ export class ConversationProjector {
     this.events.clear();
     this.tools.clear();
     this.interactions.clear();
+    this.capabilitySearches.length = 0;
+    this.activeCapabilities.clear();
+    this.capabilityDenials.length = 0;
     this.operations.clear();
     this.activeOperationId = undefined;
     if (!keepUncertainShells) this.uncertainShellOperations.clear();
@@ -515,6 +534,15 @@ export class ConversationProjector {
         this.updateOperation(event.operationId, "running");
         break;
       }
+      case "capability.searched":
+        this.capabilitySearches.push(event);
+        break;
+      case "capability.activated":
+        this.activeCapabilities.set(event.payload.capability.identity, event);
+        break;
+      case "capability.denied":
+        this.capabilityDenials.push(event);
+        break;
       case "config.model":
         this.model = event.payload.modelId;
         break;

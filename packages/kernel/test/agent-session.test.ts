@@ -460,6 +460,127 @@ test("dispatches tool calls, pairs results, and feeds them back", async (context
   assert.equal(operationIds.size, 1);
 });
 
+test("keeps activated capability instructions for the session and restores them on reopen", async (context) => {
+  const port = makePort([
+    [
+      {
+        type: "tool_call",
+        callId: "capability-1",
+        name: "capability_search",
+        input: { action: "activate", identities: ["skill:release"] },
+      },
+      { type: "completed", stopReason: "tool_use", usage },
+    ],
+    say("released"),
+    say("next"),
+  ]);
+  const registry = new ToolRegistry();
+  registry.registerCapability("skill:release", {
+    name: "release_tool",
+    description: "Release the project",
+    inputSchema: { type: "object" },
+    async execute() {
+      return { content: [{ type: "text", text: "released" }], isError: false };
+    },
+  });
+  registry.register({
+    name: "capability_search",
+    description: "Activate capabilities",
+    inputSchema: { type: "object" },
+    async execute() {
+      return {
+        content: [{ type: "text", text: '{"activated":["skill:release"]}' }],
+        isError: false,
+        sessionEffects: [
+          {
+            type: "capability.activated",
+            payload: {
+              capability: {
+                identity: "skill:release",
+                kind: "skill",
+                name: "release",
+                description: "Prepare releases",
+                path: "/workspace/.agents/skills/release/SKILL.md",
+                scope: "project",
+                provenance: "fixture",
+              },
+              content: "<skill>Release safely.</skill>",
+            },
+          },
+          {
+            type: "capability.activated",
+            payload: {
+              capability: {
+                identity: "skill:verify",
+                kind: "skill",
+                name: "verify",
+                description: "Verify releases",
+                path: "/workspace/.agents/skills/verify/SKILL.md",
+                scope: "project",
+                provenance: "fixture",
+              },
+              content: "<skill>Verify the result.</skill>",
+            },
+          },
+        ],
+      };
+    },
+  });
+  const { session, path } = await makeSession(context, port, registry, { system: "Base" });
+
+  const first = await session.runTurn([{ type: "text", text: "release" }]);
+  assert.deepEqual(
+    first.events.map((event) => event.type),
+    [
+      "user.message",
+      "assistant.message",
+      "tool.call",
+      "tool.result",
+      "capability.activated",
+      "tool.schema",
+      "capability.activated",
+      "assistant.message",
+    ],
+  );
+  assert.equal(
+    port.requests[1]?.system,
+    "Base\n\n<skill>Release safely.</skill>\n\n<skill>Verify the result.</skill>",
+  );
+  assert.deepEqual(
+    port.requests[0]?.tools.map((tool) => tool.name),
+    ["capability_search"],
+  );
+  assert.deepEqual(
+    port.requests[1]?.tools.map((tool) => tool.name),
+    ["capability_search", "release_tool"],
+  );
+
+  await session.runTurn([{ type: "text", text: "unrelated" }]);
+  const activeSystem =
+    "Base\n\n<skill>Release safely.</skill>\n\n<skill>Verify the result.</skill>";
+  assert.equal(port.requests[2]?.system, activeSystem);
+  assert.deepEqual(
+    port.requests[2]?.tools.map((tool) => tool.name),
+    ["capability_search", "release_tool"],
+  );
+
+  await session.dispose();
+  const resumedPort = makePort([say("resumed")]);
+  const resumed = await AgentSession.open(path, sessionId, {
+    model: resumedPort,
+    tools: registry,
+    cwd: "/workspace",
+    system: "Base",
+  });
+  await resumed.runTurn([{ type: "text", text: "after restart" }]);
+  assert.equal(resumedPort.requests[0]?.system, activeSystem);
+  assert.deepEqual(
+    resumedPort.requests[0]?.tools.map((tool) => tool.name),
+    ["capability_search", "release_tool"],
+  );
+  await resumed.dispose();
+});
+
 test("steering waits for the complete tool batch and follow-ups run afterward", async (context) => {
   let releaseFirst = (): void => undefined;
   let markFirstStarted = (): void => undefined;

@@ -47,6 +47,14 @@ Axl loads `AGENTS.md` files from the nearest Git repository root through the ses
 
 Loaded paths and exact model-visible content are recorded in the canonical session log and projected through the SDK. A resumed session keeps its recorded instruction snapshot. Run `/reload` to discover file changes and record a new context boundary. Symlinks that escape the applicable project or global root are rejected.
 
+## Optional capabilities
+
+Standard sessions expose one stable `capability_search` tool instead of placing every installed Skill in the prompt. The model searches compact authorized metadata, then explicitly activates selected identities once. Activation rechecks policy and path containment, records the exact model-visible instructions canonically, and keeps them active for the rest of the session, including after restart. Referenced files remain sandboxed behind the same tool's `read` action and require an active Skill.
+
+Agent Skills are discovered from `~/.axl/skills/`, `~/.agents/skills/`, and repository-root-to-working-directory `.axl/skills/` and `.agents/skills/` locations. Later definitions replace earlier definitions with the same `skill:<name>` identity. Discovery validates frontmatter and containment only. It does not execute scripts or expose instruction bodies, references, or assets. Full instructions load only through explicit activation.
+
+Daemon commands may declare a model-callable tool in the authoritative command registry. The current `compact_context` and `reload_context` tools use that progressive disclosure path: their provider-native schemas are absent until activation and remain available for the session afterward. Compaction and reload requests made during a response queue behind that response.
+
 ## Prompt templates
 
 Put reusable Markdown prompts in `~/.axl/prompts/` or `.axl/prompts/`. Project templates override global templates with the same filename. Run `/prompt` to browse them or `/prompt <name> [arguments]` to expand one into the editor for review before sending. Templates reload with `/reload`.

@@ -3,31 +3,65 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Dirent } from "node:fs";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { TerminalExtension } from "@axl/extension-api";
-import type { KernelTool, ToolExecutionResult } from "@axl/kernel";
-import type { JsonObject } from "@axl/protocol";
+import { CapabilityIndex, type CapabilityService } from "@axl/kernel";
+import type {
+  CapabilityActivationResult,
+  CapabilityRecord,
+  CapabilitySearchResult,
+  CapabilitySummary,
+  CapabilityTrust,
+} from "@axl/protocol";
 import { parseDocument } from "yaml";
 
 const SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_SKILL_FILE_BYTES = 512_000;
+const MAX_FRONTMATTER_BYTES = 64 * 1024;
+const SKILL_AUTHORITY = "skills.activate";
 
-export interface AgentSkill {
+interface SkillFrontmatter {
   readonly name: string;
   readonly description: string;
   readonly license?: string;
   readonly compatibility?: string;
   readonly metadata: Readonly<Record<string, string>>;
   readonly allowedTools?: string;
+}
+
+export interface AgentSkill extends SkillFrontmatter {
   readonly directory: string;
+  readonly path: string;
   readonly instructions: string;
+}
+
+export interface DiscoveredSkill {
+  readonly record: CapabilityRecord;
+  readonly directory: string;
+  readonly entryPath: string;
+  readonly discoveryRoot: string;
+}
+
+export interface SkillDiscoveryLocation {
+  readonly directory: string;
+  readonly containmentRoot: string;
+  readonly scope: "global" | "project";
+  readonly provenance: string;
 }
 
 export interface DiscoverSkillsOptions {
   readonly cwd: string;
-  readonly globalDirectory?: string;
+  readonly globalDirectories?: readonly string[];
+  readonly trust?: (location: SkillDiscoveryLocation, name: string) => CapabilityTrust;
+  readonly enabled?: (location: SkillDiscoveryLocation, name: string) => boolean;
+}
+
+export interface SkillCapabilityServiceOptions {
+  readonly grantedAuthorities: ReadonlySet<string>;
+  readonly authorize?: (record: CapabilityRecord) => string | undefined;
 }
 
 export class SkillValidationError extends Error {
@@ -38,6 +72,39 @@ export class SkillValidationError extends Error {
     this.name = "SkillValidationError";
     this.path = path;
   }
+}
+
+function within(root: string, path: string): boolean {
+  const child = relative(root, path);
+  return child === "" || (!child.startsWith(`..${sep}`) && child !== ".." && !isAbsolute(child));
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function projectDirectories(cwd: string): Promise<readonly string[]> {
+  const canonicalCwd = await realpath(resolve(cwd));
+  let root = canonicalCwd;
+  for (let directory = canonicalCwd; ; directory = dirname(directory)) {
+    if (await exists(join(directory, ".git"))) {
+      root = directory;
+      break;
+    }
+    if (dirname(directory) === directory) break;
+  }
+  const directories: string[] = [];
+  for (let directory = canonicalCwd; ; directory = dirname(directory)) {
+    directories.push(directory);
+    if (directory === root) break;
+  }
+  return directories.reverse();
 }
 
 function characterLength(value: string): number {
@@ -56,6 +123,7 @@ function optionalString(value: unknown, path: string, maximum?: number): string 
 }
 
 function decodeUtf8(value: Uint8Array, path: string): string {
+  if (value.includes(0)) throw new SkillValidationError(path, "must be text, not binary data");
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(value);
   } catch (cause) {
@@ -78,20 +146,9 @@ function parseMetadata(value: unknown, path: string): Readonly<Record<string, st
   return metadata;
 }
 
-export async function loadSkill(directory: string): Promise<AgentSkill> {
-  const canonicalDirectory = await realpath(directory).catch((cause: unknown) => {
-    throw new SkillValidationError(directory, `cannot resolve skill directory: ${String(cause)}`);
-  });
-  const skillPath = join(canonicalDirectory, "SKILL.md");
-  const source = decodeUtf8(
-    await readFile(skillPath).catch((cause: unknown) => {
-      throw new SkillValidationError(skillPath, `cannot read SKILL.md: ${String(cause)}`);
-    }),
-    skillPath,
-  );
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)([\s\S]*)$/.exec(source);
+function parseFrontmatter(source: string, skillPath: string): SkillFrontmatter {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source);
   if (!match) throw new SkillValidationError(skillPath, "must contain YAML frontmatter");
-
   const document = parseDocument(match[1] as string, {
     prettyErrors: false,
     strict: true,
@@ -118,10 +175,6 @@ export async function loadSkill(directory: string): Promise<AgentSkill> {
       "must contain lowercase letters, digits, and single hyphens only",
     );
   }
-  if (name !== basename(canonicalDirectory)) {
-    throw new SkillValidationError(`${skillPath}:name`, "must match the parent directory name");
-  }
-
   const license = optionalString(fields.license, `${skillPath}:license`);
   const compatibility = optionalString(fields.compatibility, `${skillPath}:compatibility`, 500);
   const allowedTools = optionalString(fields["allowed-tools"], `${skillPath}:allowed-tools`);
@@ -132,77 +185,315 @@ export async function loadSkill(directory: string): Promise<AgentSkill> {
     ...(compatibility === undefined ? {} : { compatibility }),
     metadata: parseMetadata(fields.metadata, `${skillPath}:metadata`),
     ...(allowedTools === undefined ? {} : { allowedTools }),
-    directory: canonicalDirectory,
-    instructions: match[2] as string,
   };
 }
 
-async function skillsIn(directory: string): Promise<AgentSkill[]> {
+async function readFrontmatter(handle: FileHandle, path: string): Promise<SkillFrontmatter> {
+  const buffer = Buffer.alloc(MAX_FRONTMATTER_BYTES);
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+  return parseFrontmatter(decodeUtf8(buffer.subarray(0, bytesRead), path), path);
+}
+
+async function validateOptionalDirectories(directory: string): Promise<void> {
+  for (const name of ["scripts", "references", "assets"]) {
+    const requested = join(directory, name);
+    if (!(await exists(requested))) continue;
+    const canonical = await realpath(requested);
+    if (!within(directory, canonical)) {
+      throw new SkillValidationError(requested, "escapes the skill directory");
+    }
+    if (!(await stat(canonical)).isDirectory()) {
+      throw new SkillValidationError(requested, "must be a directory");
+    }
+  }
+}
+
+async function skillMetadata(
+  entryPath: string,
+  discoveryRoot: string,
+  location: SkillDiscoveryLocation,
+  options: DiscoverSkillsOptions,
+): Promise<DiscoveredSkill> {
+  const directory = await realpath(entryPath).catch((cause: unknown) => {
+    throw new SkillValidationError(entryPath, `cannot resolve skill: ${String(cause)}`);
+  });
+  if (!within(discoveryRoot, directory)) {
+    throw new SkillValidationError(directory, "skill directory escapes its discovery root");
+  }
+  const requestedSkillPath = join(directory, "SKILL.md");
+  const skillPath = await realpath(requestedSkillPath).catch((cause: unknown) => {
+    throw new SkillValidationError(requestedSkillPath, `cannot resolve SKILL.md: ${String(cause)}`);
+  });
+  if (!within(directory, skillPath)) {
+    throw new SkillValidationError(requestedSkillPath, "escapes the skill directory");
+  }
+  const handle = await open(skillPath, "r").catch((cause: unknown) => {
+    throw new SkillValidationError(skillPath, `cannot read SKILL.md: ${String(cause)}`);
+  });
+  let frontmatter: SkillFrontmatter;
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new SkillValidationError(skillPath, "is not a regular file");
+    if (metadata.size > MAX_SKILL_FILE_BYTES) {
+      throw new SkillValidationError(skillPath, `exceeds ${MAX_SKILL_FILE_BYTES} bytes`);
+    }
+    frontmatter = await readFrontmatter(handle, skillPath);
+  } finally {
+    await handle.close();
+  }
+  if (frontmatter.name !== basename(directory)) {
+    throw new SkillValidationError(`${skillPath}:name`, "must match the parent directory name");
+  }
+  await validateOptionalDirectories(directory);
+  const identity = `skill:${frontmatter.name}`;
+  return {
+    record: {
+      identity,
+      kind: "skill",
+      name: frontmatter.name,
+      description: frontmatter.description,
+      aliases: [],
+      path: skillPath,
+      scope: location.scope,
+      provenance: location.provenance,
+      enabled: options.enabled?.(location, frontmatter.name) ?? true,
+      trust: options.trust?.(location, frontmatter.name) ?? "trusted",
+      available: true,
+      requiredAuthority: [SKILL_AUTHORITY],
+    },
+    directory,
+    entryPath,
+    discoveryRoot,
+  };
+}
+
+async function skillsIn(
+  location: SkillDiscoveryLocation,
+  options: DiscoverSkillsOptions,
+): Promise<readonly DiscoveredSkill[]> {
   let entries: Dirent[];
   let root: string;
   try {
-    root = await realpath(directory);
+    root = await realpath(location.directory);
+    const containmentRoot = await realpath(location.containmentRoot);
+    if (!within(containmentRoot, root)) {
+      throw new SkillValidationError(
+        location.directory,
+        "skills directory escapes its trusted root",
+      );
+    }
     entries = await readdir(root, { withFileTypes: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  const skills: AgentSkill[] = [];
+  const skills: DiscoveredSkill[] = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-    const candidatePath = join(root, entry.name);
-    const candidate = await realpath(candidatePath).catch((cause: unknown) => {
-      throw new SkillValidationError(candidatePath, `cannot resolve skill: ${String(cause)}`);
-    });
-    const fromRoot = relative(root, candidate);
-    if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
-      throw new SkillValidationError(candidate, "skill directory escapes its discovery root");
-    }
-    skills.push(await loadSkill(candidate));
+    skills.push(await skillMetadata(join(root, entry.name), root, location, options));
   }
   return skills;
 }
 
-/** Discovers global skills first, with project skills overriding by exact name. */
+/** Discovers global, then broad-to-nearest project Skills with later identities winning. */
 export async function discoverSkills(
   options: DiscoverSkillsOptions,
-): Promise<readonly AgentSkill[]> {
-  const discovered = new Map<string, AgentSkill>();
-  for (const directory of [
-    ...(options.globalDirectory === undefined ? [] : [options.globalDirectory]),
-    join(resolve(options.cwd), ".axl", "skills"),
-  ]) {
-    for (const skill of await skillsIn(directory)) discovered.set(skill.name, skill);
+): Promise<readonly DiscoveredSkill[]> {
+  const directories = await projectDirectories(options.cwd);
+  const locations: SkillDiscoveryLocation[] = [
+    ...(options.globalDirectories ?? []).map((directory) => ({
+      directory,
+      containmentRoot: dirname(directory),
+      scope: "global" as const,
+      provenance: `global:${directory}`,
+    })),
+    ...directories.flatMap((directory) => [
+      {
+        directory: join(directory, ".axl", "skills"),
+        containmentRoot: directory,
+        scope: "project" as const,
+        provenance: `project:${join(directory, ".axl", "skills")}`,
+      },
+      {
+        directory: join(directory, ".agents", "skills"),
+        containmentRoot: directory,
+        scope: "project" as const,
+        provenance: `project:${join(directory, ".agents", "skills")}`,
+      },
+    ]),
+  ];
+  const discovered = new Map<string, DiscoveredSkill>();
+  for (const location of locations) {
+    for (const skill of await skillsIn(location, options)) {
+      discovered.set(skill.record.identity, skill);
+    }
   }
-  return [...discovered.values()].sort((left, right) => left.name.localeCompare(right.name));
+  return [...discovered.values()].sort((left, right) =>
+    left.record.identity.localeCompare(right.record.identity),
+  );
 }
 
-async function readSkillFile(skill: AgentSkill, requestedPath: string): Promise<string> {
-  if (!requestedPath || isAbsolute(requestedPath)) {
-    throw new SkillValidationError(requestedPath || "path", "must be a relative skill path");
-  }
-  const candidate = await realpath(join(skill.directory, requestedPath)).catch((cause: unknown) => {
-    throw new SkillValidationError(requestedPath, `cannot resolve resource: ${String(cause)}`);
+export async function loadSkill(directory: string): Promise<AgentSkill> {
+  const canonicalDirectory = await realpath(directory).catch((cause: unknown) => {
+    throw new SkillValidationError(directory, `cannot resolve skill directory: ${String(cause)}`);
   });
-  const fromRoot = relative(skill.directory, candidate);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
-    throw new SkillValidationError(requestedPath, "escapes the skill directory");
+  const requestedSkillPath = join(canonicalDirectory, "SKILL.md");
+  const skillPath = await realpath(requestedSkillPath).catch((cause: unknown) => {
+    throw new SkillValidationError(requestedSkillPath, `cannot resolve SKILL.md: ${String(cause)}`);
+  });
+  if (!within(canonicalDirectory, skillPath)) {
+    throw new SkillValidationError(requestedSkillPath, "escapes the skill directory");
   }
-  const file = await stat(candidate);
-  if (!file.isFile()) throw new SkillValidationError(requestedPath, "is not a regular file");
-  if (file.size > MAX_SKILL_FILE_BYTES) {
-    throw new SkillValidationError(requestedPath, `exceeds ${MAX_SKILL_FILE_BYTES} bytes`);
+  const metadata = await stat(skillPath).catch((cause: unknown) => {
+    throw new SkillValidationError(skillPath, `cannot stat SKILL.md: ${String(cause)}`);
+  });
+  if (!metadata.isFile()) throw new SkillValidationError(skillPath, "is not a regular file");
+  if (metadata.size > MAX_SKILL_FILE_BYTES) {
+    throw new SkillValidationError(skillPath, `exceeds ${MAX_SKILL_FILE_BYTES} bytes`);
   }
-  const content = await readFile(candidate);
-  if (content.subarray(0, 8_192).includes(0)) {
-    throw new SkillValidationError(requestedPath, "is binary and cannot be loaded as instructions");
+  const source = decodeUtf8(await readFile(skillPath), skillPath);
+  const frontmatter = parseFrontmatter(source, skillPath);
+  if (frontmatter.name !== basename(canonicalDirectory)) {
+    throw new SkillValidationError(`${skillPath}:name`, "must match the parent directory name");
   }
-  return decodeUtf8(content, requestedPath);
+  await validateOptionalDirectories(canonicalDirectory);
+  const match = /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)([\s\S]*)$/.exec(source);
+  if (!match) throw new SkillValidationError(skillPath, "must contain YAML frontmatter");
+  return {
+    ...frontmatter,
+    directory: canonicalDirectory,
+    path: skillPath,
+    instructions: match[1] as string,
+  };
 }
 
-function stringField(input: JsonObject, name: string): string | undefined {
-  const value = input[name];
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+function summary(record: CapabilityRecord): CapabilitySummary {
+  const { identity, kind, name, description, path, scope, provenance } = record;
+  return { identity, kind, name, description, path, scope, provenance };
+}
+
+function eligibilityReason(
+  record: CapabilityRecord,
+  grantedAuthorities: ReadonlySet<string>,
+): string | undefined {
+  if (!record.enabled) return "capability is disabled";
+  if (!record.available) return "capability is unavailable";
+  if (record.trust !== "trusted") return "capability is not trusted";
+  const missing = record.requiredAuthority.find((authority) => !grantedAuthorities.has(authority));
+  return missing === undefined ? undefined : `missing authority ${missing}`;
+}
+
+function xmlAttribute(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
+}
+
+export class SkillCapabilityService implements CapabilityService {
+  readonly records: readonly CapabilityRecord[];
+  private readonly skills: ReadonlyMap<string, DiscoveredSkill>;
+  private readonly index: CapabilityIndex;
+  private readonly options: SkillCapabilityServiceOptions;
+
+  constructor(skills: readonly DiscoveredSkill[], options: SkillCapabilityServiceOptions) {
+    this.skills = new Map(skills.map((skill) => [skill.record.identity, skill]));
+    this.options = options;
+    this.records = skills.map((skill) =>
+      options.authorize?.(skill.record) === undefined
+        ? skill.record
+        : { ...skill.record, available: false },
+    );
+    this.index = new CapabilityIndex(this.records, options.grantedAuthorities);
+  }
+
+  async search(query: string, limit: number): Promise<CapabilitySearchResult> {
+    return { results: this.index.search(query, limit) };
+  }
+
+  async activate(identities: readonly string[]): Promise<CapabilityActivationResult> {
+    const activated: CapabilityActivationResult["activated"][number][] = [];
+    const denied: CapabilityActivationResult["denied"][number][] = [];
+    for (const identity of identities) {
+      const discovered = this.skills.get(identity);
+      if (discovered === undefined) {
+        denied.push({ identity, reason: "capability is not indexed" });
+        continue;
+      }
+      const reason =
+        eligibilityReason(discovered.record, this.options.grantedAuthorities) ??
+        this.options.authorize?.(discovered.record);
+      if (reason !== undefined) {
+        denied.push({ identity, reason });
+        continue;
+      }
+      try {
+        const currentDirectory = await realpath(discovered.entryPath);
+        if (
+          currentDirectory !== discovered.directory ||
+          !within(discovered.discoveryRoot, currentDirectory)
+        ) {
+          throw new SkillValidationError(
+            discovered.entryPath,
+            "no longer identifies the indexed skill",
+          );
+        }
+        const skill = await loadSkill(currentDirectory);
+        if (`skill:${skill.name}` !== identity || skill.path !== discovered.record.path) {
+          throw new SkillValidationError(skill.path, "no longer matches the indexed identity");
+        }
+        const attributes = [
+          `name="${xmlAttribute(skill.name)}"`,
+          `path="${xmlAttribute(skill.path)}"`,
+          ...(skill.allowedTools === undefined
+            ? []
+            : [`allowed-tools="${xmlAttribute(skill.allowedTools)}"`]),
+        ].join(" ");
+        activated.push({
+          capability: summary(discovered.record),
+          content: `<skill ${attributes}>\n${skill.instructions}\n\nRead relative Skill resources with capability_search action="read", identity="${xmlAttribute(identity)}", and the relative path. Do not use read or bash on the Skill source path.\n</skill>`,
+        });
+      } catch (error) {
+        denied.push({
+          identity,
+          reason: error instanceof Error ? error.message : "capability activation failed",
+        });
+      }
+    }
+    return { activated, denied };
+  }
+
+  async read(identity: string, requestedPath: string): Promise<string> {
+    const discovered = this.skills.get(identity);
+    if (discovered === undefined)
+      throw new SkillValidationError(identity, "capability is not indexed");
+    const reason =
+      eligibilityReason(discovered.record, this.options.grantedAuthorities) ??
+      this.options.authorize?.(discovered.record);
+    if (reason !== undefined) throw new SkillValidationError(identity, reason);
+    if (isAbsolute(requestedPath)) {
+      throw new SkillValidationError(requestedPath, "must be relative to the Skill directory");
+    }
+    const currentDirectory = await realpath(discovered.entryPath);
+    if (
+      currentDirectory !== discovered.directory ||
+      !within(discovered.discoveryRoot, currentDirectory)
+    ) {
+      throw new SkillValidationError(
+        discovered.entryPath,
+        "no longer identifies the indexed skill",
+      );
+    }
+    const path = await realpath(join(currentDirectory, requestedPath)).catch((cause: unknown) => {
+      throw new SkillValidationError(requestedPath, `cannot resolve resource: ${String(cause)}`);
+    });
+    if (!within(currentDirectory, path)) {
+      throw new SkillValidationError(requestedPath, "escapes the Skill directory");
+    }
+    const metadata = await stat(path);
+    if (!metadata.isFile()) throw new SkillValidationError(requestedPath, "is not a regular file");
+    if (metadata.size > MAX_SKILL_FILE_BYTES) {
+      throw new SkillValidationError(requestedPath, `exceeds ${MAX_SKILL_FILE_BYTES} bytes`);
+    }
+    return decodeUtf8(await readFile(path), requestedPath);
+  }
 }
 
 export const skillTerminalExtension: TerminalExtension = {
@@ -212,86 +503,25 @@ export const skillTerminalExtension: TerminalExtension = {
     capabilities: ["terminal.tool-renderers"],
   },
   activate(api) {
-    api.registerToolRenderer("skill", ({ arguments: input }) => {
-      const action = typeof input.action === "string" ? input.action : "load";
-      const name = typeof input.name === "string" ? input.name : undefined;
-      const path = typeof input.path === "string" ? input.path : undefined;
-      const target = [action, name ?? path].filter(Boolean).join(" · ");
+    api.registerToolRenderer("capability_search", ({ arguments: input }) => {
+      const action = typeof input.action === "string" ? input.action : "search";
+      const target =
+        action === "activate" && Array.isArray(input.identities)
+          ? input.identities
+              .filter((value): value is string => typeof value === "string")
+              .join(", ")
+          : action === "read"
+            ? [input.identity, input.path]
+                .filter((value): value is string => typeof value === "string")
+                .join(" · ")
+            : typeof input.query === "string"
+              ? input.query
+              : undefined;
       return {
-        label: "SKILL",
-        target,
+        label: "CAPABILITY",
+        target: [action, target].filter(Boolean).join(" · "),
         hideWhenSuccessfulInFocus: true,
       };
     });
   },
 };
-
-export function makeSkillTool(skills: readonly AgentSkill[]): KernelTool {
-  const byName = new Map(skills.map((skill) => [skill.name, skill]));
-  return {
-    name: "skill",
-    description:
-      "List available Agent Skills, load a skill's full instructions, or read a referenced text resource within that skill.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: { type: "string", enum: ["list", "load", "read"] },
-        name: { type: "string" },
-        path: { type: "string" },
-      },
-      required: ["action"],
-      additionalProperties: false,
-    },
-    async execute(input: JsonObject): Promise<ToolExecutionResult> {
-      for (const key of Object.keys(input)) {
-        if (!["action", "name", "path"].includes(key)) {
-          throw new SkillValidationError(`skill.${key}`, "is not allowed");
-        }
-      }
-      const action = stringField(input, "action");
-      if (action === "list") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: skills.map((skill) => `${skill.name}: ${skill.description}`).join("\n"),
-            },
-          ],
-          isError: false,
-        };
-      }
-      const name = stringField(input, "name");
-      if (!name)
-        throw new SkillValidationError("skill.name", `is required for ${action ?? "action"}`);
-      const skill = byName.get(name);
-      if (!skill) throw new SkillValidationError("skill.name", `unknown skill ${name}`);
-      if (action === "load") {
-        const attributes = [
-          `name="${skill.name}"`,
-          `location="${skill.directory}"`,
-          ...(skill.allowedTools ? [`allowed-tools="${skill.allowedTools}"`] : []),
-        ].join(" ");
-        return {
-          content: [
-            {
-              type: "text",
-              text: `<skill ${attributes}>\n${skill.instructions}\n</skill>`,
-            },
-          ],
-          isError: false,
-          details: { name: skill.name, directory: skill.directory },
-        };
-      }
-      if (action === "read") {
-        const path = stringField(input, "path");
-        if (!path) throw new SkillValidationError("skill.path", "is required for read");
-        return {
-          content: [{ type: "text", text: await readSkillFile(skill, path) }],
-          isError: false,
-          details: { name: skill.name, path },
-        };
-      }
-      throw new SkillValidationError("skill.action", "must be list, load, or read");
-    },
-  };
-}

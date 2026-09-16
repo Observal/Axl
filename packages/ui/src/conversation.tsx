@@ -315,6 +315,9 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     case "prompt.section":
     case "tool.schema":
     case "context.extension":
+    case "capability.searched":
+    case "capability.activated":
+    case "capability.denied":
     case "interaction.resolved":
     case "compaction.started":
       return null;

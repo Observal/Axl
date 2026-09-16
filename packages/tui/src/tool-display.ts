@@ -15,7 +15,15 @@ import { highlightCode, languageForPath } from "./highlight.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapLine } from "./render.ts";
 import type { Palette, ToolOutputDisplay } from "./transcript.ts";
 
-const HIDDEN_RESULT_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write", "skill"]);
+const HIDDEN_RESULT_TOOLS = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "edit",
+  "write",
+  "capability_search",
+]);
 const COMPACT_PREVIEW_LINES = 6;
 const BASH_PREVIEW_LINES = 6;
 const FULL_RESULT_LINES = 200;

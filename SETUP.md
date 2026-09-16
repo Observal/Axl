@@ -151,11 +151,11 @@ Axl reads global configuration from `~/.axl`:
 - `credentials.json` for credentials managed by `axl login`
 - `settings.json` for model, thinking, web-tool, theme, and terminal preferences
 
-Credentials and settings apply in every workspace. Axl also reads `AGENTS.md`, `.axl/skills`, and `.axl/mcp.json` from the workspace root. A project skill or MCP server replaces the global entry with the same name. Reload the session after changing instructions, skills, or MCP configuration.
+Credentials and settings apply in every workspace. Axl also reads hierarchical `AGENTS.md`, `.axl/skills`, `.agents/skills`, and `.axl/mcp.json` resources. A nearer project Skill replaces a broader or global Skill with the same identity. Reload the session after changing instructions, Skills, or MCP configuration.
 
 ## Session profiles
 
-The `standard` profile is the default. It exposes `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`, then adds configured Skills and MCP servers.
+The `standard` profile is the default. It exposes `read`, `write`, `edit`, `bash`, `web_fetch`, `web_search`, and daemon-owned capability discovery. Agent Skills and model-callable tools declared by the daemon command registry become visible only after explicit activation and remain active for the rest of the session. The current command-backed tools are `compact_context` and `reload_context`. MCP runtime activation remains disabled until selected provider-native MCP tools are implemented.
 
 Use the `exec` profile to create a Bash-only session:
 
@@ -190,14 +190,16 @@ Unsafe mode uses a separate daemon socket and session directory under `~/.axl/un
 
 ## Add Agent Skills
 
-Put skills in either location:
+Put Skills in any supported location:
 
 ```text
 ~/.axl/skills/<name>/SKILL.md
-<workspace>/.axl/skills/<name>/SKILL.md
+~/.agents/skills/<name>/SKILL.md
+<repository-or-descendant>/.axl/skills/<name>/SKILL.md
+<repository-or-descendant>/.agents/skills/<name>/SKILL.md
 ```
 
-A project skill overrides a global skill with the same name. Axl validates the [Agent Skills format](https://agentskills.io/specification), adds skill metadata to the startup prompt, and loads full instructions only when the model selects that skill.
+Axl walks from the repository root to the working directory. Later definitions replace earlier definitions with the same `skill:<name>` identity. Discovery validates compact metadata and containment without adding the Skill catalog to the prompt. The model uses `capability_search` to find matching metadata, activate full instructions for the session, and read referenced Skill files through a containment-checked `read` action.
 
 ## Add MCP servers
 

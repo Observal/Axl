@@ -103,6 +103,19 @@ test("identical input builds a byte-identical prompt", () => {
   assert.equal(buildStablePrompt(input).text, buildStablePrompt(input).text);
 });
 
+test("capability search covers missing abilities and slash-command requests", () => {
+  const prompt = buildStablePrompt({
+    cwd: "/repo",
+    tools: [{ name: "capability_search", description: "Search optional capabilities" }],
+  });
+  assert.match(prompt.text, /ability not shown under Available tools/);
+  assert.match(prompt.text, /slash commands are not shell commands/i);
+  assert.deepEqual(
+    prompt.sections.map((section) => section.name),
+    ["identity", "tools", "capability-discovery", "constraints", "workspace"],
+  );
+});
+
 test("loadAgentsInstructions reads applicable files and skips missing ones", async (context) => {
   const cwd = await workspace(context);
   const globalPath = join(cwd, "global-agents.md");

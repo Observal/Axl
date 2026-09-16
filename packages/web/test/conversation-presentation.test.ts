@@ -121,6 +121,9 @@ const conversation = {
     },
   ],
   interactions: [],
+  capabilitySearches: [],
+  activeCapabilities: [],
+  capabilityDenials: [],
   tools: [
     {
       callEventId: "tool",
@@ -195,6 +198,9 @@ test("renders message actions, attachments, delivery, truncation, and usage stat
 test("renders safe assistant Markdown without interpreting model HTML", () => {
   const markdown = {
     compactedEventIds: [],
+    capabilitySearches: [],
+    activeCapabilities: [],
+    capabilityDenials: [],
     records: [
       {
         kind: "event",
@@ -384,6 +390,9 @@ test("renders specialized tool details and actionable MCP forms", () => {
 test("hides compacted records and renders the retained summary", () => {
   const compacted = {
     compactedEventIds: ["old-message"],
+    capabilitySearches: [],
+    activeCapabilities: [],
+    capabilityDenials: [],
     records: [
       {
         kind: "event",
