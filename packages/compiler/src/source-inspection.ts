@@ -18,6 +18,7 @@ import {
   snapshotSourcePath,
 } from "./local-snapshot.ts";
 import { parseJsonObject } from "./parsing.ts";
+import { isBlockedSourcePath, isPotentialSecretSource } from "./source-security.ts";
 
 export interface SourceInspectionDiagnostic {
   readonly code: string;
@@ -68,13 +69,8 @@ const LICENSE = /^(?:licen[cs]e|copying)(?:\.[^.]+)?$/iu;
 const NOTICE = /^(?:notice|third[-_ ]party(?:[-_ ]notices?)?)(?:\.[^.]+)?$/iu;
 const TEST_FILE =
   /(?:^|\/)(?:test|tests|__tests__|spec)(?:\/|$)|(?:\.test|\.spec)\.[cm]?[jt]sx?$/iu;
-const BLOCKED_SEGMENT =
-  /^(?:auth\.json|credentials?(?:\.json)?|sessions?|history|trust|\.git|\.npmrc|\.env(?:\..*)?)$/iu;
-const SECRET_PATH = /(?:secret|token|password|oauth|private[-_]?key|api[-_]?key)/iu;
 const TEXT_FILE =
   /\.(?:[cm]?[jt]sx?|jsonc?|ya?ml|toml|md|txt|sh|bash|zsh|fish|env|ini|cfg|conf)$/iu;
-const SECRET_CONTENT =
-  /(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)\s*[:=]\s*["']?[^\s"']{8,})/iu;
 const CAPABILITIES: readonly [string, RegExp][] = [
   ["process.execute", /(?:node:)?child_process|\b(?:spawn|execFile|execSync)\s*\(/u],
   [
@@ -93,10 +89,6 @@ const CAPABILITIES: readonly [string, RegExp][] = [
 function equalsFingerprint(expected: string, actual: string): boolean {
   if (!SHA256.test(expected) || !SHA256.test(actual)) return false;
   return timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(actual, "hex"));
-}
-
-function pathBlocked(path: string): boolean {
-  return path.split("/").some((part) => BLOCKED_SEGMENT.test(part));
 }
 
 function inventoryFor(snapshot: TreeSnapshot): readonly ImmutableFileInventoryEntry[] {
@@ -142,8 +134,8 @@ function packageTestScripts(snapshot: TreeSnapshot, maximumBytes: number): Detec
 
 export interface InspectSourceOptions {
   readonly sourceRoot: string;
-  readonly expectedDiscoveryFingerprint: string;
-  readonly resolveDiscoveryFingerprint: (snapshot: TreeSnapshot) => string | Promise<string>;
+  readonly expectedDiscoveryFingerprint?: string;
+  readonly resolveDiscoveryFingerprint?: (snapshot: TreeSnapshot) => string | Promise<string>;
   readonly fileSystem?: BoundedFileSystem;
   readonly limits?: InspectionLimits;
 }
@@ -162,16 +154,27 @@ export async function inspectSource(options: InspectSourceOptions): Promise<Sour
       "source contains unsupported filesystem entries",
     );
   }
-  const actualFingerprint = await options.resolveDiscoveryFingerprint(snapshot);
-  if (!equalsFingerprint(options.expectedDiscoveryFingerprint, actualFingerprint)) {
+  if (
+    (options.expectedDiscoveryFingerprint === undefined) !==
+    (options.resolveDiscoveryFingerprint === undefined)
+  )
+    throw new TypeError("discovery fingerprint and resolver must be supplied together");
+
+  const inventory = inventoryFor(snapshot);
+  const treeSha256 = immutableTreeSha256(inventory);
+  const actualFingerprint =
+    options.resolveDiscoveryFingerprint === undefined
+      ? treeSha256
+      : await options.resolveDiscoveryFingerprint(snapshot);
+  if (
+    options.expectedDiscoveryFingerprint !== undefined &&
+    !equalsFingerprint(options.expectedDiscoveryFingerprint, actualFingerprint)
+  ) {
     throw new DiscoveryError(
       "adoption_source_changed",
       "discovery fingerprint changed before acquisition",
     );
   }
-
-  const inventory = inventoryFor(snapshot);
-  const treeSha256 = immutableTreeSha256(inventory);
   const lockfiles = inventory
     .map((entry) => entry.relativePath)
     .filter((path) => LOCKFILES.has(basename(path)))
@@ -218,13 +221,9 @@ export async function inspectSource(options: InspectSourceOptions): Promise<Sour
     const file = snapshot.files[index];
     const item = inventory[index];
     if (file === undefined || item === undefined) throw new Error("inspection inventory mismatch");
-    const blocked = pathBlocked(item.relativePath);
-    const text =
-      TEXT_FILE.test(item.relativePath) && file.bytes.byteLength <= limits.maxManifestBytes
-        ? safeText(file.bytes)
-        : undefined;
-    const potentialSecret =
-      SECRET_PATH.test(item.relativePath) || (text !== undefined && SECRET_CONTENT.test(text));
+    const blocked = isBlockedSourcePath(item.relativePath);
+    const potentialSecret = isPotentialSecretSource(item.relativePath, file.bytes);
+    const text = TEXT_FILE.test(item.relativePath) ? safeText(file.bytes) : undefined;
     if (blocked) {
       blockedPaths.push(item.relativePath);
       diagnostics.push({

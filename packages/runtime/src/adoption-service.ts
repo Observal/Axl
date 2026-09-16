@@ -34,6 +34,7 @@ import {
   type AdoptionResourceSurface,
   parseRpcResult,
 } from "@axl/protocol";
+import type { AdoptionAcquisitionCoordinator } from "./adoption-acquisition.ts";
 
 const CACHE_ENTRIES = 8;
 const CURSOR_ENTRIES = 512;
@@ -78,6 +79,7 @@ export interface LocalAdoptionServiceOptions {
   readonly homeDirectory?: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly cacheLifetimeMs?: number;
+  readonly acquisition?: AdoptionAcquisitionCoordinator;
   /** Optional process-host policy that may further narrow opened Axl session roots. */
   readonly authorizeProjectRoot?: (
     canonicalRoot: string,
@@ -208,6 +210,7 @@ export class LocalAdoptionService implements AdoptionService {
     LocalAdoptionServiceOptions["authorizeProjectRoot"]
   >;
   private readonly cacheLifetimeMs: number;
+  readonly acquisition: AdoptionAcquisitionCoordinator | undefined;
   private readonly cache = new Map<string, ScanCacheEntry>();
   private readonly cursors = new Map<string, CursorRecord>();
   private readonly lifecycle = new AbortController();
@@ -217,6 +220,7 @@ export class LocalAdoptionService implements AdoptionService {
     this.homeDirectory = resolve(options.homeDirectory ?? homedir());
     this.environment = Object.freeze({ ...(options.environment ?? process.env) });
     this.cacheLifetimeMs = options.cacheLifetimeMs ?? CACHE_LIFETIME_MS;
+    this.acquisition = options.acquisition;
     this.authorizeProjectRoot = options.authorizeProjectRoot ?? (() => true);
   }
 

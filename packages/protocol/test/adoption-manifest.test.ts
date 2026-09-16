@@ -79,7 +79,7 @@ test("rejects unknown fields, credentials, and ambiguous primary surfaces", () =
   assert.throws(() => parseAdoptionManifest({ ...manifest, extra: true }), /extra.*not allowed/);
   assert.throws(
     () => parseAdoptionManifest({ ...manifest, sourceUri: "https://user:secret@example.com/a" }),
-    /credentials/,
+    /credential-free/,
   );
   assert.throws(
     () =>
@@ -90,6 +90,58 @@ test("rejects unknown fields, credentials, and ambiguous primary surfaces", () =
     /credentials/,
   );
   assert.throws(() => parseAdoptionManifest({ ...manifest, surfaces: [] }), /primary surface/);
+});
+
+test("enforces immutable identity and cross-field adoption invariants", () => {
+  assert.throws(
+    () =>
+      parseAdoptionManifest({
+        ...manifest,
+        surfaces: [{ ...manifest.surfaces[0], compatibility: "unsupported" }],
+      }),
+    /primary surface must not be unsupported/,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionManifest({
+        ...manifest,
+        surfaces: [
+          manifest.surfaces[0],
+          {
+            ...manifest.surfaces[0],
+            surfaceId: "secondary",
+            primary: false,
+            compatibility: "unsupported",
+          },
+        ],
+      }),
+    /partial approval for unsupported non-primary surfaces/,
+  );
+  assert.throws(
+    () => parseAdoptionManifest({ ...manifest, approvedCapabilities: ["network.client"] }),
+    /disjoint approved and denied capabilities/,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionManifest({
+        ...manifest,
+        generatedFiles: [],
+      }),
+    /absent from generatedFiles/,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionManifest({
+        ...manifest,
+        sourceLock: {
+          kind: "local-snapshot",
+          treeSha256: "b".repeat(64),
+          fileCount: 1,
+          sizeBytes: 2,
+        },
+      }),
+    /must match the immutable source tree/,
+  );
 });
 
 test("rejects unsafe generated paths and malformed file hashes", () => {

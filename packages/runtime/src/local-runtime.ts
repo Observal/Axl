@@ -17,6 +17,7 @@ import {
   type ThinkingLevel,
 } from "@axl/protocol";
 
+import { AdoptionAcquisitionCoordinator } from "./adoption-acquisition.ts";
 import { LocalAdoptionService } from "./adoption-service.ts";
 import {
   createProviderManagementService,
@@ -287,7 +288,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
   // Sandboxed startup fails closed before listening. Unsafe startup may listen
   // first because its lack of isolation is already explicit and logged.
   const initialAssembly = unsafe ? undefined : await loadAssembly();
-  const { AxlDaemon } = await import("@axl/daemon");
+  const { AdoptionStore, AxlDaemon } = await import("@axl/daemon");
   const providerManagement = {
     list: async (...args: Parameters<import("@axl/daemon").ProviderManagementService["list"]>) =>
       createProviderManagementService((await loadAssembly()).providers).list(...args),
@@ -309,7 +310,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
-  const adoptionService = new LocalAdoptionService();
+  const adoptionStore = new AdoptionStore(join(stateDirectory, "adopted"));
+  await adoptionStore.initialize();
+  const adoptionService = new LocalAdoptionService({
+    acquisition: new AdoptionAcquisitionCoordinator(adoptionStore),
+  });
   const daemon = new AxlDaemon({
     ...(options.buildVersion === undefined ? {} : { buildVersion: options.buildVersion }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),

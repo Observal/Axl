@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export type AcquisitionErrorCode =
+  | "acquisition_cancelled"
+  | "acquisition_timed_out"
   | "archive_entry_unsupported"
   | "archive_invalid"
   | "archive_limit_exceeded"

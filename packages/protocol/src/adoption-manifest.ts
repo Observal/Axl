@@ -125,7 +125,13 @@ export interface AdoptionManifest {
 const SHA256 = /^[0-9a-f]{64}$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const CAPABILITY = /^[a-z][a-z0-9]*(?:[._:-][a-z0-9]+)*$/;
-const MAX = Object.freeze({ array: 10_000, string: 4_096, rationale: 16_384, settings: 128 });
+const MAX = Object.freeze({
+  array: 10_000,
+  files: 20_000,
+  string: 4_096,
+  rationale: 16_384,
+  settings: 128,
+});
 
 type JsonObject = Record<string, unknown>;
 
@@ -185,8 +191,9 @@ function array<T>(
   value: unknown,
   path: string,
   parse: (item: unknown, path: string) => T,
+  maximum: number = MAX.array,
 ): readonly T[] {
-  if (!Array.isArray(value) || value.length > MAX.array) fail(path, "must be a bounded array");
+  if (!Array.isArray(value) || value.length > maximum) fail(path, "must be a bounded array");
   return Object.freeze(value.map((item, index) => parse(item, `${path}[${index}]`)));
 }
 
@@ -215,8 +222,15 @@ function safeUri(value: unknown, path: string): string {
   } catch {
     fail(path, "must be an absolute URI");
   }
-  if (uri.username !== "" || uri.password !== "" || uri.search !== "" || uri.hash !== "")
-    fail(path, "must not contain credentials, a query, or a fragment");
+  if (
+    !["https:", "file:"].includes(uri.protocol) ||
+    uri.username !== "" ||
+    uri.password !== "" ||
+    uri.search !== "" ||
+    uri.hash !== "" ||
+    (uri.protocol === "file:" && uri.hostname !== "")
+  )
+    fail(path, "must be a credential-free HTTPS or local file URI");
   return uri.href;
 }
 
@@ -264,8 +278,8 @@ function parseLicense(value: unknown, path: string): AdoptionManifestLicense {
   const expression = optionalString(input.expression, `${path}.expression`, 512);
   return Object.freeze({
     ...(expression === undefined ? {} : { expression }),
-    files: array(input.files, `${path}.files`, parseFile),
-    notices: array(input.notices, `${path}.notices`, parseFile),
+    files: array(input.files, `${path}.files`, parseFile, MAX.files),
+    notices: array(input.notices, `${path}.notices`, parseFile, MAX.files),
     warnings: array(input.warnings, `${path}.warnings`, (item, itemPath) =>
       string(item, itemPath, MAX.rationale),
     ),
@@ -406,7 +420,19 @@ function capabilities(value: unknown, path: string): readonly string[] {
   return parsed;
 }
 
+function requireUnique(values: readonly string[], path: string): void {
+  if (new Set(values).size !== values.length) fail(path, "contains duplicate identities");
+}
+
 export function parseAdoptionManifest(value: unknown, path = "adoptionManifest"): AdoptionManifest {
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(value);
+  } catch {
+    fail(path, "must be finite acyclic JSON");
+  }
+  if (new TextEncoder().encode(encoded).byteLength > 4 * 1024 * 1024)
+    fail(path, "exceeds the encoded byte limit");
   const input = object(value, path, [
     "version",
     "adoptionId",
@@ -439,6 +465,89 @@ export function parseAdoptionManifest(value: unknown, path = "adoptionManifest")
   const surfaces = array(input.surfaces, `${path}.surfaces`, parseSurface);
   if (surfaces.filter((surface) => surface.primary).length !== 1)
     fail(`${path}.surfaces`, "must contain exactly one primary surface");
+  requireUnique(
+    surfaces.map((surface) => surface.surfaceId),
+    `${path}.surfaces`,
+  );
+  const primary = surfaces.find((surface) => surface.primary);
+  if (primary?.compatibility === "unsupported")
+    fail(`${path}.surfaces`, "primary surface must not be unsupported");
+  const partialAdoptionAcknowledged = boolean(
+    input.partialAdoptionAcknowledged,
+    `${path}.partialAdoptionAcknowledged`,
+  );
+  const sourceLock = parseAdoptionSourceLock(input.sourceLock, `${path}.sourceLock`);
+  const sourceContentSha256 = sha(input.sourceContentSha256, `${path}.sourceContentSha256`);
+  if (
+    (sourceLock.kind === "local-snapshot" || sourceLock.kind === "git") &&
+    sourceLock.treeSha256 !== sourceContentSha256
+  ) {
+    fail(`${path}.sourceContentSha256`, "must match the immutable source tree");
+  }
+  const sourceFiles = array(input.sourceFiles, `${path}.sourceFiles`, parseFile, MAX.files);
+  const generatedFiles = array(
+    input.generatedFiles,
+    `${path}.generatedFiles`,
+    parseFile,
+    MAX.files,
+  );
+  requireUnique(
+    sourceFiles.map((file) => file.path),
+    `${path}.sourceFiles`,
+  );
+  requireUnique(
+    generatedFiles.map((file) => file.path),
+    `${path}.generatedFiles`,
+  );
+  for (const [files, filesPath] of [
+    [sourceFiles, `${path}.sourceFiles`],
+    [generatedFiles, `${path}.generatedFiles`],
+  ] as const) {
+    const paths = files.map((file) => file.path);
+    if (paths.some((entry, index) => index > 0 && entry <= (paths[index - 1] ?? "")))
+      fail(filesPath, "must use unique lexical path order");
+  }
+  const generatedPaths = new Set(generatedFiles.map((file) => file.path));
+  for (const surface of surfaces) {
+    requireUnique(surface.generatedPaths, `${path}.surfaces.${surface.surfaceId}.generatedPaths`);
+    for (const generatedPath of surface.generatedPaths)
+      if (!generatedPaths.has(generatedPath))
+        fail(
+          `${path}.surfaces.${surface.surfaceId}.generatedPaths`,
+          "references a file absent from generatedFiles",
+        );
+  }
+  const requestedCapabilities = capabilities(
+    input.requestedCapabilities,
+    `${path}.requestedCapabilities`,
+  );
+  const approvedCapabilities = capabilities(
+    input.approvedCapabilities,
+    `${path}.approvedCapabilities`,
+  );
+  const deniedCapabilities = capabilities(input.deniedCapabilities, `${path}.deniedCapabilities`);
+  const requested = new Set(requestedCapabilities);
+  if (
+    approvedCapabilities.some((capability) => !requested.has(capability)) ||
+    deniedCapabilities.some((capability) => !requested.has(capability)) ||
+    approvedCapabilities.some((capability) => deniedCapabilities.includes(capability))
+  ) {
+    fail(`${path}.requestedCapabilities`, "must contain disjoint approved and denied capabilities");
+  }
+  const approvals = array(input.approvals, `${path}.approvals`, parseApproval);
+  requireUnique(
+    approvals.map((approval) => approval.approvalId),
+    `${path}.approvals`,
+  );
+  if (surfaces.some((surface) => !surface.primary && surface.compatibility === "unsupported")) {
+    if (!partialAdoptionAcknowledged || !approvals.some((approval) => approval.kind === "partial"))
+      fail(
+        `${path}.partialAdoptionAcknowledged`,
+        "must include a partial approval for unsupported non-primary surfaces",
+      );
+  }
+  const overlayHashes = array(input.overlayHashes, `${path}.overlayHashes`, sha);
+  requireUnique(overlayHashes, `${path}.overlayHashes`);
   const parentRevisionId =
     input.parentRevisionId === undefined
       ? undefined
@@ -451,20 +560,17 @@ export function parseAdoptionManifest(value: unknown, path = "adoptionManifest")
     scope: parseAdoptionScope(input.scope, `${path}.scope`),
     packageId: string(input.packageId, `${path}.packageId`, 512),
     sourceUri: safeUri(input.sourceUri, `${path}.sourceUri`),
-    sourceLock: parseAdoptionSourceLock(input.sourceLock, `${path}.sourceLock`),
-    sourceContentSha256: sha(input.sourceContentSha256, `${path}.sourceContentSha256`),
+    sourceLock,
+    sourceContentSha256,
     fileInventorySha256: sha(input.fileInventorySha256, `${path}.fileInventorySha256`),
-    sourceFiles: array(input.sourceFiles, `${path}.sourceFiles`, parseFile),
+    sourceFiles,
     license: parseLicense(input.license, `${path}.license`),
     model: parseModel(input.model, `${path}.model`),
     surfaces,
-    requestedCapabilities: capabilities(
-      input.requestedCapabilities,
-      `${path}.requestedCapabilities`,
-    ),
-    approvedCapabilities: capabilities(input.approvedCapabilities, `${path}.approvedCapabilities`),
-    deniedCapabilities: capabilities(input.deniedCapabilities, `${path}.deniedCapabilities`),
-    generatedFiles: array(input.generatedFiles, `${path}.generatedFiles`, parseFile),
+    requestedCapabilities,
+    approvedCapabilities,
+    deniedCapabilities,
+    generatedFiles,
     dependencies: array(input.dependencies, `${path}.dependencies`, parseDependency),
     verification: parseVerification(input.verification, `${path}.verification`),
     unsupportedBehavior: array(
@@ -472,12 +578,9 @@ export function parseAdoptionManifest(value: unknown, path = "adoptionManifest")
       `${path}.unsupportedBehavior`,
       (item, itemPath) => string(item, itemPath, MAX.rationale),
     ),
-    partialAdoptionAcknowledged: boolean(
-      input.partialAdoptionAcknowledged,
-      `${path}.partialAdoptionAcknowledged`,
-    ),
-    approvals: array(input.approvals, `${path}.approvals`, parseApproval),
+    partialAdoptionAcknowledged,
+    approvals,
     ...(parentRevisionId === undefined ? {} : { parentRevisionId }),
-    overlayHashes: array(input.overlayHashes, `${path}.overlayHashes`, sha),
+    overlayHashes,
   });
 }

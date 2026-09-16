@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { ArchiveLimits, ExtractedArchive } from "./archive.ts";
 import { extractBoundedTar } from "./archive.ts";
 import { AcquisitionError } from "./remote-errors.ts";
+import { normalizeGitRepositoryUri } from "./source-locator.ts";
+import { isUnsupportedNativeSourcePath, sensitiveSourceReason } from "./source-security.ts";
 
 const MAX_GIT_OUTPUT = 96 * 1024 * 1024;
 const MAX_GIT_DIAGNOSTIC = 16 * 1024;
@@ -40,14 +42,20 @@ export interface GitCommandRunner {
       readonly cwd: string;
       readonly env: Readonly<Record<string, string>>;
       readonly maximumOutputBytes: number;
+      readonly signal?: AbortSignal;
+      readonly timeoutMs: number;
     },
   ): Promise<GitCommandResult>;
 }
 
 export interface GitAcquisitionOptions {
   readonly destination: string;
+  /** Administrator-selected absolute path to the vetted Git executable. */
+  readonly gitExecutable: string;
   readonly temporaryDirectory?: string;
   readonly archiveLimits?: ArchiveLimits;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
 }
 
 export interface GitUnsupportedSurface {
@@ -61,38 +69,6 @@ export interface GitAcquisitionResult {
   readonly snapshot: ExtractedArchive;
   readonly sourceUri: string;
   readonly unsupportedSurfaces: readonly GitUnsupportedSurface[];
-}
-
-export function normalizeGitRepositoryUri(input: string): string {
-  if (/^(?:git@|[^/:\s]+@[^/:\s]+:|ext::)/i.test(input)) {
-    throw new AcquisitionError(
-      "git_unsupported",
-      "SCP-like and remote-helper Git sources are unsupported",
-    );
-  }
-  let url: URL;
-  try {
-    url = new URL(input);
-  } catch {
-    throw new AcquisitionError("git_invalid", "Git repository URI is invalid");
-  }
-  if (
-    url.protocol !== "https:" ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.search !== "" ||
-    url.hash !== ""
-  ) {
-    throw new AcquisitionError(
-      "git_unsupported",
-      "Git repository URI must be credential-free HTTPS without query or fragment",
-    );
-  }
-  url.hostname = url.hostname.toLowerCase();
-  url.pathname = url.pathname.replace(/\/{2,}/g, "/").replace(/\/$/, "");
-  if (url.pathname === "")
-    throw new AcquisitionError("git_invalid", "Git repository URI omits a repository path");
-  return url.href;
 }
 
 function validateRef(input: string): string {
@@ -111,8 +87,9 @@ function validateRef(input: string): string {
   return input;
 }
 
-function safeEnvironment(home: string): Readonly<Record<string, string>> {
+function safeEnvironment(home: string, gitExecutable: string): Readonly<Record<string, string>> {
   const environment: Record<string, string> = {
+    AXL_GIT_EXECUTABLE: gitExecutable,
     HOME: home,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
@@ -122,7 +99,6 @@ function safeEnvironment(home: string): Readonly<Record<string, string>> {
     GIT_PROTOCOL_FROM_USER: "0",
     LC_ALL: "C",
   };
-  if (process.env.PATH !== undefined) environment.PATH = process.env.PATH;
   if (process.env.SystemRoot !== undefined) environment.SystemRoot = process.env.SystemRoot;
   return Object.freeze(environment);
 }
@@ -134,27 +110,63 @@ export const nodeGitCommandRunner: GitCommandRunner = {
         cwd: options.cwd,
         env: { ...options.env },
         shell: false,
+        detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
       let bytes = 0;
       let exceeded = false;
+      let cancelled = false;
+      let timedOut = false;
+      const terminate = (): void => {
+        if (child.pid !== undefined && process.platform !== "win32") {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+            return;
+          } catch {
+            // Fall back to terminating the direct child.
+          }
+        }
+        child.kill("SIGKILL");
+      };
+      const onAbort = (): void => {
+        cancelled = true;
+        terminate();
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+      if (options.signal?.aborted) onAbort();
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, options.timeoutMs);
       const collect = (chunks: Buffer[], chunk: Buffer): void => {
         bytes += chunk.byteLength;
         if (bytes > options.maximumOutputBytes) {
           exceeded = true;
-          child.kill("SIGKILL");
+          terminate();
           return;
         }
         chunks.push(chunk);
       };
       child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
       child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
-      child.once("error", () =>
-        reject(new AcquisitionError("source_unavailable", "Git process could not start")),
-      );
+      child.once("error", () => {
+        clearTimeout(timeout);
+        options.signal?.removeEventListener("abort", onAbort);
+        reject(new AcquisitionError("source_unavailable", "Git process could not start"));
+      });
       child.once("close", (code) => {
+        clearTimeout(timeout);
+        options.signal?.removeEventListener("abort", onAbort);
+        if (cancelled) {
+          reject(new AcquisitionError("acquisition_cancelled", "Git acquisition was cancelled"));
+          return;
+        }
+        if (timedOut) {
+          reject(new AcquisitionError("acquisition_timed_out", "Git acquisition timed out"));
+          return;
+        }
         if (exceeded) {
           reject(new AcquisitionError("source_unavailable", "Git output exceeded its byte limit"));
           return;
@@ -183,8 +195,21 @@ async function requireGit(
   env: Readonly<Record<string, string>>,
   args: readonly string[],
   maximumOutputBytes = MAX_GIT_DIAGNOSTIC,
+  signal?: AbortSignal,
+  timeoutMs = 120_000,
 ): Promise<GitCommandResult> {
-  const result = await runner.run("git", args, { cwd, env, maximumOutputBytes });
+  const executable = env.AXL_GIT_EXECUTABLE;
+  if (executable === undefined)
+    throw new AcquisitionError("git_unsupported", "Git executable was not configured");
+  if (signal?.aborted)
+    throw new AcquisitionError("acquisition_cancelled", "Git acquisition was cancelled");
+  const result = await runner.run(executable, args, {
+    cwd,
+    env,
+    maximumOutputBytes,
+    ...(signal === undefined ? {} : { signal }),
+    timeoutMs,
+  });
   if (result.exitCode !== 0) throw new AcquisitionError("source_unavailable", "Git command failed");
   return result;
 }
@@ -232,7 +257,6 @@ async function findLfsPointers(
   snapshot: ExtractedArchive,
   destination: string,
 ): Promise<readonly GitUnsupportedSurface[]> {
-  const { readFile } = await import("node:fs/promises");
   const surfaces: GitUnsupportedSurface[] = [];
   for (const file of snapshot.files) {
     if (file.sizeBytes > 4096) continue;
@@ -254,8 +278,22 @@ export async function acquireGitSource(
   options: GitAcquisitionOptions,
   runner: GitCommandRunner = nodeGitCommandRunner,
 ): Promise<GitAcquisitionResult> {
-  const repositoryUri = normalizeGitRepositoryUri(locator.repositoryUri);
+  let repositoryUri: string;
+  try {
+    repositoryUri = normalizeGitRepositoryUri(locator.repositoryUri);
+  } catch {
+    throw new AcquisitionError("git_unsupported", "Git repository URI is unsupported");
+  }
+  if (!isAbsolute(options.gitExecutable) || options.gitExecutable.includes("\0")) {
+    throw new AcquisitionError(
+      "git_unsupported",
+      "Git acquisition requires an administrator-selected absolute executable path",
+    );
+  }
   const requestedRef = validateRef(locator.requestedRef);
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600_000)
+    throw new AcquisitionError("git_invalid", "Git acquisition timeout is invalid");
   const temporaryRoot = await mkdtemp(
     join(options.temporaryDirectory ?? tmpdir(), "axl-git-acquire-"),
   );
@@ -269,7 +307,17 @@ export async function acquireGitSource(
     "[credential]\n\thelper =\n[protocol]\n\tallow = never\n",
     { mode: 0o600 },
   );
-  const env = safeEnvironment(home);
+  const env = safeEnvironment(home, options.gitExecutable);
+  const configuredRunner = runner;
+  runner = {
+    run(executable, args, commandOptions) {
+      return configuredRunner.run(executable, args, {
+        ...commandOptions,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+        timeoutMs,
+      });
+    },
+  };
   try {
     await requireGit(runner, temporaryRoot, env, ["init", "--bare", repository]);
     await requireGit(runner, temporaryRoot, env, [
@@ -363,6 +411,19 @@ export async function acquireGitSource(
       options.archiveLimits === undefined ? {} : { limits: options.archiveLimits },
     );
     unsupported.push(...(await findLfsPointers(snapshot, options.destination)));
+    for (const file of snapshot.files) {
+      const bytes = await readFile(join(options.destination, ...file.relativePath.split("/")));
+      if (
+        sensitiveSourceReason(file.relativePath, bytes) !== undefined ||
+        isUnsupportedNativeSourcePath(file.relativePath)
+      ) {
+        await rm(options.destination, { recursive: true, force: true });
+        throw new AcquisitionError(
+          "git_unsupported",
+          "Git tree contains a blocked, secret-bearing, or native-add-on file",
+        );
+      }
+    }
     if (unsupported.some((surface) => surface.kind === "git-lfs")) {
       await rm(options.destination, { recursive: true, force: true });
       throw new AcquisitionError(

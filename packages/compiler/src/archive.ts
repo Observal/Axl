@@ -6,6 +6,7 @@ import { constants } from "node:fs";
 import { chmod, mkdir, open, realpath, rm } from "node:fs/promises";
 import { dirname, relative, resolve, sep } from "node:path";
 import { gunzipSync } from "node:zlib";
+import { immutableTreeSha256 } from "./local-snapshot.ts";
 import { AcquisitionError } from "./remote-errors.ts";
 
 export interface ArchiveLimits {
@@ -66,13 +67,21 @@ function safeRelativePath(
   stripPackagePrefix: boolean,
   limits: ArchiveLimits,
 ): string | undefined {
-  if (input.includes("\\") || input.includes("\0") || input.startsWith("/")) {
+  if (
+    input.includes("\\") ||
+    input.includes("\0") ||
+    input.startsWith("/") ||
+    [...input].some((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return code < 0x20 || code === 0x7f;
+    })
+  ) {
     throw new AcquisitionError("archive_path_invalid", "archive entry path is not relative");
   }
-  let parts = input
-    .normalize("NFC")
-    .split("/")
-    .filter((part) => part !== "");
+  const normalized = input.normalize("NFC");
+  if (normalized.includes("//"))
+    throw new AcquisitionError("archive_path_invalid", "archive entry path is not canonical");
+  let parts = normalized.split("/").filter((part) => part !== "");
   if (stripPackagePrefix && parts[0] === "package") parts = parts.slice(1);
   if (parts.length === 0) return undefined;
   if (parts.length > limits.maxDepth || parts.some((part) => part === "." || part === "..")) {
@@ -114,7 +123,13 @@ export async function extractBoundedTar(
   options: { readonly limits?: ArchiveLimits; readonly stripPackagePrefix?: boolean } = {},
 ): Promise<ExtractedArchive> {
   const limits = options.limits ?? DEFAULT_ARCHIVE_LIMITS;
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0)
+      throw new AcquisitionError("archive_limit_exceeded", `${name} must be a positive integer`);
+  }
   const maximumTarBytes = limits.maxTotalBytes + limits.maxEntries * 1024;
+  if (!Number.isSafeInteger(maximumTarBytes))
+    throw new AcquisitionError("archive_limit_exceeded", "archive limits exceed safe arithmetic");
   let tar: Uint8Array;
   try {
     tar =
@@ -206,7 +221,10 @@ export async function extractBoundedTar(
       const executable = (mode & 0o111) !== 0;
       const handle = await open(
         target,
-        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+        constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_WRONLY |
+          ("O_NOFOLLOW" in constants ? constants.O_NOFOLLOW : 0),
         executable ? 0o700 : 0o600,
       );
       try {
@@ -230,12 +248,6 @@ export async function extractBoundedTar(
     files.sort((left, right) =>
       left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0,
     );
-    const tree = createHash("sha256");
-    for (const file of files) {
-      tree.update(
-        `${file.relativePath}\0${file.sha256}\0${file.sizeBytes}\0${file.executable ? "x" : "-"}\n`,
-      );
-    }
     const directories = new Set<string>([canonicalDestination]);
     for (const file of files) {
       let directory = dirname(resolve(canonicalDestination, file.relativePath));
@@ -251,7 +263,7 @@ export async function extractBoundedTar(
       files: Object.freeze(files),
       fileCount: files.length,
       sizeBytes: totalBytes,
-      treeSha256: tree.digest("hex"),
+      treeSha256: immutableTreeSha256(files),
     });
   } catch (error) {
     await rm(destination, { recursive: true, force: true });

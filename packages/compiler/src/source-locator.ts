@@ -92,7 +92,9 @@ export function normalizeGitRepositoryUri(value: string): string {
   url.hostname = url.hostname.toLowerCase();
   url.protocol = "https:";
   if (url.port === "443") url.port = "";
-  return url.toString();
+  url.pathname = url.pathname.replace(/\/{2,}/gu, "/").replace(/\/$/u, "");
+  if (url.pathname === "") throw new TypeError("Git repository URI omits a repository path");
+  return url.href;
 }
 
 function parseNpmSpecifier(value: string, registryOrigin?: string): SourceLocator {
@@ -149,7 +151,11 @@ export function resolvedNpmLock(input: {
   if (!EXACT_VERSION.test(input.version)) throw new TypeError("npm lock version must be exact");
   if (!SHA512_SRI.test(input.integrity)) throw new TypeError("npm lock requires SHA-512 SRI");
   if (!SHA256.test(input.tarballSha256)) throw new TypeError("invalid tarball SHA-256");
-  return { ...input, registryOrigin: normalizeRegistryOrigin(input.registryOrigin), kind: "npm" };
+  return {
+    ...input,
+    registryOrigin: normalizeRegistryOrigin(input.registryOrigin),
+    kind: "npm",
+  };
 }
 
 export function resolvedGitLock(

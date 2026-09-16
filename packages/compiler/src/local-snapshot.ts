@@ -16,6 +16,7 @@ import {
 import { sha256 } from "./identity.ts";
 import { DEFAULT_INSPECTION_LIMITS, type InspectionLimits } from "./limits.ts";
 import type { ImmutableSourceLock } from "./source-locator.ts";
+import { isUnsupportedNativeSourcePath, sensitiveSourceReason } from "./source-security.ts";
 
 export interface ImmutableFileInventoryEntry {
   readonly relativePath: string;
@@ -86,6 +87,21 @@ export async function snapshotSourcePath(
   };
 }
 
+function assertSnapshotContainsNoSensitiveFiles(snapshot: TreeSnapshot): void {
+  for (const file of snapshot.files) {
+    if (
+      sensitiveSourceReason(file.relativePath, file.bytes) !== undefined ||
+      isUnsupportedNativeSourcePath(file.relativePath)
+    ) {
+      throw new DiscoveryError(
+        "adoption_source_unavailable",
+        "local source contains a blocked, secret-bearing, or native-add-on file",
+        file.relativePath,
+      );
+    }
+  }
+}
+
 function canonicalInventory(snapshot: TreeSnapshot): readonly ImmutableFileInventoryEntry[] {
   return Object.freeze(
     snapshot.files.map((file) =>
@@ -151,6 +167,16 @@ async function makeTreeReadOnly(root: string): Promise<void> {
   for (const directory of (await collectDirectories(root)).reverse()) await chmod(directory, 0o500);
 }
 
+async function removeStagingTree(root: string): Promise<void> {
+  try {
+    const directories = await collectDirectories(root);
+    for (const directory of directories) await chmod(directory, 0o700);
+    await rm(root, { recursive: true, force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 function within(path: string, root: string): boolean {
   const value = relative(root, path);
   return (
@@ -169,6 +195,24 @@ async function verifyPublishedTree(
       "adoption_source_unavailable",
       "published source contains unsupported entries",
     );
+  for (const file of snapshot.files) {
+    const expectedMode = (file.stat.mode & 0o111) !== 0 ? 0o500 : 0o400;
+    if ((file.stat.mode & 0o777) !== expectedMode) {
+      throw new DiscoveryError(
+        "adoption_source_changed",
+        "published immutable source has mutable file permissions",
+        file.relativePath,
+      );
+    }
+  }
+  for (const path of await collectDirectories(directory)) {
+    const directoryStat = await nodeFileSystem.lstat(path);
+    if ((directoryStat.mode & 0o777) !== 0o500)
+      throw new DiscoveryError(
+        "adoption_source_changed",
+        "published immutable source has mutable directory permissions",
+      );
+  }
   const inventory = canonicalInventory(snapshot);
   if (immutableTreeSha256(inventory) !== expectedTree) {
     throw new DiscoveryError(
@@ -215,10 +259,11 @@ export async function publishLocalSnapshot(
       "source and adoption store must be separate trees",
     );
   }
+  assertSnapshotContainsNoSensitiveFiles(source);
   const inventory = canonicalInventory(source);
   const treeSha256 = immutableTreeSha256(inventory);
   const destination = join(sourcesRoot, treeSha256);
-  const staging = join(canonicalStore, `.source-staging-${randomBytes(16).toString("hex")}`);
+  const staging = join(sourcesRoot, `.source-staging-${randomBytes(16).toString("hex")}`);
   await mkdir(staging, { mode: 0o700 });
 
   try {
@@ -279,14 +324,14 @@ export async function publishLocalSnapshot(
         "source changed before snapshot publication",
       );
     }
+    await makeTreeReadOnly(staging);
     await syncTreeDirectories(staging);
     await verifyPublishedTree(staging, treeSha256, limits);
-    await syncDirectory(canonicalStore);
+    await syncDirectory(sourcesRoot);
     try {
       await rename(staging, destination);
       await syncDirectory(sourcesRoot);
       await verifyPublishedTree(destination, treeSha256, limits);
-      await makeTreeReadOnly(destination);
       return {
         sourceDirectory: destination,
         lock: {
@@ -318,7 +363,7 @@ export async function publishLocalSnapshot(
       };
     }
   } finally {
-    await rm(staging, { recursive: true, force: true });
+    await removeStagingTree(staging);
     await syncDirectory(canonicalStore);
   }
 }

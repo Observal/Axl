@@ -16,7 +16,9 @@ import {
   type GitCommandRunner,
   type ImmutableArtifactCache,
   type NpmSourceLock,
+  nodeGitCommandRunner,
   normalizeGitRepositoryUri,
+  resolveNpmSource,
 } from "../src/index.ts";
 
 const temporaryDirectories: string[] = [];
@@ -72,20 +74,32 @@ function tar(entries: readonly TarEntry[]): Buffer {
 
 class MemoryCache implements ImmutableArtifactCache {
   readonly values = new Map<string, Uint8Array>();
+  readonly quarantined: string[] = [];
   async read(key: string): Promise<Uint8Array | undefined> {
     return this.values.get(key);
   }
   async write(key: string, bytes: Uint8Array): Promise<void> {
     this.values.set(key, bytes);
   }
+  async quarantine(key: string): Promise<void> {
+    this.values.delete(key);
+    this.quarantined.push(key);
+  }
 }
 
 test("npm resolves a range, drops credentials across approved origins, verifies and extracts without scripts", async () => {
+  const sentinel = join(await temporary("npm-sentinel"), "must-not-exist");
+  const lifecycleScripts = Object.fromEntries(
+    ["preinstall", "install", "postinstall", "prepare", "prepack", "postpack"].map((name) => [
+      name,
+      `touch ${sentinel}`,
+    ]),
+  );
   const artifact = gzipSync(
     tar([
       {
         path: "package/package.json",
-        content: JSON.stringify({ name: "safe-pkg", scripts: { install: "touch sentinel" } }),
+        content: JSON.stringify({ name: "safe-pkg", scripts: lifecycleScripts }),
       },
       { path: "package/index.js", content: "export default 1;", mode: 0o755 },
     ]),
@@ -153,6 +167,7 @@ test("npm resolves a range, drops credentials across approved origins, verifies 
   );
   assert.equal(result.credentialReferenceUsed, "credential:registry");
   assert.equal(JSON.stringify(result).includes("secret-value"), false);
+  await assert.rejects(readFile(sentinel));
 
   const offlineDestination = join(await temporary("npm-offline"), "snapshot");
   const offline = await acquireNpmSource(
@@ -162,7 +177,13 @@ test("npm resolves a range, drops credentials across approved origins, verifies 
       packageName: "safe-pkg",
       requested: "^1.2.0",
     },
-    { destination: offlineDestination, offline: true, lock: result.lock },
+    {
+      destination: offlineDestination,
+      offline: true,
+      lock: result.lock,
+      lockedTarballUrl: result.sourceUri,
+      approvedRedirectOrigins: ["https://cdn.example"],
+    },
     {
       cache,
       fetch: async () => {
@@ -172,6 +193,80 @@ test("npm resolves a range, drops credentials across approved origins, verifies 
   );
   assert.equal(offline.fromCache, true);
   assert.equal(offline.snapshot.treeSha256, result.snapshot.treeSha256);
+});
+
+test("npm resolves standard partial, disjunction, hyphen, and prerelease ranges", async () => {
+  const versions = ["1.2.0", "1.2.9", "1.3.0", "2.0.0", "2.1.0-alpha.2", "2.1.0-alpha.10"];
+  const metadata = JSON.stringify({
+    "dist-tags": { latest: "2.0.0" },
+    versions: Object.fromEntries(
+      versions.map((version) => [
+        version,
+        {
+          name: "safe-pkg",
+          version,
+          dist: {
+            integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}`,
+            tarball: `https://registry.example/safe-pkg-${version}.tgz`,
+          },
+        },
+      ]),
+    ),
+  });
+  const fetcher: typeof fetch = async () => new Response(metadata);
+  for (const [requested, expected] of [
+    [">=1.2 <2", "1.3.0"],
+    ["^1.2", "1.3.0"],
+    ["~1.2", "1.2.9"],
+    ["1.2.0 || 2.0.0", "2.0.0"],
+    ["1.2 - 1.3", "1.3.0"],
+    ["1.2.x", "1.2.9"],
+    [">=2.1.0-alpha.2 <2.1.0", "2.1.0-alpha.10"],
+  ] as const) {
+    const result = await resolveNpmSource(
+      {
+        kind: "npm",
+        registryOrigin: "https://registry.example",
+        packageName: "safe-pkg",
+        requested,
+      },
+      { fetch: fetcher },
+    );
+    assert.equal(result.resolved.version, expected);
+  }
+});
+
+test("remote acquisition deadlines abort stalled HTTP and Git work", async () => {
+  await assert.rejects(
+    resolveNpmSource(
+      {
+        kind: "npm",
+        registryOrigin: "https://registry.example",
+        packageName: "safe-pkg",
+        requested: "latest",
+      },
+      {
+        fetch: async (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), {
+              once: true,
+            });
+          }),
+      },
+      { timeoutMs: 10 },
+    ),
+    (error: unknown) => error instanceof AcquisitionError && error.code === "acquisition_timed_out",
+  );
+
+  await assert.rejects(
+    nodeGitCommandRunner.run("/bin/sh", ["-c", "sleep 30"], {
+      cwd: await temporary("git-timeout"),
+      env: { PATH: "/usr/bin:/bin" },
+      maximumOutputBytes: 1024,
+      timeoutMs: 10,
+    }),
+    (error: unknown) => error instanceof AcquisitionError && error.code === "acquisition_timed_out",
+  );
 });
 
 test("npm rejects bad integrity, unapproved origins, missing offline locks, and traversal archives", async () => {
@@ -239,7 +334,6 @@ test("npm rejects bad integrity, unapproved origins, missing offline locks, and 
     version: "1.0.0",
     integrity,
     tarballSha256: "0".repeat(64),
-    tarballUrl: "https://cdn.example/pkg.tgz",
   };
   const cache = new MemoryCache();
   await cache.write(`npm-sha512-${createHash("sha256").update(integrity).digest("hex")}`, artifact);
@@ -255,11 +349,58 @@ test("npm rejects bad integrity, unapproved origins, missing offline locks, and 
         destination: join(await temporary("npm-integrity"), "snapshot"),
         offline: true,
         lock: badLock,
+        lockedTarballUrl: "https://cdn.example/pkg.tgz",
+        approvedRedirectOrigins: ["https://cdn.example"],
       },
       { cache },
     ),
     (error: unknown) => error instanceof AcquisitionError && error.code === "integrity_mismatch",
   );
+});
+
+test("npm rejects bundled dependencies, native add-ons, and sensitive archive paths", async () => {
+  for (const [path, content] of [
+    ["package/node_modules/dependency/package.json", "not executed"],
+    ["package/native/binding.gyp", "not executed"],
+    ["package/native.node", "not executed"],
+    ["package/.npmrc", "not executed"],
+    ["package/src/innocent.ts", `${" ".repeat(300_000)}api_key = "never-copy-this"`],
+  ] as const) {
+    const artifact = gzipSync(tar([{ path, content }]));
+    const integrity = `sha512-${createHash("sha512").update(artifact).digest("base64")}`;
+    const cache = new MemoryCache();
+    await cache.write(
+      `npm-sha512-${createHash("sha256").update(integrity).digest("hex")}`,
+      artifact,
+    );
+    await assert.rejects(
+      acquireNpmSource(
+        {
+          kind: "npm",
+          registryOrigin: "https://registry.example",
+          packageName: "safe-pkg",
+          requested: "1.0.0",
+        },
+        {
+          destination: join(await temporary("npm-unsupported"), "snapshot"),
+          offline: true,
+          lockedTarballUrl: "https://registry.example/safe-pkg.tgz",
+          lock: {
+            kind: "npm",
+            registryOrigin: "https://registry.example",
+            packageName: "safe-pkg",
+            version: "1.0.0",
+            integrity,
+            tarballSha256: createHash("sha256").update(artifact).digest("hex"),
+          },
+        },
+        { cache },
+      ),
+      /unsupported/,
+    );
+    assert.equal(cache.values.size, 0);
+    assert.equal(cache.quarantined.length, 1);
+  }
 });
 
 test("bounded tar extraction rejects links and file limits", async () => {
@@ -292,6 +433,7 @@ test("bounded tar extraction rejects links and file limits", async () => {
 });
 
 test("git accepts only credential-free HTTPS and runs a constrained fetch into a bounded snapshot", async () => {
+  const sentinel = join(await temporary("git-sentinel"), "must-not-exist");
   for (const invalid of [
     "http://example.com/a.git",
     "ssh://example.com/a.git",
@@ -299,21 +441,28 @@ test("git accepts only credential-free HTTPS and runs a constrained fetch into a
     "https://user:pass@example.com/a.git",
     "ext::helper a",
   ]) {
-    assert.throws(() => normalizeGitRepositoryUri(invalid), AcquisitionError);
+    assert.throws(() => normalizeGitRepositoryUri(invalid));
   }
   assert.equal(
-    normalizeGitRepositoryUri("https://EXAMPLE.com/org/repo.git/"),
+    normalizeGitRepositoryUri("https://EXAMPLE.com/org//repo.git/"),
     "https://example.com/org/repo.git",
   );
 
   const archive = tar([
-    { path: "package.json", content: "{}" },
+    {
+      path: "package.json",
+      content: JSON.stringify({ scripts: { prepare: `touch ${sentinel}` } }),
+    },
     { path: "src/index.ts", content: "export {};" },
   ]);
-  const calls: Array<{ args: readonly string[]; env: Readonly<Record<string, string>> }> = [];
+  const calls: Array<{
+    executable: string;
+    args: readonly string[];
+    env: Readonly<Record<string, string>>;
+  }> = [];
   const runner: GitCommandRunner = {
-    async run(_executable, args, options) {
-      calls.push({ args, env: options.env });
+    async run(executable, args, options) {
+      calls.push({ executable, args, env: options.env });
       const command = args.includes("rev-parse")
         ? "commit"
         : args.includes("--format=%T")
@@ -342,15 +491,24 @@ test("git accepts only credential-free HTTPS and runs a constrained fetch into a
     },
   };
   const destination = join(await temporary("git"), "snapshot");
+  await assert.rejects(
+    acquireGitSource(
+      { kind: "git", repositoryUri: "https://example.com/org/repo.git", requestedRef: "main" },
+      { destination, gitExecutable: "git" },
+      runner,
+    ),
+    /absolute executable path/,
+  );
   const result = await acquireGitSource(
     { kind: "git", repositoryUri: "https://example.com/org/repo.git", requestedRef: "v1.2.3" },
-    { destination },
+    { destination, gitExecutable: "/opt/axl/bin/git" },
     runner,
   );
   assert.equal(result.lock.commit, "a".repeat(40));
   assert.equal(result.lock.repositoryTreeObject, "b".repeat(40));
   assert.match(result.lock.treeSha256, /^[0-9a-f]{64}$/);
   assert.equal(await readFile(join(destination, "src/index.ts"), "utf8"), "export {};");
+  await assert.rejects(readFile(sentinel));
   const fetchCall = calls.find((call) => call.args.includes("fetch"));
   assert.ok(fetchCall);
   assert.ok(fetchCall.args.includes("--no-tags"));
@@ -358,6 +516,8 @@ test("git accepts only credential-free HTTPS and runs a constrained fetch into a
   assert.equal(fetchCall.env.GIT_CONFIG_NOSYSTEM, "1");
   assert.equal(fetchCall.env.GIT_TERMINAL_PROMPT, "0");
   assert.equal(fetchCall.env.GIT_ASKPASS, "");
+  assert.equal(fetchCall.env.PATH, undefined);
+  assert.ok(calls.every((call) => call.executable === "/opt/axl/bin/git"));
   assert.equal(
     calls.some((call) => call.args.some((argument) => argument.includes("submodule update"))),
     false,
@@ -391,7 +551,10 @@ test("git rejects submodules and LFS pointers as unsupported surfaces", async ()
   await assert.rejects(
     acquireGitSource(
       { kind: "git", repositoryUri: "https://example.com/repo.git", requestedRef: "main" },
-      { destination: join(await temporary("git-submodule"), "snapshot") },
+      {
+        destination: join(await temporary("git-submodule"), "snapshot"),
+        gitExecutable: "/opt/axl/bin/git",
+      },
       runner(`160000 commit ${"c".repeat(40)}\tvendor/dep\0`),
     ),
     (error: unknown) => error instanceof AcquisitionError && error.code === "git_unsupported",
@@ -399,9 +562,74 @@ test("git rejects submodules and LFS pointers as unsupported surfaces", async ()
   await assert.rejects(
     acquireGitSource(
       { kind: "git", repositoryUri: "https://example.com/repo.git", requestedRef: "main" },
-      { destination: join(await temporary("git-lfs"), "snapshot") },
+      {
+        destination: join(await temporary("git-lfs"), "snapshot"),
+        gitExecutable: "/opt/axl/bin/git",
+      },
       runner(`100644 blob ${"c".repeat(40)}\tasset.bin\0`),
     ),
     (error: unknown) => error instanceof AcquisitionError && error.code === "git_unsupported",
+  );
+
+  const secretArchive = tar([
+    { path: "src/innocent.ts", content: `${" ".repeat(300_000)}api_key = "never-copy-this"` },
+  ]);
+  const secretRunner: GitCommandRunner = {
+    async run(_executable, args) {
+      return {
+        exitCode: 0,
+        stdout: args.includes("rev-parse")
+          ? Buffer.from("a".repeat(40))
+          : args.includes("--format=%T")
+            ? Buffer.from("b".repeat(40))
+            : args.includes("ls-tree")
+              ? Buffer.from(`100644 blob ${"c".repeat(40)}\tsrc/innocent.ts\0`)
+              : args.includes("archive")
+                ? secretArchive
+                : new Uint8Array(),
+        stderr: new Uint8Array(),
+      };
+    },
+  };
+  await assert.rejects(
+    acquireGitSource(
+      { kind: "git", repositoryUri: "https://example.com/repo.git", requestedRef: "main" },
+      {
+        destination: join(await temporary("git-secret"), "snapshot"),
+        gitExecutable: "/opt/axl/bin/git",
+      },
+      secretRunner,
+    ),
+    /secret-bearing/,
+  );
+
+  const nativeArchive = tar([{ path: "native/binding.gyp", content: "{}" }]);
+  const nativeRunner: GitCommandRunner = {
+    async run(_executable, args) {
+      return {
+        exitCode: 0,
+        stdout: args.includes("rev-parse")
+          ? Buffer.from("a".repeat(40))
+          : args.includes("--format=%T")
+            ? Buffer.from("b".repeat(40))
+            : args.includes("ls-tree")
+              ? Buffer.from(`100644 blob ${"c".repeat(40)}\tnative/binding.gyp\0`)
+              : args.includes("archive")
+                ? nativeArchive
+                : new Uint8Array(),
+        stderr: new Uint8Array(),
+      };
+    },
+  };
+  await assert.rejects(
+    acquireGitSource(
+      { kind: "git", repositoryUri: "https://example.com/repo.git", requestedRef: "main" },
+      {
+        destination: join(await temporary("git-native"), "snapshot"),
+        gitExecutable: "/opt/axl/bin/git",
+      },
+      nativeRunner,
+    ),
+    /native-add-on/,
   );
 });

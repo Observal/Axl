@@ -12,6 +12,7 @@ export * from "./identity.ts";
 export * from "./limits.ts";
 export * from "./local-snapshot.ts";
 export * from "./npm-acquisition.ts";
+export * from "./npm-lock.ts";
 export * from "./parsing.ts";
 export * from "./remote-errors.ts";
 export * from "./source-adapter.ts";

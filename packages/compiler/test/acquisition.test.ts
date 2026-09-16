@@ -2,7 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -132,6 +141,12 @@ test("local snapshot publication is immutable, executable-aware, verified, and i
   assert.equal(second.sourceDirectory, first.sourceDirectory);
   assert.deepEqual(second.lock, first.lock);
   assert.equal(await readFile(join(source, "lib/data.txt"), "utf8"), "content");
+
+  await chmod(first.sourceDirectory, 0o700);
+  await assert.rejects(
+    publishLocalSnapshot({ storeRoot: store, sourceRoot: source }),
+    (error: unknown) => error instanceof DiscoveryError && error.code === "adoption_source_changed",
+  );
 });
 
 test("concurrent aliases deduplicate by immutable local tree identity", async () => {
@@ -195,6 +210,24 @@ test("local snapshot rejects links and source mutation", async () => {
   );
 });
 
+test("local snapshot refuses blocked and potentially secret-bearing files", async () => {
+  for (const files of [
+    { ".env": "ordinary=value" },
+    { "config.json": 'api_key = "secret-value"' },
+    { "src/innocent.ts": `${" ".repeat(300_000)}api_key = "never-copy-this"` },
+    { "private-token.txt": "opaque" },
+  ]) {
+    const source = await fixture(files);
+    const store = await mkdtemp(join(tmpdir(), "axl-adoption-store-"));
+    await assert.rejects(
+      publishLocalSnapshot({ storeRoot: store, sourceRoot: source }),
+      (error: unknown) =>
+        error instanceof DiscoveryError && error.code === "adoption_source_unavailable",
+    );
+    assert.deepEqual(await readdir(join(store, "sources")), []);
+  }
+});
+
 test("source inspection is deterministic and reports metadata without executing scripts", async () => {
   const sentinel = join(await mkdtemp(join(tmpdir(), "axl-never-created-")), "sentinel");
   const source = await fixture({
@@ -238,6 +271,17 @@ test("source inspection is deterministic and reports metadata without executing 
     resolveDiscoveryFingerprint: () => fingerprint,
   });
   assert.deepEqual(again, inspection);
+
+  const oversizedText = await fixture({
+    "src/innocent.ts": `${" ".repeat(300_000)}\napi_key = "secret-value-that-must-not-leave"`,
+  });
+  const oversizedInspection = await inspectSource({
+    sourceRoot: oversizedText,
+    expectedDiscoveryFingerprint: fingerprint,
+    resolveDiscoveryFingerprint: () => fingerprint,
+  });
+  assert.equal(oversizedInspection.disclosure[0]?.disclose, false);
+  assert.deepEqual(oversizedInspection.potentialSecretFiles, ["src/innocent.ts"]);
   await assert.rejects(
     inspectSource({
       sourceRoot: source,
