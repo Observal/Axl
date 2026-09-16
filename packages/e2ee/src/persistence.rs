@@ -33,6 +33,14 @@ use crate::{
     TransactionalProvider,
 };
 
+mod pairing_lifecycle;
+pub use pairing_lifecycle::{
+    ActivationAcceptance, ActivationOutcome, ClaimFailure, ClaimSubmission,
+    DurablePendingInvitation, DurablePreJoinDevice, EpochReadyAcceptance, InvitationLifecycle,
+    InvitationPublication, PairLifecycle, PreJoinLifecycle, PreJoinPublication, RePairRequirement,
+    RemovalOutcome, ReservationIntent, ReservationOutcome, WelcomeOutcome, WelcomePublication,
+};
+
 /// Current Axl native E2EE storage schema.
 pub const STORAGE_SCHEMA_VERSION: u16 = 1;
 const STATE_FORMAT_VERSION: u16 = 1;
@@ -179,15 +187,79 @@ pub trait RollbackAnchor: Send + Sync {
 /// Durable exact-ciphertext record. Relay route identifiers are deliberately absent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OutboxRecord {
-    pub operation_id: Id,
-    pub crypto_session_id: Id,
-    pub logical_message_id: Id,
-    pub class: MessageClass,
-    pub epoch: u64,
-    pub profile_revision: u16,
-    pub retry_state: RetryState,
-    pub ciphertext: Vec<u8>,
-    pub commit: Option<CommitMetadata>,
+    pub(crate) operation_id: Id,
+    pub(crate) crypto_session_id: Id,
+    pub(crate) logical_message_id: Id,
+    pub(crate) class: MessageClass,
+    pub(crate) epoch: u64,
+    pub(crate) profile_revision: u16,
+    pub(crate) retry_state: RetryState,
+    pub(crate) ciphertext: Vec<u8>,
+    pub(crate) commit: Option<CommitMetadata>,
+}
+
+struct OutboxRecordFields {
+    operation_id: Id,
+    crypto_session_id: Id,
+    logical_message_id: Id,
+    class: MessageClass,
+    epoch: u64,
+    profile_revision: u16,
+    retry_state: RetryState,
+    ciphertext: Vec<u8>,
+    commit: Option<CommitMetadata>,
+}
+
+impl OutboxRecord {
+    fn new(fields: OutboxRecordFields) -> Self {
+        Self {
+            operation_id: fields.operation_id,
+            crypto_session_id: fields.crypto_session_id,
+            logical_message_id: fields.logical_message_id,
+            class: fields.class,
+            epoch: fields.epoch,
+            profile_revision: fields.profile_revision,
+            retry_state: fields.retry_state,
+            ciphertext: fields.ciphertext,
+            commit: fields.commit,
+        }
+    }
+
+    pub fn operation_id(&self) -> Id {
+        self.operation_id
+    }
+
+    pub fn crypto_session_id(&self) -> Id {
+        self.crypto_session_id
+    }
+
+    pub fn logical_message_id(&self) -> Id {
+        self.logical_message_id
+    }
+
+    pub fn class(&self) -> MessageClass {
+        self.class
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    pub fn profile_revision(&self) -> u16 {
+        self.profile_revision
+    }
+
+    pub fn retry_state(&self) -> RetryState {
+        self.retry_state
+    }
+
+    pub fn ciphertext(&self) -> &[u8] {
+        &self.ciphertext
+    }
+
+    pub fn commit(&self) -> Option<&CommitMetadata> {
+        self.commit.as_ref()
+    }
 }
 
 /// Durable retry state for an exact ciphertext.
@@ -217,6 +289,16 @@ pub(crate) enum CommittedOperation {
     Accepted(AcceptedMessageRecord),
     OutboxAcknowledged(OutboxRecord),
     ReceiveAcknowledged(AcceptedMessageRecord),
+    Pairing(PairingOperationRecord),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PairingOperationRecord {
+    operation_id: Id,
+    crypto_session_id: Id,
+    kind: u8,
+    outcome: u8,
+    artifact_hash: [u8; 48],
 }
 
 /// Errors from the durable boundary. Messages never include keys, plaintext, or ciphertext.
@@ -1168,7 +1250,8 @@ impl NativeGroupTransaction<'_> {
                         .map_err(map_storage_error)?;
                 }
                 CommittedOperation::OutboxAcknowledged(_)
-                | CommittedOperation::ReceiveAcknowledged(_) => {}
+                | CommittedOperation::ReceiveAcknowledged(_)
+                | CommittedOperation::Pairing(_) => {}
             }
             let bytes = encode_operation(fingerprint, next_generation, &operation)?;
             let mut operations = write.open_table(OPERATIONS).map_err(map_table_error)?;
@@ -1303,52 +1386,22 @@ impl Drop for NativeGroupTransaction<'_> {
 }
 
 impl GroupTransaction for NativeGroupTransaction<'_> {
-    type Provider = CoreProvider;
     type Error = PersistenceError;
 
-    fn provider(&self) -> &Self::Provider {
-        &self.provider
-    }
-
     fn stage_envelope(&mut self, envelope: &PreparedEnvelope) -> Result<(), Self::Error> {
-        self.stage_operation(CommittedOperation::Envelope(OutboxRecord {
-            operation_id: self.operation_id.ok_or(PersistenceError::Conflict)?,
-            crypto_session_id: envelope.crypto_session_id,
-            logical_message_id: envelope.logical_message_id,
-            class: envelope.class,
-            epoch: envelope.epoch,
-            profile_revision: PROFILE_REVISION,
-            retry_state: RetryState::Pending,
-            ciphertext: envelope.ciphertext.to_vec(),
-            commit: envelope.commit.clone(),
-        }))
-    }
-
-    fn stage_received(
-        &mut self,
-        crypto_session_id: Id,
-        logical_message_id: Id,
-        epoch: u64,
-    ) -> Result<(), Self::Error> {
-        if crypto_session_id != self.owner.crypto_session_id {
-            return Err(PersistenceError::IdentityMismatch);
-        }
-        self.owner
-            .faults
-            .check(FaultPoint::DuringReceiverStateWrites)?;
-        self.stage_operation(CommittedOperation::Accepted(AcceptedMessageRecord {
-            operation_id: self.operation_id.ok_or(PersistenceError::Conflict)?,
-            crypto_session_id,
-            logical_message_id,
-            class: MessageClass::ApplicationRequest,
-            epoch,
-            profile_revision: PROFILE_REVISION,
-            acknowledged: false,
-        }))
-    }
-
-    fn commit(self) -> Result<(), Self::Error> {
-        self.commit_inner().map(|_| ())
+        self.stage_operation(CommittedOperation::Envelope(OutboxRecord::new(
+            OutboxRecordFields {
+                operation_id: self.operation_id.ok_or(PersistenceError::Conflict)?,
+                crypto_session_id: envelope.crypto_session_id,
+                logical_message_id: envelope.logical_message_id,
+                class: envelope.class,
+                epoch: envelope.epoch,
+                profile_revision: PROFILE_REVISION,
+                retry_state: RetryState::Pending,
+                ciphertext: envelope.ciphertext.to_vec(),
+                commit: envelope.commit.clone(),
+            },
+        )))
     }
 
     fn rollback(mut self) -> Result<(), Self::Error> {
@@ -1368,13 +1421,13 @@ impl NativeGroupTransaction<'_> {
 /// Durable daemon endpoint. Every method reloads committed MLS state after opening its redb
 /// transaction; no `MlsGroup` survives a failed or completed operation.
 #[derive(Clone)]
-pub struct DurableDaemon {
+pub(crate) struct DurableDaemon {
     store: Arc<NativeTransactionalProvider>,
 }
 
 /// Durable phone endpoint with the same transaction and reload guarantees as [`DurableDaemon`].
 #[derive(Clone)]
-pub struct DurablePhone {
+pub(crate) struct DurablePhone {
     store: Arc<NativeTransactionalProvider>,
 }
 
@@ -1393,6 +1446,7 @@ impl DurablePlaintext {
     }
 }
 
+#[allow(dead_code)]
 impl DurableDaemon {
     pub fn create(
         root: &Path,
@@ -1537,7 +1591,7 @@ impl DurableDaemon {
             daemon.endpoint.epoch()?,
             &daemon.endpoint.epoch_authenticator()?,
         );
-        let record = OutboxRecord {
+        let record = OutboxRecord::new(OutboxRecordFields {
             operation_id,
             crypto_session_id: self.store.crypto_session_id,
             logical_message_id: operation_id,
@@ -1547,7 +1601,7 @@ impl DurableDaemon {
             retry_state: RetryState::Pending,
             ciphertext: welcome.bytes.to_vec(),
             commit: None,
-        };
+        });
         transaction.stage_operation(CommittedOperation::Envelope(record))?;
         transaction.commit_operation()?;
         self.store
@@ -1802,6 +1856,7 @@ impl DurableDaemon {
     }
 }
 
+#[allow(dead_code)]
 impl DurablePhone {
     pub fn create(
         root: &Path,
@@ -1845,7 +1900,7 @@ impl DurablePhone {
         let mut transaction = store.begin_transaction(crypto_session_id, 0, 0)?;
         transaction.bind_operation(operation_id, operation_fingerprint(10, &[])?)?;
         store.faults.check(FaultPoint::BeforeOpenMlsStateWrites)?;
-        let (phone, package) = Phone::create(identity.clone())?;
+        let (phone, package) = Phone::create_with_clock(identity.clone(), store.clock.as_ref())?;
         let provider = &phone.provider;
         persist_phone_metadata(
             &phone,
@@ -2621,6 +2676,7 @@ fn durable_plaintext(
     }
 }
 
+#[allow(dead_code)]
 fn welcome_from_operation(
     operation: CommittedOperation,
     metadata: EndpointMetadata,
@@ -2636,6 +2692,7 @@ fn welcome_from_operation(
     })
 }
 
+#[allow(dead_code)]
 fn transaction_metadata_from_store(
     store: &Arc<NativeTransactionalProvider>,
 ) -> Result<EndpointMetadata, PersistenceError> {
@@ -3004,6 +3061,15 @@ fn inspect_initialization_state(
                 && record == initialized_record(record.operation_id, crypto_session_id)
                 && persisted.as_ref() == Some(&record)
         }
+        Some((key, _, 1, CommittedOperation::Pairing(record))) => {
+            epoch == 0
+                && authenticator.is_empty()
+                && outbox_entries == 0
+                && accepted_entries == 0
+                && key.as_slice() == record.operation_id
+                && record.crypto_session_id == crypto_session_id
+                && matches!(record.kind, 1 | 2)
+        }
         _ => false,
     };
 
@@ -3178,7 +3244,7 @@ fn decode_outbox(bytes: &[u8]) -> Result<OutboxRecord, PersistenceError> {
     if crypto_session_id == [0; 16] || profile_revision != PROFILE_REVISION {
         return Err(PersistenceError::Corrupt);
     }
-    Ok(OutboxRecord {
+    Ok(OutboxRecord::new(OutboxRecordFields {
         operation_id,
         crypto_session_id,
         logical_message_id,
@@ -3188,7 +3254,7 @@ fn decode_outbox(bytes: &[u8]) -> Result<OutboxRecord, PersistenceError> {
         retry_state,
         ciphertext,
         commit,
-    })
+    }))
 }
 
 fn encode_accepted(record: &AcceptedMessageRecord) -> Vec<u8> {
@@ -3391,7 +3457,8 @@ fn prune_durable_records(
                     .is_some_and(|stored| stored.acknowledged)
             }
             CommittedOperation::OutboxAcknowledged(_)
-            | CommittedOperation::ReceiveAcknowledged(_) => true,
+            | CommittedOperation::ReceiveAcknowledged(_)
+            | CommittedOperation::Pairing(_) => true,
         };
         if acknowledged && generation <= cutoff {
             remove.push((key, operation));
@@ -3424,7 +3491,8 @@ fn prune_durable_records(
                     .map_err(map_storage_error)?;
             }
             CommittedOperation::OutboxAcknowledged(_)
-            | CommittedOperation::ReceiveAcknowledged(_) => {}
+            | CommittedOperation::ReceiveAcknowledged(_)
+            | CommittedOperation::Pairing(_) => {}
         }
     }
     Ok(())
@@ -3488,11 +3556,47 @@ fn validate_operation_binding(
         CommittedOperation::Accepted(record) | CommittedOperation::ReceiveAcknowledged(record) => {
             (record.operation_id, record.crypto_session_id)
         }
+        CommittedOperation::Pairing(record) => (record.operation_id, record.crypto_session_id),
     };
     if stored_operation_id != operation_id || stored_session_id != crypto_session_id {
         return Err(PersistenceError::IdentityMismatch);
     }
     Ok(())
+}
+
+fn encode_pairing_operation(record: &PairingOperationRecord) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + 16 + 1 + 1 + 48);
+    out.extend_from_slice(&record.operation_id);
+    out.extend_from_slice(&record.crypto_session_id);
+    out.push(record.kind);
+    out.push(record.outcome);
+    out.extend_from_slice(&record.artifact_hash);
+    out
+}
+
+fn decode_pairing_operation(bytes: &[u8]) -> Result<PairingOperationRecord, PersistenceError> {
+    let mut cursor = BinaryCursor::new(bytes);
+    let record = PairingOperationRecord {
+        operation_id: cursor.array()?,
+        crypto_session_id: cursor.array()?,
+        kind: cursor.u8()?,
+        outcome: cursor.u8()?,
+        artifact_hash: cursor.array()?,
+    };
+    cursor.finish()?;
+    if record.crypto_session_id == [0; 16] {
+        return Err(PersistenceError::Corrupt);
+    }
+    pairing_lifecycle::validate_pairing_operation_kind(record.kind, record.outcome)?;
+    Ok(record)
+}
+
+#[cfg(test)]
+pub(crate) fn validate_pairing_operation_discriminants_for_test(
+    kind: u8,
+    outcome: u8,
+) -> Result<(), PersistenceError> {
+    pairing_lifecycle::validate_pairing_operation_kind(kind, outcome)
 }
 
 fn encode_operation(
@@ -3505,6 +3609,7 @@ fn encode_operation(
         CommittedOperation::Accepted(record) => (2, encode_accepted(record)),
         CommittedOperation::OutboxAcknowledged(record) => (3, encode_outbox(record)?),
         CommittedOperation::ReceiveAcknowledged(record) => (4, encode_accepted(record)),
+        CommittedOperation::Pairing(record) => (5, encode_pairing_operation(record)),
     };
     let mut out = Vec::new();
     out.extend_from_slice(&fingerprint);
@@ -3528,6 +3633,7 @@ fn decode_operation_record(
         2 => CommittedOperation::Accepted(decode_accepted(result)?),
         3 => CommittedOperation::OutboxAcknowledged(decode_outbox(result)?),
         4 => CommittedOperation::ReceiveAcknowledged(decode_accepted(result)?),
+        5 => CommittedOperation::Pairing(decode_pairing_operation(result)?),
         _ => return Err(PersistenceError::Corrupt),
     };
     Ok((fingerprint, generation, operation))

@@ -128,32 +128,50 @@ This equivalence does not relax rollback detection. IndexedDB, persistent-storag
 non-extractable WebCrypto key do not supply an independent monotonic anchor. Browser pairing remains
 disabled until that requirement is met by a separately approved design.
 
-## Planned Session 50.2 pre-pair records
+## Session 50.2 pairing records
 
-The current Session 40B schema implements and recovers device pre-join state. It does not implement
-or recover daemon pending-invitation state. Daemon pending-invitation storage is a Session 50.2
-requirement, not an implemented Session 40B capability.
+The redb table schema remains version 1. Pairing state is stored as separately versioned records
+inside the encrypted provider image, so no nonce, claim, KeyPackage, Welcome, signer, or private
+KeyPackage material is added to an unencrypted redb table. The existing durable manifest
+authenticates the encrypted image and the pairing operation records added to `operations_v1`.
+Older active-group databases remain readable. A pairing operation requires its corresponding strict
+version 1 encrypted record; missing, malformed, unknown-version, or inconsistent state fails closed.
+An older reader cannot interpret the new pairing operation discriminator and fails closed rather
+than silently treating the state as an older form.
 
-Before implementation, PR 50.2 must define the pending-invitation table or encrypted-state
-representation, schema-version and migration decision, initialization recovery, lifecycle-lock
-behavior, authenticated-manifest coverage, cleanup behavior, and fault-injection tests. The planned
-record includes the nonce, invitation and identity binding, lifecycle state, a bounded set of at most
-five eligible failed-claim hashes and terminal results, and the accepted claim hash and exact result.
-It must live in the daemon's per-session transactional store and commit before QR bytes are returned.
-Until that work merges, the current implementation cannot create or recover daemon
-pending-invitation state.
+The daemon record contains the canonical invitation and hash, original nonce, identity and profile
+binding, issue and exclusive expiry times, rollback-safe last observed time, lifecycle state, up to
+five distinct failed-claim hashes and terminal results, pending and accepted claim binding,
+reservation intent, fresh group ID, exact Welcome, activation state, and active-pair lifecycle. The
+device record contains the complete invitation binding, per-pair signer and KeyPackage private state
+through the provider image, exact KeyPackage and claim bytes, the independently observed invitation
+and Welcome deadlines, exact Welcome and activation state, group ID, re-pair exclusions, and
+active-pair lifecycle. Neither record contains a relay route. Device pre-join creation samples its
+clock once and uses that observation for invitation validation, KeyPackage lifetime, claim creation,
+endpoint metadata, and the rollback baseline. Local invitation expiry records the actual observation
+time. A subsequently received Welcome may revive that local state only when the Welcome is still
+within its independent authenticated deadline and passes the complete join validation.
 
-The currently implemented device side owns its durable pre-join signer, KeyPackage private
-material, exact KeyPackage bytes, KeyPackage operation record, and existing profile and session
-binding. A pre-join device database is valid at epoch zero with an empty epoch authenticator only
-when its authenticated manifest and typed device state prove that the KeyPackage operation
-committed. Cleanup never turns an ambiguous pre-join database into a reusable empty store.
+A daemon invitation and a device pre-join state are valid committed initialization forms at epoch
+zero with an empty epoch authenticator. Their creation operation, encrypted state, generation,
+rollback counter, wrapping-key activation, and anchor advancement must all commit before invitation
+or claim bytes are returned. Open authenticates and strictly decodes the record before completing an
+interrupted `ready` publication. Cleanup never converts an ambiguous pre-join database into a
+reusable empty store.
 
-PR 50.1 and PR 50.2 must add the invitation hash, exact claim bytes, claim expiry and accounting, and
-associated lifecycle metadata before claim publication can use the planned contract. Once those
-records exist, pairing expiry or protected-state loss requires a fresh device ID, crypto session ID,
-KeyPackage, and group ID. Neither endpoint stores a relay route. Hosted services may later store only
-the reviewed nonce hash and opaque artifacts.
+Claim failure, confirmation, reservation, group creation, Welcome publication, join, activation,
+replacement, epoch-ready, removal, revocation, and reset use the ordinary immediate-durability,
+two-phase transaction path. Every OpenMLS call occurs after the transaction starts. Exact outbound
+bytes and the complete successor provider image commit together. Welcome-sensitive operations check
+the exclusive Welcome deadline in their transaction before disclosing bytes or accepting activation.
+A joined device remains in `AwaitingActivation` after preparing exact activation ciphertext. It
+becomes active only after durably applying typed evidence that the daemon accepted the authenticated
+activation before the Welcome deadline. A device remains behind the `WaitingForEpochReady` barrier
+until it durably applies typed evidence of the daemon's accepted epoch-ready message. Revocation may
+preempt a pending replacement. Expiry and terminal state are persisted, and the typed re-pair
+operation enforces a fresh device ID, crypto
+session ID, KeyPackage, and group ID. Hosted services may later store only reviewed opaque artifacts
+and typed reservation values.
 
 ## Retry, replay, and clock retention
 
