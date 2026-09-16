@@ -7,6 +7,7 @@ import {
   assertBoundaryScenario,
   assertLifecycleScenario,
   assertNegativeOpenMlsScenario,
+  assertPersistenceScenario,
   assertStateScenario,
 } from "./scenario-assertions.mjs";
 
@@ -35,4 +36,12 @@ test("enforces bounds independently in the loader, worker, and Rust", async ({ p
 test("fails closed for randomness, close, fatal state, and malformed responses", async ({ page }) => {
   const result = await page.evaluate(() => window.axlBrowserTest.runStateScenario());
   assertStateScenario(result);
+});
+
+test("persists prepare-and-compare transitions in real IndexedDB under Web Locks", async ({
+  page,
+}) => {
+  test.setTimeout(600_000);
+  const result = await page.evaluate(() => window.axlBrowserTest.runPersistenceScenario());
+  assertPersistenceScenario(result);
 });

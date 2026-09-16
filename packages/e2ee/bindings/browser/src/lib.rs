@@ -11,7 +11,8 @@ use axl_e2ee::pairing::{
 use axl_e2ee::{
     Error,
     browser_test_fixtures::{
-        BrowserLifecycleEvidence, BrowserNegativeEvidence, run_openmls_lifecycle,
+        BrowserLifecycleEvidence, BrowserNegativeEvidence, browser_persistence_receive,
+        browser_persistence_seed, browser_persistence_send, run_openmls_lifecycle,
         run_openmls_negative_cases,
     },
 };
@@ -190,6 +191,66 @@ pub fn test_openmls_negative_cases_json(now_ms: f64) -> Result<String, JsValue> 
     run_openmls_negative_cases(now_ms as u64)
         .map(|value| negative_json(&value))
         .map_err(map_core)
+}
+
+#[cfg(feature = "test-fixtures")]
+fn test_now(value: f64) -> Result<u64, JsValue> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > 9_007_199_254_740_991.0
+    {
+        return Err(error("invalid_argument"));
+    }
+    Ok(value as u64)
+}
+
+#[cfg(feature = "test-fixtures")]
+fn test_operation_id(value: Vec<u8>) -> Result<[u8; 16], JsValue> {
+    value.try_into().map_err(|_| error("invalid_argument"))
+}
+
+#[cfg(feature = "test-fixtures")]
+#[wasm_bindgen]
+pub fn test_browser_persistence_seed(now_ms: f64, receive: bool) -> Result<Vec<u8>, JsValue> {
+    browser_persistence_seed(test_now(now_ms)?, receive).map_err(map_core)
+}
+
+#[cfg(feature = "test-fixtures")]
+#[wasm_bindgen]
+pub fn test_browser_persistence_send(
+    mut snapshot: Vec<u8>,
+    operation_id: Vec<u8>,
+    mut plaintext: Vec<u8>,
+    now_ms: f64,
+) -> Result<Vec<u8>, JsValue> {
+    let result = browser_persistence_send(
+        &snapshot,
+        test_operation_id(operation_id)?,
+        &plaintext,
+        test_now(now_ms)?,
+    )
+    .map_err(map_core);
+    snapshot.fill(0);
+    plaintext.fill(0);
+    result
+}
+
+#[cfg(feature = "test-fixtures")]
+#[wasm_bindgen]
+pub fn test_browser_persistence_receive(
+    mut snapshot: Vec<u8>,
+    operation_id: Vec<u8>,
+    mut ciphertext: Vec<u8>,
+    now_ms: f64,
+) -> Result<Vec<u8>, JsValue> {
+    let result = browser_persistence_receive(
+        &snapshot,
+        test_operation_id(operation_id)?,
+        &ciphertext,
+        test_now(now_ms)?,
+    )
+    .map_err(map_core);
+    snapshot.fill(0);
+    ciphertext.fill(0);
+    result
 }
 
 #[cfg(feature = "test-fixtures")]

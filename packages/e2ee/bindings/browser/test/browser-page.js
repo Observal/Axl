@@ -7,6 +7,7 @@ import {
   runBoundaryScenario,
   runLifecycleScenario,
   runNegativeOpenMlsScenario,
+  runPersistenceScenario,
   runStateScenario,
   testWorker,
 } from "/test/scenario.js";
@@ -17,6 +18,7 @@ window.axlBrowserTest = Object.freeze({
   runBoundaryScenario,
   runLifecycleScenario,
   runNegativeOpenMlsScenario,
+  runPersistenceScenario,
   runStateScenario,
   testWorker,
 });

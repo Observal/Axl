@@ -30,6 +30,13 @@ const declarations = readFileSync(join(production, "index.d.ts"), "utf8");
 const wasm = readFileSync(join(production, "wasm/axl_e2ee_browser_bg.wasm"));
 const productionText = `${loader}\n${worker}\n${glue}\n${wasm.toString("latin1")}`;
 for (const forbidden of [
+  "test_browser_persistence_receive",
+  "test_browser_persistence_seed",
+  "test_browser_persistence_send",
+  "BrowserPersistenceEndpoint",
+  "indexedDB",
+  "navigator.locks",
+  "test_anchor_v1",
   "test_openmls_lifecycle_json",
   "test_openmls_negative_cases_json",
   "test_secure_random_probe",
@@ -83,6 +90,15 @@ assert.deepEqual(
   ["get_binding_info_json", "inspect_pairing_claim", "inspect_pairing_invitation", "secure_random_check"],
   "production Rust/WASM export drift",
 );
+const testWorker = readFileSync(join(testArtifact, "worker/index.js"), "utf8");
+const testStorage = readFileSync(join(testArtifact, "worker/browser-storage.js"), "utf8");
+assert.match(testWorker, /test_browser_persistence_seed/u);
+assert.match(testStorage, /indexedDB/u);
+assert.match(testStorage, /navigator\.locks/u);
+assert.match(testStorage, /durability: "strict"/u);
+assert.match(testStorage, /transaction\.durability !== "strict"/u);
+assert.match(testStorage, /strict_durability_unavailable/u);
+assert.match(testStorage, /extractable !== false/u);
 const testGlue = readFileSync(join(testArtifact, "wasm/axl_e2ee_browser.js"), "utf8");
 const testGeneratedExports = [...testGlue.matchAll(/^export function ([a-z0-9_]+)/gmu)]
   .map((match) => match[1])
@@ -91,6 +107,9 @@ assert.deepEqual(
   testGeneratedExports,
   [
     ...generatedExports,
+    "test_browser_persistence_receive",
+    "test_browser_persistence_seed",
+    "test_browser_persistence_send",
     "test_openmls_lifecycle_json",
     "test_openmls_negative_cases_json",
     "test_secure_random_probe",

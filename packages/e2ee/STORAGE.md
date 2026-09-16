@@ -124,9 +124,15 @@ only committed state. The internal pending mutation is not part of the public pl
 not a reusable transaction handle. Suspension, freezing, restoration, and termination behavior
 must be verified separately in every supported browser.
 
-This equivalence does not relax rollback detection. IndexedDB, persistent-storage permission, and a
-non-extractable WebCrypto key do not supply an independent monotonic anchor. Browser pairing remains
-disabled until that requirement is met by a separately approved design.
+Session 50.5 implements this sequence in the separate browser test artifact with real IndexedDB,
+Web Locks, WebCrypto, and dedicated workers. Its versioned stores, wrapped-DEK lifecycle, recovery
+rules, fault evidence, and browser limitations are documented in
+[`BROWSER_STORAGE.md`](BROWSER_STORAGE.md). Test-only persistence constructors and rollback evidence
+are excluded from the production WASM, JavaScript exports, declarations, and tarball.
+
+This equivalence does not relax rollback detection. IndexedDB, persistent-storage permission,
+WebAuthn counters, and a non-extractable WebCrypto key do not supply an independent monotonic anchor.
+Browser pairing remains disabled until that requirement is met by a separately approved design.
 
 ## Session 50.2 pairing records
 

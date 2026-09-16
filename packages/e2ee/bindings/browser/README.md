@@ -13,15 +13,23 @@ from another origin. Closing the binding is idempotent and terminal for that mod
 subsequent calls fail with `endpoint_closed`. A malformed worker response or worker failure is also
 terminal and cannot transparently start a replacement worker.
 
-Production endpoint creation and opening fail with `rollback_anchor_unavailable`. The package does
-not contain IndexedDB, Web Locks, persistent storage, or a rollback-anchor implementation. The
-test artifact executes a fresh in-memory OpenMLS lifecycle covering KeyPackage creation, Welcome
-join, pair activation, bidirectional application protection, a device self-Update proposal, the
-daemon commit, device commit application, and epoch-ready delivery. Focused negative browser cases
-exercise MLS replay, duplicate ciphertext, mutation, AAD and authenticated-identity mismatch,
-profile mismatch, and competing commit rejection. The artifact also exposes isolated
-secure-randomness and Rust-bound probes. These test-only exports are built into
-`dist/test-artifact` only and are excluded from `dist/package` and npm tarball checks.
+Production endpoint creation and opening fail with `rollback_anchor_unavailable`. The production
+package does not contain IndexedDB persistence, a browser rollback anchor, or persistence
+constructors. The separate test artifact implements the reviewed prepare-and-compare feasibility
+protocol with real IndexedDB, Web Locks, WebCrypto, and disposable WASM endpoints. It covers
+close/reopen, exact-byte retry, operation conflicts, strict transaction faults, worker and document
+termination, lock contention, key reconciliation, corruption, schema handling, quota failure, and
+state loss. Test-only constructors and the explicitly test-only anchor remain inside the dedicated
+worker and never accept keys, DEKs, or counters from page JavaScript. See
+[`../../BROWSER_STORAGE.md`](../../BROWSER_STORAGE.md).
+
+The test artifact also executes a fresh in-memory OpenMLS lifecycle covering KeyPackage creation,
+Welcome join, pair activation, bidirectional application protection, a device self-Update proposal,
+the daemon commit, device commit application, and epoch-ready delivery. Focused negative browser
+cases exercise MLS replay, duplicate ciphertext, mutation, AAD and authenticated-identity mismatch,
+profile mismatch, and competing commit rejection. Isolated secure-randomness and Rust-bound probes
+remain test-only. All test exports are built into `dist/test-artifact` only and are excluded from
+`dist/package`, declarations, and npm tarball checks.
 
 Linux browser CI pins Ubuntu 24.04 x64 and installs Firefox 155.0 revision 1543 and WebKit 26.6
 revision 2359 through `scripts/install-verified-playwright-linux.mjs`. That script verifies the

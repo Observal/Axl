@@ -77,9 +77,92 @@ export function assertStateScenario(result) {
   });
 }
 
+export function assertPersistenceScenario(result) {
+  assert.equal(result.creationBeforeEvent, "prepared");
+  assert.equal(result.creationAfterBeforeTerminationDuplicate, false);
+  assert.equal(result.creationAfterEvent, "committed");
+  assert.equal(result.recoveredCreationDuplicate, true);
+  assert.equal(result.recoveredCreationGeneration, 1);
+  assert.equal(result.recoveredCreationStrict, true);
+  assert.equal(result.recoveredCreationPlaintext, "committed browser plaintext");
+  assert.equal(result.creationAmbiguous, "ambiguous_commit");
+  assert.equal(result.recoveredAmbiguousCreationDuplicate, true);
+  assert.equal(result.recoveredAmbiguousCreationGeneration, 1);
+  assert.equal(result.created.generation, 1);
+  assert.equal(result.created.duplicate, false);
+  assert.equal(result.created.strictDurability, true);
+  assert.equal(result.created.lockName, `axl-e2ee-v1:${result.created.sessionId}`);
+  assert.equal(result.reopened.generation, 2);
+  assert.equal(result.reopened.strictDurability, true);
+  assert.equal(result.exactRetry, true);
+  assert.equal(result.duplicate, true);
+  assert.equal(result.conflict, "operation_conflict");
+  assert.equal(result.aborted, "transaction_aborted");
+  assert.equal(result.abortReleasedBytes, false);
+  assert.equal(result.afterAbortDuplicate, false);
+  assert.equal(result.quota, "quota_exceeded");
+  assert.equal(result.ambiguous, "ambiguous_commit");
+  assert.equal(result.ambiguousReleasedBytes, false);
+  assert.equal(result.recoveredAmbiguous, true);
+  assert.equal(result.contention, "lifecycle_busy");
+  assert(result.afterPageTerminationGeneration >= 1);
+  assert.equal(result.beforeEvent, "prepared");
+  assert.equal(result.afterTerminationBefore, false);
+  assert.equal(result.afterEvent, "committed");
+  assert.equal(result.afterTerminationAfter, true);
+  assert.equal(result.completionEvent, "transaction_complete");
+  assert.equal(result.ciphertextReleasedBeforeCompletion, false);
+  assert.equal(result.callbackException, "lock_lost");
+  assert(result.afterCallbackGeneration >= 1);
+  assert.deepEqual(result.inputBounds, {
+    oversizedPlaintext: "bound_exceeded",
+    oversizedCiphertext: "bound_exceeded",
+    invalidByte: "invalid_argument",
+    sparseByteArray: "invalid_argument",
+    unknownFault: "invalid_argument",
+    unknownTamper: "invalid_argument",
+  });
+  assert.equal(result.forcedClose, "storage_unavailable");
+  assert.equal(result.unavailable, "storage_unavailable");
+  assert.deepEqual(result.canonicalOrdering, {
+    highDuplicate: true,
+    highExact: true,
+    lowDuplicate: true,
+    lowExact: true,
+  });
+  assert.equal(result.receiveCompletionEvent, "transaction_complete");
+  assert.equal(result.plaintextReleasedBeforeCompletion, false);
+  assert.equal(result.receivePlaintext, "committed browser plaintext");
+  assert.equal(result.receiveDuplicate, true);
+  assert.equal(result.receiveExact, true);
+  assert.equal(result.secondReceivePlaintext, "second committed browser plaintext");
+  assert.equal(result.secondReceiveDuplicate, true);
+  assert.equal(result.secondReceiveExact, true);
+  assert.deepEqual(result.corruption, {
+    manifest: "corrupt_state",
+    state: "corrupt_state",
+    schema: "unsupported_schema",
+    rollback: "rollback_detected",
+    malformed: "corrupt_state",
+    unexpected: "corrupt_state",
+    cyclic: "corrupt_state",
+    oversized: "corrupt_state",
+    excessive: "corrupt_state",
+  });
+  assert.equal(result.stateLoss, "state_loss");
+  assert.equal(result.rePairRequired, "re_pair_required");
+  assert.equal(result.newerDatabase, "unsupported_schema");
+  assert.equal(result.generationConflict, "generation_conflict");
+  assert.equal(result.generationAfterConflict, 1);
+  assert.equal(result.generationRetryDuplicate, false);
+  assert.deepEqual(result.upgrade, { blocked: true, failed: true, preservedVersion: 2 });
+  assert.equal(result.lifecycleEvidence, "not_exposed_by_browser");
+}
+
 export function assertAllScenarios(result) {
   assertLifecycleScenario(result.lifecycle);
   assertNegativeOpenMlsScenario(result.negativeOpenMls);
   assertBoundaryScenario(result.boundaries);
   assertStateScenario(result.state);
+  assertPersistenceScenario(result.persistence);
 }
