@@ -44,6 +44,7 @@ import {
 } from "@axl/sdk";
 import { connectUnixClient, createUnixDaemonHost } from "@axl/sdk/unix";
 
+import { runAdoptionScan } from "./adoption-cli.ts";
 import { launchBrowser } from "./browser-launch.ts";
 import { inspectLegacyDaemon, type LegacyDaemonStatus, stopLegacyDaemon } from "./legacy-daemon.ts";
 import { createTerminalProviderLoginAdapter } from "./provider-auth-ui.ts";
@@ -60,6 +61,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl login <provider-id> [api_key|oauth]
        axl logout <provider-id>
        axl refresh [provider-id]
+       axl adopt scan [--json]
        axl doctor
        axl daemon [status|stop|restart] [options]
        axl print [prompt] [options]
@@ -117,6 +119,7 @@ interface CliArguments {
     | "print"
     | "rpc"
     | "web"
+    | "adopt-scan"
     | "session-export"
     | "session-migrate-events";
   daemonAction?: "status" | "stop" | "restart";
@@ -148,6 +151,7 @@ interface CliArguments {
   resume: boolean;
   noOpen: boolean;
   printUrl: boolean;
+  adoptionJson: boolean;
   showHelp: boolean;
   showVersion: boolean;
 }
@@ -164,6 +168,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     resume: false,
     noOpen: false,
     printUrl: false,
+    adoptionJson: false,
     raw: false,
     confirmPrefix: false,
     showHelp: false,
@@ -176,6 +181,11 @@ function parseArguments(argv: readonly string[]): CliArguments {
   if (argv[0] === "web") {
     parsed.command = "web";
     startIndex = 1;
+  }
+  if (argv[0] === "adopt") {
+    if (argv[1] !== "scan") throw new Error("adopt requires the scan subcommand");
+    parsed.command = "adopt-scan";
+    startIndex = 2;
   }
   if (argv[0] === "session") {
     const operation = argv[1];
@@ -270,6 +280,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     } else if (argument === "--unsafe") parsed.unsafe = true;
     else if (argument === "--help" || argument === "-h") parsed.showHelp = true;
     else if (argument === "--version" || argument === "-v") parsed.showVersion = true;
+    else if (argument === "--json" && parsed.command === "adopt-scan") parsed.adoptionJson = true;
     else if (argument === "print" || argument === "--print" || argument === "-p") {
       parsed.command = "print";
     } else if (argument === "json" || argument === "--json") {
@@ -1023,7 +1034,9 @@ async function main(): Promise<void> {
       ? cli.command
       : cli.command === "rpc"
         ? "rpc_probe"
-        : ["providers", "models", "login", "logout", "refresh"].includes(cli.command ?? "")
+        : ["providers", "models", "login", "logout", "refresh", "adopt-scan"].includes(
+              cli.command ?? "",
+            )
           ? "cli"
           : cli.command === "web"
             ? "web_host"
@@ -1167,6 +1180,18 @@ async function main(): Promise<void> {
     }
     return;
   }
+  if (cli.command === "adopt-scan") {
+    try {
+      await runAdoptionScan({
+        client,
+        json: cli.adoptionJson,
+        write: (value) => process.stdout.write(value),
+      });
+    } finally {
+      client.close();
+    }
+    return;
+  }
   if (cli.command === "json" || cli.command === "print") {
     if (headlessPrompt === undefined) throw new Error("Headless prompt was not loaded");
     const input = {
@@ -1262,6 +1287,9 @@ async function main(): Promise<void> {
     diffLayout: settings.diffLayout ?? "unified",
     workspaceReview: settings.workspaceReview ?? false,
     imageDisplay: settings.imageDisplay ?? "auto",
+    ...(settings.adoptionDismissedScanGeneration === undefined
+      ? {}
+      : { adoptionDismissedScanGeneration: settings.adoptionDismissedScanGeneration }),
     globalThemeDirectory: join(axlHome, "themes"),
     extensions: [
       mcpTerminalExtension,

@@ -5,6 +5,15 @@ import type { CapabilityId, CommandDescriptor, CommandListResult, SessionId } fr
 
 const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
   {
+    id: "core.adopt",
+    name: "adopt",
+    aliases: [],
+    description: "discover resources from existing agent harnesses",
+    context: "global",
+    argument: { required: false, hint: "scan" },
+    requiredCapabilities: ["adoption.discover"],
+  },
+  {
     id: "core.model",
     name: "model",
     aliases: [],
@@ -196,7 +205,7 @@ export function commandCatalog(
   sessionId?: SessionId,
 ): CommandListResult {
   return {
-    generation: "builtin-3",
+    generation: "builtin-4",
     commands: BUILT_INS.filter((command) =>
       command.requiredCapabilities.every((capability) => capabilities.has(capability)),
     ).map((command) => ({

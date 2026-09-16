@@ -3,6 +3,9 @@
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import {
+  type AdoptionCandidate,
+  AdoptionController,
+  type AdoptionControllerState,
   type AttachmentPresence,
   type AxlClient,
   type BlobReference,
@@ -46,6 +49,7 @@ import {
   uploadBlob as uploadSessionBlob,
 } from "@axl/sdk";
 
+import { AdoptionDialog } from "./adoption-dialog.tsx";
 import { BrowserPane, type BrowserPaneState, EMPTY_BROWSER_STATE } from "./browser-pane.tsx";
 import { CommandPalette } from "./command-palette.tsx";
 import {
@@ -346,6 +350,17 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   });
   const providerDirectoryController = useRef<ProviderDirectoryController | undefined>(undefined);
   const configurationController = useRef<SessionConfigurationController | undefined>(undefined);
+  const adoptionController = useRef<AdoptionController | undefined>(undefined);
+  const [adoptionState, setAdoptionState] = useState<AdoptionControllerState>({
+    status: "idle",
+    scope: {},
+    candidates: [],
+    warnings: [],
+    hasMore: false,
+    findingsDismissed: true,
+  });
+  const [adoptionOpen, setAdoptionOpen] = useState(false);
+  const [adoptionNoticeVisible, setAdoptionNoticeVisible] = useState(false);
   const modelCatalog = providerDirectory.models;
   const providerInventory = providerDirectory.providers;
   const providerLoading = providerDirectory.status === "loading";
@@ -402,6 +417,17 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const fileInput = useRef<HTMLInputElement>(null);
   const artifactInput = useRef<HTMLInputElement>(null);
   const sidebarWasOpen = useRef(false);
+  const preferencesRef = useRef<WebPreferences>(DEFAULT_LAYOUT);
+  preferencesRef.current = {
+    sidebarWidth,
+    dockWidth,
+    sidebarCollapsed,
+    changesView,
+    panes: paneLayout.panes,
+    ...(adoptionState.dismissedScanGeneration === undefined
+      ? {}
+      : { adoptionDismissedScanGeneration: adoptionState.dismissedScanGeneration }),
+  };
 
   useEffect(() => {
     const media = matchMedia("(prefers-color-scheme: dark)");
@@ -507,6 +533,16 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       void refreshCommandDirectory(next.sessionId).catch((cause: unknown) =>
         setError(cause instanceof Error ? cause.message : "Could not load commands"),
       );
+      const adoption = adoptionController.current;
+      if (adoption !== undefined && adoption.state.status !== "unavailable") {
+        void adoption
+          .loadAll({
+            projectRoot: next.cwd,
+            scopes: ["global", "project"],
+            includeMalformed: true,
+          })
+          .catch(() => undefined);
+      }
     } catch (cause) {
       if (generation === selectionGeneration.current) {
         workspaceController.current = undefined;
@@ -526,6 +562,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     let removeStateListener = (): void => undefined;
     let removeCatalogListener = (): void => undefined;
     let removePresenceListener = (): void => undefined;
+    let removeAdoptionListener = (): void => undefined;
     void connectWebEnvironment().then(async (environment) => {
       if (disposed) { environment.client.close(); return; }
       activeClient = environment.client; setClient(environment.client); setBootstrap(environment.bootstrap);
@@ -535,6 +572,35 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       configurationController.current = configuration;
       providers.subscribe(setProviderDirectory);
       configuration.subscribe(setConfigurationState);
+      const adoption = new AdoptionController(environment.client, {
+        ...(environment.bootstrap.preferences.adoptionDismissedScanGeneration === undefined
+          ? {}
+          : {
+              dismissedScanGeneration:
+                environment.bootstrap.preferences.adoptionDismissedScanGeneration,
+            }),
+        onDismissedScanGeneration: (adoptionDismissedScanGeneration) =>
+          saveWebPreferences({
+            ...preferencesRef.current,
+            adoptionDismissedScanGeneration,
+          }),
+      });
+      adoptionController.current = adoption;
+      removeAdoptionListener = adoption.subscribe((state) => {
+        if (disposed) return;
+        setAdoptionState(state);
+        setAdoptionNoticeVisible(
+          state.status === "ready" && state.candidates.length > 0 && !state.findingsDismissed,
+        );
+      });
+      if (adoption.state.status !== "unavailable") {
+        void adoption
+          .loadAll({
+            scopes: ["global"],
+            includeMalformed: true,
+          })
+          .catch(() => undefined);
+      }
       if (environment.client.connection.grantedCapabilities.includes("command.list")) {
         commandController.current = new CommandController(environment.client, () =>
           webPresentationCommands({
@@ -569,6 +635,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       setPaneLayout(createPaneLayout(environment.bootstrap.preferences.panes));
       if (environment.client.connection.grantedCapabilities.includes("provider.list")) {
         void providers.load().catch(() => undefined);
+      }
+      if (commandController.current !== undefined) {
+        void refreshCommandDirectory().catch((cause: unknown) =>
+          setCommandPaletteError(cause instanceof Error ? cause.message : "Could not load commands"),
+        );
       }
       removeStateListener = environment.client.onStateChange((state) => {
         if (!disposed) {
@@ -610,6 +681,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       removeStateListener();
       removeCatalogListener();
       removePresenceListener();
+      removeAdoptionListener();
+      adoptionController.current?.dispose();
+      adoptionController.current = undefined;
       providerDirectoryController.current?.dispose();
       providerDirectoryController.current = undefined;
       configurationController.current?.dispose();
@@ -1674,7 +1748,20 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         );
         return;
       }
-      if (outcome.surface === "model" || outcome.surface === "thinking") {
+      if (outcome.surface === "adopt") {
+        setAdoptionOpen(true);
+        const adoption = adoptionController.current;
+        if (adoption !== undefined && adoption.state.status !== "unavailable") {
+          const projectRoot = opened?.cwd;
+          await adoption.loadAll({
+            ...(projectRoot === undefined ? { scopes: ["global"] as const } : { projectRoot, scopes: ["global", "project"] as const }),
+            includeMalformed: true,
+          });
+          adoption.dismissFindings();
+          setAdoptionNoticeVisible(false);
+        }
+        restoreComposerFocus = false;
+      } else if (outcome.surface === "model" || outcome.surface === "thinking") {
         setModelPickerInitialFocus(outcome.surface);
         setModelPickerOpenRequest((current) => current + 1);
       } else if (
@@ -1829,6 +1916,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     sidebarCollapsed,
     changesView,
     panes: paneLayout.panes,
+    ...(adoptionState.dismissedScanGeneration === undefined
+      ? {}
+      : { adoptionDismissedScanGeneration: adoptionState.dismissedScanGeneration }),
   });
 
   const applyPaneLayout = (layout: PaneLayout): void => {
@@ -2182,6 +2272,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       </div>
       {promptBreakpoints.length > 1 && <nav className={`prompt-breakpoints${transcriptNavigationVisible || transcriptSearchOpen ? " visible" : ""}`} aria-label="Conversation prompts" onMouseEnter={() => { if (transcriptNavigationTimer.current !== undefined) clearTimeout(transcriptNavigationTimer.current); setTranscriptNavigationVisible(true); }} onMouseLeave={() => setTranscriptNavigationVisible(false)}>{promptBreakpoints.map((point) => <button type="button" key={point.id} className={point.id === activePromptId ? "active" : ""} title={point.text} onClick={() => jumpToMessage(point.id)}><span>{point.text}</span></button>)}</nav>}
       {!connected && <div className="connection-banner" role="status" aria-live="polite"><span>{connection === "disconnected" ? "Connection to the daemon was lost." : connection === "incompatible" ? "The browser and daemon versions are incompatible." : "Connecting to the daemon…"}</span>{connection === "disconnected" && client !== undefined && <button onClick={() => void reconnect()}>Reconnect</button>}</div>}
+      {adoptionNoticeVisible && !adoptionOpen && <div className="action-notice" role="status">Existing setups found. <button type="button" onClick={() => { setAdoptionOpen(true); adoptionController.current?.dismissFindings(); setAdoptionNoticeVisible(false); }}>Review with /adopt</button><button type="button" aria-label="Dismiss adoption findings" onClick={() => { adoptionController.current?.dismissFindings(); setAdoptionNoticeVisible(false); }}>Dismiss</button></div>}
       {actionNotice && !error && <div className="action-notice" role="status">{actionNotice}</div>}
       {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError(undefined)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>}
       {directOperation && directOperation.source !== "terminal" && <div className="direct-operation" role="status" aria-live="polite"><progress aria-label={directOperation.kind === "compaction" ? "Compaction progress" : "Shell command progress"} /><span><strong>{directOperation.kind === "compaction" ? "Compacting context" : "Running shell command"}</strong><small>{directOperation.kind === "compaction" ? "Summarizing older context into a durable checkpoint." : "The sandboxed command result will appear in the transcript."}</small></span><button type="button" disabled={directOperation.cancelling} onClick={() => void cancelDirectOperation()}>{directOperation.cancelling ? "Cancelling…" : "Cancel"}</button></div>}
@@ -2218,6 +2309,28 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         }}
       />
     </div>
+    {adoptionOpen && <AdoptionDialog
+      state={adoptionState}
+      onRefresh={() => {
+        const adoption = adoptionController.current;
+        if (adoption === undefined) return;
+        const projectRoot = opened?.cwd;
+        void adoption.loadAll({
+          ...(projectRoot === undefined ? { scopes: ["global"] as const } : { projectRoot, scopes: ["global", "project"] as const }),
+          includeMalformed: true,
+        }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "Adoption scan failed"));
+      }}
+      onInspect={(candidate: AdoptionCandidate) => {
+        void adoptionController.current?.inspect(candidate).catch((cause: unknown) =>
+          setError(cause instanceof Error ? cause.message : "Adoption inspection failed"),
+        );
+      }}
+      onDismissFindings={() => {
+        adoptionController.current?.dismissFindings();
+        setAdoptionNoticeVisible(false);
+      }}
+      onClose={() => setAdoptionOpen(false)}
+    />}
     {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={currentPreferences()} theme={theme} providers={providerInventory} providerLoading={providerLoading} providerRefresh={providerDirectory.refresh} providerError={providerError} providerLogin={providerLogin} settingsError={settingsError} canRefresh={hasCapability("provider.catalog.refresh")} canLogin={canLoginProvider} canLogout={hasCapability("provider.auth.logout")} onTab={setControlCenter} onPreferences={applyWebPreferences} onTheme={(nextTheme) => { setSettingsError(undefined); setTheme(nextTheme); }} onRefresh={(providerId) => void refreshProviders(providerId)} onCancelRefresh={() => providerDirectoryController.current?.cancelRefresh()} onLogin={(providerId, method) => void startProviderLogin(providerId, method)} onCancelLogin={cancelProviderLogin} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId, method) => void copyProviderLogin(providerId, method)} onClose={() => { setControlCenter(undefined); setSettingsError(undefined); }} /></Suspense>}
     {sessionLifecycleOpen && selectedSummary && <SessionLifecycle session={selectedSummary} busy={busy} capabilities={lifecycleCapabilities} {...(sessionLifecycleError === undefined ? {} : { error: sessionLifecycleError })} onRename={(title) => void renameSession(title)} onClone={() => void cloneSession()} onExport={() => void exportArtifact()} onDispose={() => void disposeSession()} onDelete={() => void deleteSession()} onClose={() => { setSessionLifecycleOpen(false); setSessionLifecycleError(undefined); }} />}
     {requeueOpen && <RequeueDialog items={pausedQueue} busyItemId={requeueBusyItemId} error={requeueError} onRequeue={(queueItemId) => void requeueItem(queueItemId)} onClose={() => { setRequeueOpen(false); setRequeueError(undefined); }} />}

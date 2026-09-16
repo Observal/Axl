@@ -323,3 +323,36 @@ test("command directory rejects aliases that shadow another command", () => {
     /Command name collision: \/reload/,
   );
 });
+
+test("routes only /adopt and /adopt scan to the adoption surface", async () => {
+  const adoptionCatalog: CommandListResult = {
+    generation: "builtin-4",
+    commands: [
+      {
+        id: "core.adopt",
+        name: "adopt",
+        aliases: [],
+        description: "Discover resources",
+        context: "global",
+        argument: { required: false, hint: "scan" },
+        requiredCapabilities: ["adoption.discover"],
+        availability: { state: "available" },
+      },
+    ],
+  };
+  const client = {
+    request: async (method: string) => {
+      assert.equal(method, "command.list");
+      return adoptionCatalog;
+    },
+  } as unknown as AxlClient;
+  const controller = new CommandController(client);
+  await controller.refresh();
+  assert.deepEqual(await controller.invoke("/adopt"), { state: "focus", surface: "adopt" });
+  assert.deepEqual(await controller.invoke("/adopt scan"), {
+    state: "focus",
+    surface: "adopt",
+    argument: "scan",
+  });
+  await assert.rejects(controller.invoke("/adopt install"), /Use \/adopt or \/adopt scan/u);
+});

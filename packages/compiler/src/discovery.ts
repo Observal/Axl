@@ -42,6 +42,44 @@ export interface DiscoverOptions {
   readonly ecosystems?: readonly Ecosystem[];
   readonly fileSystem?: BoundedFileSystem;
   readonly adapters?: readonly SourceAdapter[];
+  readonly signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new DOMException("Discovery was cancelled", "AbortError");
+}
+
+function cancellableFileSystem(
+  fileSystem: BoundedFileSystem,
+  signal: AbortSignal | undefined,
+): BoundedFileSystem {
+  if (signal === undefined) return fileSystem;
+  return {
+    async realpath(path) {
+      throwIfAborted(signal);
+      const value = await fileSystem.realpath(path);
+      throwIfAborted(signal);
+      return value;
+    },
+    async lstat(path) {
+      throwIfAborted(signal);
+      const value = await fileSystem.lstat(path);
+      throwIfAborted(signal);
+      return value;
+    },
+    async readdir(path) {
+      throwIfAborted(signal);
+      const value = await fileSystem.readdir(path);
+      throwIfAborted(signal);
+      return value;
+    },
+    async readStableFile(path, maximumBytes, canonicalRoot) {
+      throwIfAborted(signal);
+      const value = await fileSystem.readStableFile(path, maximumBytes, canonicalRoot);
+      throwIfAborted(signal);
+      return value;
+    },
+  };
 }
 
 export async function discover(
@@ -55,10 +93,12 @@ export async function discover(
   const adapters = (options.adapters ?? sourceAdapters).filter((adapter) =>
     requested.has(adapter.ecosystem),
   );
-  const fileSystem = options.fileSystem ?? nodeFileSystem;
+  throwIfAborted(options.signal);
+  const fileSystem = cancellableFileSystem(options.fileSystem ?? nodeFileSystem, options.signal);
   const results = await Promise.all(
     adapters.map((adapter) => adapter.discover({ ...context, limits }, fileSystem)),
   );
+  throwIfAborted(options.signal);
   const candidates = results.flatMap((result) => result.candidates).sort(compareCandidates);
   if (candidates.length > limits.maxCandidates) {
     throw new DiscoveryError("adoption_scan_limit_exceeded", "candidate count exceeded");

@@ -50,6 +50,11 @@ import {
   type WireRequest,
 } from "@axl/protocol";
 
+import {
+  type AdoptionRequestContext,
+  type AdoptionService,
+  AdoptionServiceError,
+} from "./adoption-service.ts";
 import { commandCatalog } from "./command-catalog.ts";
 import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
 import { DataDirectoryLock } from "./data-directory-lock.ts";
@@ -72,6 +77,7 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly heartbeatIntervalMs?: number;
   readonly presenceTimeoutMs?: number;
   readonly providerManagement?: ProviderManagementService;
+  readonly adoptionService?: AdoptionService;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -207,6 +213,7 @@ export class AxlDaemon {
   private readonly heartbeatIntervalMs: number;
   private readonly presenceTimeoutMs: number;
   private readonly providerManagement: ProviderManagementService | undefined;
+  private readonly adoptionService: AdoptionService | undefined;
   private readonly capabilities: readonly string[];
   private readonly hostOptions: Pick<
     DaemonOptions,
@@ -245,10 +252,14 @@ export class AxlDaemon {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.presenceTimeoutMs = options.presenceTimeoutMs ?? PRESENCE_TIMEOUT_MS;
     this.providerManagement = options.providerManagement;
-    this.capabilities =
-      this.providerManagement === undefined
-        ? WIRE_CAPABILITIES.filter((capability) => !capability.startsWith("provider."))
-        : WIRE_CAPABILITIES;
+    this.adoptionService = options.adoptionService;
+    this.capabilities = WIRE_CAPABILITIES.filter(
+      (capability) =>
+        (this.providerManagement !== undefined || !capability.startsWith("provider.")) &&
+        (!capability.startsWith("adoption.") ||
+          (this.adoptionService !== undefined &&
+            (capability === "adoption.discover" || capability === "adoption.inspect"))),
+    );
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
       this.snapshotIdleLifetimeMs <= 0 ||
@@ -313,6 +324,8 @@ export class AxlDaemon {
       const stats = await lstat(this.socketPath);
       this.socketIdentity = { dev: stats.dev, ino: stats.ino };
       await chmod(this.socketPath, 0o600);
+      // Discovery is derived state. Warm it opportunistically without delaying startup.
+      void this.adoptionService?.prime?.().catch(() => undefined);
     } catch (error) {
       if (this.server?.listening) {
         await new Promise<void>((resolve) => this.server?.close(() => resolve()));
@@ -348,6 +361,7 @@ export class AxlDaemon {
     await Promise.all([...this.pending]);
     await this.sessions.disposeAll();
     await this.providerManagement?.dispose?.();
+    await this.adoptionService?.dispose?.();
     await this.dataLock?.release({ allowMissing: true });
     this.dataLock = undefined;
     await this.removeOwnedSocket();
@@ -801,6 +815,8 @@ export class AxlDaemon {
         request.method === "provider.auth.status" ||
         request.method === "provider.auth.login" ||
         request.method === "provider.auth.logout" ||
+        request.method === "adoption.discover" ||
+        request.method === "adoption.inspect" ||
         request.method === "session.history" ||
         request.method === "session.workspace.list" ||
         request.method === "session.workspace.read" ||
@@ -832,7 +848,9 @@ export class AxlDaemon {
       }
     } catch (error) {
       const reportedCode =
-        error instanceof DaemonError || error instanceof CommandJournalError
+        error instanceof DaemonError ||
+        error instanceof CommandJournalError ||
+        error instanceof AdoptionServiceError
           ? error.code
           : error instanceof CanonicalEventSizeError
             ? "content_too_large"
@@ -853,7 +871,9 @@ export class AxlDaemon {
                 ? error.message
                 : "Request failed",
           retryable: isRpcErrorRetryable(code),
-          ...((error instanceof DaemonError || error instanceof CommandJournalError) &&
+          ...((error instanceof DaemonError ||
+            error instanceof CommandJournalError ||
+            error instanceof AdoptionServiceError) &&
           error.details !== undefined
             ? { details: error.details }
             : error instanceof CanonicalEventSizeError
@@ -1023,6 +1043,10 @@ export class AxlDaemon {
       }
       case "command.list":
         return commandCatalog(state.grantedCapabilities, request.params.sessionId);
+      case "adoption.discover":
+        return this.adoptions().discover(request.params, this.adoptionContext(state), signal);
+      case "adoption.inspect":
+        return this.adoptions().inspect(request.params, this.adoptionContext(state), signal);
       case "provider.list":
         return this.providers().list(request.params, signal);
       case "provider.catalog.refresh":
@@ -1270,6 +1294,27 @@ export class AxlDaemon {
         await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
         return { disposed: true, historyPreserved: true };
     }
+  }
+
+  private adoptionContext(state: ConnectionState): AdoptionRequestContext {
+    if (state.attachmentId === undefined || state.client === undefined) {
+      throw new DaemonError("not_initialized", "Connection is not initialized");
+    }
+    return {
+      attachmentId: state.attachmentId,
+      client: state.client,
+      openedProjectRoots: this.sessions.openedProjectRoots(),
+    };
+  }
+
+  private adoptions(): AdoptionService {
+    if (this.adoptionService === undefined) {
+      throw new DaemonError(
+        "unsupported_capability",
+        "Adoption discovery is not available in this daemon",
+      );
+    }
+    return this.adoptionService;
   }
 
   private providers(): ProviderManagementService {

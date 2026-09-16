@@ -91,7 +91,14 @@ export function discoveryFingerprint(input: {
 }
 
 export function finalizeCandidate(
-  candidate: Omit<DiscoveryCandidate, "candidateId" | "discoveryFingerprint">,
+  candidate: Omit<
+    DiscoveryCandidate,
+    | "candidateId"
+    | "discoveryFingerprint"
+    | "sourceFileCount"
+    | "sourceTotalBytes"
+    | "sourceExecutable"
+  >,
   sourceFiles: readonly FingerprintSourceFile[],
   inspectionDecisions: readonly DiscoveryDiagnostic[],
   limits: Readonly<Record<string, number>>,
@@ -109,6 +116,9 @@ export function finalizeCandidate(
   return {
     ...candidate,
     candidateId: id,
+    sourceFileCount: sourceFiles.length,
+    sourceTotalBytes: sourceFiles.reduce((total, file) => total + file.size, 0),
+    sourceExecutable: sourceFiles.some((file) => (file.mode & 0o111) !== 0),
     discoveryFingerprint: discoveryFingerprint({
       adapterId: candidate.adapterId,
       adapterVersion: candidate.adapterVersion,

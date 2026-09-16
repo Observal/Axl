@@ -157,6 +157,9 @@ importers:
       '@axl/ai':
         specifier: workspace:*
         version: link:../ai
+      '@axl/compiler':
+        specifier: workspace:*
+        version: link:../compiler
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon

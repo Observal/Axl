@@ -947,6 +947,10 @@ export class SessionManager {
     };
   }
 
+  openedProjectRoots(): readonly string[] {
+    return [...new Set([...this.sessions.values()].map((managed) => managed.cwd))].sort();
+  }
+
   async list(): Promise<readonly StoredSessionSummary[]> {
     const directory = join(this.options.dataDirectory, "sessions");
     let entries: Dirent[];

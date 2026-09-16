@@ -17,6 +17,7 @@ import {
   type ThinkingLevel,
 } from "@axl/protocol";
 
+import { LocalAdoptionService } from "./adoption-service.ts";
 import {
   createProviderManagementService,
   type TrustedProviderLoginAdapter,
@@ -308,6 +309,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
+  const adoptionService = new LocalAdoptionService();
   const daemon = new AxlDaemon({
     ...(options.buildVersion === undefined ? {} : { buildVersion: options.buildVersion }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),
@@ -318,6 +320,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     providerManagement,
+    adoptionService,
     runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";

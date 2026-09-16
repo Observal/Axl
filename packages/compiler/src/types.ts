@@ -68,6 +68,10 @@ export interface DiscoveryCandidate {
   readonly primary: boolean;
   readonly executable: boolean;
   readonly malformed: boolean;
+  /** Bounded source inventory captured by the same snapshot that produced the fingerprint. */
+  readonly sourceFileCount: number;
+  readonly sourceTotalBytes: number;
+  readonly sourceExecutable: boolean;
   readonly adapterId: string;
   readonly adapterVersion: string;
   readonly sourceSchemaVersion: string;
