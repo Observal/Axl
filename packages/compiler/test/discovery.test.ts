@@ -22,6 +22,7 @@ import {
   snapshotTree,
   type BoundedFileSystem,
 } from "../src/index.ts";
+import { cordisSequenceConformance, ecosystemFailureFixtures } from "./fixtures/ecosystem-cases.ts";
 
 async function fixture(files: Readonly<Record<string, string | Uint8Array>>): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "axl-compiler-test-"));
@@ -430,9 +431,8 @@ test("DSH discovery honors DSH_HOME and parses bounded Cordis YAML as data", asy
   const home = await fixture({
     ".dsh/tools/ignored.ts": "registerTool('ignored', {})",
     "custom-dsh/tools/todo.ts": "registerTool('todo_write', {})",
-    "custom-dsh/cordis.yml":
-      "version: 1\nplugins:\n  group:todo:\n    enabled: true\n  logger:\n    level: info\n",
-    "custom-dsh/unsafe/cordis.yaml": "plugins:\n  evil: !javascript/function payload\n",
+    "custom-dsh/cordis.yml": cordisSequenceConformance,
+    "custom-dsh/unsafe/cordis.yaml": ecosystemFailureFixtures.dsh.hostile,
   });
   const result = await discover(
     { ...context(home), environment: { DSH_HOME: join(home, "custom-dsh") } },
@@ -456,7 +456,11 @@ test("DSH discovery honors DSH_HOME and parses bounded Cordis YAML as data", asy
   assert.ok(cordis);
   assert.deepEqual(
     cordis.surfaces.map((surface) => surface.registrations[0]),
-    ["cordis-plugin:group:todo", "cordis-plugin:logger"],
+    [
+      "cordis-plugin:@deepseek-ai/dsh-tool-cordis",
+      "cordis-plugin:@example/independent-helper",
+      "cordis-plugin:webserver",
+    ],
   );
   assert.ok(result.diagnostics.some((diagnostic) => diagnostic.code === "cordis-config-invalid"));
 });
@@ -501,6 +505,103 @@ test("Claude Code discovery parses plugin skills, hooks, MCP metadata, and malfo
   );
   assert.ok(result.diagnostics.some((entry) => entry.code === "source-schema-unsupported"));
   assert.ok(result.diagnostics.some((entry) => entry.code === "manifest-invalid"));
+});
+
+test("OpenCode malformed, hostile, and unknown-version fixtures fail closed", async () => {
+  const home = await fixture({
+    ".config/opencode/tools/sentinel.ts":
+      "import { writeFileSync } from 'node:fs'; writeFileSync('EXECUTED', 'bad')",
+    ".config/opencode/malformed/opencode.json": ecosystemFailureFixtures.opencode.malformed,
+    ".config/opencode/hostile/opencode.json": ecosystemFailureFixtures.opencode.hostile,
+    ".config/opencode/unknown/opencode.json": ecosystemFailureFixtures.opencode.unknownVersion,
+  });
+  const result = await discover(context(home), { ecosystems: ["opencode"] });
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "manifest-invalid" && entry.relativePath?.includes("malformed"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "literal-credential" && entry.relativePath?.includes("hostile"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "command-value" && entry.relativePath?.includes("hostile"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) =>
+        entry.code === "source-schema-unsupported" && entry.relativePath?.includes("unknown"),
+    ),
+  );
+  await assert.rejects(readFile(join(home, "EXECUTED")), /ENOENT/u);
+});
+
+test("DSH malformed, hostile, and unknown-version fixtures fail closed", async () => {
+  const home = await fixture({
+    ".dsh/tools/sentinel.ts":
+      "import { writeFileSync } from 'node:fs'; writeFileSync('EXECUTED', 'bad')",
+    ".dsh/malformed/cordis.yml": ecosystemFailureFixtures.dsh.malformed,
+    ".dsh/hostile/cordis.yml": ecosystemFailureFixtures.dsh.hostile,
+    ".dsh/unknown/cordis.yml": ecosystemFailureFixtures.dsh.unknownVersion,
+  });
+  const result = await discover(context(home), { ecosystems: ["dsh"] });
+  assert.ok(
+    result.diagnostics.some(
+      (entry) =>
+        entry.code === "cordis-config-invalid" && entry.relativePath?.includes("malformed"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "cordis-config-invalid" && entry.relativePath?.includes("hostile"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) =>
+        entry.code === "source-schema-unsupported" && entry.relativePath?.includes("unknown"),
+    ),
+  );
+  await assert.rejects(readFile(join(home, "EXECUTED")), /ENOENT/u);
+});
+
+test("Claude Code malformed, hostile, and unknown-version fixtures fail closed", async () => {
+  const home = await fixture({
+    ".claude/plugins/sentinel/index.ts":
+      "import { writeFileSync } from 'node:fs'; writeFileSync('EXECUTED', 'bad')",
+    ".claude/plugins/malformed/.claude-plugin/plugin.json":
+      ecosystemFailureFixtures.claudeCode.malformed,
+    ".claude/hostile/settings.json": ecosystemFailureFixtures.claudeCode.hostile,
+    ".claude/plugins/unknown/.claude-plugin/plugin.json":
+      ecosystemFailureFixtures.claudeCode.unknownVersion,
+  });
+  const result = await discover(context(home), { ecosystems: ["claude-code"] });
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "manifest-invalid" && entry.relativePath?.includes("malformed"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "literal-credential" && entry.relativePath?.includes("hostile"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) => entry.code === "command-value" && entry.relativePath?.includes("hostile"),
+    ),
+  );
+  assert.ok(
+    result.diagnostics.some(
+      (entry) =>
+        entry.code === "source-schema-unsupported" && entry.relativePath?.includes("unknown"),
+    ),
+  );
+  await assert.rejects(readFile(join(home, "EXECUTED")), /ENOENT/u);
 });
 
 test("candidate ordering and duplicate handling are deterministic", async () => {

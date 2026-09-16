@@ -157,9 +157,11 @@ function stripYamlComment(line: string): string {
 
 function splitYamlMapping(
   line: string,
-): { indent: number; key: string; scalar: string } | undefined {
+): { indent: number; sequence: boolean; key: string; scalar: string } | undefined {
   const indent = /^ */u.exec(line)?.[0].length ?? 0;
-  const content = line.slice(indent);
+  let content = line.slice(indent);
+  const sequence = content.startsWith("- ");
+  if (sequence) content = content.slice(2);
   let quote: "'" | '"' | undefined;
   let escaped = false;
   for (let index = 0; index < content.length; index += 1) {
@@ -181,7 +183,7 @@ function splitYamlMapping(
         (rawKey.startsWith("'") && rawKey.endsWith("'"))
           ? rawKey.slice(1, -1)
           : rawKey;
-      return { indent, key, scalar: content.slice(index + 1).trim() };
+      return { indent, sequence, key, scalar: content.slice(index + 1).trim() };
     }
   }
   return undefined;
@@ -197,6 +199,8 @@ function parseCordisConfig(file: SnapshotFile, maximumBytes: number): CordisConf
     throw new Error("Cordis YAML tags, anchors, aliases, merges, and expressions are unsupported");
   }
   const pluginNames: string[] = [];
+  const sequenceEntries: { indent: number; id?: string; name?: string }[] = [];
+  const sequenceStack: { indent: number; id?: string; name?: string }[] = [];
   let pluginsIndent: number | undefined;
   let directPluginIndent: number | undefined;
   let version: string | undefined;
@@ -213,11 +217,26 @@ function parseCordisConfig(file: SnapshotFile, maximumBytes: number): CordisConf
     }
     const mapping = splitYamlMapping(line);
     if (mapping === undefined) throw new Error("Cordis YAML must use bounded mapping syntax");
-    const { indent, key, scalar } = mapping;
+    const { indent, sequence, key, scalar } = mapping;
     if (indent > 64 || indent % 2 !== 0) throw new Error("Cordis YAML indentation is unsupported");
-    if (Buffer.byteLength(key, "utf8") > 256) throw new Error("Cordis YAML key exceeds limit");
-    if (indent === 0 && key === "version" && scalar !== "")
-      version = scalar.replace(/^['"]|['"]$/gu, "");
+    if (Buffer.byteLength(key, "utf8") > 256 || Buffer.byteLength(scalar, "utf8") > 4_096)
+      throw new Error("Cordis YAML key or scalar exceeds limit");
+    const scalarValue = scalar.replace(/^['"]|['"]$/gu, "");
+    while ((sequenceStack.at(-1)?.indent ?? -1) >= indent) sequenceStack.pop();
+    if (sequence) {
+      const entry: { indent: number; id?: string; name?: string } = { indent };
+      if (key === "id" && scalarValue !== "") entry.id = scalarValue;
+      if (key === "name" && scalarValue !== "") entry.name = scalarValue;
+      sequenceEntries.push(entry);
+      sequenceStack.push(entry);
+    } else {
+      const entry = sequenceStack.at(-1);
+      if (entry !== undefined && indent > entry.indent) {
+        if (key === "id" && scalarValue !== "") entry.id = scalarValue;
+        if (key === "name" && scalarValue !== "") entry.name = scalarValue;
+      }
+    }
+    if (indent === 0 && !sequence && key === "version" && scalar !== "") version = scalarValue;
     if (indent === 0 && key === "plugins") {
       pluginsIndent = indent;
       directPluginIndent = undefined;
@@ -229,7 +248,7 @@ function parseCordisConfig(file: SnapshotFile, maximumBytes: number): CordisConf
         directPluginIndent = undefined;
       } else {
         directPluginIndent ??= indent;
-        if (indent === directPluginIndent) pluginNames.push(key);
+        if (!sequence && indent === directPluginIndent) pluginNames.push(key);
       }
     }
   }
@@ -241,6 +260,15 @@ function parseCordisConfig(file: SnapshotFile, maximumBytes: number): CordisConf
       message: `unsupported Cordis configuration version ${version}`,
       relativePath: file.relativePath,
     });
+  }
+  for (const entry of sequenceEntries) {
+    const name = entry.name ?? entry.id;
+    if (name !== undefined && name !== "") {
+      if (Buffer.byteLength(name, "utf8") > 256) {
+        throw new Error("Cordis plugin name exceeds limit");
+      }
+      pluginNames.push(name);
+    }
   }
   return { pluginNames: [...new Set(pluginNames)].sort(), diagnostics };
 }
