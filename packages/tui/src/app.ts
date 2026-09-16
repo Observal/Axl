@@ -589,6 +589,7 @@ export class AxlApp {
   private client: AxlClient;
   private commandController: CommandController;
   private adoptionController: AdoptionController;
+  private adoptionFindingsLoad: Promise<void> | undefined;
   private daemonHost: DaemonHostControl | undefined;
   private openWeb:
     | ((sessionId: SessionId, cwd: string, providerHost: TrustedProviderHost) => Promise<string>)
@@ -1117,7 +1118,9 @@ export class AxlApp {
       else app.repaintRegularTranscript();
       app.paint();
       if (initialResume) void app.openResume();
-      void app.loadAdoptionFindings();
+      app.adoptionFindingsLoad = app.loadAdoptionFindings().finally(() => {
+        app.adoptionFindingsLoad = undefined;
+      });
       return app;
     } catch (error) {
       try {
@@ -2361,6 +2364,10 @@ export class AxlApp {
       return;
     }
     this.quitPending = true;
+    // A first-launch scan is disposable derived work. Cancel and observe it before
+    // taking the daemon shutdown snapshot so it cannot create a stale status race.
+    this.adoptionController.dispose();
+    await this.adoptionFindingsLoad;
     const context: { sessionId: string; attachmentId?: string } = { sessionId: this.sessionId };
     let status: DaemonHostStatus | undefined;
     try {
