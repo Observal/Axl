@@ -22,6 +22,7 @@ use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 
 pub mod pairing;
+pub mod witness;
 
 #[cfg(feature = "browser-test-fixtures")]
 pub mod browser_test_fixtures;
