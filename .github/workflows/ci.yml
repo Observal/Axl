@@ -115,9 +115,121 @@ jobs:
           cargo test --locked
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked -p axl-e2ee --all-targets --features browser-test-fixtures -- -D warnings
           cargo clippy --locked -p axl-e2ee-node --all-targets --features test-fixtures -- -D warnings
           cargo audit --deny warnings
           cargo deny check
+
+  e2ee-browser-tooling:
+    name: E2EE browser tooling
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Install pinned Rust audit tools
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Format, lint, audit, and deny the standalone tooling lock
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo audit --deny warnings
+          cargo deny check
+
+  e2ee-browser:
+    name: E2EE browser (${{ matrix.browser }})
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox, webkit]
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+      - name: Install dependencies
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          cargo fetch --locked --manifest-path packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver/Cargo.toml
+      - name: Install Playwright browser system libraries
+        if: needs.changes.outputs.e2ee == 'true' && matrix.browser != 'chrome'
+        run: pnpm --filter @axl/e2ee-browser exec playwright install-deps ${{ matrix.browser }}
+      - name: Install the checksum-verified test-only Playwright browser
+        if: needs.changes.outputs.e2ee == 'true' && matrix.browser != 'chrome'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/axl-playwright-browsers
+        run: node packages/e2ee/bindings/browser/scripts/install-verified-playwright-linux.mjs ${{ matrix.browser }}
+      - name: Build and verify the private browser artifacts
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm --filter @axl/e2ee-browser build
+          pnpm --filter @axl/e2ee-browser build:test
+          pnpm --filter @axl/e2ee-browser check:abi
+          pnpm --filter @axl/e2ee-browser check:types
+          cargo clippy --locked --manifest-path packages/e2ee/Cargo.toml --target wasm32-unknown-unknown -p axl-e2ee --features browser-test-fixtures -- -D warnings
+          cargo clippy --locked --manifest-path packages/e2ee/Cargo.toml --target wasm32-unknown-unknown -p axl-e2ee-browser --all-targets --features test-fixtures --no-deps -- -D warnings
+      - name: Run ${{ matrix.browser }} browser evidence
+        if: needs.changes.outputs.e2ee == 'true'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/axl-playwright-browsers
+        run: pnpm --filter @axl/e2ee-browser exec playwright test --project=${{ matrix.browser }}
+
+  e2ee-browser-safari:
+    name: E2EE browser (Safari WebDriver)
+    needs: changes
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+      - name: Install dependencies and build browser artifacts
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          cargo fetch --locked --manifest-path packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver/Cargo.toml
+          pnpm --filter @axl/e2ee-browser build
+          pnpm --filter @axl/e2ee-browser build:test
+          pnpm --filter @axl/e2ee-browser check:abi
+      - name: Run actual Safari WebDriver evidence
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          sudo safaridriver --enable
+          pnpm --filter @axl/e2ee-browser test:safari
 
   e2ee-node:
     name: E2EE Node (${{ matrix.target }}, Node ${{ matrix.node }})

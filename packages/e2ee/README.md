@@ -63,5 +63,14 @@ contains no secure-store or rollback-anchor implementation and therefore fails c
 endpoint creation or opening. Test-only storage is compiled into a separate local fixture artifact
 and is excluded from production packaging.
 
+The private browser binding lives in [`bindings/browser`](bindings/browser). It runs single-threaded
+WASM in a dedicated same-origin module worker, requires `crypto.getRandomValues()`, and packages no
+browser executable. Its separately built test artifact executes a fresh KeyPackage, Welcome,
+activation, bidirectional application, update, commit, and epoch-ready lifecycle in each browser.
+It also executes negative OpenMLS cases for replay, duplicate ciphertext, mutation, AAD and identity
+mismatch, profile mismatch, and competing commits. Production endpoint creation and opening fail with
+`rollback_anchor_unavailable`. IndexedDB, Web Locks, persistence, and remote-web wiring remain out
+of this change.
+
 The exact toolchain is in `rust-toolchain.toml`. The implementation dependency and maintenance
 exception record is in `DEPENDENCIES.md`.

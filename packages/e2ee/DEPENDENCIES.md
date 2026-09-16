@@ -79,6 +79,36 @@ Rust 1.96 and Node 24.13.1 on macOS arm64 are locally verified. Node 22.19, macO
 glibc Linux architectures require separate runtime evidence. The production package contains no
 secure-store implementation and cannot create or open an endpoint.
 
+## Session 50.4 browser/WASM binding
+
+The private `@axl/e2ee-browser` binding adds `wasm-bindgen` 0.2.128, `getrandom` 0.2.17 with
+its `js` feature, and `web-time` 1.1.0. OpenMLS's `js` feature is enabled only by the browser
+workspace member. The initial artifact is single-threaded and contains no shared WASM memory or
+`SharedArrayBuffer` requirement. The resulting E2EE `Cargo.lock` SHA-256 is
+`a324986d4ff5a8178219c1836fb5ad9f28c8b49880e286f17927d6327738f0a0`.
+
+Generated `--target web` glue is produced by a repository-owned driver in
+`bindings/browser/scripts/wasm-bindgen-driver`. The driver is a standalone Cargo workspace with
+its own lock. It uses `wasm-bindgen-cli-support` 0.2.128 with default features disabled; it does not
+install, package, or execute `wasm-bindgen-cli`. Its 43-record lock contains the local driver and 42
+external package/version pairs and has SHA-256
+`19fe623de7a29372a9f899f8130c4194e9b9e2a60969f046c1f4c8b79ad69475`. Its separate license
+policy adds only the approved tooling-only Zlib allowance. CI independently formats, lints, audits,
+and checks this lock with cargo-deny.
+
+Browser tests use `@playwright/test` 1.63.0, which selects `playwright` 1.63.0 and
+`playwright-core` 1.63.0. Browser executables are downloaded only in test jobs and are absent from
+production packages. Linux CI is pinned to Ubuntu 24.04 x64. Its repository-owned installer checks
+Firefox 155.0 revision 1543 against SHA-256
+`b0905e84427cc162b9a6e4392be14e5e54e0ade911c83639962c8078b273565e` and WebKit 26.6 revision
+2359 against SHA-256 `8c129d989a1c48d826ca11b45acbba919039de811623dc3819ccbd95b69eeb62`
+before extraction. The resulting `pnpm-lock.yaml` SHA-256 is
+`a26537aea0418e8f36690eb2868df4d581d5961678e57b7f9028ce0ea1f81c78`.
+
+Production endpoint creation and opening remain closed with `rollback_anchor_unavailable`. The
+production package contains no test-only randomness probe, in-memory endpoint capability,
+IndexedDB adapter, Web Locks code, persistence implementation, or rollback anchor.
+
 ## Maintenance exception
 
 | Field | Value |

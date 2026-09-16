@@ -6,6 +6,7 @@ packages:
   - packages/*
   - packages/extensions/*
   - packages/e2ee/bindings/node
+  - packages/e2ee/bindings/browser
   - services/*
   - apps/*
 allowBuilds:

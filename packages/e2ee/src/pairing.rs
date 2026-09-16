@@ -6,7 +6,9 @@
 //! The in-memory accountant operates only after a pending invitation has been found. Unknown
 //! invitation lookup and its non-counting result belong to the durable Session 50.2 owner.
 
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
+use std::{collections::BTreeMap, sync::Arc};
 
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::{
@@ -324,6 +326,7 @@ impl PairingInvitation {
         sha384(&self.invitation_nonce)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn invitation_nonce(&self) -> [u8; 32] {
         self.invitation_nonce
     }
@@ -440,6 +443,7 @@ impl PairingClaimV1 {
         Self::create_after_verification(invitation, device_credential, key_package, device_signer)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn create_at(
         invitation: &PairingInvitation,
         device_credential: PairingCredential,
@@ -731,6 +735,7 @@ impl fmt::Display for PairingError {
 impl std::error::Error for PairingError {}
 
 /// Crate-private classification consumed by the durable pairing owner.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FailedClaimReason {
     Credential,
@@ -738,6 +743,7 @@ pub(crate) enum FailedClaimReason {
     Signature,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) enum ClassifiedClaim {
     NonCounting,
     EligibleFailure {
@@ -750,6 +756,7 @@ pub(crate) enum ClassifiedClaim {
     },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn classify_claim(
     invitation: &PairingInvitation,
     claim_bytes: &[u8],
@@ -812,10 +819,12 @@ fn classify_claim(
 }
 
 /// Exact accepted result. Debug output never prints its bytes.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 #[derive(Clone, Eq, PartialEq)]
 pub(crate) struct AcceptedPairingResult(Box<[u8]>);
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 impl AcceptedPairingResult {
     pub(crate) fn new(bytes: &[u8]) -> Result<Self, PairingError> {
@@ -828,12 +837,14 @@ impl AcceptedPairingResult {
         &self.0
     }
 }
+#[cfg(not(target_arch = "wasm32"))]
 impl fmt::Debug for AcceptedPairingResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("AcceptedPairingResult([redacted])")
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ClaimDecision {
@@ -841,6 +852,7 @@ pub(crate) enum ClaimDecision {
     Failed(FailedClaimReason),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PublicClaimResult {
@@ -850,6 +862,7 @@ pub(crate) enum PublicClaimResult {
     Rejected,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InvitationState {
@@ -860,6 +873,7 @@ enum InvitationState {
 }
 
 /// Pure in-memory revision 1 failure accounting. Durable ownership belongs to Session 50.2.
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 pub(crate) struct PairingClaimAccountant {
     invitation: PairingInvitation,
@@ -871,6 +885,7 @@ pub(crate) struct PairingClaimAccountant {
     last_now_ms: u64,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl fmt::Debug for PairingClaimAccountant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PairingClaimAccountant")
@@ -883,6 +898,7 @@ impl fmt::Debug for PairingClaimAccountant {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(dead_code)]
 impl PairingClaimAccountant {
     pub(crate) fn classify(
