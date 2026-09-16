@@ -68,9 +68,16 @@ WASM in a dedicated same-origin module worker, requires `crypto.getRandomValues(
 browser executable. Its separately built test artifact executes a fresh KeyPackage, Welcome,
 activation, bidirectional application, update, commit, and epoch-ready lifecycle in each browser.
 It also executes negative OpenMLS cases for replay, duplicate ciphertext, mutation, AAD and identity
-mismatch, profile mismatch, and competing commits. Production endpoint creation and opening fail with
-`rollback_anchor_unavailable`. IndexedDB, Web Locks, persistence, and remote-web wiring remain out
-of this change.
+mismatch, profile mismatch, and competing commits.
+
+The separate test artifact implements browser persistence feasibility with real IndexedDB, Web
+Locks, WebCrypto, dedicated workers, strict prepare-and-compare transactions, wrapped-DEK restart
+reconciliation, exact ciphertext and sealed-plaintext recovery, and storage fault evidence. The
+production artifact, declarations, and tarball contain no test persistence constructor or test
+anchor. Production endpoint creation and opening continue to fail with
+`rollback_anchor_unavailable`, and remote-web wiring remains out of scope. See
+[`BROWSER_STORAGE.md`](BROWSER_STORAGE.md) for the schema, sequencing, failure policy, evidence, and
+explicit browser security non-claims.
 
 The exact toolchain is in `rust-toolchain.toml`. The implementation dependency and maintenance
 exception record is in `DEPENDENCIES.md`.
