@@ -82,7 +82,10 @@ SPDX-FileCopyrightText = "2026 Lokesh"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
-path = ["packages/e2ee/Cargo.lock"]
+path = [
+  "packages/e2ee/Cargo.lock",
+  "packages/e2ee/fixtures/v1/*.tls",
+]
 SPDX-FileCopyrightText = "2026 VishnuM449"
 SPDX-License-Identifier = "Apache-2.0"
 
