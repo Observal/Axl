@@ -23,8 +23,15 @@ It provides:
   outbox recovery, durable acknowledgement and bounded retry retention, accepted-message-before-
   plaintext behavior, authenticated metadata manifests, restart-stable previous-epoch windows, and
   deterministic fault injection;
-- injected active-only envelope-key and monotonic rollback-anchor interfaces with crash
+- injected active-only envelope-key and legacy test rollback-anchor interfaces with crash
   reconciliation for prepared keys;
+- canonical signed rollback-witness register, read, and advance requests, bounded per-replica
+  overlap keysets, strict unanimous 3-of-3 certificate verification, append-ordered fork and
+  revocation decisions, complete endpoint reconciliation and quarantine, and an output-gating state
+  machine;
+- an acyclic sealed-inner and sealed-outer format that encrypts and authenticates the exact result
+  inside the committed successor, then binds its SHA-384 state commitment to the exact signed
+  request while keeping request construction and state material below the public API;
 - fail-closed creation recovery serialized across threads and processes by an OS-backed per-session
   lifecycle claim; cleanup requires proof that no cryptographic state committed, while open finishes
   publication of authenticated state and removes only a stale `.initializing` marker.
@@ -39,9 +46,10 @@ and signer state inside every native transaction, so rolled-back state and prepa
 be reused. See [`STORAGE.md`](STORAGE.md) for the schema, transaction order, migrations, rollback
 detection, erasure boundary, and explicit exclusions. Session 50's approved platform boundary is in
 [`../../docs/architecture/e2ee-platform-bindings.md`](../../docs/architecture/e2ee-platform-bindings.md).
-Browser transaction evidence remains required, but browser pairing stays disabled until an
-independent rollback anchor or reviewed peer-witness design is approved. Keychain, Android Keystore,
-generated mobile SDKs, and mobile applications remain Phase 13 work.
+Browser transaction evidence remains required. The approved hosted witness protocol supplies the
+independent rollback anchor, but browser pairing stays disabled until its production persistence,
+witness integration, artifact isolation, and runtime evidence pass. Keychain, Android Keystore,
+generated mobile SDKs, and mobile applications remain later work.
 
 Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
 upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim
