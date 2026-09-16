@@ -87,7 +87,7 @@ impl CoreProvider {
         })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser-test-fixtures"))]
     pub(crate) fn from_storage_values(
         values: BTreeMap<Vec<u8>, Vec<u8>>,
     ) -> Result<Self, openmls_traits::types::CryptoError> {
@@ -99,7 +99,7 @@ impl CoreProvider {
         })
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser-test-fixtures"))]
     pub(crate) fn storage_values(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
         self.storage
             .values

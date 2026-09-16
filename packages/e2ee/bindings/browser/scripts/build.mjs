@@ -70,6 +70,9 @@ cpSync(
   mode === "production" ? join(packageRoot, "worker/index.js") : join(packageRoot, "test/worker.js"),
   join(staging, "worker/index.js"),
 );
+if (mode === "test") {
+  cpSync(join(packageRoot, "test/browser-storage.js"), join(staging, "worker/browser-storage.js"));
+}
 if (mode === "production") {
   mkdirSync(join(staging, "loader"), { recursive: true });
   cpSync(join(packageRoot, "loader/index.js"), join(staging, "loader/index.js"));
