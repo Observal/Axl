@@ -64,6 +64,7 @@ These rules keep package ownership clear:
 
 - `packages/protocol` has no runtime dependencies.
 - `packages/kernel` depends only on `packages/protocol` and Node.js built-ins.
+- `packages/compiler` depends only on `packages/protocol` and Node.js built-ins. It owns foreign-format parsing and data-only inspection, and does not import daemon, SDK, runtime, or presentation types.
 - First-party extensions use the same public extension API as third-party extensions.
 - `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript client creates a real need for generation.
 - Apps use the public protocol SDK rather than package internals.

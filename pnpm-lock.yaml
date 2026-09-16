@@ -88,6 +88,8 @@ importers:
         specifier: 8.18.1
         version: 8.18.1
 
+  packages/compiler: {}
+
   packages/daemon:
     dependencies:
       '@axl/kernel':
