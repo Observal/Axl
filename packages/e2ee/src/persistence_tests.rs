@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
     path::PathBuf,
     process::Command,
@@ -20,9 +20,11 @@ use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinitio
 use crate::{
     Clock, Error, Identity, PairContext, SystemClock, TransactionalProvider,
     persistence::{
-        CommittedOperation, DurableDaemon, DurablePhone, EnvelopeKeyStore, FaultInjector,
-        FaultPoint, NativeTransactionalProvider, NoFaults, PersistenceError, RollbackAnchor,
-        RollbackState, RuntimeHooks, discard_interrupted_creation,
+        ActivationOutcome, ClaimSubmission, CommittedOperation, DurableDaemon,
+        DurablePendingInvitation, DurablePhone, DurablePreJoinDevice, EnvelopeKeyStore,
+        FaultInjector, FaultPoint, InvitationLifecycle, NativeTransactionalProvider, NoFaults,
+        PairLifecycle, PersistenceError, PreJoinLifecycle, RemovalOutcome, ReservationOutcome,
+        RollbackAnchor, RollbackState, RuntimeHooks, WelcomeOutcome, discard_interrupted_creation,
     },
 };
 
@@ -49,6 +51,24 @@ impl ManualClock {
 impl Clock for ManualClock {
     fn now_ms(&self) -> Result<u64, Error> {
         Ok(self.0.load(Ordering::SeqCst))
+    }
+}
+
+struct ScriptedClock(Mutex<VecDeque<u64>>);
+
+impl ScriptedClock {
+    fn new(values: impl IntoIterator<Item = u64>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(values.into_iter().collect())))
+    }
+}
+
+impl Clock for ScriptedClock {
+    fn now_ms(&self) -> Result<u64, Error> {
+        self.0
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or(Error::ClockRollback)
     }
 }
 
@@ -416,7 +436,11 @@ fn durable_pair(seed: u8) -> DurablePair {
     let phone_anchor = TestAnchor::new();
     let daemon_faults = OneShotFault::new();
     let phone_faults = OneShotFault::new();
-    let clock = ManualClock::new(1_000_000);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let clock = ManualClock::new(now_ms);
     let daemon_identity = Identity::daemon(context.account_id, context.installation_id);
     let phone_identity = Identity::device(
         context.account_id,
@@ -1593,6 +1617,7 @@ fn stale_marker_recovery_holds_lifecycle_claim_against_cleanup() {
     let opener_keys = pair.phone_keys.clone();
     let opener_anchor = pair.phone_anchor.clone();
     let opener_faults = faults.clone();
+    let opener_clock = pair.clock.clone();
     let opener = thread::spawn(move || {
         DurablePhone::open_with_runtime(
             &opener_root,
@@ -1601,7 +1626,7 @@ fn stale_marker_recovery_holds_lifecycle_claim_against_cleanup() {
             opener_anchor,
             RuntimeHooks {
                 faults: opener_faults,
-                clock: ManualClock::new(1_000_000),
+                clock: opener_clock,
             },
         )
     });
@@ -2174,4 +2199,1487 @@ fn unrelated_groups_make_progress_on_separate_databases() {
     for handle in handles {
         assert!(handle.join().unwrap() > 0);
     }
+}
+
+#[derive(Clone)]
+struct PairingIds {
+    account: [u8; 16],
+    installation: [u8; 16],
+    session: [u8; 16],
+    device: [u8; 16],
+}
+
+fn uuid_v7(seed: u8) -> [u8; 16] {
+    let mut value = [seed; 16];
+    value[6] = 0x70 | (seed & 0x0f);
+    value[8] = 0x80 | (seed & 0x3f);
+    value
+}
+
+fn pairing_ids(seed: u8) -> PairingIds {
+    PairingIds {
+        account: [seed; 16],
+        installation: uuid_v7(seed.wrapping_add(1)),
+        session: uuid_v7(seed.wrapping_add(2)),
+        device: uuid_v7(seed.wrapping_add(3)),
+    }
+}
+
+struct PendingFixture {
+    root: PathBuf,
+    endpoint: DurablePendingInvitation,
+    publication: crate::persistence::InvitationPublication,
+    keys: Arc<TestKeys>,
+    anchor: Arc<TestAnchor>,
+    clock: Arc<ManualClock>,
+    ids: PairingIds,
+}
+
+fn pending_fixture(seed: u8) -> PendingFixture {
+    let ids = pairing_ids(seed);
+    let root = temp_root("pending-invitation");
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let clock = ManualClock::new(now_ms);
+    let (endpoint, publication) = DurablePendingInvitation::issue_with_runtime(
+        &root,
+        Identity::daemon(ids.account, ids.installation),
+        ids.session,
+        sequence_id(90, u64::from(seed)),
+        keys.clone(),
+        anchor.clone(),
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: clock.clone(),
+        },
+    )
+    .unwrap();
+    PendingFixture {
+        root,
+        endpoint,
+        publication,
+        keys,
+        anchor,
+        clock,
+        ids,
+    }
+}
+
+fn prepare_prejoin(
+    fixture: &PendingFixture,
+    seed: u8,
+) -> (
+    PathBuf,
+    DurablePreJoinDevice,
+    crate::persistence::PreJoinPublication,
+    Arc<TestKeys>,
+    Arc<TestAnchor>,
+) {
+    let root = temp_root("device-prejoin");
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let (device, publication) = DurablePreJoinDevice::prepare_with_runtime(
+        &root,
+        Identity::device(
+            fixture.ids.account,
+            fixture.ids.installation,
+            fixture.ids.device,
+        )
+        .unwrap(),
+        fixture.publication.bytes(),
+        sequence_id(91, u64::from(seed)),
+        keys.clone(),
+        anchor.clone(),
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    (root, device, publication, keys, anchor)
+}
+
+#[test]
+fn invitation_is_committed_before_publication_and_recovers_after_ambiguous_return() {
+    let ids = pairing_ids(170);
+    let root = temp_root("invitation-ambiguous-return");
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let faults = OneShotFault::new();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let clock = ManualClock::new(now_ms);
+    faults.arm(FaultPoint::AfterCommitBeforeNetworkSend);
+    assert!(matches!(
+        DurablePendingInvitation::issue_with_runtime(
+            &root,
+            Identity::daemon(ids.account, ids.installation),
+            ids.session,
+            id(171),
+            keys.clone(),
+            anchor.clone(),
+            RuntimeHooks {
+                faults,
+                clock: clock.clone(),
+            },
+        ),
+        Err(PersistenceError::InjectedFault)
+    ));
+    assert!(!marker_path(&root, ids.session).exists());
+
+    let mut recovered = DurablePendingInvitation::open_with_runtime(
+        &root,
+        ids.session,
+        keys,
+        anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock,
+        },
+    )
+    .unwrap();
+    let publication = recovered.publication().unwrap();
+    assert_eq!(
+        crate::pairing::PairingInvitation::decode(publication.bytes())
+            .unwrap()
+            .invitation_hash()
+            .unwrap(),
+        publication.invitation_hash()
+    );
+    assert_eq!(recovered.store().generation().unwrap(), 1);
+}
+
+#[test]
+fn prejoin_creation_samples_the_clock_once_and_anchors_the_observed_time() {
+    let fixture = pending_fixture(170);
+    let observed = fixture.publication.expires_at_ms() - 1;
+    let clock = ScriptedClock::new([observed]);
+    let root = temp_root("device-prejoin-single-clock-sample");
+    let keys = TestKeys::enabled();
+    let anchor = TestAnchor::new();
+    let (device, publication) = DurablePreJoinDevice::prepare_with_runtime(
+        &root,
+        Identity::device(
+            fixture.ids.account,
+            fixture.ids.installation,
+            fixture.ids.device,
+        )
+        .unwrap(),
+        fixture.publication.bytes(),
+        id(172),
+        keys,
+        anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock,
+        },
+    )
+    .unwrap();
+    assert!(!publication.key_package().is_empty());
+    assert_eq!(device.last_now_ms_for_test().unwrap(), observed);
+}
+
+#[test]
+fn invitation_expiry_is_exclusive_durable_and_restart_safe() {
+    let mut fixture = pending_fixture(171);
+    fixture.clock.set(fixture.publication.expires_at_ms() - 1);
+    assert_eq!(
+        fixture.endpoint.lifecycle().unwrap(),
+        InvitationLifecycle::Issued
+    );
+    let generation = fixture.endpoint.store().generation().unwrap();
+    fixture.clock.set(fixture.publication.expires_at_ms());
+    assert_eq!(
+        fixture.endpoint.lifecycle().unwrap(),
+        InvitationLifecycle::Expired
+    );
+    assert_eq!(
+        fixture.endpoint.store().generation().unwrap(),
+        generation + 1
+    );
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    let mut reopened = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys,
+        fixture.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened.lifecycle().unwrap(), InvitationLifecycle::Expired);
+}
+
+#[test]
+fn pending_claim_and_device_prejoin_recover_exact_bytes() {
+    let mut fixture = pending_fixture(172);
+    let (device_root, device, publication, device_keys, device_anchor) =
+        prepare_prejoin(&fixture, 172);
+    let expected = publication.clone();
+    let pending = fixture
+        .endpoint
+        .submit_claim(id(173), publication.claim())
+        .unwrap();
+    assert!(matches!(pending, ClaimSubmission::Pending { .. }));
+
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    let mut reopened_daemon = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys,
+        fixture.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reopened_daemon.lifecycle().unwrap(),
+        InvitationLifecycle::ClaimPending
+    );
+    assert_eq!(
+        reopened_daemon
+            .submit_claim(id(174), expected.claim())
+            .unwrap(),
+        pending
+    );
+
+    device.store().close().unwrap();
+    drop(device);
+    let mut reopened_device = DurablePreJoinDevice::open_with_runtime(
+        &device_root,
+        fixture.ids.session,
+        device_keys,
+        device_anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened_device.publication().unwrap(), expected);
+    assert_eq!(
+        reopened_device.lifecycle().unwrap(),
+        PreJoinLifecycle::PreJoin
+    );
+}
+
+#[test]
+fn failed_claims_are_idempotent_across_restart_and_fifth_cancels_atomically() {
+    let mut fixture = pending_fixture(173);
+    let (_, _, publication, _, _) = prepare_prejoin(&fixture, 173);
+    let mut failed_claims = Vec::new();
+    for index in 0..5_u8 {
+        let mut bytes = publication.claim().to_vec();
+        let last = bytes.len() - 1 - usize::from(index);
+        bytes[last] ^= index + 1;
+        failed_claims.push(bytes);
+    }
+
+    assert_eq!(
+        fixture
+            .endpoint
+            .submit_claim(id(180), &failed_claims[0])
+            .unwrap(),
+        ClaimSubmission::Rejected {
+            reason: Some(crate::persistence::ClaimFailure::Signature)
+        }
+    );
+    assert_eq!(fixture.endpoint.failed_claim_count().unwrap(), 1);
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    let mut endpoint = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys,
+        fixture.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint.submit_claim(id(181), &failed_claims[0]).unwrap(),
+        ClaimSubmission::Rejected {
+            reason: Some(crate::persistence::ClaimFailure::Signature)
+        }
+    );
+    assert_eq!(endpoint.failed_claim_count().unwrap(), 1);
+    for (index, bytes) in failed_claims.iter().enumerate().skip(1) {
+        let result = endpoint
+            .submit_claim(sequence_id(92, index as u64), bytes)
+            .unwrap();
+        if index == 4 {
+            assert_eq!(result, ClaimSubmission::Cancelled);
+        } else {
+            assert!(matches!(result, ClaimSubmission::Rejected { .. }));
+        }
+    }
+    assert_eq!(endpoint.failed_claim_count().unwrap(), 5);
+    assert_eq!(
+        endpoint.lifecycle().unwrap(),
+        InvitationLifecycle::Cancelled
+    );
+    assert_eq!(
+        endpoint.submit_claim(id(182), &failed_claims[0]).unwrap(),
+        ClaimSubmission::Rejected {
+            reason: Some(crate::persistence::ClaimFailure::Signature)
+        }
+    );
+}
+
+#[test]
+fn malformed_and_wrong_binding_claims_do_not_count() {
+    let mut fixture = pending_fixture(174);
+    let (_, _, publication, _, _) = prepare_prejoin(&fixture, 174);
+    assert_eq!(
+        fixture
+            .endpoint
+            .submit_claim(id(183), b"malformed")
+            .unwrap(),
+        ClaimSubmission::Rejected { reason: None }
+    );
+    let mut wrong_binding = publication.claim().to_vec();
+    let account_offset = 2 + 1 + crate::PROFILE_ID.len() + 2;
+    wrong_binding[account_offset] ^= 1;
+    assert_eq!(
+        fixture
+            .endpoint
+            .submit_claim(id(184), &wrong_binding)
+            .unwrap(),
+        ClaimSubmission::Rejected { reason: None }
+    );
+    assert_eq!(fixture.endpoint.failed_claim_count().unwrap(), 0);
+    assert_eq!(
+        fixture.endpoint.lifecycle().unwrap(),
+        InvitationLifecycle::Issued
+    );
+}
+
+#[test]
+fn cancellation_is_terminal_and_recovers() {
+    let mut fixture = pending_fixture(175);
+    assert_eq!(
+        fixture.endpoint.cancel(id(185)).unwrap(),
+        InvitationLifecycle::Cancelled
+    );
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    let mut reopened = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys,
+        fixture.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.lifecycle().unwrap(),
+        InvitationLifecycle::Cancelled
+    );
+}
+
+#[test]
+fn malformed_and_missing_encrypted_invitation_records_fail_closed_after_restart() {
+    let fixture = pending_fixture(176);
+    let mut malformed = fixture.endpoint.record_bytes_for_test().unwrap();
+    let state_offset = 2 + 1 + crate::PROFILE_ID.len() + 2;
+    malformed[state_offset] = 99;
+    fixture
+        .endpoint
+        .replace_record_for_test(id(186), &malformed)
+        .unwrap();
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    assert!(matches!(
+        DurablePendingInvitation::open_with_runtime(
+            &fixture.root,
+            fixture.ids.session,
+            fixture.keys,
+            fixture.anchor,
+            RuntimeHooks {
+                faults: Arc::new(NoFaults),
+                clock: fixture.clock,
+            },
+        ),
+        Err(PersistenceError::Corrupt)
+    ));
+
+    let fixture = pending_fixture(177);
+    fixture.endpoint.remove_record_for_test(id(187)).unwrap();
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    assert!(matches!(
+        DurablePendingInvitation::open_with_runtime(
+            &fixture.root,
+            fixture.ids.session,
+            fixture.keys,
+            fixture.anchor,
+            RuntimeHooks {
+                faults: Arc::new(NoFaults),
+                clock: fixture.clock,
+            },
+        ),
+        Err(PersistenceError::Corrupt)
+    ));
+}
+
+#[test]
+fn pairing_secrets_and_prejoin_private_material_are_not_plaintext_redb_values() {
+    let fixture = pending_fixture(178);
+    let (_, device, publication, _, _) = prepare_prejoin(&fixture, 178);
+    let invitation =
+        crate::pairing::PairingInvitation::decode(fixture.publication.bytes()).unwrap();
+    let nonce_start = fixture.publication.bytes().len() - 64 - 32;
+    let nonce = &fixture.publication.bytes()[nonce_start..nonce_start + 32];
+
+    fixture.endpoint.store().close().unwrap();
+    let daemon_file = fs::read(fixture.endpoint.store().path()).unwrap();
+    assert!(
+        !daemon_file
+            .windows(fixture.publication.bytes().len())
+            .any(|window| window == fixture.publication.bytes())
+    );
+    assert!(
+        !daemon_file
+            .windows(nonce.len())
+            .any(|window| window == nonce)
+    );
+    assert_eq!(
+        invitation.invitation_hash().unwrap(),
+        fixture.publication.invitation_hash()
+    );
+
+    device.store().close().unwrap();
+    let device_file = fs::read(device.store().path()).unwrap();
+    assert!(
+        !device_file
+            .windows(publication.claim().len())
+            .any(|window| window == publication.claim())
+    );
+    assert!(
+        !device_file
+            .windows(publication.key_package().len())
+            .any(|window| window == publication.key_package())
+    );
+}
+
+#[allow(clippy::type_complexity)]
+fn confirmed_pairing(
+    seed: u8,
+) -> (
+    PendingFixture,
+    PathBuf,
+    DurablePreJoinDevice,
+    crate::persistence::PreJoinPublication,
+    Arc<TestKeys>,
+    Arc<TestAnchor>,
+    [u8; 48],
+    [u8; 16],
+) {
+    let mut fixture = pending_fixture(seed);
+    let (device_root, device, publication, device_keys, device_anchor) =
+        prepare_prejoin(&fixture, seed);
+    let claim_hash = match fixture
+        .endpoint
+        .submit_claim(sequence_id(100, u64::from(seed)), publication.claim())
+        .unwrap()
+    {
+        ClaimSubmission::Pending { claim_hash, .. } => claim_hash,
+        other => panic!("unexpected claim result: {other:?}"),
+    };
+    let reservation_id = sequence_id(101, u64::from(seed));
+    assert!(matches!(
+        fixture
+            .endpoint
+            .confirm_claim(
+                sequence_id(102, u64::from(seed)),
+                claim_hash,
+                reservation_id,
+            )
+            .unwrap(),
+        ReservationOutcome::Reserved(_)
+    ));
+    (
+        fixture,
+        device_root,
+        device,
+        publication,
+        device_keys,
+        device_anchor,
+        claim_hash,
+        reservation_id,
+    )
+}
+
+#[test]
+fn one_reservation_wins_and_expired_reservation_can_be_replaced() {
+    let mut fixture = pending_fixture(179);
+    let (_, _, publication, _, _) = prepare_prejoin(&fixture, 179);
+    let claim_hash = match fixture
+        .endpoint
+        .submit_claim(id(188), publication.claim())
+        .unwrap()
+    {
+        ClaimSubmission::Pending { claim_hash, .. } => claim_hash,
+        other => panic!("unexpected claim result: {other:?}"),
+    };
+    let mut first = fixture.endpoint.clone();
+    let mut second = fixture.endpoint.clone();
+    let first_handle = thread::spawn(move || first.confirm_claim(id(189), claim_hash, id(190)));
+    let second_handle = thread::spawn(move || second.confirm_claim(id(191), claim_hash, id(192)));
+    let outcomes = [
+        first_handle.join().unwrap().unwrap(),
+        second_handle.join().unwrap().unwrap(),
+    ];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ReservationOutcome::Reserved(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, ReservationOutcome::Busy))
+            .count(),
+        1
+    );
+    fixture.clock.advance(60_000);
+    assert!(matches!(
+        fixture
+            .endpoint
+            .confirm_claim(id(193), claim_hash, id(194))
+            .unwrap(),
+        ReservationOutcome::Reserved(_)
+    ));
+}
+
+#[test]
+fn group_welcome_join_and_activation_are_durable_and_exact() {
+    let (
+        mut fixture,
+        device_root,
+        mut device,
+        _,
+        device_keys,
+        device_anchor,
+        claim_hash,
+        reservation_id,
+    ) = confirmed_pairing(180);
+    let welcome = match fixture
+        .endpoint
+        .create_welcome(id(195), reservation_id)
+        .unwrap()
+    {
+        WelcomeOutcome::Committed(welcome) => welcome,
+        other => panic!("unexpected Welcome result: {other:?}"),
+    };
+    assert_ne!(welcome.group_id(), [0; 32]);
+    let duplicate = fixture.endpoint.recover_welcome(claim_hash).unwrap();
+    assert_eq!(duplicate, WelcomeOutcome::Duplicate(welcome.clone()));
+
+    assert_eq!(
+        device.join(id(196), &welcome).unwrap(),
+        PreJoinLifecycle::Joined
+    );
+    device.store().close().unwrap();
+    drop(device);
+    let mut device = DurablePreJoinDevice::open_with_runtime(
+        &device_root,
+        fixture.ids.session,
+        device_keys,
+        device_anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Joined);
+
+    let activation = match device.prepare_activation(id(197), id(198)).unwrap() {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation result: {other:?}"),
+    };
+    let retry = match device.prepare_activation(id(197), id(198)).unwrap() {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation retry: {other:?}"),
+    };
+    assert_eq!(retry.ciphertext, activation.ciphertext);
+    let acceptance = match fixture
+        .endpoint
+        .accept_activation(id(199), id(198), &activation.ciphertext)
+        .unwrap()
+    {
+        ActivationOutcome::Activated(acceptance) => acceptance,
+        other => panic!("unexpected activation acceptance: {other:?}"),
+    };
+    assert_eq!(
+        fixture
+            .endpoint
+            .accept_activation(id(200), id(198), &activation.ciphertext)
+            .unwrap(),
+        ActivationOutcome::Duplicate(acceptance.clone())
+    );
+    assert_eq!(
+        device.acknowledge_activation(id(201), &acceptance).unwrap(),
+        PairLifecycle::Active
+    );
+    assert_eq!(
+        fixture.endpoint.recover_welcome(claim_hash).unwrap(),
+        WelcomeOutcome::Consumed
+    );
+}
+
+#[test]
+fn group_creation_precommit_fault_retries_and_postcommit_fault_recovers_exact_welcome() {
+    let (precommit, _, _, _, _, _, _, reservation_id) = confirmed_pairing(181);
+    // The fixture uses NoFaults. Reopen with the same protected state and an injected fault.
+    precommit.endpoint.store().close().unwrap();
+    drop(precommit.endpoint);
+    let faults = OneShotFault::new();
+    faults.arm(FaultPoint::BeforeCommit);
+    let mut endpoint = DurablePendingInvitation::open_with_runtime(
+        &precommit.root,
+        precommit.ids.session,
+        precommit.keys.clone(),
+        precommit.anchor.clone(),
+        RuntimeHooks {
+            faults: faults.clone(),
+            clock: precommit.clock.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint
+            .create_welcome(id(201), reservation_id)
+            .unwrap_err(),
+        PersistenceError::InjectedFault
+    );
+    endpoint.store().close().unwrap();
+    drop(endpoint);
+    let mut endpoint = DurablePendingInvitation::open_with_runtime(
+        &precommit.root,
+        precommit.ids.session,
+        precommit.keys,
+        precommit.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: precommit.clock,
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        endpoint.create_welcome(id(201), reservation_id).unwrap(),
+        WelcomeOutcome::Committed(_)
+    ));
+
+    let (postcommit, _, _, _, _, _, _, reservation_id) = confirmed_pairing(182);
+    postcommit.endpoint.store().close().unwrap();
+    drop(postcommit.endpoint);
+    let faults = OneShotFault::new();
+    faults.arm(FaultPoint::AfterCommitBeforeNetworkSend);
+    let mut endpoint = DurablePendingInvitation::open_with_runtime(
+        &postcommit.root,
+        postcommit.ids.session,
+        postcommit.keys,
+        postcommit.anchor,
+        RuntimeHooks {
+            faults,
+            clock: postcommit.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        endpoint
+            .create_welcome(id(202), reservation_id)
+            .unwrap_err(),
+        PersistenceError::InjectedFault
+    );
+    let recovered = endpoint.create_welcome(id(202), reservation_id).unwrap();
+    assert!(matches!(recovered, WelcomeOutcome::Duplicate(_)));
+}
+
+#[test]
+fn conflicting_claim_cannot_replace_confirmed_or_consumed_pairing() {
+    let (mut fixture, _, _, publication, _, _, claim_hash, reservation_id) = confirmed_pairing(183);
+    let mut conflict = publication.claim().to_vec();
+    let last = conflict.len() - 1;
+    conflict[last] ^= 1;
+    assert_eq!(
+        fixture.endpoint.submit_claim(id(203), &conflict).unwrap(),
+        ClaimSubmission::Conflict
+    );
+    let welcome = fixture
+        .endpoint
+        .create_welcome(id(204), reservation_id)
+        .unwrap();
+    assert!(matches!(welcome, WelcomeOutcome::Committed(_)));
+    assert_eq!(
+        fixture.endpoint.submit_claim(id(205), &conflict).unwrap(),
+        ClaimSubmission::Conflict
+    );
+    assert!(matches!(
+        fixture.endpoint.recover_welcome(claim_hash).unwrap(),
+        WelcomeOutcome::Duplicate(_)
+    ));
+}
+
+fn activated_pair(
+    seed: u8,
+) -> (
+    PendingFixture,
+    PathBuf,
+    DurablePreJoinDevice,
+    Arc<TestKeys>,
+    Arc<TestAnchor>,
+) {
+    let (mut fixture, device_root, mut device, _, device_keys, device_anchor, _, reservation_id) =
+        confirmed_pairing(seed);
+    let welcome = match fixture
+        .endpoint
+        .create_welcome(sequence_id(110, u64::from(seed)), reservation_id)
+        .unwrap()
+    {
+        WelcomeOutcome::Committed(welcome) => welcome,
+        other => panic!("unexpected Welcome result: {other:?}"),
+    };
+    device
+        .join(sequence_id(111, u64::from(seed)), &welcome)
+        .unwrap();
+    let activation = match device
+        .prepare_activation(
+            sequence_id(112, u64::from(seed)),
+            sequence_id(113, u64::from(seed)),
+        )
+        .unwrap()
+    {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation result: {other:?}"),
+    };
+    let acceptance = match fixture
+        .endpoint
+        .accept_activation(
+            sequence_id(114, u64::from(seed)),
+            sequence_id(113, u64::from(seed)),
+            &activation.ciphertext,
+        )
+        .unwrap()
+    {
+        ActivationOutcome::Activated(acceptance) => acceptance,
+        other => panic!("unexpected activation acceptance: {other:?}"),
+    };
+    device
+        .acknowledge_activation(sequence_id(115, u64::from(seed)), &acceptance)
+        .unwrap();
+    (fixture, device_root, device, device_keys, device_anchor)
+}
+
+#[test]
+fn replacement_commit_and_epoch_ready_complete_in_order_across_restart() {
+    let (mut fixture, device_root, mut device, device_keys, device_anchor) = activated_pair(184);
+    let proposal = device.prepare_replacement(id(210), id(211), 7).unwrap();
+    assert_eq!(
+        device.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::ReplacementProposed)
+    );
+    fixture
+        .endpoint
+        .receive_replacement_proposal(id(212), &proposal.ciphertext, id(211), 7)
+        .unwrap();
+    let commit = fixture
+        .endpoint
+        .create_update_commit(id(213), id(214), 7)
+        .unwrap();
+    assert_eq!(
+        fixture.endpoint.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::WaitingForEpochReady)
+    );
+    assert!(
+        fixture
+            .endpoint
+            .prepare_application(id(209), id(208), 7, b"daemon barrier")
+            .is_err()
+    );
+    let ready = device
+        .apply_update_commit(id(215), &commit, id(214), 7, id(216))
+        .unwrap();
+    assert_eq!(
+        device.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::WaitingForEpochReady)
+    );
+    assert!(
+        device
+            .prepare_application(id(218), id(219), 7, b"blocked before acknowledgement")
+            .is_err()
+    );
+    assert!(
+        device
+            .receive_application(id(207), &[], id(206), 7)
+            .is_err()
+    );
+    let acceptance = fixture
+        .endpoint
+        .accept_epoch_ready(id(217), id(216), &ready.ciphertext)
+        .unwrap();
+    assert_eq!(
+        device
+            .acknowledge_epoch_ready(id(218), &acceptance)
+            .unwrap(),
+        PairLifecycle::Active
+    );
+    assert!(
+        device
+            .prepare_application(id(219), id(220), 7, b"enabled after acknowledgement")
+            .is_ok()
+    );
+
+    fixture.endpoint.store().close().unwrap();
+    device.store().close().unwrap();
+    drop(fixture.endpoint);
+    drop(device);
+    let daemon = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys,
+        fixture.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    let phone = DurablePreJoinDevice::open_with_runtime(
+        &device_root,
+        fixture.ids.session,
+        device_keys,
+        device_anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        daemon.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::Active)
+    );
+    assert_eq!(phone.pair_lifecycle().unwrap(), Some(PairLifecycle::Active));
+}
+
+#[test]
+fn daemon_only_removal_precedes_device_terminal_state() {
+    let (mut fixture, _, mut device, _, _) = activated_pair(185);
+    let removal = match fixture.endpoint.revoke_device(id(220), id(221), 8).unwrap() {
+        RemovalOutcome::Commit(record) => record,
+        other => panic!("unexpected removal result: {other:?}"),
+    };
+    assert_eq!(
+        fixture.endpoint.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::Revoked)
+    );
+    assert_eq!(
+        device.apply_removal(id(222), &removal, id(221), 8).unwrap(),
+        RemovalOutcome::Removed
+    );
+    assert_eq!(
+        device.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::Removed)
+    );
+    assert!(device.prepare_replacement(id(223), id(224), 8).is_err());
+}
+
+#[test]
+fn reset_requires_fresh_device_session_and_group_identifiers() {
+    let (mut fixture, _, mut device, _, _) = activated_pair(186);
+    let requirement = device.reset(id(230)).unwrap();
+    assert_eq!(device.pair_lifecycle().unwrap(), Some(PairLifecycle::Reset));
+    assert!(
+        requirement
+            .validate_fresh(requirement.device_id(), uuid_v7(240), [240; 32], [240; 48],)
+            .is_err()
+    );
+    assert!(
+        requirement
+            .validate_fresh(
+                uuid_v7(241),
+                requirement.crypto_session_id(),
+                [241; 32],
+                [241; 48],
+            )
+            .is_err()
+    );
+    assert!(
+        requirement
+            .validate_fresh(
+                uuid_v7(242),
+                uuid_v7(243),
+                requirement.group_id().unwrap(),
+                [242; 48],
+            )
+            .is_err()
+    );
+    requirement
+        .validate_fresh(uuid_v7(244), uuid_v7(245), [246; 32], [246; 48])
+        .unwrap();
+    assert!(fixture.endpoint.reset(id(231)).is_ok());
+    assert_eq!(
+        fixture.endpoint.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::Reset)
+    );
+}
+
+#[test]
+fn accepted_claim_retries_recover_reservation_welcome_and_expiry_state() {
+    let (mut fixture, _, mut device, publication, _, _, claim_hash, reservation_id) =
+        confirmed_pairing(187);
+    fixture.endpoint.close().unwrap();
+    fixture.endpoint = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys.clone(),
+        fixture.anchor.clone(),
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        fixture.endpoint.lifecycle().unwrap(),
+        InvitationLifecycle::Confirmed
+    );
+    assert!(matches!(
+        fixture
+            .endpoint
+            .submit_claim(id(232), publication.claim())
+            .unwrap(),
+        ClaimSubmission::Confirmed(_)
+    ));
+    let welcome = match fixture
+        .endpoint
+        .create_welcome(id(233), reservation_id)
+        .unwrap()
+    {
+        WelcomeOutcome::Committed(welcome) => welcome,
+        other => panic!("unexpected Welcome result: {other:?}"),
+    };
+    assert_eq!(
+        fixture
+            .endpoint
+            .submit_claim(id(234), publication.claim())
+            .unwrap(),
+        ClaimSubmission::Accepted(welcome.clone())
+    );
+    device.join(id(235), &welcome).unwrap();
+    let activation = match device.prepare_activation(id(236), id(237)).unwrap() {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation result: {other:?}"),
+    };
+    fixture.clock.set(welcome.expires_at_ms());
+    assert_eq!(
+        fixture
+            .endpoint
+            .submit_claim(id(238), publication.claim())
+            .unwrap(),
+        ClaimSubmission::Expired
+    );
+    assert_eq!(
+        fixture
+            .endpoint
+            .create_welcome(id(233), reservation_id)
+            .unwrap(),
+        WelcomeOutcome::Expired
+    );
+    assert_eq!(
+        fixture
+            .endpoint
+            .accept_activation(id(239), id(237), activation.ciphertext())
+            .unwrap(),
+        ActivationOutcome::Rejected
+    );
+    assert_eq!(
+        fixture.endpoint.recover_welcome(claim_hash).unwrap(),
+        WelcomeOutcome::Expired
+    );
+    fixture.endpoint.store().close().unwrap();
+    drop(fixture.endpoint);
+    let mut reopened = DurablePendingInvitation::open_with_runtime(
+        &fixture.root,
+        fixture.ids.session,
+        fixture.keys,
+        fixture.anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.recover_welcome(claim_hash).unwrap(),
+        WelcomeOutcome::Expired
+    );
+}
+
+#[test]
+fn safe_facade_allows_active_messages_and_blocks_after_reset() {
+    let (mut fixture, _, mut device, _, _) = activated_pair(188);
+    let sent = device
+        .prepare_application(id(240), id(241), 9, b"facade message")
+        .unwrap();
+    assert_eq!(
+        fixture
+            .endpoint
+            .receive_application(id(242), &sent.ciphertext, id(241), 9)
+            .unwrap()
+            .plaintext(),
+        b"facade message"
+    );
+    device.reset(id(243)).unwrap();
+    assert_eq!(
+        device
+            .prepare_application(id(244), id(245), 9, b"blocked")
+            .unwrap_err(),
+        PersistenceError::Conflict
+    );
+}
+
+#[test]
+fn welcome_remains_joinable_after_invitation_expiry_until_its_own_deadline() {
+    let mut fixture = pending_fixture(189);
+    let (device_root, device, publication, device_keys, device_anchor) =
+        prepare_prejoin(&fixture, 189);
+    let claim_hash = match fixture
+        .endpoint
+        .submit_claim(id(10), publication.claim())
+        .unwrap()
+    {
+        ClaimSubmission::Pending { claim_hash, .. } => claim_hash,
+        other => panic!("unexpected claim result: {other:?}"),
+    };
+    fixture
+        .clock
+        .set(fixture.publication.expires_at_ms() - 1_000);
+    let reservation_id = id(11);
+    fixture
+        .endpoint
+        .confirm_claim(id(12), claim_hash, reservation_id)
+        .unwrap();
+    let welcome = match fixture
+        .endpoint
+        .create_welcome(id(13), reservation_id)
+        .unwrap()
+    {
+        WelcomeOutcome::Committed(welcome) => welcome,
+        other => panic!("unexpected Welcome result: {other:?}"),
+    };
+    device.store().close().unwrap();
+    drop(device);
+    fixture.clock.set(fixture.publication.expires_at_ms() + 1);
+    assert!(fixture.clock.0.load(Ordering::SeqCst) < welcome.expires_at_ms());
+    let mut device = DurablePreJoinDevice::open_with_runtime(
+        &device_root,
+        fixture.ids.session,
+        device_keys,
+        device_anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Expired);
+    assert_eq!(
+        device.join(id(14), &welcome).unwrap(),
+        PreJoinLifecycle::Joined
+    );
+    device.store().close().unwrap();
+    drop(device);
+    fs::remove_dir_all(device_root).unwrap();
+}
+
+#[test]
+fn reservation_release_retry_returns_exact_result_without_releasing_replacement() {
+    let (mut fixture, _, _, _, _, _, claim_hash, first_reservation) = confirmed_pairing(190);
+    assert_eq!(
+        fixture
+            .endpoint
+            .release_reservation(id(20), first_reservation)
+            .unwrap(),
+        ReservationOutcome::Unavailable
+    );
+    let replacement = id(21);
+    assert!(matches!(
+        fixture
+            .endpoint
+            .confirm_claim(id(22), claim_hash, replacement)
+            .unwrap(),
+        ReservationOutcome::Reserved(_)
+    ));
+    assert_eq!(
+        fixture
+            .endpoint
+            .release_reservation(id(20), first_reservation)
+            .unwrap(),
+        ReservationOutcome::Unavailable
+    );
+    assert!(matches!(
+        fixture
+            .endpoint
+            .create_welcome(id(23), replacement)
+            .unwrap(),
+        WelcomeOutcome::Committed(_)
+    ));
+}
+
+#[test]
+fn revocation_preempts_a_pending_device_replacement() {
+    let (mut fixture, _, mut device, _, _) = activated_pair(191);
+    let proposal = device.prepare_replacement(id(30), id(31), 4).unwrap();
+    fixture
+        .endpoint
+        .receive_replacement_proposal(id(32), proposal.ciphertext(), id(31), 4)
+        .unwrap();
+    let removal = match fixture.endpoint.revoke_device(id(33), id(34), 4).unwrap() {
+        RemovalOutcome::Commit(record) => record,
+        other => panic!("unexpected removal result: {other:?}"),
+    };
+    assert_eq!(
+        device.apply_removal(id(35), &removal, id(34), 4).unwrap(),
+        RemovalOutcome::Removed
+    );
+}
+
+#[test]
+fn prejoin_reset_preserves_material_and_repair_enforces_fresh_inputs() {
+    let fixture = pending_fixture(192);
+    let (_, mut device, publication, _, _) = prepare_prejoin(&fixture, 192);
+    let requirement = device.reset(id(40)).unwrap();
+    assert_eq!(requirement.group_id(), None);
+    assert_eq!(
+        requirement.key_package_hash(),
+        crate::pairing::sha384(publication.key_package()).unwrap()
+    );
+
+    let fresh_ids = pairing_ids(193);
+    let daemon_root = temp_root("repair-daemon");
+    let daemon_keys = TestKeys::enabled();
+    let daemon_anchor = TestAnchor::new();
+    let (daemon, invitation) = DurablePendingInvitation::issue_with_runtime(
+        &daemon_root,
+        Identity::daemon(fixture.ids.account, fixture.ids.installation),
+        fresh_ids.session,
+        id(41),
+        daemon_keys,
+        daemon_anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    let same_device_root = temp_root("repair-same-device");
+    assert!(matches!(
+        DurablePreJoinDevice::prepare_repair_with_runtime(
+            &same_device_root,
+            Identity::device(
+                fixture.ids.account,
+                fixture.ids.installation,
+                fixture.ids.device,
+            )
+            .unwrap(),
+            invitation.bytes(),
+            id(42),
+            TestKeys::enabled(),
+            TestAnchor::new(),
+            (
+                RuntimeHooks {
+                    faults: Arc::new(NoFaults),
+                    clock: fixture.clock.clone(),
+                },
+                &requirement,
+            ),
+        ),
+        Err(PersistenceError::IdentityMismatch)
+    ));
+    let repair_root = temp_root("repair-fresh-device");
+    let (_, repaired) = DurablePreJoinDevice::prepare_repair_with_runtime(
+        &repair_root,
+        Identity::device(
+            fixture.ids.account,
+            fixture.ids.installation,
+            fresh_ids.device,
+        )
+        .unwrap(),
+        invitation.bytes(),
+        id(43),
+        TestKeys::enabled(),
+        TestAnchor::new(),
+        (
+            RuntimeHooks {
+                faults: Arc::new(NoFaults),
+                clock: fixture.clock,
+            },
+            &requirement,
+        ),
+    )
+    .unwrap();
+    assert_ne!(
+        crate::pairing::sha384(repaired.key_package()).unwrap(),
+        requirement.key_package_hash()
+    );
+    daemon.close().unwrap();
+}
+
+#[test]
+fn pairing_operation_discriminants_are_exhaustive() {
+    use crate::persistence::validate_pairing_operation_discriminants_for_test;
+
+    assert!(validate_pairing_operation_discriminants_for_test(1, 1).is_ok());
+    assert!(validate_pairing_operation_discriminants_for_test(21, 5).is_ok());
+    assert_eq!(
+        validate_pairing_operation_discriminants_for_test(0, 1),
+        Err(PersistenceError::Corrupt)
+    );
+    assert_eq!(
+        validate_pairing_operation_discriminants_for_test(255, 1),
+        Err(PersistenceError::Corrupt)
+    );
+    assert_eq!(
+        validate_pairing_operation_discriminants_for_test(1, 255),
+        Err(PersistenceError::Corrupt)
+    );
+    assert_eq!(
+        validate_pairing_operation_discriminants_for_test(8, 13),
+        Err(PersistenceError::Corrupt)
+    );
+}
+
+#[test]
+fn strict_daemon_record_validation_rejects_impossible_shapes_for_every_state() {
+    let issued = pending_fixture(194);
+    assert!(issued.endpoint.rejects_shape_mutation_for_test(1).unwrap());
+
+    let mut pending = pending_fixture(195);
+    let (_, _, publication, _, _) = prepare_prejoin(&pending, 195);
+    pending
+        .endpoint
+        .submit_claim(id(50), publication.claim())
+        .unwrap();
+    assert!(pending.endpoint.rejects_shape_mutation_for_test(1).unwrap());
+
+    let (confirmed, _, _, _, _, _, _, _) = confirmed_pairing(196);
+    assert!(
+        confirmed
+            .endpoint
+            .rejects_shape_mutation_for_test(2)
+            .unwrap()
+    );
+
+    let (mut consumed, _, _, _, _, _, _, reservation) = confirmed_pairing(197);
+    consumed
+        .endpoint
+        .create_welcome(id(51), reservation)
+        .unwrap();
+    assert!(
+        consumed
+            .endpoint
+            .rejects_shape_mutation_for_test(4)
+            .unwrap()
+    );
+
+    let (active, _, _, _, _) = activated_pair(198);
+    assert!(active.endpoint.rejects_shape_mutation_for_test(5).unwrap());
+
+    let mut cancelled = pending_fixture(199);
+    cancelled.endpoint.cancel(id(52)).unwrap();
+    assert!(
+        cancelled
+            .endpoint
+            .rejects_shape_mutation_for_test(3)
+            .unwrap()
+    );
+
+    let mut expired = pending_fixture(200);
+    expired.clock.set(expired.publication.expires_at_ms());
+    assert_eq!(
+        expired.endpoint.lifecycle().unwrap(),
+        InvitationLifecycle::Expired
+    );
+    assert!(expired.endpoint.rejects_shape_mutation_for_test(3).unwrap());
+}
+
+#[test]
+fn device_expiry_persists_when_first_observed_after_the_deadline() {
+    for (seed, delay) in [(201, 1), (202, 86_400_000)] {
+        let fixture = pending_fixture(seed);
+        let (root, mut device, _, keys, anchor) = prepare_prejoin(&fixture, seed);
+        fixture
+            .clock
+            .set(fixture.publication.expires_at_ms() + delay);
+        assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Expired);
+        device.store().close().unwrap();
+        drop(device);
+        let mut reopened = DurablePreJoinDevice::open_with_runtime(
+            &root,
+            fixture.ids.session,
+            keys,
+            anchor,
+            RuntimeHooks {
+                faults: Arc::new(NoFaults),
+                clock: fixture.clock,
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened.lifecycle().unwrap(), PreJoinLifecycle::Expired);
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn joined_pair(
+    seed: u8,
+) -> (
+    PendingFixture,
+    PathBuf,
+    DurablePreJoinDevice,
+    Arc<TestKeys>,
+    Arc<TestAnchor>,
+    crate::persistence::WelcomePublication,
+) {
+    let (mut fixture, root, mut device, _, keys, anchor, _, reservation_id) =
+        confirmed_pairing(seed);
+    let welcome = match fixture
+        .endpoint
+        .create_welcome(sequence_id(120, u64::from(seed)), reservation_id)
+        .unwrap()
+    {
+        WelcomeOutcome::Committed(welcome) => welcome,
+        other => panic!("unexpected Welcome result: {other:?}"),
+    };
+    device
+        .join(sequence_id(121, u64::from(seed)), &welcome)
+        .unwrap();
+    (fixture, root, device, keys, anchor, welcome)
+}
+
+#[test]
+fn activation_preparation_rejects_at_and_after_welcome_expiry() {
+    for (seed, offset) in [(203, 0), (204, 1)] {
+        let (fixture, _, mut device, _, _, welcome) = joined_pair(seed);
+        fixture.clock.set(welcome.expires_at_ms() + offset);
+        assert_eq!(
+            device
+                .prepare_activation(sequence_id(122, u64::from(seed)), id(seed))
+                .unwrap(),
+            ActivationOutcome::Rejected
+        );
+        assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Joined);
+        assert_eq!(
+            device.pair_lifecycle().unwrap(),
+            Some(PairLifecycle::AwaitingActivation)
+        );
+    }
+}
+
+#[test]
+fn pending_activation_survives_restart_and_opens_only_after_daemon_acceptance() {
+    let (mut fixture, root, mut device, keys, anchor, welcome) = joined_pair(205);
+    fixture.clock.set(welcome.expires_at_ms() - 1);
+    let activation = match device.prepare_activation(id(60), id(61)).unwrap() {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation result: {other:?}"),
+    };
+    assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Joined);
+    assert_eq!(
+        device.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::AwaitingActivation)
+    );
+    assert!(
+        device
+            .prepare_application(id(62), id(63), 1, b"blocked")
+            .is_err()
+    );
+    assert!(device.receive_application(id(64), &[], id(65), 1).is_err());
+
+    device.store().close().unwrap();
+    drop(device);
+    let mut device = DurablePreJoinDevice::open_with_runtime(
+        &root,
+        fixture.ids.session,
+        keys,
+        anchor,
+        RuntimeHooks {
+            faults: Arc::new(NoFaults),
+            clock: fixture.clock.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Joined);
+    let retry = match device.prepare_activation(id(60), id(61)).unwrap() {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation retry: {other:?}"),
+    };
+    assert_eq!(retry.ciphertext(), activation.ciphertext());
+    let acceptance = match fixture
+        .endpoint
+        .accept_activation(id(66), id(61), activation.ciphertext())
+        .unwrap()
+    {
+        ActivationOutcome::Activated(acceptance) => acceptance,
+        other => panic!("unexpected daemon activation result: {other:?}"),
+    };
+    assert_eq!(
+        device.acknowledge_activation(id(67), &acceptance).unwrap(),
+        PairLifecycle::Active
+    );
+    assert!(
+        device
+            .prepare_application(id(68), id(69), 1, b"enabled")
+            .is_ok()
+    );
+}
+
+#[test]
+fn delayed_activation_rejection_never_opens_the_device() {
+    let (mut fixture, _, mut device, _, _, welcome) = joined_pair(206);
+    fixture.clock.set(welcome.expires_at_ms() - 1);
+    let activation = match device.prepare_activation(id(70), id(71)).unwrap() {
+        ActivationOutcome::Prepared(record) => record,
+        other => panic!("unexpected activation result: {other:?}"),
+    };
+    fixture.clock.set(welcome.expires_at_ms());
+    assert_eq!(
+        fixture
+            .endpoint
+            .accept_activation(id(72), id(71), activation.ciphertext())
+            .unwrap(),
+        ActivationOutcome::Rejected
+    );
+    assert_eq!(device.lifecycle().unwrap(), PreJoinLifecycle::Joined);
+    assert_eq!(
+        device.pair_lifecycle().unwrap(),
+        Some(PairLifecycle::AwaitingActivation)
+    );
+    assert!(
+        device
+            .prepare_application(id(73), id(74), 1, b"still blocked")
+            .is_err()
+    );
 }

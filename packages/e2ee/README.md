@@ -10,12 +10,14 @@ It provides:
 
 - one daemon and one device per group;
 - canonical revision 1 pairing invitation and claim encoding, signatures, comparison values, and
-  crate-private in-memory failed-claim accounting for known invitations; durable unknown-invitation
-  lookup remains Session 50.2 work;
-- bounded KeyPackage and Welcome handling;
+  durable encrypted pending-invitation and device pre-join state;
+- fixed-lifetime KeyPackage reservation, independently expiring Welcome creation and recovery, and
+  activation with a durable daemon-acceptance barrier;
 - canonical Axl credential and AAD validation;
 - bidirectional private application messages;
-- phone-owned self-Update proposals and daemon-only commits;
+- phone-owned self-Update proposals, daemon-only update and removal commits, authenticated
+  epoch-ready completion with a durable device acknowledgement barrier, terminal reset and
+  revocation state, and enforced fresh-identifier and fresh-KeyPackage re-pair operations;
 - immutable prepared envelopes and a platform-neutral transaction contract;
 - a native redb adapter with per-pair databases, immediate-durability two-phase commits, exact-byte
   outbox recovery, durable acknowledgement and bounded retry retention, accepted-message-before-
@@ -27,8 +29,12 @@ It provides:
   lifecycle claim; cleanup requires proof that no cryptographic state committed, while open finishes
   publication of authenticated state and removes only a stale `.initializing` marker.
 
-The package does not provide transport, relay routing, accounts, authorization, completed platform
-bindings, browser persistence, or presentation behavior. The durable API reloads committed OpenMLS
+The public native facade exposes typed endpoint operations and immutable artifacts. Outbox fields
+are read-only, and replacement commits and removals accept only those typed artifacts. Mutable
+OpenMLS state, transaction handles, providers, signers, private key material, DEKs, rollback
+counters, relay routes, and authorization decisions remain internal. The package does not provide
+transport, relay routing, accounts, authorization, completed platform bindings, browser persistence,
+or presentation behavior. The durable API reloads committed OpenMLS
 and signer state inside every native transaction, so rolled-back state and prepared handles cannot
 be reused. See [`STORAGE.md`](STORAGE.md) for the schema, transaction order, migrations, rollback
 detection, erasure boundary, and explicit exclusions. Session 50's approved platform boundary is in

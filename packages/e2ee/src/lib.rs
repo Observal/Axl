@@ -432,8 +432,9 @@ impl PreparedEnvelope {
 }
 
 /// Outcome reported by the platform transaction enclosing one prepared operation.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TransactionOutcome {
+pub(crate) enum TransactionOutcome {
     Committed,
     RolledBack,
 }
@@ -444,7 +445,7 @@ pub enum TransactionOutcome {
 /// adapter then stages the immutable envelope or accepted-message identity in that same
 /// transaction. Network transmission and plaintext release are forbidden until `commit` returns.
 /// No relay route appears in this contract.
-pub trait TransactionalProvider {
+pub(crate) trait TransactionalProvider {
     type TransactionError: StdError + Send + Sync + 'static;
     type Transaction<'a>: GroupTransaction<Error = Self::TransactionError>
     where
@@ -459,19 +460,10 @@ pub trait TransactionalProvider {
 }
 
 /// One strict read-write transaction around OpenMLS state and Axl delivery metadata.
-pub trait GroupTransaction {
-    type Provider: OpenMlsProvider;
+pub(crate) trait GroupTransaction {
     type Error: StdError + Send + Sync + 'static;
 
-    fn provider(&self) -> &Self::Provider;
     fn stage_envelope(&mut self, envelope: &PreparedEnvelope) -> Result<(), Self::Error>;
-    fn stage_received(
-        &mut self,
-        crypto_session_id: Id,
-        logical_message_id: Id,
-        epoch: u64,
-    ) -> Result<(), Self::Error>;
-    fn commit(self) -> Result<(), Self::Error>;
     fn rollback(self) -> Result<(), Self::Error>;
 }
 
@@ -683,6 +675,97 @@ impl Endpoint {
         Ok(envelope)
     }
 
+    fn prepare_control(
+        &mut self,
+        class: MessageClass,
+        logical_message_id: Id,
+        plaintext: &[u8],
+    ) -> Result<PreparedEnvelope, Error> {
+        self.ensure_ready()?;
+        if plaintext.len() > 2 * 1024 {
+            return Err(Error::BoundExceeded("control plaintext"));
+        }
+        if !matches!(
+            class,
+            MessageClass::PairActivation | MessageClass::EpochReady | MessageClass::ResyncControl
+        ) {
+            return Err(Error::InvalidMessageClass);
+        }
+        let aad = self
+            .context
+            .aad(self.identity.role, class, logical_message_id, 0)
+            .encode();
+        let group = self.group.as_mut().ok_or(Error::InactiveAfterRollback)?;
+        let epoch = group.epoch().as_u64();
+        group.set_aad(aad);
+        let bytes = group
+            .create_message(&self.provider, &self.signer, plaintext)
+            .map_err(|_| Error::Crypto("control encryption failed"))?
+            .tls_serialize_detached()
+            .map_err(|_| Error::Crypto("control serialization failed"))?;
+        let envelope = bounded_envelope(
+            bytes,
+            self.context.crypto_session_id,
+            logical_message_id,
+            class,
+            epoch,
+        )?;
+        self.transaction_pending = true;
+        Ok(envelope)
+    }
+
+    fn receive_control(
+        &mut self,
+        envelope: &[u8],
+        class: MessageClass,
+        logical_message_id: Id,
+    ) -> Result<PreparedPlaintext, Error> {
+        self.ensure_ready()?;
+        if envelope.len() > ENVELOPE_MAX_BYTES {
+            return Err(Error::BoundExceeded("MLS envelope"));
+        }
+        if self.accepted.contains(&logical_message_id) {
+            return Err(Error::DuplicateCiphertext);
+        }
+        let protocol = decode_protocol(envelope)?;
+        self.validate_incoming(&protocol)?;
+        let processed = self
+            .group
+            .as_mut()
+            .ok_or(Error::InactiveAfterRollback)?
+            .process_message(&self.provider, protocol)
+            .map_err(|_| Error::InvalidCiphertext)?;
+        if let Err(error) = Aad::validate_exact(
+            processed.aad(),
+            &self.expected_aad(class, logical_message_id, 0),
+        ) {
+            self.invalidate();
+            return Err(error);
+        }
+        if let Err(error) = validate_sender(&processed, &self.peer) {
+            self.invalidate();
+            return Err(error);
+        }
+        let epoch = processed.epoch().as_u64();
+        let ProcessedMessageContent::ApplicationMessage(application) = processed.into_content()
+        else {
+            self.invalidate();
+            return Err(Error::UnexpectedMessage);
+        };
+        let plaintext = application.into_bytes();
+        if plaintext.len() > 2 * 1024 {
+            self.invalidate();
+            return Err(Error::BoundExceeded("control plaintext"));
+        }
+        self.accepted.insert(logical_message_id);
+        self.transaction_pending = true;
+        Ok(PreparedPlaintext {
+            logical_message_id,
+            epoch,
+            plaintext: plaintext.into_boxed_slice(),
+        })
+    }
+
     fn receive_application(
         &mut self,
         envelope: &[u8],
@@ -760,6 +843,7 @@ pub(crate) struct Daemon {
 }
 
 impl Daemon {
+    #[allow(dead_code)]
     pub(crate) fn create(identity: Identity, context: PairContext) -> Result<Self, Error> {
         if identity.role != Role::Daemon
             || identity.account_id != context.account_id
@@ -804,6 +888,65 @@ impl Daemon {
         })
     }
 
+    pub(crate) fn create_from_pairing_state(
+        values: BTreeMap<Vec<u8>, Vec<u8>>,
+        identity: Identity,
+        context: PairContext,
+        signer_public: &[u8],
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, Error> {
+        if identity.role != Role::Daemon
+            || identity.account_id != context.account_id
+            || identity.installation_id != context.installation_id
+        {
+            return Err(Error::InvalidIdentity("daemon does not match pair context"));
+        }
+        let provider = CoreProvider::from_storage_values(values)
+            .map_err(|_| Error::Crypto("provider initialization failed"))?;
+        ensure_suite(&provider)?;
+        let signer = SignatureKeyPair::read(
+            provider.storage(),
+            signer_public,
+            SUITE.signature_algorithm(),
+        )
+        .ok_or(Error::Crypto("daemon signer state missing"))?;
+        let credential = BasicCredential::new(identity.credential_bytes(signer.public())?);
+        let credential = CredentialWithKey {
+            credential: credential.into(),
+            signature_key: signer.public().into(),
+        };
+        let group = MlsGroup::builder()
+            .with_group_id(GroupId::from_slice(&context.group_id))
+            .ciphersuite(SUITE)
+            .use_ratchet_tree_extension(true)
+            .sender_ratchet_configuration(SenderRatchetConfiguration::new(32, 1000))
+            .max_past_epochs(MAX_PAST_EPOCHS as usize)
+            .build(&provider, &signer, credential)
+            .map_err(|_| Error::Crypto("group creation failed"))?;
+        let peer = Identity::device(
+            context.account_id,
+            context.installation_id,
+            context.device_id,
+        )?;
+        let last_wall_time_ms = clock.now_ms()?;
+        Ok(Self {
+            endpoint: Endpoint {
+                provider,
+                signer,
+                group: Some(group),
+                identity,
+                peer,
+                context,
+                accepted: BTreeSet::new(),
+                previous_epoch_deadlines: BTreeMap::new(),
+                last_wall_time_ms,
+                clock,
+                transaction_pending: false,
+            },
+            key_package_consumed: false,
+        })
+    }
+
     pub(crate) fn consume_key_package(
         &mut self,
         package: PhoneKeyPackage,
@@ -819,22 +962,13 @@ impl Daemon {
                 "KeyPackage identity does not match pair",
             ));
         }
-        let key_package_in = KeyPackageIn::tls_deserialize_exact(package.bytes.as_ref())
-            .map_err(|_| Error::Crypto("invalid KeyPackage encoding"))?;
-        let unverified = key_package_in.unverified_credential();
-        if Identity::parse_credential(unverified.credential.serialized_content())?
-            != package.identity
-        {
-            return Err(Error::InvalidIdentity(
-                "KeyPackage credential does not match claim",
-            ));
-        }
-        let key_package = key_package_in
-            .validate(self.endpoint.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|_| Error::Crypto("KeyPackage validation failed"))?;
-        if key_package.ciphersuite() != SUITE {
-            return Err(Error::WrongSuite);
-        }
+        let now_ms = self.endpoint.checked_now_ms()?;
+        let key_package = validate_phone_key_package(
+            &self.endpoint.provider,
+            package.bytes.as_ref(),
+            &package.identity,
+            now_ms,
+        )?;
         let provider = &self.endpoint.provider;
         let signer = &self.endpoint.signer;
         let group = self
@@ -887,6 +1021,15 @@ impl Daemon {
     ) -> Result<PreparedPlaintext, Error> {
         self.endpoint
             .receive_application(bytes, MessageClass::ApplicationRequest, id, generation)
+    }
+
+    pub(crate) fn receive_pair_activation(
+        &mut self,
+        bytes: &[u8],
+        id: Id,
+    ) -> Result<PreparedPlaintext, Error> {
+        self.endpoint
+            .receive_control(bytes, MessageClass::PairActivation, id)
     }
 
     pub(crate) fn receive_update_proposal(
@@ -998,6 +1141,87 @@ impl Daemon {
         Ok(envelope)
     }
 
+    pub(crate) fn prepare_removal(
+        &mut self,
+        id: Id,
+        generation: u64,
+    ) -> Result<PreparedEnvelope, Error> {
+        self.endpoint.ensure_ready()?;
+        let aad = self
+            .endpoint
+            .context
+            .aad(Role::Daemon, MessageClass::Commit, id, generation)
+            .encode();
+        let provider = &self.endpoint.provider;
+        let signer = &self.endpoint.signer;
+        let group = self
+            .endpoint
+            .group
+            .as_mut()
+            .ok_or(Error::InactiveAfterRollback)?;
+        let epoch = group.epoch().as_u64();
+        let target = group
+            .members()
+            .find_map(|member| {
+                (Identity::parse_credential(member.credential.serialized_content()).ok()
+                    == Some(self.endpoint.peer.clone()))
+                .then_some(member.index)
+            })
+            .ok_or(Error::NotTwoMembers)?;
+        group.set_aad(aad);
+        let (commit, _, _) = group
+            .remove_members(provider, signer, &[target])
+            .map_err(|_| Error::Crypto("member removal failed"))?;
+        let bytes = commit
+            .tls_serialize_detached()
+            .map_err(|_| Error::Crypto("removal serialization failed"))?;
+        group
+            .merge_pending_commit(provider)
+            .map_err(|_| Error::Crypto("removal merge failed"))?;
+        if group.members().count() != 1 {
+            return Err(Error::NotTwoMembers);
+        }
+        let commit_id: [u8; 48] = provider
+            .crypto()
+            .hash(SUITE.hash_algorithm(), &bytes)
+            .map_err(|_| Error::Crypto("commit hash failed"))?
+            .try_into()
+            .map_err(|_| Error::Crypto("unexpected commit hash length"))?;
+        let epoch_authenticator = group
+            .epoch_authenticator()
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Crypto("unexpected epoch authenticator length"))?;
+        let target_epoch = group.epoch().as_u64();
+        if let Err(error) = self.endpoint.mark_epoch_advanced(epoch) {
+            self.endpoint.invalidate();
+            return Err(error);
+        }
+        let mut envelope = bounded_envelope(
+            bytes,
+            self.endpoint.context.crypto_session_id,
+            id,
+            MessageClass::Commit,
+            epoch,
+        )?;
+        envelope.commit = Some(CommitMetadata {
+            commit_id,
+            target_epoch,
+            epoch_authenticator,
+        });
+        self.endpoint.transaction_pending = true;
+        Ok(envelope)
+    }
+
+    pub(crate) fn receive_epoch_ready(
+        &mut self,
+        bytes: &[u8],
+        id: Id,
+    ) -> Result<PreparedPlaintext, Error> {
+        self.endpoint
+            .receive_control(bytes, MessageClass::EpochReady, id)
+    }
+
     #[cfg(test)]
     pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint.finish_transaction(outcome)
@@ -1021,7 +1245,23 @@ pub(crate) struct Phone {
 }
 
 impl Phone {
+    #[cfg(test)]
     pub(crate) fn create(identity: Identity) -> Result<(Self, PhoneKeyPackage), Error> {
+        Self::create_with_clock(identity, &SystemClock)
+    }
+
+    pub(crate) fn create_with_clock(
+        identity: Identity,
+        clock: &dyn Clock,
+    ) -> Result<(Self, PhoneKeyPackage), Error> {
+        let now_ms = clock.now_ms()?;
+        Self::create_at(identity, now_ms)
+    }
+
+    pub(crate) fn create_at(
+        identity: Identity,
+        now_ms: u64,
+    ) -> Result<(Self, PhoneKeyPackage), Error> {
         if identity.role != Role::Device {
             return Err(Error::InvalidIdentity("phone must use device role"));
         }
@@ -1030,8 +1270,12 @@ impl Phone {
             CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?;
         ensure_suite(&provider)?;
         let (credential, signer) = make_credential(&provider, &identity)?;
+        let now_seconds = now_ms / 1_000;
+        let not_after = now_seconds
+            .checked_add(KEY_PACKAGE_LIFETIME_SECONDS)
+            .ok_or(Error::ClockRollback)?;
         let bundle = KeyPackage::builder()
-            .key_package_lifetime(Lifetime::new(KEY_PACKAGE_LIFETIME_SECONDS))
+            .key_package_lifetime(Lifetime::init(now_seconds, not_after))
             .build(SUITE, &provider, &signer, credential)
             .map_err(|_| Error::Crypto("KeyPackage creation failed"))?;
         let bytes = bundle
@@ -1147,6 +1391,15 @@ impl Phone {
             generation,
         )
     }
+    pub(crate) fn prepare_pair_activation(
+        &mut self,
+        id: Id,
+        plaintext: &[u8],
+    ) -> Result<PreparedEnvelope, Error> {
+        self.endpoint_mut()?
+            .prepare_control(MessageClass::PairActivation, id, plaintext)
+    }
+
     pub(crate) fn prepare_self_update(
         &mut self,
         id: Id,
@@ -1188,6 +1441,25 @@ impl Phone {
         id: Id,
         generation: u64,
     ) -> Result<(), Error> {
+        self.apply_commit_inner(bytes, id, generation, false)
+    }
+
+    pub(crate) fn apply_removal(
+        &mut self,
+        bytes: &[u8],
+        id: Id,
+        generation: u64,
+    ) -> Result<(), Error> {
+        self.apply_commit_inner(bytes, id, generation, true)
+    }
+
+    fn apply_commit_inner(
+        &mut self,
+        bytes: &[u8],
+        id: Id,
+        generation: u64,
+        removal: bool,
+    ) -> Result<(), Error> {
         let endpoint = self.endpoint_mut()?;
         endpoint.ensure_ready()?;
         let protocol = decode_protocol(bytes)?;
@@ -1226,7 +1498,14 @@ impl Phone {
             .ok_or(Error::InactiveAfterRollback)?
             .merge_staged_commit(provider, *staged)
             .map_err(|_| Error::CompetingCommit)?;
-        validate_members(endpoint.group()?, &endpoint.peer, &endpoint.identity)?;
+        if removal {
+            if endpoint.group()?.is_active() || endpoint.group()?.members().count() != 1 {
+                endpoint.invalidate();
+                return Err(Error::NotTwoMembers);
+            }
+        } else {
+            validate_members(endpoint.group()?, &endpoint.peer, &endpoint.identity)?;
+        }
         if let Err(error) = endpoint.mark_epoch_advanced(old_epoch) {
             endpoint.invalidate();
             return Err(error);
@@ -1234,6 +1513,25 @@ impl Phone {
         endpoint.transaction_pending = true;
         Ok(())
     }
+
+    pub(crate) fn continue_pending_transaction(&mut self) -> Result<(), Error> {
+        let endpoint = self.endpoint_mut()?;
+        if !endpoint.transaction_pending {
+            return Err(Error::NoPreparedTransaction);
+        }
+        endpoint.transaction_pending = false;
+        Ok(())
+    }
+
+    pub(crate) fn prepare_epoch_ready(
+        &mut self,
+        id: Id,
+        plaintext: &[u8],
+    ) -> Result<PreparedEnvelope, Error> {
+        self.endpoint_mut()?
+            .prepare_control(MessageClass::EpochReady, id, plaintext)
+    }
+
     #[cfg(test)]
     pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint_mut()?.finish_transaction(outcome)
@@ -1265,6 +1563,54 @@ fn make_credential(
         },
         signer,
     ))
+}
+
+fn validate_phone_key_package(
+    provider: &CoreProvider,
+    bytes: &[u8],
+    identity: &Identity,
+    now_ms: u64,
+) -> Result<KeyPackage, Error> {
+    if bytes.is_empty() || bytes.len() > HANDSHAKE_MAX_BYTES {
+        return Err(Error::BoundExceeded("KeyPackage"));
+    }
+    let package_in = KeyPackageIn::tls_deserialize_exact(bytes)
+        .map_err(|_| Error::Crypto("invalid KeyPackage encoding"))?;
+    let unverified = package_in.unverified_credential();
+    let pairing_credential =
+        pairing::PairingCredential::decode(unverified.credential.serialized_content())
+            .map_err(|_| Error::InvalidIdentity("invalid KeyPackage credential"))?;
+    if pairing_credential.identity() != identity
+        || unverified.signature_key.as_slice() != pairing_credential.verification_key()
+    {
+        return Err(Error::InvalidIdentity(
+            "KeyPackage credential does not match claim",
+        ));
+    }
+    let package = package_in
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|_| Error::Crypto("KeyPackage validation failed"))?;
+    if package.ciphersuite() != SUITE {
+        return Err(Error::WrongSuite);
+    }
+    let lifetime = package.life_time();
+    let now_seconds = now_ms / 1_000;
+    if lifetime.not_after().checked_sub(lifetime.not_before()) != Some(KEY_PACKAGE_LIFETIME_SECONDS)
+        || now_seconds < lifetime.not_before()
+        || now_seconds >= lifetime.not_after()
+    {
+        return Err(Error::Crypto("invalid KeyPackage lifetime"));
+    }
+    let capabilities = package.leaf_node().capabilities();
+    if !capabilities.versions().contains(&ProtocolVersion::Mls10)
+        || !capabilities
+            .ciphersuites()
+            .contains(&VerifiableCiphersuite::from(SUITE))
+        || !capabilities.credentials().contains(&CredentialType::Basic)
+    {
+        return Err(Error::Crypto("invalid KeyPackage capabilities"));
+    }
+    Ok(package)
 }
 
 fn ensure_suite(provider: &CoreProvider) -> Result<(), Error> {
@@ -1401,6 +1747,90 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_invalid_key_package_lifetime_and_capabilities() {
+        let context = PairContext {
+            crypto_session_id: [11; 16],
+            group_id: [12; 32],
+            account_id: [13; 16],
+            installation_id: [14; 16],
+            device_id: [15; 16],
+        };
+        let identity = Identity::device(
+            context.account_id,
+            context.installation_id,
+            context.device_id,
+        )
+        .unwrap();
+        let provider = CoreProvider::new().unwrap();
+        let (credential, signer) = make_credential(&provider, &identity).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expired = KeyPackage::builder()
+            .key_package_lifetime(Lifetime::init(now.saturating_sub(601), now))
+            .build(SUITE, &provider, &signer, credential.clone())
+            .unwrap();
+        let long_lived = KeyPackage::builder()
+            .key_package_lifetime(Lifetime::init(
+                now.saturating_sub(3_600),
+                now + KEY_PACKAGE_LIFETIME_SECONDS,
+            ))
+            .build(SUITE, &provider, &signer, credential.clone())
+            .unwrap();
+        let empty_capabilities = KeyPackage::builder()
+            .key_package_lifetime(Lifetime::init(now, now + KEY_PACKAGE_LIFETIME_SECONDS))
+            .leaf_node_capabilities(Capabilities::empty())
+            .build(SUITE, &provider, &signer, credential)
+            .unwrap();
+        let daemon_identity = Identity::daemon(context.account_id, context.installation_id);
+        let mut daemon = Daemon::create(daemon_identity, context.clone()).unwrap();
+        assert!(matches!(
+            daemon.consume_key_package(PhoneKeyPackage {
+                bytes: expired
+                    .key_package()
+                    .tls_serialize_detached()
+                    .unwrap()
+                    .into_boxed_slice(),
+                identity: identity.clone(),
+            }),
+            Err(Error::Crypto("KeyPackage validation failed"))
+        ));
+        let mut daemon = Daemon::create(
+            Identity::daemon(context.account_id, context.installation_id),
+            context.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            daemon.consume_key_package(PhoneKeyPackage {
+                bytes: long_lived
+                    .key_package()
+                    .tls_serialize_detached()
+                    .unwrap()
+                    .into_boxed_slice(),
+                identity: identity.clone(),
+            }),
+            Err(Error::Crypto("invalid KeyPackage lifetime"))
+        ));
+        let mut daemon = Daemon::create(
+            Identity::daemon(context.account_id, context.installation_id),
+            context,
+        )
+        .unwrap();
+        assert!(matches!(
+            daemon.consume_key_package(PhoneKeyPackage {
+                bytes: empty_capabilities
+                    .key_package()
+                    .tls_serialize_detached()
+                    .unwrap()
+                    .into_boxed_slice(),
+                identity,
+            }),
+            Err(Error::Crypto("invalid KeyPackage capabilities"))
+        ));
+    }
 
     #[test]
     fn rejects_a_valid_key_package_from_another_suite() {
