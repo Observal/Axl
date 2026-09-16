@@ -23,6 +23,9 @@ use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 
 pub mod pairing;
 
+#[cfg(feature = "browser-test-fixtures")]
+pub mod browser_test_fixtures;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
 
@@ -84,6 +87,7 @@ impl CoreProvider {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_storage_values(
         values: BTreeMap<Vec<u8>, Vec<u8>>,
     ) -> Result<Self, openmls_traits::types::CryptoError> {
@@ -95,6 +99,7 @@ impl CoreProvider {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn storage_values(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
         self.storage
             .values
@@ -105,6 +110,7 @@ impl CoreProvider {
             .collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn insert_internal(&self, key: Vec<u8>, value: Vec<u8>) {
         self.storage
             .values
@@ -113,6 +119,7 @@ impl CoreProvider {
             .insert(key, value);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn internal(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.storage
             .values
@@ -122,6 +129,7 @@ impl CoreProvider {
             .cloned()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn remove_internal(&self, key: &[u8]) {
         self.storage
             .values
@@ -432,10 +440,11 @@ impl PreparedEnvelope {
 }
 
 /// Outcome reported by the platform transaction enclosing one prepared operation.
-#[cfg(test)]
+#[cfg(any(test, feature = "browser-test-fixtures"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TransactionOutcome {
     Committed,
+    #[cfg(test)]
     RolledBack,
 }
 
@@ -445,6 +454,7 @@ pub(crate) enum TransactionOutcome {
 /// adapter then stages the immutable envelope or accepted-message identity in that same
 /// transaction. Network transmission and plaintext release are forbidden until `commit` returns.
 /// No relay route appears in this contract.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait TransactionalProvider {
     type TransactionError: StdError + Send + Sync + 'static;
     type Transaction<'a>: GroupTransaction<Error = Self::TransactionError>
@@ -460,6 +470,7 @@ pub(crate) trait TransactionalProvider {
 }
 
 /// One strict read-write transaction around OpenMLS state and Axl delivery metadata.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) trait GroupTransaction {
     type Error: StdError + Send + Sync + 'static;
 
@@ -815,13 +826,14 @@ impl Endpoint {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         if !self.transaction_pending {
             return Err(Error::NoPreparedTransaction);
         }
         match outcome {
             TransactionOutcome::Committed => self.transaction_pending = false,
+            #[cfg(test)]
             TransactionOutcome::RolledBack => self.invalidate(),
         }
         Ok(())
@@ -843,8 +855,16 @@ pub(crate) struct Daemon {
 }
 
 impl Daemon {
-    #[allow(dead_code)]
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn create(identity: Identity, context: PairContext) -> Result<Self, Error> {
+        Self::create_with_clock(identity, context, Arc::new(SystemClock))
+    }
+
+    fn create_with_clock(
+        identity: Identity,
+        context: PairContext,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self, Error> {
         if identity.role != Role::Daemon
             || identity.account_id != context.account_id
             || identity.installation_id != context.installation_id
@@ -868,7 +888,6 @@ impl Daemon {
             context.installation_id,
             context.device_id,
         )?;
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let last_wall_time_ms = clock.now_ms()?;
         Ok(Self {
             endpoint: Endpoint {
@@ -888,6 +907,7 @@ impl Daemon {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn create_from_pairing_state(
         values: BTreeMap<Vec<u8>, Vec<u8>>,
         identity: Identity,
@@ -1141,6 +1161,7 @@ impl Daemon {
         Ok(envelope)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn prepare_removal(
         &mut self,
         id: Id,
@@ -1222,15 +1243,15 @@ impl Daemon {
             .receive_control(bytes, MessageClass::EpochReady, id)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint.finish_transaction(outcome)
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn epoch(&self) -> Result<u64, Error> {
         self.endpoint.epoch()
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
         self.endpoint.epoch_authenticator()
     }
@@ -1299,10 +1320,20 @@ impl Phone {
         ))
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn join(
         &mut self,
         welcome: PairWelcome,
         expected: &PairContext,
+    ) -> Result<(), Error> {
+        self.join_with_clock(welcome, expected, Arc::new(SystemClock))
+    }
+
+    fn join_with_clock(
+        &mut self,
+        welcome: PairWelcome,
+        expected: &PairContext,
+        clock: Arc<dyn Clock>,
     ) -> Result<(), Error> {
         if &welcome.context != expected {
             return Err(Error::WrongGroup);
@@ -1331,7 +1362,6 @@ impl Phone {
         let group = staged
             .into_group(&self.provider)
             .map_err(|_| Error::Crypto("Welcome persistence failed"))?;
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let last_wall_time_ms = clock.now_ms()?;
         let endpoint = Endpoint {
             provider: std::mem::replace(
@@ -1357,7 +1387,7 @@ impl Phone {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     fn endpoint(&self) -> Result<&Endpoint, Error> {
         self.endpoint.as_ref().ok_or(Error::WrongGroup)
     }
@@ -1444,6 +1474,7 @@ impl Phone {
         self.apply_commit_inner(bytes, id, generation, false)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn apply_removal(
         &mut self,
         bytes: &[u8],
@@ -1514,6 +1545,7 @@ impl Phone {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn continue_pending_transaction(&mut self) -> Result<(), Error> {
         let endpoint = self.endpoint_mut()?;
         if !endpoint.transaction_pending {
@@ -1532,15 +1564,15 @@ impl Phone {
             .prepare_control(MessageClass::EpochReady, id, plaintext)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint_mut()?.finish_transaction(outcome)
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn epoch(&self) -> Result<u64, Error> {
         self.endpoint()?.epoch()
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
         self.endpoint()?.epoch_authenticator()
     }

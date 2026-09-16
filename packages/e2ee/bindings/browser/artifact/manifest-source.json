@@ -1,0 +1,10 @@
+{
+  "abiVersion": 1,
+  "profileId": "axl-e2ee-mls-pq-v1",
+  "profileRevision": 1,
+  "productionStorageReady": false,
+  "workerModel": "dedicated-module-worker",
+  "wasmThreads": false,
+  "sharedMemory": false,
+  "integrityPurpose": "Packaging-corruption detection only; not a signature or trust anchor."
+}

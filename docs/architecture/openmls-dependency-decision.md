@@ -3,7 +3,7 @@
 
 # OpenMLS dependency decision
 
-Status: OpenMLS/libcrux and Session 50.3 Node binding dependencies approved for implementation; browser candidates remain evaluation-only; production release approval deferred
+Status: OpenMLS/libcrux and Session 50.3 Node and Session 50.4 browser binding dependencies approved for implementation; production release approval deferred
 
 Reviewed: 2026-09-16
 
@@ -26,28 +26,28 @@ No Rust dependency is added to Axl by this Session 30 change. The repository own
 
 The research lock under `/tmp` is evidence, not the implementation lockfile. Cargo resolved 264 packages because a lock records optional and target-specific alternatives. After Session 40B, the table below is the complete 156-package normal and build dependency closure selected by `cargo tree --locked --target all --edges normal,build` for the stated features. Development-only dependencies and optional packages not selected by that command are excluded. Session 40A reconciled the implementation graph and received explicit human approval for `openmls_basic_credential` 0.6.0 and its additional normal/build closure. Session 40B adds only `redb` 4.2.0; its sole normal dependency, `libc` 0.2.189, was already selected. Cargo's lockfile also records optional, target-specific, and dependency-development alternatives that are not selected by this command.
 
-## Session 50 evaluation candidates
+## Session 50 dependency decisions
 
-The following versions are approved only for isolated evaluation and planning. This approval does not permit changing a repository manifest or lockfile. Each dependency-bearing Session 50 PR must present its exact resulting lock, selected normal/build/development graph, licenses, advisories, build scripts, downloaded binaries, and target evidence for separate human approval before insertion.
+The Node candidates below were approved for implementation in Session 50.3. The browser candidates were approved for implementation in Session 50.4 after review of the exact runtime, npm, and independently locked build-tool graphs described below. These approvals do not approve production release. Future dependency changes still require the exact resulting lock, selected normal/build/development graph, licenses, advisories, build scripts, downloaded binaries, and target evidence for separate human approval before insertion.
 
 | Use | Exact evaluation candidate | Source and integrity | Scope |
 | --- | --- | --- | --- |
 | Node runtime | `napi` 3.12.5, Node-API 9, default features disabled | MIT; crates.io checksum `f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e`; annotated tag `napi-v3.12.5` object `c69066bc9b2fc848aea9fd83f478e815085fbe1e`, source commit `43100baf28a3e5709641e35f892be4da5d62dcb2` | Approved production dependency for the private Node binding only |
 | Node macros | `napi-derive` 3.6.6 with only `strict` | MIT; checksum `e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb`; annotated tag object `718349e1e4c8ec666ce8ba0b6eee59babd7e0dd6`, source commit `43100baf28a3e5709641e35f892be4da5d62dcb2` | Approved build-time macro dependency for the private Node binding; `type-def` is not enabled |
 | Node build | `napi-build` 2.4.2, default features disabled | MIT; checksum `860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7`; annotated tag object `fce13f61caff9b4c0d1d6d093d1ea24dcdd7af31`, source commit `31c27a1676a7c4b317f4e144e0a9cb94e8354143` | Approved build dependency; no runtime npm package |
-| WASM ABI | `wasm-bindgen` 0.2.128 | MIT OR Apache-2.0; checksum `aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf`; tag `0.2.128`, commit `246946fddd62163e778c3a1f6afe7264347adceb` | Already resolved in the current Cargo lock; proposed direct binding dependency |
-| WASM build tool | `wasm-bindgen-cli` 0.2.128 | MIT OR Apache-2.0; checksum `2e29140c04e81832902b70e5d37b9ce1bfa811c8fe4563bea08f76df8388cf20`; same upstream tag | Proposed pinned build tool only |
-| Legacy RNG bridge | `getrandom` 0.2.17 with `js` | MIT OR Apache-2.0; checksum `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | Already resolved transitively; proposed direct target dependency to enable browser Web Crypto for the credential helper graph |
-| WASM time | `web-time` 1.1.0 | MIT OR Apache-2.0; checksum `5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb` | New transitive dependency selected by `openmls/js` |
-| Browser tests | `@playwright/test` 1.63.0 | Apache-2.0; npm integrity `sha512-oxMK4vllB9RK5NQ2l1pq1IfOf2AvnEuj/vYGDj0H2nMtmtZpKtCwt/l00GEO6xjGfpBNAvjovvYdCm50dRQkpQ==`; tag `v1.63.0`, commit `1b025d7e20a026371cd5f98ba0cdce48892737c8` | Proposed development dependency; resolves `playwright` and `playwright-core` 1.63.0 and downloads pinned browser builds |
+| WASM ABI | `wasm-bindgen` 0.2.128 | MIT OR Apache-2.0; checksum `aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf`; tag `0.2.128`, commit `246946fddd62163e778c3a1f6afe7264347adceb` | Approved direct dependency for the private browser binding |
+| WASM build support | `wasm-bindgen-cli-support` 0.2.128, default features disabled | MIT OR Apache-2.0; checksum `e771daffd9404412ad1b20076ab5d0aa9f8c031e5d1734c362f720cf5538f8e3`; same upstream tag | Approved only in the independently locked repository-owned build driver; `wasm-bindgen-cli` is not installed, packaged, or executed |
+| Legacy RNG bridge | `getrandom` 0.2.17 with `js` | MIT OR Apache-2.0; checksum `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | Approved direct WASM-target dependency to enable browser Web Crypto for the credential helper graph |
+| WASM time | `web-time` 1.1.0 | MIT OR Apache-2.0; checksum `5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb` | Approved transitive dependency selected by `openmls/js` |
+| Browser tests | `@playwright/test` 1.63.0 | Apache-2.0; npm integrity `sha512-oxMK4vllB9RK5NQ2l1pq1IfOf2AvnEuj/vYGDj0H2nMtmtZpKtCwt/l00GEO6xjGfpBNAvjovvYdCm50dRQkpQ==`; tag `v1.63.0`, commit `1b025d7e20a026371cd5f98ba0cdce48892737c8` | Approved development dependency; resolves only `playwright` and `playwright-core` 1.63.0 and is excluded from production packages |
 
 No IndexedDB wrapper, Web Locks package, WebCrypto package, `@napi-rs/cli`, UniFFI, cbindgen, JNI crate, Swift package dependency, Kotlin library, Android Gradle plugin, or mobile SDK is selected. Browser persistence uses standard Web APIs. Swift, Kotlin, C ABI, JNI, generated SDKs, mobile secure storage, and mobile applications remain Phase 13.
 
 The earlier temporary Node graph count is superseded by the Session 50.3 approval below, which was recomputed from its RC baseline. The approved isolated build passed. Its license evaluation passed the existing allow-list. `cargo audit` found no vulnerability; `cargo deny` retained the baseline warnings recorded below.
 
-A direct `openmls/js` check against `wasm32-unknown-unknown` currently fails because the credential helper's `getrandom` 0.2.17 branch lacks its `js` feature. An isolated candidate that enabled `getrandom/js` compiled successfully on the real target, selected 124 normal/build package names, and added only `web-time` 1.1.0 to the lock. This is compile evidence, not browser execution evidence.
+The initial direct `openmls/js` evaluation failed because the credential helper's `getrandom` 0.2.17 branch lacked its `js` feature. The approved implementation enables `getrandom/js` only for the WASM target, selects 124 normal/build package names, and adds only `web-time` 1.1.0 to the runtime lock. The test-only browser artifact now executes the fresh-randomness OpenMLS KeyPackage, Welcome, activation, bidirectional application, self-Update, commit, and epoch-ready lifecycle in real browsers. It also executes OpenMLS rejection cases for replay, duplicate ciphertext, mutation, AAD and authenticated-identity mismatch, profile mismatch, and competing commits. Production endpoint creation and opening remain disabled by the rollback-anchor gate.
 
-An isolated pnpm lock for `@playwright/test` 1.63.0 selected only `@playwright/test`, `playwright`, and `playwright-core` at 1.63.0. `pnpm audit --audit-level high` reported no known vulnerability. The downloaded Chromium, Firefox, and WebKit revisions and their binary checksums must be recorded by the dependency-bearing PR. Playwright WebKit does not count as actual Safari evidence.
+The approved pnpm lock for `@playwright/test` 1.63.0 selects only `@playwright/test`, `playwright`, and `playwright-core` at 1.63.0. `pnpm audit --audit-level high` reported no known vulnerability. Browser downloads remain test-only. Linux CI uses the repository-owned checksum-verifying installer for Firefox 155.0 revision 1543 (`firefox-ubuntu-24.04.zip`, SHA-256 `b0905e84427cc162b9a6e4392be14e5e54e0ade911c83639962c8078b273565e`) and WebKit 26.6 revision 2359 (`webkit-ubuntu-24.04.zip`, SHA-256 `8c129d989a1c48d826ca11b45acbba919039de811623dc3819ccbd95b69eeb62`). The CI host is pinned to Ubuntu 24.04 x64. Branded Chrome comes from the GitHub-hosted runner image and is reported separately. Playwright WebKit does not count as actual Safari evidence.
 
 `openmls_basic_credential` 0.6.0 is an approved direct implementation dependency for revision 1. It supplies the OpenMLS `SignatureKeyPair` implementation used to create and retain endpoint signing keys. Its helper graph contains implementations for Ed25519, ECDSA over P-256 and P-384, and ML-DSA, but revision 1 selects only Ed25519 through the fixed suite. Axl exposes no signature-scheme negotiation and does not enable any additional MLS cipher suite, signature scheme, or algorithm negotiation. The presence of unused implementations in the helper graph does not make them part of the revision 1 profile.
 
@@ -93,6 +93,30 @@ The existing `proc-macro-error2` 2.0.1 path is unchanged and receives no new rou
 Its exception and expiry are not broadened. Current `cargo audit` reports no vulnerability; current
 `cargo deny` emits the same baseline `advisory-not-detected`, duplicate-version, and
 `license-not-encountered` warnings.
+
+## Session 50.4 browser binding approval
+
+The browser binding evaluation was completed from RC commit
+`623c2138c53bd0b20f6a3a2fdf6fc43c5b0a4a57`. The approved implementation uses
+`wasm-bindgen` 0.2.128, target-only `getrandom` 0.2.17 with `js`, transitive `web-time` 1.1.0,
+and development-only `@playwright/test` 1.63.0. The resulting runtime `packages/e2ee/Cargo.lock`
+SHA-256 is `a324986d4ff5a8178219c1836fb5ad9f28c8b49880e286f17927d6327738f0a0`. The
+`pnpm-lock.yaml` SHA-256 is
+`a26537aea0418e8f36690eb2868df4d581d5961678e57b7f9028ce0ea1f81c78`.
+
+Normal builds and CI do not acquire or execute `wasm-bindgen-cli`. A standalone repository-owned
+driver uses `wasm-bindgen-cli-support` 0.2.128 with default features disabled and exposes only the
+fixed web transformation used by this package. Its independent 43-record lock has SHA-256
+`19fe623de7a29372a9f899f8130c4194e9b9e2a60969f046c1f4c8b79ad69475`. The selected external
+graph has 42 package/version pairs. `foldhash` 0.2.0 is its only Zlib-licensed package. The tool
+graph has no HTTP or TLS client and no executable-download path. Its format, clippy, audit, and deny
+checks run independently. One-time review evidence established byte-identical output against the
+rejected upstream CLI for generated JavaScript, declarations, WebAssembly, and WebAssembly
+declarations. CI does not reacquire that CLI to repeat the comparison.
+
+This approval is limited to the private, single-threaded browser artifact and its test-only browser
+execution. It does not approve publication, browser persistence, a rollback anchor, remote-web
+enablement, or production release.
 
 ## Complete selected dependency and license table
 
@@ -322,7 +346,7 @@ Before production release:
 - final MPL-2.0 and third-party notice verification;
 - all native, browser, fault-injection, and release gates.
 
-OpenMLS/libcrux are approved implementation candidates for Session 40. Session 50 binding versions above are evaluation candidates only and require dependency-specific approval before any manifest or lockfile change. Production release remains fail-closed until the later gates pass.
+OpenMLS/libcrux are approved implementation dependencies for Session 40. The exact Session 50.3 Node and Session 50.4 browser binding graphs above are approved for implementation. Any graph change requires new dependency-specific review. Production release remains fail-closed until the later gates pass.
 
 ## Primary sources
 

@@ -102,6 +102,9 @@ export function checkWorkspace(root: string): string[] {
   const e2eeNode = packages.find(
     ({ directory }) => directory === resolve(root, "packages/e2ee/bindings/node"),
   );
+  const e2eeBrowser = packages.find(
+    ({ directory }) => directory === resolve(root, "packages/e2ee/bindings/browser"),
+  );
   const protocolName = protocol?.manifest.name ?? "@axl/protocol";
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
   const tuiName = tui?.manifest.name ?? "@axl/tui";
@@ -160,10 +163,11 @@ export function checkWorkspace(root: string): string[] {
     }
   }
 
-  if (e2eeNode) {
-    for (const dependency of runtimeDependencies(e2eeNode.manifest)) {
+  for (const binding of [e2eeNode, e2eeBrowser]) {
+    if (!binding) continue;
+    for (const dependency of runtimeDependencies(binding.manifest)) {
       errors.push(
-        `${relative(root, e2eeNode.directory)} must not have npm runtime dependencies, found ${dependency}`,
+        `${relative(root, binding.directory)} must not have npm runtime dependencies, found ${dependency}`,
       );
     }
   }
