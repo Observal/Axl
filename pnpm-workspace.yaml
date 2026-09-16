@@ -5,6 +5,7 @@
 packages:
   - packages/*
   - packages/extensions/*
+  - packages/e2ee/bindings/node
   - services/*
   - apps/*
 allowBuilds:

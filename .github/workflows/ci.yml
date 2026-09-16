@@ -115,8 +115,67 @@ jobs:
           cargo test --locked
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked -p axl-e2ee-node --all-targets --features test-fixtures -- -D warnings
           cargo audit --deny warnings
           cargo deny check
+
+  e2ee-node:
+    name: E2EE Node (${{ matrix.target }}, Node ${{ matrix.node }})
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+            node: 22.19.0
+          - runner: macos-15
+            target: darwin-arm64
+            node: 24.13.1
+          - runner: macos-15-intel
+            target: darwin-x64
+            node: 22.19.0
+          - runner: macos-15-intel
+            target: darwin-x64
+            node: 24.13.1
+          - runner: ubuntu-latest
+            target: linux-x64-gnu
+            node: 22.19.0
+          - runner: ubuntu-latest
+            target: linux-x64-gnu
+            node: 24.13.1
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64-gnu
+            node: 22.19.0
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64-gnu
+            node: 24.13.1
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - name: Install Node dependencies
+        if: needs.changes.outputs.e2ee == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build, test, verify, and package the Node binding
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm --filter @axl/e2ee-node test
+          pnpm --filter @axl/e2ee-node check:abi
+          pnpm --filter @axl/e2ee-node pack:local
 
   relay:
     name: Relay build and test

@@ -3,7 +3,7 @@
 
 # OpenMLS dependency decision
 
-Status: OpenMLS/libcrux candidates approved to enter Session 40; Session 50 binding candidates approved for evaluation only; production release approval deferred
+Status: OpenMLS/libcrux and Session 50.3 Node binding dependencies approved for implementation; browser candidates remain evaluation-only; production release approval deferred
 
 Reviewed: 2026-09-16
 
@@ -32,9 +32,9 @@ The following versions are approved only for isolated evaluation and planning. T
 
 | Use | Exact evaluation candidate | Source and integrity | Scope |
 | --- | --- | --- | --- |
-| Node runtime | `napi` 3.12.5, Node-API 9, default features disabled | MIT; crates.io checksum `f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e`; tag `napi-v3.12.5`, commit `c69066bc9b2fc848aea9fd83f478e815085fbe1e` | Proposed production dependency for the private Node binding only |
-| Node macros | `napi-derive` 3.6.6 with `strict` and `type-def` | MIT; checksum `e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb`; tag commit `718349e1e4c8ec666ce8ba0b6eee59babd7e0dd6` | Proposed build-time macro dependency for the private Node binding |
-| Node build | `napi-build` 2.4.2, default features disabled | MIT; checksum `860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7`; tag commit `fce13f61caff9b4c0d1d6d093d1ea24dcdd7af31` | Proposed build dependency; no runtime npm package |
+| Node runtime | `napi` 3.12.5, Node-API 9, default features disabled | MIT; crates.io checksum `f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e`; annotated tag `napi-v3.12.5` object `c69066bc9b2fc848aea9fd83f478e815085fbe1e`, source commit `43100baf28a3e5709641e35f892be4da5d62dcb2` | Approved production dependency for the private Node binding only |
+| Node macros | `napi-derive` 3.6.6 with only `strict` | MIT; checksum `e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb`; annotated tag object `718349e1e4c8ec666ce8ba0b6eee59babd7e0dd6`, source commit `43100baf28a3e5709641e35f892be4da5d62dcb2` | Approved build-time macro dependency for the private Node binding; `type-def` is not enabled |
+| Node build | `napi-build` 2.4.2, default features disabled | MIT; checksum `860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7`; annotated tag object `fce13f61caff9b4c0d1d6d093d1ea24dcdd7af31`, source commit `31c27a1676a7c4b317f4e144e0a9cb94e8354143` | Approved build dependency; no runtime npm package |
 | WASM ABI | `wasm-bindgen` 0.2.128 | MIT OR Apache-2.0; checksum `aecb87a33d3b0c5e3b7aa46336eaf486cffafbd281b195e4c8b80d50df2351bf`; tag `0.2.128`, commit `246946fddd62163e778c3a1f6afe7264347adceb` | Already resolved in the current Cargo lock; proposed direct binding dependency |
 | WASM build tool | `wasm-bindgen-cli` 0.2.128 | MIT OR Apache-2.0; checksum `2e29140c04e81832902b70e5d37b9ce1bfa811c8fe4563bea08f76df8388cf20`; same upstream tag | Proposed pinned build tool only |
 | Legacy RNG bridge | `getrandom` 0.2.17 with `js` | MIT OR Apache-2.0; checksum `ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0` | Already resolved transitively; proposed direct target dependency to enable browser Web Crypto for the credential helper graph |
@@ -43,7 +43,7 @@ The following versions are approved only for isolated evaluation and planning. T
 
 No IndexedDB wrapper, Web Locks package, WebCrypto package, `@napi-rs/cli`, UniFFI, cbindgen, JNI crate, Swift package dependency, Kotlin library, Android Gradle plugin, or mobile SDK is selected. Browser persistence uses standard Web APIs. Swift, Kotlin, C ABI, JNI, generated SDKs, mobile secure storage, and mobile applications remain Phase 13.
 
-A temporary Node candidate graph contained 19 new external package/version pairs beyond the current core graph. Its isolated build passed. Its license evaluation passed the existing allow-list; the temporary path dependency intentionally tripped the repository wildcard-dependency ban. `cargo audit` found no vulnerability and reported only the existing `proc-macro-error2` maintenance warning when the graph was combined with the OpenMLS core.
+The earlier temporary Node graph count is superseded by the Session 50.3 approval below, which was recomputed from its RC baseline. The approved isolated build passed. Its license evaluation passed the existing allow-list. `cargo audit` found no vulnerability; `cargo deny` retained the baseline warnings recorded below.
 
 A direct `openmls/js` check against `wasm32-unknown-unknown` currently fails because the credential helper's `getrandom` 0.2.17 branch lacks its `js` feature. An isolated candidate that enabled `getrandom/js` compiled successfully on the real target, selected 124 normal/build package names, and added only `web-time` 1.1.0 to the lock. This is compile evidence, not browser execution evidence.
 
@@ -59,6 +59,40 @@ adapter, rather than redb, owns encrypted OpenMLS state envelopes, exact-ciphert
 idempotency, rollback anchors, and envelope-key lifecycle. Session 50 still owns browser-specific
 adapter dependencies. Native and browser engines may differ, but both implement the same atomic
 state, exact-ciphertext, rollback, reload, and typed-outcome contract.
+
+## Session 50.3 Node binding approval
+
+The Node binding evaluation was repeated from RC commit
+`fb8329f4926ef6fa62e1c7f9bab195acc5725def`. The approved direct dependencies are `napi` 3.12.5
+with only `napi9`, `napi-derive` 3.6.6 with only `strict`, and build dependency `napi-build` 2.4.2.
+All default features are disabled. `type-def` is intentionally omitted because it emits metadata for
+`@napi-rs/cli`; the binding instead maintains declaration source with runtime ABI drift checks. No
+Tokio, npm dependency, `@napi-rs/cli`, node-gyp, CMake, native binary, or downloaded build tool is
+added.
+
+The selected all-target normal/build graph grows from 156 to 177 external package/version pairs.
+The 21 selected additions are `convert_case` 0.12.0, `ctor` 1.0.13, `futures` 0.3.34,
+`futures-channel` 0.3.34, `futures-core` 0.3.34, `futures-executor` 0.3.34, `futures-io` 0.3.34,
+`futures-macro` 0.3.34, `futures-sink` 0.3.34, `futures-task` 0.3.34, `futures-util` 0.3.34,
+`libloading` 0.9.0, `napi` 3.12.5, `napi-build` 2.4.2, `napi-derive` 3.6.6,
+`napi-derive-backend` 6.1.3, `napi-sys` 3.3.1, `nohash-hasher` 0.2.0,
+`pin-project-lite` 0.2.17, `slab` 0.4.12, and `unicode-segmentation` 1.13.3. There are no direct
+development dependencies. Five of those pairs were already lock-resident. Cargo adds 19 external
+pairs and removes lock-only `synstructure` 0.13.2, `yoke-derive` 0.8.2, and `zerofrom-derive`
+0.1.7 in favor of versions 0.14.0, 0.8.3, and 0.1.8. The approved resulting `Cargo.lock` SHA-256
+is `bb5a5a66a60f5ae9a318c2c4a8daac43a5757856c1a183bd91eb2360830555f8`.
+
+The direct checksums and source commits are recorded in `packages/e2ee/DEPENDENCIES.md`. All new
+licenses are within the existing MIT, Apache-2.0, ISC, and Unicode-3.0 policy. `napi-derive` and
+`futures-macro` are new selected procedural macros. `napi` and the local binding run Rust build
+scripts; `napi-build` only emits target linker configuration for the selected macOS and Linux
+artifacts. Rust 1.96 and Node 24.13.1 on macOS arm64 are locally verified. Node 22.19 and runtime
+evidence for macOS x64 and both glibc Linux targets remain required before merge.
+
+The existing `proc-macro-error2` 2.0.1 path is unchanged and receives no new route from the binding.
+Its exception and expiry are not broadened. Current `cargo audit` reports no vulnerability; current
+`cargo deny` emits the same baseline `advisory-not-detected`, duplicate-version, and
+`license-not-encountered` warnings.
 
 ## Complete selected dependency and license table
 

@@ -15,7 +15,11 @@ type GeneratorRunner = (
 
 function walk(directory: string, visit: (path: string) => void): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if ([".git", ".reference", "_build", "deps", "dist", "node_modules"].includes(entry.name)) {
+    if (
+      [".git", ".reference", "_build", "deps", "dist", "node_modules", "target"].includes(
+        entry.name,
+      )
+    ) {
       continue;
     }
     if (entry.isSymbolicLink()) continue;

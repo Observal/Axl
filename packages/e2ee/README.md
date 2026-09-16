@@ -58,5 +58,10 @@ cargo audit --deny warnings
 cargo deny check
 ```
 
+The private Node-API binding lives in [`bindings/node`](bindings/node). Its production artifact
+contains no secure-store or rollback-anchor implementation and therefore fails closed during
+endpoint creation or opening. Test-only storage is compiled into a separate local fixture artifact
+and is excluded from production packaging.
+
 The exact toolchain is in `rust-toolchain.toml`. The implementation dependency and maintenance
 exception record is in `DEPENDENCIES.md`.

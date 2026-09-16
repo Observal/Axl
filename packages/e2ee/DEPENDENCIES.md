@@ -38,6 +38,47 @@ browser-only entries that are not selected without OpenMLS's Session 50 `js` fea
 branch. `Cargo.lock` is authoritative for this package and also records optional, target-specific,
 and dependency-development alternatives that are not selected by the normal/build tree.
 
+## Session 50.3 Node binding
+
+The private `@axl/e2ee-node` binding adds `napi` 3.12.5 with only `napi9`,
+`napi-derive` 3.6.6 with only `strict`, and build dependency `napi-build` 2.4.2. All default
+features are disabled. `type-def`, Tokio, `@napi-rs/cli`, node-gyp, CMake, and downloaded build
+tools are not selected. Node declarations are reviewed source and are checked against runtime
+exports and ABI inventories.
+
+The resulting all-target normal/build closure contains 177 external package/version pairs, 21 more
+than the prior 156-pair closure. Of those 21 selected additions, `futures-core` 0.3.34,
+`futures-task` 0.3.34, `futures-util` 0.3.34, `pin-project-lite` 0.2.17, and `slab` 0.4.12 were
+already present in the lock. The other selected additions are `convert_case` 0.12.0, `ctor`
+1.0.13, `futures` 0.3.34, `futures-channel` 0.3.34, `futures-executor` 0.3.34, `futures-io`
+0.3.34, `futures-macro` 0.3.34, `futures-sink` 0.3.34, `libloading` 0.9.0, `napi` 3.12.5,
+`napi-build` 2.4.2, `napi-derive` 3.6.6, `napi-derive-backend` 6.1.3, `napi-sys` 3.3.1,
+`nohash-hasher` 0.2.0, and `unicode-segmentation` 1.13.3. There are no direct development
+dependencies.
+
+Lock regeneration also replaces three unselected optional entries: `synstructure` 0.13.2 with
+0.14.0, `yoke-derive` 0.8.2 with 0.8.3, and `zerofrom-derive` 0.1.7 with 0.1.8. The resulting
+`Cargo.lock` SHA-256 is
+`bb5a5a66a60f5ae9a318c2c4a8daac43a5757856c1a183bd91eb2360830555f8`.
+
+All additions use MIT, Apache-2.0 OR MIT, ISC, or Unicode-3.0 terms already accepted by the
+allow-list. New procedural macros are `napi-derive` and `futures-macro`; the lock-only replacements
+`yoke-derive` and `zerofrom-derive` are also procedural macros. `napi` and the local binding have
+Rust build scripts. On the approved macOS and glibc Linux targets, `napi-build` emits linker
+configuration and downloads no executable or other tool.
+
+The direct crate provenance is:
+
+| Crate | Checksum | Annotated tag object | Source commit |
+| --- | --- | --- | --- |
+| `napi` 3.12.5 | `f0c007d4a8ead952a81887661d41fd56b7e7a70d3d4d921f445fb37a8f6efa1e` | `c69066bc9b2fc848aea9fd83f478e815085fbe1e` | `43100baf28a3e5709641e35f892be4da5d62dcb2` |
+| `napi-derive` 3.6.6 | `e8872852c2d050fc5859749864119bc5d50e3f6ad5957874d61d1a07c76771cb` | `718349e1e4c8ec666ce8ba0b6eee59babd7e0dd6` | `43100baf28a3e5709641e35f892be4da5d62dcb2` |
+| `napi-build` 2.4.2 | `860e7c40864f95cfb83cde99f9ebadd88ef3d9bdccd7dd2cee0cc96a2dd4ffa7` | `fce13f61caff9b4c0d1d6d093d1ea24dcdd7af31` | `31c27a1676a7c4b317f4e144e0a9cb94e8354143` |
+
+Rust 1.96 and Node 24.13.1 on macOS arm64 are locally verified. Node 22.19, macOS x64, and both
+glibc Linux architectures require separate runtime evidence. The production package contains no
+secure-store implementation and cannot create or open an endpoint.
+
 ## Maintenance exception
 
 | Field | Value |
