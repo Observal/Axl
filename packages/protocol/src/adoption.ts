@@ -239,11 +239,17 @@ export interface AdoptionPolicyEvaluation {
   readonly reasons: readonly string[];
 }
 
-export interface AdoptionCompatibilityReport {
+export interface AdoptionCompatibilitySummary {
   readonly primarySurfaceId: string;
   readonly overall: AdoptionCompatibility;
-  readonly surfaces: readonly AdoptionResourceSurface[];
+  readonly surfaceCount: number;
+  readonly unsupportedSurfaceCount: number;
   readonly partialAcknowledgementRequired: boolean;
+}
+
+/** A bounded page of a compatibility report. Use the containing RPC cursor for the next page. */
+export interface AdoptionCompatibilityReport extends AdoptionCompatibilitySummary {
+  readonly surfaces: readonly AdoptionResourceSurface[];
 }
 
 export interface AdoptionDisclosureFile {
@@ -253,12 +259,19 @@ export interface AdoptionDisclosureFile {
 }
 
 export interface AdoptionSourceDisclosureManifest {
+  /** Hash of the complete canonical manifest, including all file metadata. */
   readonly manifestSha256: string;
   readonly providerId: string;
   readonly modelId: string;
   readonly endpointLocation: "local" | "remote" | "unknown";
-  readonly files: readonly AdoptionDisclosureFile[];
+  readonly fileCount: number;
+  /** Digest of the complete canonical file-metadata sequence. */
+  readonly filesSha256: string;
   readonly totalBytes: number;
+  /** At most 100 metadata entries for a small manifest or preview. Never contains source bodies. */
+  readonly files?: readonly AdoptionDisclosureFile[];
+  /** Complete metadata for a large manifest. The referenced blob is bound by filesSha256. */
+  readonly filesBlob?: BlobReference;
   readonly retentionMetadataRevision: string;
 }
 
@@ -313,7 +326,11 @@ export interface AdoptionOperationDetail extends AdoptionOperationSummary {
   readonly disclosure?: AdoptionSourceDisclosureManifest;
   readonly estimates?: AdoptionEstimates;
   readonly verification?: AdoptionVerificationSummary;
+  /** Surfaces and diagnostics form one page of at most 100 combined entries. */
+  readonly diagnosticCount: number;
+  readonly detailOffset: number;
   readonly diagnostics: readonly AdoptionDiagnosticSummary[];
+  readonly nextDetailPageCursor?: string;
   readonly review?: BlobReference;
 }
 
@@ -354,7 +371,7 @@ export interface AdoptionRollbackPreview {
   readonly adoptionId: AdoptionId;
   readonly fromRevisionId: AdoptionRevisionId;
   readonly toRevisionId: AdoptionRevisionId;
-  readonly compatibility: AdoptionCompatibilityReport;
+  readonly compatibility: AdoptionCompatibilitySummary;
 }
 
 export interface AdoptionDiscoverParams {
@@ -402,6 +419,10 @@ export interface AdoptionInspectResult {
     readonly maxFileBytes: number;
     readonly maxManifestBytes: number;
   };
+  readonly surfaceCount: number;
+  readonly diagnosticCount: number;
+  /** Offset in the combined surfaces-then-diagnostics detail stream. */
+  readonly detailOffset: number;
   readonly surfaces: readonly AdoptionResourceSurface[];
   readonly diagnostics: readonly AdoptionDiagnosticSummary[];
   readonly nextPageCursor?: string;
@@ -420,6 +441,8 @@ export type AdoptionRpcMethodMap = {
     readonly params: {
       readonly candidateId: AdoptionCandidateId;
       readonly expectedDiscoveryFingerprint: string;
+      /** Omit to select the whole package; otherwise contains the exact selected surfaces. */
+      readonly selectedSurfaceIds?: readonly string[];
       readonly targetScope: AdoptionScope;
     };
     readonly result: {
@@ -432,7 +455,11 @@ export type AdoptionRpcMethodMap = {
     readonly result: AdoptionOperationSummary;
   };
   readonly "adoption.operation.get": {
-    readonly params: { readonly operationId: AdoptionOperationId };
+    readonly params: {
+      readonly operationId: AdoptionOperationId;
+      readonly detailPageSize: number;
+      readonly detailPageCursor?: string;
+    };
     readonly result: AdoptionOperationDetail;
   };
   readonly "adoption.operation.list": {
@@ -495,12 +522,21 @@ export type AdoptionRpcMethodMap = {
     };
   };
   readonly "adoption.revision.get": {
-    readonly params: { readonly adoptionId: AdoptionId; readonly revisionId: AdoptionRevisionId };
+    readonly params: {
+      readonly adoptionId: AdoptionId;
+      readonly revisionId: AdoptionRevisionId;
+      readonly detailPageSize: number;
+      readonly detailPageCursor?: string;
+    };
     readonly result: {
       readonly adoption: AdoptedPackageSummary;
       readonly revision: AdoptedRevisionSummary;
       readonly compatibility: AdoptionCompatibilityReport;
       readonly verification: AdoptionVerificationSummary;
+      readonly diagnosticCount: number;
+      readonly detailOffset: number;
+      readonly diagnostics: readonly AdoptionDiagnosticSummary[];
+      readonly nextDetailPageCursor?: string;
     };
   };
   readonly "adoption.diff": {
@@ -696,22 +732,42 @@ export function parseAdoptionRpcParams<Method extends AdoptionRpcMethod>(
   if (method === "adoption.discover") parsed = parseDiscoverParams(input, path);
   else if (method === "adoption.inspect") parsed = parseInspectParams(input, path);
   else if (method === "adoption.plan") {
-    exact(input, path, ["candidateId", "expectedDiscoveryFingerprint", "targetScope"]);
+    exact(input, path, [
+      "candidateId",
+      "expectedDiscoveryFingerprint",
+      "selectedSurfaceIds",
+      "targetScope",
+    ]);
     parsed = {
       candidateId: parseAdoptionCandidateId(input.candidateId, `${path}.candidateId`),
       expectedDiscoveryFingerprint: sha(
         input.expectedDiscoveryFingerprint,
         `${path}.expectedDiscoveryFingerprint`,
       ),
+      ...(input.selectedSurfaceIds === undefined
+        ? {}
+        : {
+            selectedSurfaceIds: uniqueArray(
+              input.selectedSurfaceIds,
+              `${path}.selectedSurfaceIds`,
+              10_000,
+              (value, itemPath) => sha(value, itemPath),
+            ),
+          }),
       targetScope: parseAdoptionScope(input.targetScope, `${path}.targetScope`),
     };
-  } else if (
-    method === "adoption.start" ||
-    method === "adoption.operation.get" ||
-    method === "adoption.operation.cancel"
-  ) {
+  } else if (method === "adoption.start" || method === "adoption.operation.cancel") {
     exact(input, path, ["operationId"]);
     parsed = { operationId: parseAdoptionOperationId(input.operationId, `${path}.operationId`) };
+  } else if (method === "adoption.operation.get") {
+    exact(input, path, ["operationId", "detailPageSize", "detailPageCursor"]);
+    parsed = {
+      operationId: parseAdoptionOperationId(input.operationId, `${path}.operationId`),
+      detailPageSize: pageSize(input.detailPageSize, `${path}.detailPageSize`),
+      ...(input.detailPageCursor === undefined
+        ? {}
+        : { detailPageCursor: text(input.detailPageCursor, `${path}.detailPageCursor`, 512) }),
+    };
   } else if (method === "adoption.operation.list") {
     exact(input, path, ["states", "pageSize", "pageCursor"]);
     parsed = {
@@ -763,10 +819,14 @@ export function parseAdoptionRpcParams<Method extends AdoptionRpcMethod>(
         : { pageCursor: text(input.pageCursor, `${path}.pageCursor`, 512) }),
     };
   } else if (method === "adoption.revision.get") {
-    exact(input, path, ["adoptionId", "revisionId"]);
+    exact(input, path, ["adoptionId", "revisionId", "detailPageSize", "detailPageCursor"]);
     parsed = {
       adoptionId: parseAdoptionId(input.adoptionId, `${path}.adoptionId`),
       revisionId: parseAdoptionRevisionId(input.revisionId, `${path}.revisionId`),
+      detailPageSize: pageSize(input.detailPageSize, `${path}.detailPageSize`),
+      ...(input.detailPageCursor === undefined
+        ? {}
+        : { detailPageCursor: text(input.detailPageCursor, `${path}.detailPageCursor`, 512) }),
     };
   } else if (method === "adoption.diff") {
     exact(input, path, ["adoptionId", "fromRevisionId", "toRevisionId"]);
@@ -864,10 +924,12 @@ export function parseAdoptionRpcResult<Method extends AdoptionRpcMethod>(
   else if (method === "adoption.operation.get") parsed = parseOperationDetail(input, path);
   else if (method === "adoption.operation.list") {
     exact(input, path, ["operations", "nextPageCursor"]);
+    const operations = array(input.operations, `${path}.operations`, 100).map((v, i) =>
+      parseOperationSummary(v, `${path}.operations[${i}]`),
+    );
+    assertUniqueBy(operations, (operation) => operation.operationId, `${path}.operations`);
     parsed = {
-      operations: array(input.operations, `${path}.operations`, 100).map((v, i) =>
-        parseOperationSummary(v, `${path}.operations[${i}]`),
-      ),
+      operations,
       ...(input.nextPageCursor === undefined
         ? {}
         : { nextPageCursor: text(input.nextPageCursor, `${path}.nextPageCursor`, 512) }),
@@ -884,21 +946,55 @@ export function parseAdoptionRpcResult<Method extends AdoptionRpcMethod>(
     };
   } else if (method === "adoption.list") {
     exact(input, path, ["adoptions", "nextPageCursor"]);
+    const adoptions = array(input.adoptions, `${path}.adoptions`, 100).map((v, i) =>
+      parsePackage(v, `${path}.adoptions[${i}]`),
+    );
+    assertUniqueBy(adoptions, (adoption) => adoption.adoptionId, `${path}.adoptions`);
     parsed = {
-      adoptions: array(input.adoptions, `${path}.adoptions`, 100).map((v, i) =>
-        parsePackage(v, `${path}.adoptions[${i}]`),
-      ),
+      adoptions,
       ...(input.nextPageCursor === undefined
         ? {}
         : { nextPageCursor: text(input.nextPageCursor, `${path}.nextPageCursor`, 512) }),
     };
   } else if (method === "adoption.revision.get") {
-    exact(input, path, ["adoption", "revision", "compatibility", "verification"]);
+    exact(input, path, [
+      "adoption",
+      "revision",
+      "compatibility",
+      "verification",
+      "diagnosticCount",
+      "detailOffset",
+      "diagnostics",
+      "nextDetailPageCursor",
+    ]);
+    const compatibility = parseCompatibilityReport(input.compatibility, `${path}.compatibility`);
+    const diagnosticCount = count(input.diagnosticCount, `${path}.diagnosticCount`, 10_000);
+    const detailOffset = count(input.detailOffset, `${path}.detailOffset`, 20_000);
+    const diagnostics = array(input.diagnostics, `${path}.diagnostics`, 100).map((value, index) =>
+      parseDiagnostic(value, `${path}.diagnostics[${index}]`),
+    );
+    const nextDetailPageCursor = optionalCursor(
+      input.nextDetailPageCursor,
+      `${path}.nextDetailPageCursor`,
+    );
+    assertDetailPage(
+      compatibility.surfaceCount,
+      diagnosticCount,
+      detailOffset,
+      compatibility.surfaces,
+      diagnostics,
+      nextDetailPageCursor,
+      path,
+    );
     parsed = {
       adoption: parsePackage(input.adoption, `${path}.adoption`),
       revision: parseRevision(input.revision, `${path}.revision`),
-      compatibility: parseCompatibilityReport(input.compatibility, `${path}.compatibility`),
+      compatibility,
       verification: parseVerification(input.verification, `${path}.verification`),
+      diagnosticCount,
+      detailOffset,
+      diagnostics,
+      ...(nextDetailPageCursor === undefined ? {} : { nextDetailPageCursor }),
     };
   } else if (method === "adoption.diff") parsed = parseDiff(input, path);
   else if (method === "adoption.update") {
@@ -930,12 +1026,14 @@ export function parseAdoptionRpcResult<Method extends AdoptionRpcMethod>(
     };
   } else if (method === "adoption.subscribe") {
     exact(input, path, ["subscriptionId", "boundaryCursor", "operations", "resumed"]);
+    const operations = array(input.operations, `${path}.operations`, 100).map((v, i) =>
+      parseOperationSummary(v, `${path}.operations[${i}]`),
+    );
+    assertUniqueBy(operations, (operation) => operation.operationId, `${path}.operations`);
     parsed = {
       subscriptionId: parseAdoptionSubscriptionId(input.subscriptionId, `${path}.subscriptionId`),
       boundaryCursor: text(input.boundaryCursor, `${path}.boundaryCursor`, 512),
-      operations: array(input.operations, `${path}.operations`, 100).map((v, i) =>
-        parseOperationSummary(v, `${path}.operations[${i}]`),
-      ),
+      operations,
       resumed: bool(input.resumed, `${path}.resumed`),
     };
   } else if (method === "adoption.ack") {
@@ -986,7 +1084,9 @@ export function parseAdoptionOperationDetail(
   value: unknown,
   path = "operation",
 ): AdoptionOperationDetail {
-  return parseOperationDetail(value, path);
+  const detail = parseOperationDetail(value, path);
+  boundedJson(detail, path);
+  return detail;
 }
 
 export function parseAdoptionCompatibilityReport(
@@ -1064,11 +1164,13 @@ function parseInspectParams(input: Record<string, unknown>, path: string): Adopt
 }
 function parseDiscoverResult(input: Record<string, unknown>, path: string): AdoptionDiscoverResult {
   exact(input, path, ["scanGeneration", "candidates", "warnings", "nextPageCursor"]);
+  const candidates = array(input.candidates, `${path}.candidates`, 100).map((v, i) =>
+    parseCandidate(v, `${path}.candidates[${i}]`),
+  );
+  assertUniqueBy(candidates, (candidate) => candidate.candidateId, `${path}.candidates`);
   return {
     scanGeneration: text(input.scanGeneration, `${path}.scanGeneration`, 128),
-    candidates: array(input.candidates, `${path}.candidates`, 100).map((v, i) =>
-      parseCandidate(v, `${path}.candidates[${i}]`),
-    ),
+    candidates,
     warnings: array(input.warnings, `${path}.warnings`, 64).map((v, i) =>
       parseDiagnostic(v, `${path}.warnings[${i}]`),
     ),
@@ -1084,6 +1186,9 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
     "license",
     "inventory",
     "limits",
+    "surfaceCount",
+    "diagnosticCount",
+    "detailOffset",
     "surfaces",
     "diagnostics",
     "nextPageCursor",
@@ -1103,10 +1208,26 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
     "maxFileBytes",
     "maxManifestBytes",
   ]);
-  const surfaces = array(input.surfaces, `${path}.surfaces`, 100);
-  const diagnostics = array(input.diagnostics, `${path}.diagnostics`, 100);
-  if (surfaces.length + diagnostics.length > 100)
-    fail(path, "surfaces plus diagnostics must not exceed 100");
+  const surfaceCount = count(input.surfaceCount, `${path}.surfaceCount`, 10_000);
+  const diagnosticCount = count(input.diagnosticCount, `${path}.diagnosticCount`, 10_000);
+  const detailOffset = count(input.detailOffset, `${path}.detailOffset`, 20_000);
+  const surfaces = array(input.surfaces, `${path}.surfaces`, 100).map((value, index) =>
+    parseSurface(value, `${path}.surfaces[${index}]`),
+  );
+  const diagnostics = array(input.diagnostics, `${path}.diagnostics`, 100).map((value, index) =>
+    parseDiagnostic(value, `${path}.diagnostics[${index}]`),
+  );
+  assertUniqueBy(surfaces, (surface) => surface.surfaceId, `${path}.surfaces`);
+  const nextPageCursor = optionalCursor(input.nextPageCursor, `${path}.nextPageCursor`);
+  assertDetailPage(
+    surfaceCount,
+    diagnosticCount,
+    detailOffset,
+    surfaces,
+    diagnostics,
+    nextPageCursor,
+    path,
+  );
   return {
     candidate: parseCandidate(input.candidate, `${path}.candidate`),
     adapter: {
@@ -1139,11 +1260,12 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
       maxFileBytes: count(limits.maxFileBytes, `${path}.limits.maxFileBytes`, 1_048_576),
       maxManifestBytes: count(limits.maxManifestBytes, `${path}.limits.maxManifestBytes`, 262_144),
     },
-    surfaces: surfaces.map((v, i) => parseSurface(v, `${path}.surfaces[${i}]`)),
-    diagnostics: diagnostics.map((v, i) => parseDiagnostic(v, `${path}.diagnostics[${i}]`)),
-    ...(input.nextPageCursor === undefined
-      ? {}
-      : { nextPageCursor: text(input.nextPageCursor, `${path}.nextPageCursor`, 512) }),
+    surfaceCount,
+    diagnosticCount,
+    detailOffset,
+    surfaces,
+    diagnostics,
+    ...(nextPageCursor === undefined ? {} : { nextPageCursor }),
   };
 }
 function parseCandidate(value: unknown, path: string): AdoptionCandidate {
@@ -1189,7 +1311,10 @@ function parseSource(value: unknown, path: string): AdoptionSourceLocator {
   const x = object(value, path);
   if (x.kind === "local") {
     exact(x, path, ["kind", "canonicalPath"]);
-    return { kind: "local", canonicalPath: text(x.canonicalPath, `${path}.canonicalPath`, 4096) };
+    return {
+      kind: "local",
+      canonicalPath: absoluteCanonicalHostPath(x.canonicalPath, `${path}.canonicalPath`),
+    };
   }
   if (x.kind === "npm") {
     exact(x, path, ["kind", "registryOrigin", "packageName", "requested"]);
@@ -1369,9 +1494,38 @@ function parseOperationDetail(value: unknown, path: string): AdoptionOperationDe
     "disclosure",
     "estimates",
     "verification",
+    "diagnosticCount",
+    "detailOffset",
     "diagnostics",
+    "nextDetailPageCursor",
     "review",
   ]);
+  const compatibility =
+    x.compatibility === undefined
+      ? undefined
+      : parseCompatibilityReport(x.compatibility, `${path}.compatibility`);
+  const capabilityRequests = array(x.capabilityRequests, `${path}.capabilityRequests`, 256).map(
+    (value, index) => parseCapabilityRequest(value, `${path}.capabilityRequests[${index}]`),
+  );
+  assertUniqueBy(capabilityRequests, (request) => request.capability, `${path}.capabilityRequests`);
+  const diagnosticCount = count(x.diagnosticCount, `${path}.diagnosticCount`, 10_000);
+  const detailOffset = count(x.detailOffset, `${path}.detailOffset`, 20_000);
+  const diagnostics = array(x.diagnostics, `${path}.diagnostics`, 100).map((v, i) =>
+    parseDiagnostic(v, `${path}.diagnostics[${i}]`),
+  );
+  const nextDetailPageCursor = optionalCursor(
+    x.nextDetailPageCursor,
+    `${path}.nextDetailPageCursor`,
+  );
+  assertDetailPage(
+    compatibility?.surfaceCount ?? 0,
+    diagnosticCount,
+    detailOffset,
+    compatibility?.surfaces ?? [],
+    diagnostics,
+    nextDetailPageCursor,
+    path,
+  );
   return {
     ...base,
     ...(x.candidate === undefined
@@ -1380,12 +1534,8 @@ function parseOperationDetail(value: unknown, path: string): AdoptionOperationDe
     ...(x.sourceLock === undefined
       ? {}
       : { sourceLock: parseSourceLock(x.sourceLock, `${path}.sourceLock`) }),
-    ...(x.compatibility === undefined
-      ? {}
-      : { compatibility: parseCompatibilityReport(x.compatibility, `${path}.compatibility`) }),
-    capabilityRequests: array(x.capabilityRequests, `${path}.capabilityRequests`, 256).map((v, i) =>
-      parseCapabilityRequest(v, `${path}.capabilityRequests[${i}]`),
-    ),
+    ...(compatibility === undefined ? {} : { compatibility }),
+    capabilityRequests,
     ...(x.policy === undefined ? {} : { policy: parsePolicy(x.policy, `${path}.policy`) }),
     ...(x.disclosure === undefined
       ? {}
@@ -1396,12 +1546,42 @@ function parseOperationDetail(value: unknown, path: string): AdoptionOperationDe
     ...(x.verification === undefined
       ? {}
       : { verification: parseVerification(x.verification, `${path}.verification`) }),
-    diagnostics: array(x.diagnostics, `${path}.diagnostics`, 100).map((v, i) =>
-      parseDiagnostic(v, `${path}.diagnostics[${i}]`),
-    ),
+    diagnosticCount,
+    detailOffset,
+    diagnostics,
+    ...(nextDetailPageCursor === undefined ? {} : { nextDetailPageCursor }),
     ...(x.review === undefined ? {} : { review: parseBlob(x.review, `${path}.review`) }),
   };
 }
+function optionalCursor(value: unknown, path: string): string | undefined {
+  return value === undefined ? undefined : text(value, path, 512);
+}
+
+function assertDetailPage(
+  surfaceCount: number,
+  diagnosticCount: number,
+  detailOffset: number,
+  surfaces: readonly AdoptionResourceSurface[],
+  diagnostics: readonly AdoptionDiagnosticSummary[],
+  nextCursor: string | undefined,
+  path: string,
+): void {
+  if (surfaces.length + diagnostics.length > 100) {
+    fail(path, "surfaces plus diagnostics must not exceed 100 entries per page");
+  }
+  const total = surfaceCount + diagnosticCount;
+  const returned = surfaces.length + diagnostics.length;
+  if (detailOffset > total || detailOffset + returned > total) {
+    fail(`${path}.detailOffset`, "page range must not exceed declared totals");
+  }
+  if (detailOffset + returned < total && nextCursor === undefined) {
+    fail(`${path}.nextDetailPageCursor`, "is required while detail entries remain");
+  }
+  if (detailOffset + returned === total && nextCursor !== undefined) {
+    fail(`${path}.nextDetailPageCursor`, "must be absent on the final detail page");
+  }
+}
+
 function parseCapabilityRequest(value: unknown, path: string): AdoptionCapabilityRequest {
   const x = object(value, path);
   exact(x, path, ["capability", "required", "rationale"]);
@@ -1432,27 +1612,71 @@ function parsePolicy(value: unknown, path: string): AdoptionPolicyEvaluation {
     ),
   };
 }
-function parseCompatibilityReport(value: unknown, path: string): AdoptionCompatibilityReport {
+function parseCompatibilitySummary(value: unknown, path: string): AdoptionCompatibilitySummary {
   const x = object(value, path);
-  exact(x, path, ["primarySurfaceId", "overall", "surfaces", "partialAcknowledgementRequired"]);
-  const surfaces = array(x.surfaces, `${path}.surfaces`, 100).map((v, i) =>
-    parseSurface(v, `${path}.surfaces[${i}]`),
+  exact(x, path, [
+    "primarySurfaceId",
+    "overall",
+    "surfaceCount",
+    "unsupportedSurfaceCount",
+    "partialAcknowledgementRequired",
+  ]);
+  const surfaceCount = count(x.surfaceCount, `${path}.surfaceCount`, 10_000);
+  if (surfaceCount < 1) fail(`${path}.surfaceCount`, "must be at least 1");
+  const unsupportedSurfaceCount = count(
+    x.unsupportedSurfaceCount,
+    `${path}.unsupportedSurfaceCount`,
+    10_000,
   );
-  const primary = sha(x.primarySurfaceId, `${path}.primarySurfaceId`);
-  if (
-    surfaces.filter((s) => s.primary).length !== 1 ||
-    !surfaces.some((s) => s.surfaceId === primary && s.primary)
-  )
-    fail(`${path}.primarySurfaceId`, "must identify the single primary surface");
+  if (unsupportedSurfaceCount > surfaceCount) {
+    fail(`${path}.unsupportedSurfaceCount`, "must not exceed surfaceCount");
+  }
   return {
-    primarySurfaceId: primary,
+    primarySurfaceId: sha(x.primarySurfaceId, `${path}.primarySurfaceId`),
     overall: parseAdoptionCompatibility(x.overall, `${path}.overall`),
-    surfaces,
+    surfaceCount,
+    unsupportedSurfaceCount,
     partialAcknowledgementRequired: bool(
       x.partialAcknowledgementRequired,
       `${path}.partialAcknowledgementRequired`,
     ),
   };
+}
+function parseCompatibilityReport(value: unknown, path: string): AdoptionCompatibilityReport {
+  const x = object(value, path);
+  const summary = parseCompatibilitySummary(
+    {
+      primarySurfaceId: x.primarySurfaceId,
+      overall: x.overall,
+      surfaceCount: x.surfaceCount,
+      unsupportedSurfaceCount: x.unsupportedSurfaceCount,
+      partialAcknowledgementRequired: x.partialAcknowledgementRequired,
+    },
+    path,
+  );
+  exact(x, path, [
+    "primarySurfaceId",
+    "overall",
+    "surfaceCount",
+    "unsupportedSurfaceCount",
+    "surfaces",
+    "partialAcknowledgementRequired",
+  ]);
+  const surfaces = array(x.surfaces, `${path}.surfaces`, 100).map((v, i) =>
+    parseSurface(v, `${path}.surfaces[${i}]`),
+  );
+  assertUniqueBy(surfaces, (surface) => surface.surfaceId, `${path}.surfaces`);
+  if (surfaces.length > summary.surfaceCount) {
+    fail(`${path}.surfaces`, "page length must not exceed surfaceCount");
+  }
+  const primarySurfaces = surfaces.filter((surface) => surface.primary);
+  if (
+    primarySurfaces.length > 1 ||
+    primarySurfaces.some((surface) => surface.surfaceId !== summary.primarySurfaceId)
+  ) {
+    fail(`${path}.primarySurfaceId`, "must identify the only primary surface on this page");
+  }
+  return { ...summary, surfaces };
 }
 function parseDisclosure(value: unknown, path: string): AdoptionSourceDisclosureManifest {
   const x = object(value, path);
@@ -1461,10 +1685,52 @@ function parseDisclosure(value: unknown, path: string): AdoptionSourceDisclosure
     "providerId",
     "modelId",
     "endpointLocation",
-    "files",
+    "fileCount",
+    "filesSha256",
     "totalBytes",
+    "files",
+    "filesBlob",
     "retentionMetadataRevision",
   ]);
+  const fileCount = count(x.fileCount, `${path}.fileCount`, 20_000);
+  const files =
+    x.files === undefined
+      ? undefined
+      : array(x.files, `${path}.files`, 100).map((v, i) => {
+          const p = `${path}.files[${i}]`;
+          const f = object(v, p);
+          exact(f, p, ["relativePath", "sha256", "sizeBytes"]);
+          return {
+            relativePath: pathText(f.relativePath, `${p}.relativePath`, false),
+            sha256: sha(f.sha256, `${p}.sha256`),
+            sizeBytes: count(f.sizeBytes, `${p}.sizeBytes`),
+          };
+        });
+  if (files !== undefined) {
+    assertUniqueBy(files, (file) => file.relativePath, `${path}.files`);
+  }
+  const filesSha256 = sha(x.filesSha256, `${path}.filesSha256`);
+  const filesBlob =
+    x.filesBlob === undefined
+      ? undefined
+      : parseBlob(x.filesBlob, `${path}.filesBlob`, 256 * 1_024 * 1_024);
+  if (filesBlob !== undefined) {
+    if (filesBlob.mediaType !== "application/vnd.axl.adoption-disclosure+json") {
+      fail(`${path}.filesBlob.mediaType`, "must identify an adoption disclosure manifest");
+    }
+    if (filesBlob.sha256 !== filesSha256) {
+      fail(`${path}.filesBlob.sha256`, "must match filesSha256");
+    }
+  }
+  if (files === undefined && filesBlob === undefined) {
+    fail(path, "must contain files or filesBlob");
+  }
+  if (files !== undefined && files.length > fileCount) {
+    fail(`${path}.files`, "must not contain more entries than fileCount");
+  }
+  if (filesBlob === undefined && files?.length !== fileCount) {
+    fail(`${path}.filesBlob`, "is required when the inline file page is incomplete");
+  }
   return {
     manifestSha256: sha(x.manifestSha256, `${path}.manifestSha256`),
     providerId: text(x.providerId, `${path}.providerId`, 512),
@@ -1474,17 +1740,11 @@ function parseDisclosure(value: unknown, path: string): AdoptionSourceDisclosure
       "remote",
       "unknown",
     ] as const),
-    files: array(x.files, `${path}.files`, 10_000).map((v, i) => {
-      const p = `${path}.files[${i}]`;
-      const f = object(v, p);
-      exact(f, p, ["relativePath", "sha256", "sizeBytes"]);
-      return {
-        relativePath: pathText(f.relativePath, `${p}.relativePath`, false),
-        sha256: sha(f.sha256, `${p}.sha256`),
-        sizeBytes: count(f.sizeBytes, `${p}.sizeBytes`),
-      };
-    }),
+    fileCount,
+    filesSha256,
     totalBytes: count(x.totalBytes, `${path}.totalBytes`),
+    ...(files === undefined ? {} : { files }),
+    ...(filesBlob === undefined ? {} : { filesBlob }),
     retentionMetadataRevision: text(
       x.retentionMetadataRevision,
       `${path}.retentionMetadataRevision`,
@@ -1510,6 +1770,25 @@ function parseEstimates(value: unknown, path: string): AdoptionEstimates {
 function parseVerification(value: unknown, path: string): AdoptionVerificationSummary {
   const x = object(value, path);
   exact(x, path, ["status", "steps", "evidenceSha256"]);
+  const steps = array(x.steps, `${path}.steps`, 100).map((v, i) => {
+    const p = `${path}.steps[${i}]`;
+    const s = object(v, p);
+    exact(s, p, ["id", "name", "status", "toolVersion", "log"]);
+    return {
+      id: code(s.id, `${p}.id`),
+      name: text(s.name, `${p}.name`, 256),
+      status: enumValue(s.status, `${p}.status`, [
+        "pending",
+        "running",
+        "passed",
+        "failed",
+        "skipped",
+      ] as const),
+      toolVersion: text(s.toolVersion, `${p}.toolVersion`, 128),
+      ...(s.log === undefined ? {} : { log: parseBlob(s.log, `${p}.log`) }),
+    };
+  });
+  assertUniqueBy(steps, (step) => step.id, `${path}.steps`);
   return {
     status: enumValue(x.status, `${path}.status`, [
       "pending",
@@ -1517,24 +1796,7 @@ function parseVerification(value: unknown, path: string): AdoptionVerificationSu
       "passed",
       "failed",
     ] as const),
-    steps: array(x.steps, `${path}.steps`, 100).map((v, i) => {
-      const p = `${path}.steps[${i}]`;
-      const s = object(v, p);
-      exact(s, p, ["id", "name", "status", "toolVersion", "log"]);
-      return {
-        id: code(s.id, `${p}.id`),
-        name: text(s.name, `${p}.name`, 256),
-        status: enumValue(s.status, `${p}.status`, [
-          "pending",
-          "running",
-          "passed",
-          "failed",
-          "skipped",
-        ] as const),
-        toolVersion: text(s.toolVersion, `${p}.toolVersion`, 128),
-        ...(s.log === undefined ? {} : { log: parseBlob(s.log, `${p}.log`) }),
-      };
-    }),
+    steps,
     ...(x.evidenceSha256 === undefined
       ? {}
       : { evidenceSha256: sha(x.evidenceSha256, `${path}.evidenceSha256`) }),
@@ -1629,16 +1891,16 @@ function parseRollbackPreview(value: unknown, path: string): AdoptionRollbackPre
     adoptionId: parseAdoptionId(x.adoptionId, `${path}.adoptionId`),
     fromRevisionId: parseAdoptionRevisionId(x.fromRevisionId, `${path}.fromRevisionId`),
     toRevisionId: parseAdoptionRevisionId(x.toRevisionId, `${path}.toRevisionId`),
-    compatibility: parseCompatibilityReport(x.compatibility, `${path}.compatibility`),
+    compatibility: parseCompatibilitySummary(x.compatibility, `${path}.compatibility`),
   };
 }
-function parseBlob(value: unknown, path: string): BlobReference {
+function parseBlob(value: unknown, path: string, maxSizeBytes = 67_108_864): BlobReference {
   const x = object(value, path);
   exact(x, path, ["sha256", "mediaType", "sizeBytes", "name"]);
   return {
     sha256: sha(x.sha256, `${path}.sha256`),
     mediaType: text(x.mediaType, `${path}.mediaType`, 128),
-    sizeBytes: count(x.sizeBytes, `${path}.sizeBytes`, 67_108_864),
+    sizeBytes: count(x.sizeBytes, `${path}.sizeBytes`, maxSizeBytes),
     ...(x.name === undefined ? {} : { name: text(x.name, `${path}.name`, 256) }),
   };
 }
@@ -1652,7 +1914,7 @@ function range(value: unknown, path: string, max: number, float = false): Adopti
 }
 function safeUri(value: unknown, path: string, max: number): string {
   const result = text(value, path, max);
-  if (/[\u0000-\u0020\u007f]/.test(result)) {
+  if (hasAsciiControl(result, true)) {
     return fail(path, "must not contain whitespace or control characters");
   }
   let url: URL;
@@ -1665,6 +1927,67 @@ function safeUri(value: unknown, path: string, max: number): string {
   if (url.search || url.hash) fail(path, "must not contain query or fragment data");
   if (url.protocol !== "https:") fail(path, "must use HTTPS");
   return result;
+}
+function absoluteCanonicalHostPath(value: unknown, path: string): string {
+  const result = text(value, path, 4096);
+  if (result !== result.normalize("NFC")) fail(path, "must use Unicode NFC");
+  if (hasAsciiControl(result, false)) fail(path, "must not contain control characters");
+
+  if (result.startsWith("/")) {
+    if (result === "/") return result;
+    if (result.endsWith("/") || result.includes("//")) {
+      fail(path, "must be a canonical POSIX absolute path");
+    }
+    const segments = result.split("/").slice(1);
+    if (segments.some((segment) => segment === "." || segment === ".." || segment.length === 0)) {
+      fail(path, "must not contain empty, dot, or dot-dot segments");
+    }
+    return result;
+  }
+
+  if (/^[A-Z]:\\/.test(result)) {
+    if (result.length === 3) return result;
+    if (result.endsWith("\\")) fail(path, "must not have a trailing separator");
+    const segments = result.slice(3).split("\\");
+    if (segments.some((segment) => !validWindowsSegment(segment))) {
+      fail(path, "must not contain empty, dot, dot-dot, or invalid Windows segments");
+    }
+    if (result.includes("/")) fail(path, "must use canonical Windows separators");
+    return result;
+  }
+
+  if (result.startsWith("\\\\")) {
+    if (result.endsWith("\\") || result.includes("/")) {
+      fail(path, "must be a canonical UNC absolute path");
+    }
+    const segments = result.slice(2).split("\\");
+    if (segments.length < 2 || segments.some((segment) => !validWindowsSegment(segment))) {
+      fail(path, "must contain canonical UNC server and share segments");
+    }
+    return result;
+  }
+
+  return fail(path, "must be an absolute canonical POSIX, drive-letter, or UNC path");
+}
+function validWindowsSegment(segment: string): boolean {
+  if (
+    segment.length === 0 ||
+    segment === "." ||
+    segment === ".." ||
+    /[<>:"|?*]/.test(segment) ||
+    /[. ]$/.test(segment)
+  ) {
+    return false;
+  }
+  const basename = segment.split(".", 1)[0]?.toUpperCase();
+  return !(
+    basename === "CON" ||
+    basename === "PRN" ||
+    basename === "AUX" ||
+    basename === "NUL" ||
+    /^COM[1-9]$/.test(basename ?? "") ||
+    /^LPT[1-9]$/.test(basename ?? "")
+  );
 }
 function pathText(value: unknown, path: string, allowEmpty: boolean): string {
   const result = text(value, path, 4096, allowEmpty);
@@ -1682,6 +2005,14 @@ function sha(value: unknown, path: string): string {
   if (typeof value !== "string" || !SHA256_PATTERN.test(value))
     return fail(path, "must be 64 lowercase hexadecimal characters");
   return value;
+}
+function hasAsciiControl(value: string, includeSpace: boolean): boolean {
+  const maximum = includeSpace ? 0x20 : 0x1f;
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index);
+    if (codePoint <= maximum || codePoint === 0x7f) return true;
+  }
+  return false;
 }
 function npmPackageName(value: unknown, path: string): string {
   const result = text(value, path, 256);
@@ -1750,6 +2081,9 @@ function uniqueArray<T>(
   const values = array(value, path, max).map((v, i) => parse(v, `${path}[${i}]`));
   if (new Set(values).size !== values.length) fail(path, "must not contain duplicates");
   return values;
+}
+function assertUniqueBy<T>(values: readonly T[], key: (value: T) => string, path: string): void {
+  if (new Set(values.map(key)).size !== values.length) fail(path, "must not contain duplicates");
 }
 function enumValue<const T extends readonly string[]>(
   value: unknown,

@@ -14,6 +14,7 @@ import {
   hashCanonicalRequest,
   isRetryableMutationMethod,
   parseAdoptionCandidateId,
+  parseAdoptionOperationDetail,
   parseAdoptionOperationId,
   parseAdoptionOperationState,
   parseAdoptionResourceKind,
@@ -212,6 +213,346 @@ test("validates bounded resumable adoption progress without source bodies", () =
   );
 });
 
+test("accepts canonical POSIX and Windows local paths and rejects ambiguous forms", () => {
+  for (const canonicalPath of [
+    "/",
+    `/${"a".repeat(4_095)}`,
+    "/home/user/project",
+    "C:\\",
+    "C:\\Users\\User\\project",
+    "\\\\server\\share",
+    "\\\\server\\share\\project",
+  ]) {
+    assert.deepEqual(parseAdoptionSourceLocator({ kind: "local", canonicalPath }), {
+      kind: "local",
+      canonicalPath,
+    });
+  }
+
+  for (const canonicalPath of [
+    "relative/path",
+    "./relative",
+    "../escape",
+    "/tmp/../escape",
+    "/tmp//file",
+    "/tmp/",
+    "/tmp/\u0000file",
+    "/tmp/e\u0301",
+    `/${"a".repeat(4_096)}`,
+    "c:\\project",
+    "C:/project",
+    "C:\\project\\..\\escape",
+    "C:\\project\\NUL.txt",
+    "C:\\project\\trailing. ",
+    "\\\\server",
+    "\\\\server\\share\\",
+  ]) {
+    assert.throws(
+      () => parseAdoptionSourceLocator({ kind: "local", canonicalPath }),
+      ProtocolValidationError,
+      canonicalPath,
+    );
+  }
+});
+
+test("pages operation and revision details across the 10,000-surface bound", () => {
+  const surfaces = Array.from({ length: 100 }, (_, index) => ({
+    surfaceId: index.toString(16).padStart(64, "0"),
+    kind: "extension",
+    name: `tool-${index}`,
+    primary: index === 0,
+    executable: true,
+    compatibility: "adapted",
+    requiredCapabilities: [],
+    diagnosticCount: 0,
+    dynamicBehavior: "none",
+  }));
+  const compatibility = {
+    primarySurfaceId: surfaces[0]?.surfaceId,
+    overall: "adapted",
+    surfaceCount: 10_000,
+    unsupportedSurfaceCount: 0,
+    partialAcknowledgementRequired: false,
+    surfaces,
+  };
+  const detail = {
+    operationId,
+    state: "inspected",
+    phase: "inspection",
+    statusText: "Inspection complete",
+    sequence: 2,
+    createdAt: 1,
+    updatedAt: 2,
+    compatibility,
+    capabilityRequests: [],
+    diagnosticCount: 0,
+    detailOffset: 0,
+    diagnostics: [],
+    nextDetailPageCursor: "detail-page-2",
+  };
+  assert.deepEqual(parseAdoptionOperationDetail(detail), detail);
+  assert.deepEqual(
+    parseWireRequest({
+      kind: "request",
+      id: 10,
+      method: "adoption.operation.get",
+      params: { operationId, detailPageSize: 100, detailPageCursor: "detail-page-2" },
+    }),
+    {
+      kind: "request",
+      id: 10,
+      method: "adoption.operation.get",
+      params: { operationId, detailPageSize: 100, detailPageCursor: "detail-page-2" },
+    },
+  );
+
+  const adoptionId = "018f0000-0000-7000-8000-000000000004";
+  const revisionId = "018f0000-0000-7000-8000-000000000005";
+  const revisionResult = {
+    adoption: {
+      adoptionId,
+      displayName: "large package",
+      ecosystem: "opencode",
+      scope: "project",
+      enabled: true,
+      activeRevisionId: revisionId,
+      revisionCount: 1,
+    },
+    revision: {
+      revisionId,
+      createdAt: 1,
+      active: true,
+      manifestSha256: digest,
+      compatibility: "adapted",
+    },
+    compatibility,
+    verification: { status: "passed", steps: [], evidenceSha256: digest },
+    diagnosticCount: 0,
+    detailOffset: 0,
+    diagnostics: [],
+    nextDetailPageCursor: "detail-page-2",
+  };
+  assert.deepEqual(
+    parseWireRequest({
+      kind: "request",
+      id: 11,
+      method: "adoption.revision.get",
+      params: { adoptionId, revisionId, detailPageSize: 100, detailPageCursor: "detail-page-2" },
+    }),
+    {
+      kind: "request",
+      id: 11,
+      method: "adoption.revision.get",
+      params: { adoptionId, revisionId, detailPageSize: 100, detailPageCursor: "detail-page-2" },
+    },
+  );
+  assert.equal(
+    parseServerMessage({
+      kind: "success",
+      id: 12,
+      method: "adoption.revision.get",
+      result: revisionResult,
+    }).kind,
+    "success",
+  );
+  assert.doesNotThrow(() =>
+    parseAdoptionOperationDetail({
+      ...detail,
+      detailOffset: 9_900,
+      compatibility: {
+        ...compatibility,
+        surfaces: surfaces.map((surface) => ({ ...surface, primary: false })),
+      },
+      nextDetailPageCursor: undefined,
+    }),
+  );
+  assert.throws(
+    () => parseAdoptionOperationDetail({ ...detail, nextDetailPageCursor: undefined }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        ...detail,
+        compatibility: { ...compatibility, surfaces: [surfaces[0], surfaces[0]] },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        ...detail,
+        diagnosticCount: 1,
+        diagnostics: [{ code: "extra", severity: "warning", message: "extra detail" }],
+      }),
+    ProtocolValidationError,
+  );
+});
+
+test("represents a 20,000-file disclosure by immutable metadata blob", () => {
+  const base = {
+    operationId,
+    state: "awaiting-plan-approval",
+    phase: "review",
+    statusText: "Review source disclosure",
+    sequence: 3,
+    createdAt: 1,
+    updatedAt: 2,
+    capabilityRequests: [],
+    diagnosticCount: 0,
+    detailOffset: 0,
+    diagnostics: [],
+  } as const;
+  const disclosure = {
+    manifestSha256: digest,
+    providerId: "provider-1",
+    modelId: "model-1",
+    endpointLocation: "remote",
+    fileCount: 20_000,
+    filesSha256: "b".repeat(64),
+    totalBytes: 67_108_864,
+    files: [{ relativePath: "src/index.ts", sha256: digest, sizeBytes: 100 }],
+    filesBlob: {
+      sha256: "b".repeat(64),
+      mediaType: "application/vnd.axl.adoption-disclosure+json",
+      sizeBytes: 80 * 1_024 * 1_024,
+    },
+    retentionMetadataRevision: "policy-1",
+  } as const;
+  assert.deepEqual(parseAdoptionOperationDetail({ ...base, disclosure }), {
+    ...base,
+    disclosure,
+  });
+  const smallDisclosure = {
+    ...disclosure,
+    fileCount: 1,
+    filesSha256: digest,
+    files: [{ relativePath: "src/index.ts", sha256: digest, sizeBytes: 100 }],
+    filesBlob: undefined,
+  };
+  assert.deepEqual(parseAdoptionOperationDetail({ ...base, disclosure: smallDisclosure }), {
+    ...base,
+    disclosure: {
+      manifestSha256: digest,
+      providerId: "provider-1",
+      modelId: "model-1",
+      endpointLocation: "remote",
+      fileCount: 1,
+      filesSha256: digest,
+      totalBytes: 67_108_864,
+      files: [{ relativePath: "src/index.ts", sha256: digest, sizeBytes: 100 }],
+      retentionMetadataRevision: "policy-1",
+    },
+  });
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({ ...base, disclosure: { ...disclosure, fileCount: 20_001 } }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        ...base,
+        disclosure: { ...disclosure, filesSha256: digest },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        ...base,
+        disclosure: {
+          ...disclosure,
+          fileCount: 101,
+          files: Array.from({ length: 101 }, (_, index) => ({
+            relativePath: `src/file-${index}.ts`,
+            sha256: digest,
+            sizeBytes: 1,
+          })),
+        },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        ...base,
+        disclosure: { ...disclosure, filesBlob: undefined },
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        ...base,
+        disclosure: {
+          ...disclosure,
+          fileCount: 1,
+          filesBlob: undefined,
+          files: [{ relativePath: "src/index.ts", sha256: digest, sizeBytes: 100, content: "no" }],
+        },
+      }),
+    ProtocolValidationError,
+  );
+});
+
+test("enforces the aggregate adoption result byte limit", () => {
+  const longPath = (index: number) => `src/${index}-${"a".repeat(4_080)}`;
+  const surfaces = Array.from({ length: 100 }, (_, index) => ({
+    surfaceId: index.toString(16).padStart(64, "0"),
+    kind: "extension",
+    name: `tool-${index}`,
+    relativePath: longPath(index),
+    primary: index === 0,
+    executable: true,
+    compatibility: "adapted",
+    requiredCapabilities: [],
+    diagnosticCount: 0,
+    dynamicBehavior: "none",
+  }));
+  const files = Array.from({ length: 100 }, (_, index) => ({
+    relativePath: longPath(index),
+    sha256: digest,
+    sizeBytes: 1,
+  }));
+  assert.throws(
+    () =>
+      parseAdoptionOperationDetail({
+        operationId,
+        state: "inspected",
+        phase: "inspection",
+        statusText: "Inspection complete",
+        sequence: 2,
+        createdAt: 1,
+        updatedAt: 2,
+        compatibility: {
+          primarySurfaceId: surfaces[0]?.surfaceId,
+          overall: "adapted",
+          surfaceCount: 100,
+          unsupportedSurfaceCount: 0,
+          partialAcknowledgementRequired: false,
+          surfaces,
+        },
+        capabilityRequests: [],
+        disclosure: {
+          manifestSha256: digest,
+          providerId: "provider-1",
+          modelId: "model-1",
+          endpointLocation: "remote",
+          fileCount: 100,
+          filesSha256: digest,
+          totalBytes: 100,
+          files,
+          retentionMetadataRevision: "policy-1",
+        },
+        diagnosticCount: 0,
+        detailOffset: 0,
+        diagnostics: [],
+      }),
+    ProtocolValidationError,
+  );
+});
+
 test("validates inspection primary surfaces and bounded source identity", () => {
   const candidate = {
     candidateId,
@@ -244,6 +585,9 @@ test("validates inspection primary surfaces and bounded source identity", () => 
       maxFileBytes: 1_048_576,
       maxManifestBytes: 262_144,
     },
+    surfaceCount: 1,
+    diagnosticCount: 0,
+    detailOffset: 0,
     surfaces: [
       {
         surfaceId: digest,
@@ -263,6 +607,25 @@ test("validates inspection primary surfaces and bounded source identity", () => 
   assert.deepEqual(
     parseServerMessage({ kind: "success", id: 9, method: "adoption.inspect", result }),
     { kind: "success", id: 9, method: "adoption.inspect", result },
+  );
+  assert.throws(
+    () =>
+      parseServerMessage({
+        kind: "success",
+        id: 9,
+        method: "adoption.inspect",
+        result: { ...result, surfaceCount: 10_000 },
+      }),
+    ProtocolValidationError,
+  );
+  assert.equal(
+    parseServerMessage({
+      kind: "success",
+      id: 9,
+      method: "adoption.inspect",
+      result: { ...result, surfaceCount: 10_000, nextPageCursor: "page-2" },
+    }).kind,
+    "success",
   );
   assert.throws(
     () =>

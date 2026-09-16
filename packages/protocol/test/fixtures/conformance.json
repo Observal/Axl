@@ -508,6 +508,7 @@
       "params": {
         "candidateId": "018f0000-0000-8000-8000-000000000001",
         "expectedDiscoveryFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "selectedSurfaceIds": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
         "targetScope": "project"
       },
       "idempotencyKey": "00000000-0000-4000-8000-000000000020"
@@ -526,7 +527,8 @@
       "id": 52,
       "method": "adoption.operation.get",
       "params": {
-        "operationId": "018f0000-0000-7000-8000-000000000002"
+        "operationId": "018f0000-0000-7000-8000-000000000002",
+        "detailPageSize": 50
       }
     },
     {
@@ -593,7 +595,8 @@
       "method": "adoption.revision.get",
       "params": {
         "adoptionId": "018f0000-0000-7000-8000-000000000003",
-        "revisionId": "018f0000-0000-7000-8000-000000000004"
+        "revisionId": "018f0000-0000-7000-8000-000000000004",
+        "detailPageSize": 50
       }
     },
     {
@@ -1412,6 +1415,9 @@
           "maxFileBytes": 1048576,
           "maxManifestBytes": 262144
         },
+        "surfaceCount": 1,
+        "diagnosticCount": 0,
+        "detailOffset": 0,
         "surfaces": [
           {
             "surfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1464,6 +1470,9 @@
           "compatibility": {
             "primarySurfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "overall": "adapted",
+            "surfaceCount": 1,
+            "unsupportedSurfaceCount": 0,
+            "partialAcknowledgementRequired": false,
             "surfaces": [
               {
                 "surfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1477,10 +1486,11 @@
                 "diagnosticCount": 0,
                 "dynamicBehavior": "none"
               }
-            ],
-            "partialAcknowledgementRequired": false
+            ]
           },
           "capabilityRequests": [],
+          "diagnosticCount": 0,
+          "detailOffset": 0,
           "diagnostics": []
         }
       }
@@ -1532,6 +1542,9 @@
         "compatibility": {
           "primarySurfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "overall": "adapted",
+          "surfaceCount": 1,
+          "unsupportedSurfaceCount": 0,
+          "partialAcknowledgementRequired": false,
           "surfaces": [
             {
               "surfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1545,10 +1558,11 @@
               "diagnosticCount": 0,
               "dynamicBehavior": "none"
             }
-          ],
-          "partialAcknowledgementRequired": false
+          ]
         },
         "capabilityRequests": [],
+        "diagnosticCount": 0,
+        "detailOffset": 0,
         "diagnostics": []
       }
     },
@@ -1677,6 +1691,9 @@
         "compatibility": {
           "primarySurfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "overall": "adapted",
+          "surfaceCount": 1,
+          "unsupportedSurfaceCount": 0,
+          "partialAcknowledgementRequired": false,
           "surfaces": [
             {
               "surfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1690,14 +1707,16 @@
               "diagnosticCount": 0,
               "dynamicBehavior": "none"
             }
-          ],
-          "partialAcknowledgementRequired": false
+          ]
         },
         "verification": {
           "status": "passed",
           "steps": [],
           "evidenceSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        }
+        },
+        "diagnosticCount": 0,
+        "detailOffset": 0,
+        "diagnostics": []
       }
     },
     {
@@ -1739,20 +1758,8 @@
           "compatibility": {
             "primarySurfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "overall": "adapted",
-            "surfaces": [
-              {
-                "surfaceId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "kind": "extension",
-                "name": "math_add",
-                "relativePath": ".opencode/tools/math.ts",
-                "primary": true,
-                "executable": true,
-                "compatibility": "adapted",
-                "requiredCapabilities": [],
-                "diagnosticCount": 0,
-                "dynamicBehavior": "none"
-              }
-            ],
+            "surfaceCount": 1,
+            "unsupportedSurfaceCount": 0,
             "partialAcknowledgementRequired": false
           }
         },

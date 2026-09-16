@@ -81,11 +81,16 @@ const adoptionSurface = {
   diagnosticCount: 0,
   dynamicBehavior: "none",
 } as const;
-const adoptionCompatibility = {
+const adoptionCompatibilitySummary = {
   primarySurfaceId: digest,
   overall: "adapted",
-  surfaces: [adoptionSurface],
+  surfaceCount: 1,
+  unsupportedSurfaceCount: 0,
   partialAcknowledgementRequired: false,
+} as const;
+const adoptionCompatibility = {
+  ...adoptionCompatibilitySummary,
+  surfaces: [adoptionSurface],
 } as const;
 const adoptionOperation = {
   operationId: adoptionOperationId,
@@ -101,6 +106,8 @@ const adoptionOperationDetail = {
   candidate: adoptionCandidate,
   compatibility: adoptionCompatibility,
   capabilityRequests: [],
+  diagnosticCount: 0,
+  detailOffset: 0,
   diagnostics: [],
 } as const;
 const adoptedPackage = {
@@ -356,10 +363,11 @@ const params = {
   "adoption.plan": {
     candidateId: adoptionCandidateId,
     expectedDiscoveryFingerprint: digest,
+    selectedSurfaceIds: [digest],
     targetScope: "project",
   },
   "adoption.start": { operationId: adoptionOperationId },
-  "adoption.operation.get": { operationId: adoptionOperationId },
+  "adoption.operation.get": { operationId: adoptionOperationId, detailPageSize: 50 },
   "adoption.operation.list": { states: ["inspected"], pageSize: 50 },
   "adoption.operation.cancel": { operationId: adoptionOperationId },
   "adoption.operation.approveConversion": {
@@ -376,7 +384,7 @@ const params = {
     revisionId: adoptionRevisionId,
   },
   "adoption.list": { scopes: ["project"], pageSize: 50 },
-  "adoption.revision.get": { adoptionId, revisionId: adoptionRevisionId },
+  "adoption.revision.get": { adoptionId, revisionId: adoptionRevisionId, detailPageSize: 50 },
   "adoption.diff": { adoptionId, toRevisionId: adoptionRevisionId },
   "adoption.update": { adoptionId, previewOnly: true },
   "adoption.rollback": {
@@ -637,6 +645,9 @@ const results = {
       maxFileBytes: 1_048_576,
       maxManifestBytes: 262_144,
     },
+    surfaceCount: 1,
+    diagnosticCount: 0,
+    detailOffset: 0,
     surfaces: [adoptionSurface],
     diagnostics: [],
   },
@@ -668,6 +679,9 @@ const results = {
     revision: adoptedRevision,
     compatibility: adoptionCompatibility,
     verification,
+    diagnosticCount: 0,
+    detailOffset: 0,
+    diagnostics: [],
   },
   "adoption.diff": {
     toRevisionId: adoptionRevisionId,
@@ -688,7 +702,7 @@ const results = {
       adoptionId,
       fromRevisionId: adoptionRevisionId,
       toRevisionId: adoptionRevisionId,
-      compatibility: adoptionCompatibility,
+      compatibility: adoptionCompatibilitySummary,
     },
     operation: adoptionOperation,
   },
