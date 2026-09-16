@@ -5,6 +5,18 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  ADOPTION_CAPABILITIES,
+  ADOPTION_RETRYABLE_MUTATION_METHODS,
+  ADOPTION_RPC_METHODS,
+  type AdoptionOperationDelivery,
+  type AdoptionRpcMethodMap,
+  isAdoptionRpcMethod,
+  parseAdoptionOperationDelivery,
+  parseAdoptionRpcParams,
+  parseAdoptionRpcResult,
+  requiredAdoptionCapability,
+} from "./adoption.ts";
 import type { EventId, JsonObject, OperationId, SessionId } from "./event-envelope.ts";
 import {
   ProtocolValidationError,
@@ -671,6 +683,7 @@ export const WIRE_CAPABILITIES = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  ...ADOPTION_CAPABILITIES,
 ] as const satisfies readonly CapabilityId[];
 
 export interface ClientIdentity {
@@ -742,7 +755,7 @@ export interface QueueRestoreResult {
   readonly operationId?: OperationId;
 }
 
-export interface RpcMethodMap {
+export interface RpcMethodMap extends AdoptionRpcMethodMap {
   readonly "daemon.info": {
     readonly params: Record<string, never>;
     readonly result: DaemonInfoResult;
@@ -1016,6 +1029,7 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.configure",
   "session.interaction.respond",
   "session.dispose",
+  ...ADOPTION_RETRYABLE_MUTATION_METHODS,
 ] as const satisfies readonly RpcMethod[];
 
 export type RetryableMutationMethod = (typeof RETRYABLE_MUTATION_METHODS)[number];
@@ -1025,6 +1039,7 @@ export function isRetryableMutationMethod(method: RpcMethod): method is Retryabl
 }
 
 export function requiredCapability(method: RpcMethod): CapabilityId | undefined {
+  if (isAdoptionRpcMethod(method)) return requiredAdoptionCapability(method);
   if (
     method === "daemon.info" ||
     method === "connection.initialize" ||
@@ -1144,6 +1159,25 @@ export const RPC_ERROR_CODES = [
   "region_required",
   "region_unsupported",
   "provider_configuration_required",
+  "adoption_candidate_not_found",
+  "adoption_source_changed",
+  "adoption_snapshot_required",
+  "adoption_ecosystem_unsupported",
+  "adoption_source_schema_unsupported",
+  "adoption_manifest_invalid",
+  "adoption_scan_limit_exceeded",
+  "adoption_ambiguous_primary",
+  "adoption_operation_not_found",
+  "adoption_operation_state_conflict",
+  "adoption_policy_denied",
+  "adoption_project_untrusted",
+  "adoption_source_unavailable",
+  "adoption_store_corrupt",
+  "adoption_isolation_unavailable",
+  "adoption_approval_stale",
+  "adoption_dependency_conflict",
+  "adoption_collision",
+  "adoption_primary_unsupported",
 ] as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number] | (string & {});
@@ -1217,6 +1251,7 @@ export type ServerMessage =
   | WireActivity
   | PresenceDelivery
   | SessionsChangedDelivery
+  | AdoptionOperationDelivery
   | WireHello;
 
 export interface SessionForkResult extends SessionOpenResult {
@@ -1558,6 +1593,13 @@ export function parseWireRequest(value: unknown): WireRequest {
     ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
   };
 
+  if (isAdoptionRpcMethod(method)) {
+    return {
+      ...base,
+      method,
+      params: parseAdoptionRpcParams(method, params),
+    } as RpcRequest;
+  }
   if (method === "connection.initialize") {
     exact(params, "request.params", ["client", "requestedCapabilities"]);
     const client = object(params.client, "request.params.client");
@@ -2479,7 +2521,9 @@ export function parseRpcResult<Method extends RpcMethod>(
 ): RpcResult<Method> {
   const path = "success.result";
   let parsed: unknown;
-  if (method === "daemon.info") {
+  if (isAdoptionRpcMethod(method)) {
+    parsed = parseAdoptionRpcResult(method, value);
+  } else if (method === "daemon.info") {
     const result = object(value, path);
     exact(result, path, ["securityMode", "sandboxProvider", "sandboxImage"]);
     if (result.securityMode !== "sandboxed" && result.securityMode !== "unsafe") {
@@ -2976,6 +3020,7 @@ export const RPC_METHODS = [
   "session.dispose",
   "session.rename",
   "session.delete",
+  ...ADOPTION_RPC_METHODS,
 ] as const satisfies readonly RpcMethod[];
 
 export type KnownRpcErrorCode = (typeof RPC_ERROR_CODES)[number];
@@ -3015,6 +3060,31 @@ const CHECKPOINT_ERRORS = [
   "checkpoint_unavailable",
   "checkpoint_too_large",
   "checkpoint_corrupt",
+] as const;
+const ADOPTION_READ_ERRORS = [
+  "adoption_candidate_not_found",
+  "adoption_source_changed",
+  "adoption_snapshot_required",
+  "adoption_ecosystem_unsupported",
+  "adoption_source_schema_unsupported",
+  "adoption_manifest_invalid",
+  "adoption_scan_limit_exceeded",
+  "adoption_ambiguous_primary",
+  "adoption_operation_not_found",
+  "adoption_policy_denied",
+  "adoption_project_untrusted",
+  "adoption_source_unavailable",
+  "adoption_store_corrupt",
+] as const;
+const ADOPTION_MUTATION_ERRORS = [
+  ...ADOPTION_READ_ERRORS,
+  ...MUTATION_ERRORS,
+  "adoption_operation_state_conflict",
+  "adoption_isolation_unavailable",
+  "adoption_approval_stale",
+  "adoption_dependency_conflict",
+  "adoption_collision",
+  "adoption_primary_unsupported",
 ] as const;
 
 export const RPC_METHOD_ERROR_CODES = {
@@ -3310,6 +3380,27 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_read_failed",
   ],
   "session.dispose": [...SESSION_BASE_ERRORS, ...MUTATION_ERRORS],
+  "adoption.discover": [...ADOPTION_READ_ERRORS],
+  "adoption.inspect": [...ADOPTION_READ_ERRORS],
+  "adoption.plan": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.start": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.operation.get": [...ADOPTION_READ_ERRORS],
+  "adoption.operation.list": ["adoption_snapshot_required", "adoption_store_corrupt"],
+  "adoption.operation.cancel": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.operation.approveConversion": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.operation.acknowledgePartial": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.operation.approveActivation": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.list": ["adoption_snapshot_required", "adoption_store_corrupt"],
+  "adoption.revision.get": ["adoption_candidate_not_found", "adoption_store_corrupt"],
+  "adoption.diff": ["adoption_candidate_not_found", "adoption_store_corrupt"],
+  "adoption.update": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.rollback": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.disable": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.remove": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.purge": [...ADOPTION_MUTATION_ERRORS],
+  "adoption.subscribe": ["adoption_snapshot_required", "adoption_store_corrupt"],
+  "adoption.ack": ["unknown_subscription", "unknown_cursor", "adoption_snapshot_required"],
+  "adoption.unsubscribe": ["unknown_subscription"],
 } as const satisfies Readonly<Record<RpcMethod, readonly KnownRpcErrorCode[]>>;
 
 export type UniversalRpcErrorCode = (typeof UNIVERSAL_RPC_ERROR_CODES)[number];
@@ -3450,6 +3541,9 @@ export function parseServerMessage(value: unknown): ServerMessage {
             : { details: parseJsonObject(error.details, "message.error.details") }),
       },
     };
+  }
+  if (kind === "adoption_operation") {
+    return parseAdoptionOperationDelivery(message);
   }
   if (kind === "sessions_changed") {
     exact(message, "message", ["kind", "generation"]);

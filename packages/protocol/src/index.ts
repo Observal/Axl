@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
+export * from "./adoption.ts";
 export * from "./canonical-event.ts";
 export * from "./canonical-request.ts";
 export * from "./event-envelope.ts";

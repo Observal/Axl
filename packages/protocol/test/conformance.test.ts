@@ -121,6 +121,7 @@ test("language-neutral fixtures validate every non-success server message shape"
   const messages = document.serverMessages.map((value) => parseServerMessage(value));
   assert.deepEqual(messages.map((message) => message.kind).sort(), [
     "activity",
+    "adoption_operation",
     "error",
     "event",
     "hello",
