@@ -9,6 +9,9 @@ of Axl's private `axl-e2ee-mls-pq-v1` profile.
 It provides:
 
 - one daemon and one device per group;
+- canonical revision 1 pairing invitation and claim encoding, signatures, comparison values, and
+  crate-private in-memory failed-claim accounting for known invitations; durable unknown-invitation
+  lookup remains Session 50.2 work;
 - bounded KeyPackage and Welcome handling;
 - canonical Axl credential and AAD validation;
 - bidirectional private application messages;

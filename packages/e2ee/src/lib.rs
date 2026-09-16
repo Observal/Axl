@@ -21,6 +21,8 @@ use openmls_memory_storage::MemoryStorage;
 use openmls_traits::OpenMlsProvider;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 
+pub mod pairing;
+
 #[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
 
