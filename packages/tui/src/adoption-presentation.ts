@@ -36,20 +36,45 @@ export function adoptionPickerItems(
 
 export function adoptionInspectionLines(report: AdoptionInspectResult): readonly string[] {
   const candidate = report.candidate;
+  const ecosystem = {
+    pi: "Pi",
+    opencode: "OpenCode",
+    dsh: "DSH",
+    "claude-code": "Claude Code",
+  }[candidate.ecosystem];
   return [
-    `Adoption inspection · ${sanitizeTerminalText(candidate.displayName)}`,
-    `  source      ${candidate.ecosystem} · ${candidate.scope} · ${candidate.kind}`,
-    `  adapter     ${report.adapter.id} ${report.adapter.version}`,
-    `  inventory   ${plural(report.inventory.fileCount, "file")} · ${report.inventory.totalBytes} bytes`,
-    `  execution   ${report.inventory.executable ? "contains executable surfaces" : "declarative only"}`,
-    `  status      ${candidate.malformed ? "malformed" : "recognized"} · ${plural(report.diagnosticCount, "diagnostic")}`,
-    ...report.surfaces.map(
-      (surface) =>
-        `  surface     ${surface.kind} · ${sanitizeTerminalText(surface.name)}${surface.executable ? " · executable" : ""}${surface.dynamicBehavior === "unknown" ? " · dynamic behavior unknown" : ""}`,
-    ),
-    ...report.diagnostics.map(
-      (entry) => `  ${entry.severity}     ${entry.code} · ${sanitizeTerminalText(entry.message)}`,
-    ),
-    "  Inspection only. No source was executed and no installation or activation occurred.",
+    "Adoption inspection",
+    `  ${sanitizeTerminalText(candidate.displayName)}`,
+    `  ${ecosystem} · ${candidate.kind} · ${candidate.scope}`,
+    "",
+    "Summary",
+    `  Status      ${candidate.malformed ? "Malformed" : "Recognized"}`,
+    `  Contents    ${plural(report.inventory.fileCount, "file")} · ${report.inventory.totalBytes} bytes`,
+    `  Execution   ${report.inventory.executable ? "Contains executable surfaces" : "Declarative only"}`,
+    `  Diagnostics ${plural(report.diagnosticCount, "diagnostic")}`,
+    "",
+    `Resources (${report.surfaceCount})`,
+    ...(report.surfaces.length === 0
+      ? ["  None"]
+      : report.surfaces.map(
+          (surface) =>
+            `  • ${surface.kind} · ${sanitizeTerminalText(surface.name)}${surface.executable ? " · executable" : ""}${surface.dynamicBehavior === "unknown" ? " · dynamic behavior unknown" : ""}`,
+        )),
+    ...(report.diagnostics.length === 0
+      ? []
+      : [
+          "",
+          "Diagnostics",
+          ...report.diagnostics.map(
+            (entry) =>
+              `  ${entry.severity.toUpperCase()} · ${entry.code} · ${sanitizeTerminalText(entry.message)}`,
+          ),
+        ]),
+    "",
+    "Technical details",
+    `  Adapter     ${report.adapter.id} ${report.adapter.version}`,
+    "",
+    "Safety",
+    "  Inspection only. No source was executed, installed, or activated.",
   ];
 }

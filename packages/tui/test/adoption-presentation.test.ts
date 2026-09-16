@@ -51,7 +51,11 @@ test("TUI adoption presentation exposes rescan and inspection-only warnings", ()
     diagnostics: [{ code: "malformed", severity: "error", message: "Invalid source" }],
   };
   const text = adoptionInspectionLines(report).join("\n");
-  assert.match(text, /contains executable surfaces/u);
-  assert.match(text, /No source was executed/u);
+  assert.match(text, /Adoption inspection\n {2}hello\n {2}Pi · extension · project/u);
+  assert.match(text, /Summary\n {2}Status {6}Malformed/u);
+  assert.match(text, /Execution {3}Contains executable surfaces/u);
+  assert.match(text, /Resources \(0\)\n {2}None/u);
+  assert.match(text, /Diagnostics\n {2}ERROR · malformed · Invalid source/u);
+  assert.match(text, /Safety\n {2}Inspection only\. No source was executed/u);
   assert.doesNotMatch(text, /Install|Activate/u);
 });
