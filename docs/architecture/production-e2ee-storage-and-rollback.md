@@ -996,7 +996,7 @@ Endpoint reconciliation distinguishes overlapping counter-distance cases using t
 
 ## Phased implementation plan
 
-All production-storage steps below are implemented in one draft PR from the current reviewed RC baseline, with each step kept in a separate DCO-signed commit and reviewed before work proceeds to the next dependency-bearing commit. Unsupported targets continue to fail closed. Session 60 remains a separate PR created only after this production-storage PR merges.
+All production-storage steps below are implemented in one draft PR from the current reviewed RC baseline, with each step kept in a separate DCO-signed commit and reviewed before work proceeds to the next dependency-bearing commit. Unsupported targets continue to fail closed. Session 60 remains a separate PR created only after this production-storage PR merges. The non-normative repository mapping and acceptance checklists are maintained in [`production-e2ee-implementation-briefs.md`](production-e2ee-implementation-briefs.md).
 
 1. **Shared rollback-witness protocol and state machine**
    - Add commitment, request, receipt, reconciliation, and output-barrier behavior to `packages/e2ee`.
