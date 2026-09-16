@@ -4,6 +4,7 @@
 
 export type { WireEvent } from "@axl/protocol";
 export * from "./adoption-service.ts";
+export * from "./adoption-store.ts";
 export * from "./daemon.ts";
 export * from "./event-migration.ts";
 export * from "./provider-management.ts";
