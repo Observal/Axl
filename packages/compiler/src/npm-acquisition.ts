@@ -196,11 +196,16 @@ function upperForPartial(value: Semver, precision: 1 | 2 | 3): Semver {
 }
 
 function satisfiesComparator(version: Semver, token: string): boolean {
-  const match = /^(<=|>=|<|>|=)?\s*(.+)$/u.exec(token);
-  if (match === null) return false;
-  const operator = match[1] ?? "=";
-  const exact = parseSemver(match[2] ?? "");
-  const partial = exact === undefined ? partialVersion(match[2] ?? "") : undefined;
+  const trimmed = token.trim();
+  const explicitOperator = (["<=", ">=", "<", ">", "="] as const).find((candidate) =>
+    trimmed.startsWith(candidate),
+  );
+  const operator = explicitOperator ?? "=";
+  const targetText =
+    explicitOperator === undefined ? trimmed : trimmed.slice(explicitOperator.length).trim();
+  if (targetText === "") return false;
+  const exact = parseSemver(targetText);
+  const partial = exact === undefined ? partialVersion(targetText) : undefined;
   const target = exact ?? partial?.value;
   if (target === undefined) return false;
   if (operator === "=" && partial !== undefined && partial.precision < 3)
@@ -257,7 +262,17 @@ function satisfiesSet(version: Semver, request: string): boolean {
         : { major: base.major, minor: base.minor + 1, patch: 0, prerelease: "" };
     return compareSemver(version, upper) < 0;
   }
-  const tokens = request.split(/\s+/u).filter(Boolean);
+  const tokens: string[] = [];
+  let start = -1;
+  for (let index = 0; index <= request.length; index += 1) {
+    const code = request.charCodeAt(index);
+    const whitespace = code === 32 || (code >= 9 && code <= 13);
+    if (!whitespace && index < request.length && start === -1) start = index;
+    if ((whitespace || index === request.length) && start !== -1) {
+      tokens.push(request.slice(start, index));
+      start = -1;
+    }
+  }
   return tokens.length > 0 && tokens.every((token) => satisfiesComparator(version, token));
 }
 
@@ -267,7 +282,7 @@ export function npmVersionSatisfies(versionText: string, range: string): boolean
   const request = range.trim();
   if (request === "" || request === "*" || request.toLowerCase() === "latest")
     return version.prerelease === "";
-  const sets = request.split(/\s*\|\|\s*/u);
+  const sets = request.split("||").map((set) => set.trim());
   if (sets.some((set) => set === "")) return false;
   const explicitlyAllowsPrerelease = /\d\.\d\.\d-[0-9A-Za-z]/u.test(request);
   if (version.prerelease !== "" && !explicitlyAllowsPrerelease) return false;
@@ -275,7 +290,7 @@ export function npmVersionSatisfies(versionText: string, range: string): boolean
 }
 
 function registryPath(packageName: string): string {
-  return packageName.startsWith("@") ? packageName.replace("/", "%2f") : packageName;
+  return packageName.startsWith("@") ? packageName.replaceAll("/", "%2f") : packageName;
 }
 
 function validateJsonBounds(input: unknown): void {

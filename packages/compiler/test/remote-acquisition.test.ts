@@ -215,10 +215,10 @@ test("npm resolves standard partial, disjunction, hyphen, and prerelease ranges"
   });
   const fetcher: typeof fetch = async () => new Response(metadata);
   for (const [requested, expected] of [
-    [">=1.2 <2", "1.3.0"],
+    [`${"\t".repeat(100)}>=1.2\t<2${"\t".repeat(100)}`, "1.3.0"],
     ["^1.2", "1.3.0"],
     ["~1.2", "1.2.9"],
-    ["1.2.0 || 2.0.0", "2.0.0"],
+    ["1.2.0\t||\t2.0.0", "2.0.0"],
     ["1.2 - 1.3", "1.3.0"],
     ["1.2.x", "1.2.9"],
     [">=2.1.0-alpha.2 <2.1.0", "2.1.0-alpha.10"],
@@ -234,6 +234,38 @@ test("npm resolves standard partial, disjunction, hyphen, and prerelease ranges"
     );
     assert.equal(result.resolved.version, expected);
   }
+});
+
+test("npm encodes every separator in scoped package registry paths", async () => {
+  const metadata = JSON.stringify({
+    "dist-tags": { latest: "1.0.0" },
+    versions: {
+      "1.0.0": {
+        name: "@scope/safe-pkg",
+        version: "1.0.0",
+        dist: {
+          integrity: `sha512-${Buffer.alloc(64, 1).toString("base64")}`,
+          tarball: "https://registry.example/safe-pkg-1.0.0.tgz",
+        },
+      },
+    },
+  });
+  let requestedUrl = "";
+  await resolveNpmSource(
+    {
+      kind: "npm",
+      registryOrigin: "https://registry.example",
+      packageName: "@scope/safe-pkg",
+      requested: "latest",
+    },
+    {
+      fetch: async (input) => {
+        requestedUrl = String(input);
+        return new Response(metadata);
+      },
+    },
+  );
+  assert.equal(requestedUrl, "https://registry.example/@scope%2fsafe-pkg");
 });
 
 test("remote acquisition deadlines abort stalled HTTP and Git work", async () => {
