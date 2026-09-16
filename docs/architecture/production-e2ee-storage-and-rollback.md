@@ -981,6 +981,19 @@ A production release must:
 
 Production support metadata must distinguish `built`, `runtime_tested`, `installer_tested`, and `supported`. Only the last state may enable endpoint creation.
 
+## Approved implementation sequencing decisions
+
+The responsible human approved these sequencing decisions for this draft PR:
+
+- The hosted-witness implementation begins behind typed injected storage, signing, authentication, journal, and recovery interfaces with deterministic in-memory test implementations. Production assembly and deployment remain blocked until a focused decision selects and approves each replica's concrete datastore, Ed25519 signing-key service, immutable journal, failure domain, backup identity, and recovery authority. No deployment is part of this PR.
+- The macOS, Linux desktop, and Windows dependency candidates recorded above are the preferred starting points, not unconditional dependency approvals. Each dependency-bearing commit must regenerate and receive approval for its exact current lockfile, features, transitive graph, licenses, advisories, build scripts, native requirements, and runtime evidence.
+- Platform implementation proceeds in this order unless hardware availability requires a reviewed change: macOS, Linux desktop, Windows, then the production browser path. Ordering is not a support claim.
+- Missing physical runtime evidence does not block merging code that remains fail-closed. It does block setting the target to `supported`, shipping an enabled production artifact for that target, or enabling endpoint creation. Emulation does not replace physical evidence where this RFC requires physical hardware.
+
+Witness verifier keysets contain exactly three replica identities and at most four canonically ordered keys per replica. The bound permits controlled overlap across released artifact generations and emergency rotation. Rotation procedures must remove obsolete keys explicitly and may never use the larger bound to bypass the one-replica-at-a-time approval rule.
+
+Endpoint reconciliation distinguishes overlapping counter-distance cases using the last locally confirmed witness head. A malformed pending chain more than one successor ahead is `LocalAheadMoreThanOne`; a fresh quorum below an already confirmed local head by more than one is `WitnessBehindMoreThanOne`. Neither case permits local fast-forward, output release, or another mutation.
+
 ## Phased implementation plan
 
 All production-storage steps below are implemented in one draft PR from the current reviewed RC baseline, with each step kept in a separate DCO-signed commit and reviewed before work proceeds to the next dependency-bearing commit. Unsupported targets continue to fail closed. Session 60 remains a separate PR created only after this production-storage PR merges.
