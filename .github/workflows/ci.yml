@@ -189,8 +189,8 @@ jobs:
           pnpm --filter @axl/e2ee-browser build:test
           pnpm --filter @axl/e2ee-browser check:abi
           pnpm --filter @axl/e2ee-browser check:types
-          cargo clippy --locked --manifest-path packages/e2ee/Cargo.toml --target wasm32-unknown-unknown -p axl-e2ee --features browser-test-fixtures -- -D warnings
-          cargo clippy --locked --manifest-path packages/e2ee/Cargo.toml --target wasm32-unknown-unknown -p axl-e2ee-browser --all-targets --features test-fixtures --no-deps -- -D warnings
+          (cd packages/e2ee && cargo clippy --locked --target wasm32-unknown-unknown -p axl-e2ee --features browser-test-fixtures -- -D warnings)
+          (cd packages/e2ee && cargo clippy --locked --target wasm32-unknown-unknown -p axl-e2ee-browser --all-targets --features test-fixtures --no-deps -- -D warnings)
       - name: Run ${{ matrix.browser }} browser evidence
         if: needs.changes.outputs.e2ee == 'true'
         env:
