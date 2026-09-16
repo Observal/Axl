@@ -132,6 +132,47 @@ test("adoption controller pages discovery and inspection into immutable state", 
   ]);
 });
 
+test("adoption controller accepts a complete one-page inspection", async () => {
+  const controller = new AdoptionController(
+    client({
+      request: async () =>
+        ({
+          candidate,
+          adapter: { id: "pi", version: "1", sourceSchemaVersion: "1" },
+          license: { expressions: [], notices: [] },
+          inventory: { fileCount: 1, totalBytes: 10, executable: false },
+          limits: {
+            maxTraversalDepth: 32,
+            maxEntries: 50_000,
+            maxFiles: 20_000,
+            maxTotalBytes: 67_108_864,
+            maxFileBytes: 1_048_576,
+            maxManifestBytes: 262_144,
+          },
+          surfaceCount: 1,
+          diagnosticCount: 0,
+          detailOffset: 0,
+          surfaces: [
+            {
+              surfaceId: "b".repeat(64),
+              kind: "prompt",
+              name: "adopt-smoke",
+              primary: true,
+              executable: false,
+              requiredCapabilities: [],
+              diagnosticCount: 0,
+              dynamicBehavior: "none",
+            },
+          ],
+          diagnostics: [],
+        }) satisfies AdoptionInspectResult,
+    }),
+  );
+
+  const report = await controller.inspect(candidate);
+  assert.equal(report?.surfaces[0]?.name, "adopt-smoke");
+});
+
 test("adoption controller exposes unavailable state and ignores a stale response", async () => {
   const unavailable = new AdoptionController(
     client({ capabilities: [], request: async () => Promise.reject(new Error("not used")) }),

@@ -314,7 +314,7 @@ export class AdoptionController {
           surfaces.push(surface);
         }
         diagnostics.push(...page.diagnostics);
-        if (page.nextPageCursor === requestedCursor) {
+        if (page.nextPageCursor !== undefined && page.nextPageCursor === requestedCursor) {
           throw new AxlClientError("protocol_error", "Inspection cursor did not advance");
         }
         pageCursor = page.nextPageCursor;
