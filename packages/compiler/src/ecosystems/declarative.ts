@@ -298,6 +298,54 @@ function checkSchema(
   }
 }
 
+function diagnostic(code: string, error: unknown, relativePath: string): DiscoveryDiagnostic {
+  return {
+    code,
+    severity: "error",
+    message: error instanceof Error ? error.message : String(error),
+    relativePath,
+  };
+}
+
+function malformedCandidate(
+  options: DeclarativeAdapterOptions,
+  snapshot: TreeSnapshot,
+  scope: Scope,
+  file: SnapshotFile,
+  kind: ResourceKind,
+  executable: boolean,
+  issue: DiscoveryDiagnostic,
+  limits: ReturnType<typeof mergeLimits>,
+): DiscoveryCandidate {
+  return createCandidate(
+    {
+      ecosystem: options.ecosystem,
+      scope,
+      snapshot,
+      adapterId: options.adapterId,
+      adapterVersion: options.adapterVersion,
+      sourceSchemaVersion: options.sourceSchemaVersion,
+      kind,
+      relativePath: file.relativePath,
+      executable,
+      diagnostics: [issue],
+      surfaces: [
+        {
+          kind,
+          name: file.relativePath.split("/").at(-1) ?? file.relativePath,
+          relativePath: file.relativePath,
+          primary: true,
+          executable,
+          registrations: [],
+          dynamicBehavior: executable,
+          metadata: {},
+        },
+      ],
+    },
+    limits,
+  );
+}
+
 function discoverSnapshot(
   options: DeclarativeAdapterOptions,
   snapshot: TreeSnapshot,
@@ -336,12 +384,20 @@ function discoverSnapshot(
         ),
       );
     } catch (error) {
-      diagnostics.push({
-        code: "resource-invalid",
-        severity: "error",
-        message: error instanceof Error ? error.message : String(error),
-        relativePath: file.relativePath,
-      });
+      const issue = diagnostic("resource-invalid", error, file.relativePath);
+      diagnostics.push(issue);
+      candidates.push(
+        malformedCandidate(
+          options,
+          snapshot,
+          scope,
+          file,
+          convention.kind,
+          convention.executable,
+          issue,
+          limits,
+        ),
+      );
     }
   }
 
@@ -396,12 +452,11 @@ function discoverSnapshot(
           ),
         );
       } catch (error) {
-        diagnostics.push({
-          code: "cordis-config-invalid",
-          severity: "error",
-          message: error instanceof Error ? error.message : String(error),
-          relativePath: file.relativePath,
-        });
+        const issue = diagnostic("cordis-config-invalid", error, file.relativePath);
+        diagnostics.push(issue);
+        candidates.push(
+          malformedCandidate(options, snapshot, scope, file, "package", true, issue, limits),
+        );
       }
       continue;
     }
@@ -411,37 +466,43 @@ function discoverSnapshot(
         ? parseJsoncObject(file, limits.maxManifestBytes)
         : parseJsonObject(file, limits.maxManifestBytes);
     } catch (error) {
-      diagnostics.push({
-        code: "manifest-invalid",
-        severity: "error",
-        message: error instanceof Error ? error.message : String(error),
-        relativePath: file.relativePath,
-      });
+      const issue = diagnostic("manifest-invalid", error, file.relativePath);
+      diagnostics.push(issue);
+      candidates.push(
+        malformedCandidate(options, snapshot, scope, file, "package", true, issue, limits),
+      );
       continue;
     }
-    checkSchema(options, json, diagnostics, file.relativePath);
+    const fileDiagnostics: DiscoveryDiagnostic[] = [];
+    checkSchema(options, json, fileDiagnostics, file.relativePath);
     if (options.configNames.includes(base)) {
       const serialized = JSON.stringify(json);
       if (/"(?:apiKey|token|secret|password|oauth)"\s*:/iu.test(serialized))
-        diagnostics.push({
+        fileDiagnostics.push({
           code: "literal-credential",
           severity: "error",
           message: "configuration contains credential-like fields",
           relativePath: file.relativePath,
         });
       if (/![^"\s]+/u.test(serialized))
-        diagnostics.push({
+        fileDiagnostics.push({
           code: "command-value",
           severity: "error",
           message: "configuration contains an executable command value",
           relativePath: file.relativePath,
         });
+      diagnostics.push(...fileDiagnostics);
       const mcp = json.mcpServers ?? json.mcp;
-      if (mcp !== null && typeof mcp === "object" && !Array.isArray(mcp)) {
-        const names = Object.keys(mcp).sort();
-        if (names.length > 0) {
-          const surfaces = names.map(
-            (name, index): ResourceSurface => ({
+      const names =
+        mcp !== null && typeof mcp === "object" && !Array.isArray(mcp)
+          ? Object.keys(mcp).sort()
+          : [];
+      const executable =
+        names.length > 0 || fileDiagnostics.some((entry) => entry.code === "command-value");
+      const kind: ResourceKind = names.length > 0 ? "mcp-server" : "package";
+      const surfaces: ResourceSurface[] =
+        names.length > 0
+          ? names.map((name, index) => ({
               kind: "mcp-server",
               name,
               relativePath: file.relativePath,
@@ -450,41 +511,50 @@ function discoverSnapshot(
               registrations: [],
               dynamicBehavior: false,
               metadata: {},
-            }),
-          );
-          candidates.push(
-            createCandidate(
+            }))
+          : [
               {
-                ecosystem: options.ecosystem,
-                scope,
-                snapshot,
-                adapterId: options.adapterId,
-                adapterVersion: options.adapterVersion,
-                sourceSchemaVersion: options.sourceSchemaVersion,
-                kind: "mcp-server",
+                kind,
+                name: base,
                 relativePath: file.relativePath,
-                displayName: base,
-                executable: true,
-                surfaces,
+                primary: true,
+                executable,
+                registrations: [],
+                dynamicBehavior: executable,
+                metadata: {},
               },
-              limits,
-            ),
-          );
-        }
-      }
+            ];
+      candidates.push(
+        createCandidate(
+          {
+            ecosystem: options.ecosystem,
+            scope,
+            snapshot,
+            adapterId: options.adapterId,
+            adapterVersion: options.adapterVersion,
+            sourceSchemaVersion: options.sourceSchemaVersion,
+            kind,
+            relativePath: file.relativePath,
+            displayName: base,
+            executable,
+            surfaces,
+            diagnostics: fileDiagnostics,
+          },
+          limits,
+        ),
+      );
       continue;
     }
-    const packageDiagnostics: DiscoveryDiagnostic[] = [];
+    const packageDiagnostics: DiscoveryDiagnostic[] = [...fileDiagnostics];
     let inventory: PackageInventory;
     try {
       inventory = packageInventory(json, packageDiagnostics, file.relativePath);
     } catch (error) {
-      diagnostics.push({
-        code: "manifest-invalid",
-        severity: "error",
-        message: error instanceof Error ? error.message : String(error),
-        relativePath: file.relativePath,
-      });
+      const issue = diagnostic("manifest-invalid", error, file.relativePath);
+      diagnostics.push(issue);
+      candidates.push(
+        malformedCandidate(options, snapshot, scope, file, "package", true, issue, limits),
+      );
       continue;
     }
     const manifestDirectory = dirname(file.relativePath) === "." ? "" : dirname(file.relativePath);
@@ -509,8 +579,20 @@ function discoverSnapshot(
               primary: false,
             },
           ];
-        } catch {
-          return [];
+        } catch (error) {
+          packageDiagnostics.push(diagnostic("resource-invalid", error, candidate.relativePath));
+          return [
+            {
+              kind: convention.kind,
+              name: candidate.relativePath.split("/").at(-1) ?? candidate.relativePath,
+              relativePath: candidate.relativePath,
+              primary: false,
+              executable: convention.executable,
+              registrations: [],
+              dynamicBehavior: convention.executable,
+              metadata: {},
+            },
+          ];
         }
       });
     const primary = surfaces.findIndex((surface) => surface.executable);
@@ -528,6 +610,7 @@ function discoverSnapshot(
         dynamicBehavior: false,
         metadata: {},
       });
+    diagnostics.push(...packageDiagnostics);
     candidates.push(
       createCandidate(
         {

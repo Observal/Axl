@@ -63,6 +63,7 @@ export function createCandidate(
     nlink: file.stat.nlink,
   }));
   const primarySource = sourceFiles.find((file) => file.path === input.relativePath);
+  const candidateDiagnostics = input.diagnostics ?? [];
   return finalizeCandidate(
     {
       ecosystem: input.ecosystem,
@@ -80,16 +81,18 @@ export function createCandidate(
       },
       primary: true,
       executable: input.executable,
-      malformed: input.malformed ?? false,
+      malformed:
+        input.malformed ??
+        candidateDiagnostics.some((diagnostic) => diagnostic.severity === "error"),
       adapterId: input.adapterId,
       adapterVersion: input.adapterVersion,
       sourceSchemaVersion: input.sourceSchemaVersion,
       surfaces,
       ...(input.inventory === undefined ? {} : { inventory: input.inventory }),
-      diagnostics: input.diagnostics ?? [],
+      diagnostics: candidateDiagnostics,
     },
     sourceFiles,
-    [...input.snapshot.diagnostics, ...(input.diagnostics ?? [])],
+    [...input.snapshot.diagnostics, ...candidateDiagnostics],
     limits as unknown as Readonly<Record<string, number>>,
   );
 }

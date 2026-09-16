@@ -142,6 +142,33 @@ test("traversal detects metadata mutation across a read", async () => {
   );
 });
 
+test("traversal detects chmod and hard-link metadata races", async () => {
+  for (const field of ["mode", "nlink"] as const) {
+    const root = await fixture({ "file.txt": "value" });
+    let calls = 0;
+    const mutating: BoundedFileSystem = {
+      ...nodeFileSystem,
+      async lstat(path) {
+        const stat = await nodeFileSystem.lstat(path);
+        if (path.endsWith("file.txt")) {
+          calls += 1;
+          if (calls >= 2) {
+            return field === "mode"
+              ? { ...stat, mode: stat.mode ^ 0o100 }
+              : { ...stat, nlink: stat.nlink + 1 };
+          }
+        }
+        return stat;
+      },
+    };
+    await assert.rejects(
+      snapshotTree(root, mutating, mergeLimits(undefined)),
+      (error) => error instanceof DiscoveryError && error.code === "adoption_source_changed",
+      field,
+    );
+  }
+});
+
 test("strict text and parsers reject invalid UTF-8, deep JSON, and unsafe globs", async () => {
   const root = await fixture({
     invalid: Uint8Array.from([0xc3, 0x28]),
@@ -270,6 +297,108 @@ test("Pi discovery inventories all supported global resources without executing 
   );
 });
 
+test("Pi retains malformed resources and packages without suppressing valid siblings", async () => {
+  const invalidUtf8 = Uint8Array.from([0xc3, 0x28]);
+  const home = await fixture({
+    ".pi/agent/extensions/good.ts": "pi.registerTool('good', {})",
+    ".pi/agent/extensions/bad.ts": invalidUtf8,
+    ".pi/agent/prompts/good.md": "Good prompt",
+    ".pi/agent/prompts/bad.md": "---\nname: bad\nunterminated",
+    ".pi/agent/skills/good/SKILL.md": "---\nname: good\ndescription: Good skill\n---\nBody",
+    ".pi/agent/skills/bad/SKILL.md": invalidUtf8,
+    ".pi/agent/skills/bad/helper.sh": "echo never-run",
+    ".pi/agent/npm/node_modules/broken/package.json": "{not-json",
+    ".pi/agent/npm/node_modules/healthy/package.json":
+      '{"name":"healthy","pi":{"prompts":["prompt.md"]}}',
+    ".pi/agent/npm/node_modules/healthy/prompt.md": "Healthy prompt",
+  });
+  const result = await discover(context(home), { ecosystems: ["pi"] });
+  for (const relativePath of ["extensions/good.ts", "prompts/good.md", "skills/good/SKILL.md"]) {
+    assert.ok(
+      result.candidates.some(
+        (candidate) => candidate.provenance.relativePath === relativePath && !candidate.malformed,
+      ),
+      relativePath,
+    );
+  }
+  for (const relativePath of [
+    "extensions/bad.ts",
+    "prompts/bad.md",
+    "skills/bad/SKILL.md",
+    "npm/node_modules/broken/package.json",
+  ]) {
+    const candidate = result.candidates.find(
+      (entry) => entry.provenance.relativePath === relativePath,
+    );
+    assert.ok(candidate, relativePath);
+    assert.equal(candidate.malformed, true, relativePath);
+    assert.equal(candidate.scope, "global", relativePath);
+    assert.equal(candidate.primary, true, relativePath);
+    assert.equal(candidate.surfaces.filter((surface) => surface.primary).length, 1, relativePath);
+    assert.ok(candidate.diagnostics.some((diagnostic) => diagnostic.severity === "error"));
+  }
+  assert.equal(
+    result.candidates.find((candidate) => candidate.provenance.relativePath === "extensions/bad.ts")
+      ?.executable,
+    true,
+  );
+  assert.equal(
+    result.candidates.find((candidate) => candidate.provenance.relativePath === "prompts/bad.md")
+      ?.executable,
+    false,
+  );
+  assert.equal(
+    result.candidates.find(
+      (candidate) => candidate.provenance.relativePath === "skills/bad/SKILL.md",
+    )?.executable,
+    true,
+  );
+  assert.ok(result.candidates.some((candidate) => candidate.packageIdentity === "healthy"));
+});
+
+test("strict Agent Skill inspection reports standard and Pi-lenient behavior", async () => {
+  const home = await fixture({
+    ".pi/agent/skills/no-frontmatter/SKILL.md": "Body only",
+    ".pi/agent/skills/mismatch/SKILL.md":
+      "---\nname: INVALID Name\ndescription: Present\nunknown-field: value\ndisable-model-invocation: true\n---\nBody",
+    ".pi/agent/skills/mismatch/helper.py": "print('never run')",
+    ".pi/agent/skills/complex/SKILL.md":
+      "---\nname: complex\ndescription: Present\nmetadata:\n  nested: value\n---\nBody",
+    ".pi/agent/skills/flat.md": "Flat Pi skill",
+    ".pi/agent/skills/long/SKILL.md": `---\nname: ${"a".repeat(65)}\ndescription: ${"x".repeat(1_025)}\n---\nBody`,
+    ".pi/agent/skills/one/SKILL.md": "---\nname: shared\ndescription: First\n---\nBody",
+    ".pi/agent/skills/two/SKILL.md": "---\nname: shared\ndescription: Second\n---\nBody",
+  });
+  const result = await discover(context(home), { ecosystems: ["pi"] });
+  const codes = new Set(
+    result.candidates.flatMap((candidate) =>
+      candidate.diagnostics.map((diagnostic) => diagnostic.code),
+    ),
+  );
+  for (const code of [
+    "skill-frontmatter-required",
+    "skill-name-required",
+    "skill-description-required",
+    "skill-invalid-name",
+    "skill-description-too-long",
+    "skill-name-mismatch",
+    "skill-unknown-field",
+    "skill-flat-markdown",
+    "skill-collision",
+    "skill-pi-disable-model-invocation",
+    "skill-executable-helper",
+    "skill-frontmatter-invalid",
+  ]) {
+    assert.ok(codes.has(code), code);
+  }
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "skills/complex/SKILL.md" && candidate.malformed,
+    ),
+  );
+});
+
 test("Pi project discovery requires trust and honors environment roots and exact filters", async () => {
   const home = await fixture({
     "custom/extensions/keep.ts": "pi.registerTool('keep', {})",
@@ -363,10 +492,8 @@ test("OpenCode discovery covers global and trusted project resources", async () 
     ".opencode/agents/reviewer.md": "---\nname: reviewer\n---\nAgent",
   });
   const result = await discover(context(home, project, true), { ecosystems: ["opencode"] });
-  assert.deepEqual(
-    result.candidates.map((candidate) => candidate.scope),
-    ["global", "global", "project"],
-  );
+  assert.equal(result.candidates.filter((candidate) => candidate.scope === "global").length, 3);
+  assert.equal(result.candidates.filter((candidate) => candidate.scope === "project").length, 1);
   assert.ok(
     result.candidates.some((candidate) => candidate.kind === "extension" && candidate.executable),
   );
@@ -485,6 +612,12 @@ test("DSH discovery inventories executable and declarative surfaces", async () =
   );
   assert.ok(result.diagnostics.some((entry) => entry.code === "source-schema-unsupported"));
   assert.ok(result.diagnostics.some((entry) => entry.code === "manifest-invalid"));
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "bad/package.json" && candidate.malformed,
+    ),
+  );
 });
 
 test("Claude Code discovery parses plugin skills, hooks, MCP metadata, and malformed manifests", async () => {
@@ -511,9 +644,11 @@ test("OpenCode malformed, hostile, and unknown-version fixtures fail closed", as
   const home = await fixture({
     ".config/opencode/tools/sentinel.ts":
       "import { writeFileSync } from 'node:fs'; writeFileSync('EXECUTED', 'bad')",
+    ".config/opencode/tools/bad.ts": Uint8Array.from([0xc3, 0x28]),
     ".config/opencode/malformed/opencode.json": ecosystemFailureFixtures.opencode.malformed,
     ".config/opencode/hostile/opencode.json": ecosystemFailureFixtures.opencode.hostile,
     ".config/opencode/unknown/opencode.json": ecosystemFailureFixtures.opencode.unknownVersion,
+    ".config/opencode/broken/package.json": "{not-json",
   });
   const result = await discover(context(home), { ecosystems: ["opencode"] });
   assert.ok(
@@ -535,6 +670,20 @@ test("OpenCode malformed, hostile, and unknown-version fixtures fail closed", as
     result.diagnostics.some(
       (entry) =>
         entry.code === "source-schema-unsupported" && entry.relativePath?.includes("unknown"),
+    ),
+  );
+  for (const relativePath of ["tools/bad.ts", "malformed/opencode.json", "broken/package.json"]) {
+    assert.ok(
+      result.candidates.some(
+        (candidate) => candidate.provenance.relativePath === relativePath && candidate.malformed,
+      ),
+      relativePath,
+    );
+  }
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "tools/sentinel.ts" && !candidate.malformed,
     ),
   );
   await assert.rejects(readFile(join(home, "EXECUTED")), /ENOENT/u);
@@ -564,6 +713,18 @@ test("DSH malformed, hostile, and unknown-version fixtures fail closed", async (
     result.diagnostics.some(
       (entry) =>
         entry.code === "source-schema-unsupported" && entry.relativePath?.includes("unknown"),
+    ),
+  );
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "malformed/cordis.yml" && candidate.malformed,
+    ),
+  );
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "tools/sentinel.ts" && !candidate.malformed,
     ),
   );
   await assert.rejects(readFile(join(home, "EXECUTED")), /ENOENT/u);
@@ -599,6 +760,19 @@ test("Claude Code malformed, hostile, and unknown-version fixtures fail closed",
     result.diagnostics.some(
       (entry) =>
         entry.code === "source-schema-unsupported" && entry.relativePath?.includes("unknown"),
+    ),
+  );
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "plugins/malformed/.claude-plugin/plugin.json" &&
+        candidate.malformed,
+    ),
+  );
+  assert.ok(
+    result.candidates.some(
+      (candidate) =>
+        candidate.provenance.relativePath === "plugins/sentinel/index.ts" && !candidate.malformed,
     ),
   );
   await assert.rejects(readFile(join(home, "EXECUTED")), /ENOENT/u);

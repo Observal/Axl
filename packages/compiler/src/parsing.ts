@@ -159,12 +159,30 @@ export function parseFrontmatter(text: string, allowedFields: ReadonlySet<string
   const attributes: Record<string, string | boolean> = {};
   const unknownFields: string[] = [];
   for (const line of text.slice(4, end).split("\n")) {
-    if (line.trim() === "") continue;
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    if (/^\s/u.test(line)) {
+      throw new DiscoveryError(
+        "adoption_manifest_invalid",
+        "nested frontmatter YAML is unsupported",
+      );
+    }
     const colon = line.indexOf(":");
     if (colon <= 0)
       throw new DiscoveryError("adoption_manifest_invalid", "invalid frontmatter entry");
     const key = line.slice(0, colon).trim();
+    if (Object.hasOwn(attributes, key)) {
+      throw new DiscoveryError("adoption_manifest_invalid", `duplicate frontmatter field ${key}`);
+    }
     let raw: string | boolean = line.slice(colon + 1).trim();
+    if (
+      typeof raw === "string" &&
+      (/^(?:[!&*|>]|<<:|\$\{|\{\{)/u.test(raw) || raw.startsWith("[") || raw.startsWith("{"))
+    ) {
+      throw new DiscoveryError(
+        "adoption_manifest_invalid",
+        "complex frontmatter YAML is unsupported",
+      );
+    }
     if (raw === "true") raw = true;
     else if (raw === "false") raw = false;
     else if (

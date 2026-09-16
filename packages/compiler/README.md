@@ -5,7 +5,7 @@
 
 `@axl/compiler` discovers and inspects resources from supported agent harnesses. Its inputs are untrusted data.
 
-The package never imports discovered modules, evaluates configuration, runs package managers, follows source lifecycle instructions, or launches a source harness. Traversal is deterministic and bounded. It uses `lstat`, canonical roots, before/after metadata checks, strict UTF-8 decoding, and typed diagnostics. Symlinks, hard links, device files, sockets, and FIFOs are not followed.
+The package never imports discovered modules, evaluates configuration, runs package managers, follows source lifecycle instructions, or launches a source harness. Traversal is deterministic and bounded. Recognized malformed resources remain bounded candidates with provenance and typed diagnostics so one bad file cannot hide valid siblings. It uses `lstat`, canonical roots, before/after metadata checks, strict UTF-8 decoding, and typed diagnostics. Symlinks, hard links, device files, sockets, and FIFOs are not followed.
 
 Adapters produce an internal domain model and do not depend on daemon, SDK, client, runtime, or presentation packages. A daemon integration must explicitly map this model to public protocol DTOs and enforce project trust before requesting project executable/config discovery.
 

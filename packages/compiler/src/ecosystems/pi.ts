@@ -272,6 +272,14 @@ function resourceKind(directory: string): ResourceKind {
   return "theme";
 }
 
+function resourceErrorCode(kind: ResourceKind): string {
+  if (kind === "skill") return "skill-frontmatter-invalid";
+  if (kind === "prompt") return "prompt-invalid";
+  if (kind === "extension") return "extension-source-invalid";
+  if (kind === "theme") return "theme-invalid";
+  return "pi-resource-invalid";
+}
+
 function parseSkill(
   file: SnapshotFile,
   snapshot: TreeSnapshot,
@@ -282,7 +290,17 @@ function parseSkill(
   metadata: Record<string, string | boolean>;
 } {
   const diagnostics: DiscoveryDiagnostic[] = [];
-  const parsed = parseFrontmatter(decodeUtf8(file), skillFields);
+  const text = decodeUtf8(file);
+  const standardSkill = file.relativePath.endsWith("/SKILL.md");
+  if (standardSkill && !text.startsWith("---\n")) {
+    diagnostics.push({
+      code: "skill-frontmatter-required",
+      severity: "error",
+      message: "SKILL.md requires YAML frontmatter",
+      relativePath: file.relativePath,
+    });
+  }
+  const parsed = parseFrontmatter(text, skillFields);
   for (const field of parsed.unknownFields)
     diagnostics.push({
       code: "skill-unknown-field",
@@ -290,11 +308,35 @@ function parseSkill(
       message: `unknown skill field ${field}`,
       relativePath: file.relativePath,
     });
-  const directoryName = file.relativePath.endsWith("/SKILL.md")
+  const directoryName = standardSkill
     ? (dirname(file.relativePath).split("/").at(-1) ?? "")
     : (file.relativePath.replace(/\.md$/u, "").split("/").at(-1) ?? "");
-  const declared =
-    typeof parsed.attributes.name === "string" ? parsed.attributes.name : directoryName;
+  const declaredName = parsed.attributes.name;
+  const declared = typeof declaredName === "string" ? declaredName : directoryName;
+  if (standardSkill && (typeof declaredName !== "string" || declaredName.trim() === "")) {
+    diagnostics.push({
+      code: "skill-name-required",
+      severity: "error",
+      message: "standard Agent Skill frontmatter requires a nonempty name",
+      relativePath: file.relativePath,
+    });
+  }
+  const description = parsed.attributes.description;
+  if (standardSkill && (typeof description !== "string" || description.trim() === "")) {
+    diagnostics.push({
+      code: "skill-description-required",
+      severity: "error",
+      message: "standard Agent Skill frontmatter requires a nonempty description",
+      relativePath: file.relativePath,
+    });
+  } else if (typeof description === "string" && Buffer.byteLength(description, "utf8") > 1_024) {
+    diagnostics.push({
+      code: "skill-description-too-long",
+      severity: "error",
+      message: "skill description exceeds 1024 UTF-8 bytes",
+      relativePath: file.relativePath,
+    });
+  }
   if (Buffer.byteLength(declared, "utf8") > 64 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(declared))
     diagnostics.push({
       code: "skill-invalid-name",
@@ -305,15 +347,22 @@ function parseSkill(
   if (declared !== directoryName)
     diagnostics.push({
       code: "skill-name-mismatch",
-      severity: "warning",
+      severity: "error",
       message: "skill name differs from its directory",
       relativePath: file.relativePath,
     });
-  if (!file.relativePath.endsWith("/SKILL.md"))
+  if (!standardSkill)
     diagnostics.push({
       code: "skill-flat-markdown",
       severity: "warning",
       message: "flat Markdown skill is Pi-lenient",
+      relativePath: file.relativePath,
+    });
+  if (parsed.attributes["disable-model-invocation"] !== undefined)
+    diagnostics.push({
+      code: "skill-pi-disable-model-invocation",
+      severity: "warning",
+      message: "disable-model-invocation is Pi-specific metadata",
       relativePath: file.relativePath,
     });
   const parent = dirname(file.relativePath);
@@ -376,12 +425,46 @@ function discoverSnapshot(
     try {
       parsed = parsePiManifest(packageFile, limits.maxManifestBytes);
     } catch (error) {
-      diagnostics.push({
+      const issue: DiscoveryDiagnostic = {
         code: "pi-manifest-invalid",
         severity: "error",
         message: error instanceof Error ? error.message : String(error),
         relativePath: packageFile.relativePath,
-      });
+      };
+      diagnostics.push(issue);
+      const packageRoot =
+        dirname(packageFile.relativePath) === "." ? "" : dirname(packageFile.relativePath);
+      const fallbackName = packageRoot.split("/").at(-1) || "pi-package";
+      candidates.push(
+        createCandidate(
+          {
+            ecosystem: "pi",
+            scope,
+            snapshot,
+            adapterId: ADAPTER_ID,
+            adapterVersion: ADAPTER_VERSION,
+            sourceSchemaVersion: SOURCE_SCHEMA_VERSION,
+            kind: "package",
+            relativePath: packageFile.relativePath,
+            displayName: fallbackName,
+            executable: true,
+            diagnostics: [issue],
+            surfaces: [
+              {
+                kind: "package",
+                name: fallbackName,
+                relativePath: packageFile.relativePath,
+                primary: true,
+                executable: true,
+                registrations: [],
+                dynamicBehavior: true,
+                metadata: {},
+              },
+            ],
+          },
+          limits,
+        ),
+      );
       continue;
     }
     diagnostics.push(...parsed.diagnostics);
@@ -399,32 +482,73 @@ function discoverSnapshot(
     ];
     const surfaces: ResourceSurface[] = [];
     for (const [kind, patterns] of resourceLists) {
-      for (const relativeResource of expandPatterns(
-        packagePaths,
-        patterns,
-        limits.maxGlobMatches,
-      )) {
+      let expanded: readonly string[];
+      try {
+        expanded = expandPatterns(packagePaths, patterns, limits.maxGlobMatches);
+      } catch (error) {
+        const issue: DiscoveryDiagnostic = {
+          code: "pi-resource-pattern-invalid",
+          severity: "error",
+          message: error instanceof Error ? error.message : String(error),
+          relativePath: packageFile.relativePath,
+        };
+        parsed.diagnostics.push(issue);
+        diagnostics.push(issue);
+        continue;
+      }
+      for (const relativeResource of expanded) {
         const full = `${prefix}${relativeResource}`;
         const source = byPath.get(full);
+        let name =
+          relativeResource
+            .split("/")
+            .at(-1)
+            ?.replace(/\.[^.]+$/u, "") ?? relativeResource;
+        let executable = kind === "extension";
+        let registrations: readonly string[] = [];
+        let dynamicBehavior = false;
+        let metadata: Readonly<Record<string, string | number | boolean>> = {};
+        if (source !== undefined) {
+          try {
+            if (kind === "extension") {
+              const inventory = inventoryExtensionSource(decodeUtf8(source));
+              registrations = inventory.registrations;
+              dynamicBehavior = inventory.dynamicBehavior;
+              metadata = inventory.metadata;
+            } else if (kind === "skill") {
+              const skill = parseSkill(source, snapshot);
+              name = skill.name;
+              executable = skill.executable;
+              metadata = skill.metadata;
+              parsed.diagnostics.push(...skill.diagnostics);
+              diagnostics.push(...skill.diagnostics);
+            } else if (kind === "prompt") {
+              const prompt = parseFrontmatter(decodeUtf8(source), new Set(["name", "description"]));
+              if (typeof prompt.attributes.name === "string") name = prompt.attributes.name;
+            } else {
+              parseJsonObject(source, limits.maxManifestBytes);
+            }
+          } catch (error) {
+            const issue: DiscoveryDiagnostic = {
+              code: resourceErrorCode(kind),
+              severity: "error",
+              message: error instanceof Error ? error.message : String(error),
+              relativePath: full,
+            };
+            parsed.diagnostics.push(issue);
+            diagnostics.push(issue);
+            dynamicBehavior = executable;
+          }
+        }
         surfaces.push({
           kind,
-          name:
-            relativeResource
-              .split("/")
-              .at(-1)
-              ?.replace(/\.[^.]+$/u, "") ?? relativeResource,
+          name,
           relativePath: full,
           primary: false,
-          executable: kind === "extension",
-          registrations:
-            source !== undefined && kind === "extension"
-              ? inventoryExtensionSource(decodeUtf8(source)).registrations
-              : [],
-          dynamicBehavior:
-            source !== undefined && kind === "extension"
-              ? inventoryExtensionSource(decodeUtf8(source)).dynamicBehavior
-              : false,
-          metadata: {},
+          executable,
+          registrations,
+          dynamicBehavior,
+          metadata,
         });
       }
     }
@@ -517,74 +641,107 @@ function discoverSnapshot(
       let resourceDiagnostics: DiscoveryDiagnostic[] = [];
       let executable = kind === "extension";
       let surface: ResourceSurface | undefined;
-      if (kind === "skill") {
-        const parsed = parseSkill(file, snapshot);
-        displayName = parsed.name;
-        resourceDiagnostics = parsed.diagnostics;
-        executable = parsed.executable;
-        const existing = skillNames.get(parsed.name);
-        if (existing !== undefined)
-          resourceDiagnostics.push({
-            code: "skill-collision",
-            severity: "error",
-            message: `skill name collides with ${existing}`,
+      try {
+        if (kind === "skill") {
+          const parsed = parseSkill(file, snapshot);
+          displayName = parsed.name;
+          resourceDiagnostics = parsed.diagnostics;
+          executable = parsed.executable;
+          const existing = skillNames.get(parsed.name);
+          if (existing !== undefined)
+            resourceDiagnostics.push({
+              code: "skill-collision",
+              severity: "error",
+              message: `skill name collides with ${existing}`,
+              relativePath,
+            });
+          else skillNames.set(parsed.name, relativePath);
+          surface = {
+            kind,
+            name: parsed.name,
             relativePath,
-          });
-        else skillNames.set(parsed.name, relativePath);
-        surface = {
-          kind,
-          name: parsed.name,
-          relativePath,
-          primary: true,
-          executable,
-          registrations: [],
-          dynamicBehavior: false,
-          metadata: parsed.metadata,
-        };
-      } else if (kind === "extension") surface = extensionSurface(file);
-      else if (kind === "prompt") {
-        const parsed = parseFrontmatter(decodeUtf8(file), new Set(["name", "description"]));
-        displayName =
-          typeof parsed.attributes.name === "string" ? parsed.attributes.name : undefined;
-        surface = {
-          kind,
-          name: displayName ?? relativePath,
-          relativePath,
-          primary: true,
-          executable: false,
-          registrations: [...decodeUtf8(file).matchAll(/\{\{([a-zA-Z0-9_-]+)\}\}/gu)]
-            .map((match) => `substitution:${match[1] ?? ""}`)
-            .sort(),
-          dynamicBehavior: false,
-          metadata: {},
-        };
-      } else {
-        let metadata: Record<string, string | number | boolean> = {};
-        try {
-          const theme = parseJsonObject(file, limits.maxManifestBytes);
-          metadata = {
-            tokenCount:
-              theme.colors !== null && typeof theme.colors === "object"
-                ? Object.keys(theme.colors as object).length
-                : 0,
+            primary: true,
+            executable,
+            registrations: [],
+            dynamicBehavior: false,
+            metadata: parsed.metadata,
           };
-        } catch (error) {
-          resourceDiagnostics.push({
-            code: "theme-invalid",
-            severity: "error",
-            message: error instanceof Error ? error.message : String(error),
+        } else if (kind === "extension") surface = extensionSurface(file);
+        else if (kind === "prompt") {
+          const parsed = parseFrontmatter(decodeUtf8(file), new Set(["name", "description"]));
+          displayName =
+            typeof parsed.attributes.name === "string" ? parsed.attributes.name : undefined;
+          surface = {
+            kind,
+            name: displayName ?? relativePath,
             relativePath,
-          });
+            primary: true,
+            executable: false,
+            registrations: [...decodeUtf8(file).matchAll(/\{\{([a-zA-Z0-9_-]+)\}\}/gu)]
+              .map((match) => `substitution:${match[1] ?? ""}`)
+              .sort(),
+            dynamicBehavior: false,
+            metadata: {},
+          };
+        } else {
+          let metadata: Record<string, string | number | boolean> = {};
+          try {
+            const theme = parseJsonObject(file, limits.maxManifestBytes);
+            metadata = {
+              tokenCount:
+                theme.colors !== null && typeof theme.colors === "object"
+                  ? Object.keys(theme.colors as object).length
+                  : 0,
+            };
+          } catch (error) {
+            resourceDiagnostics.push({
+              code: "theme-invalid",
+              severity: "error",
+              message: error instanceof Error ? error.message : String(error),
+              relativePath,
+            });
+          }
+          surface = {
+            kind,
+            name: displayName ?? relativePath,
+            relativePath,
+            primary: true,
+            executable: false,
+            registrations: [],
+            dynamicBehavior: false,
+            metadata,
+          };
+        }
+      } catch (error) {
+        const issue: DiscoveryDiagnostic = {
+          code: resourceErrorCode(kind),
+          severity: "error",
+          message: error instanceof Error ? error.message : String(error),
+          relativePath,
+        };
+        resourceDiagnostics.push(issue);
+        displayName = relativePath
+          .split("/")
+          .at(-1)
+          ?.replace(/\.[^.]+$/u, "");
+        if (kind === "skill") {
+          const parent = dirname(relativePath);
+          executable = snapshot.files.some(
+            (candidate) =>
+              candidate.relativePath.startsWith(`${parent}/`) &&
+              candidate.relativePath !== relativePath &&
+              /\.(?:js|mjs|cjs|ts|py|sh)$/u.test(candidate.relativePath),
+          );
         }
         surface = {
           kind,
           name: displayName ?? relativePath,
           relativePath,
           primary: true,
-          executable: false,
+          executable,
           registrations: [],
-          dynamicBehavior: false,
-          metadata,
+          dynamicBehavior: kind === "extension",
+          metadata: {},
         };
       }
       diagnostics.push(...resourceDiagnostics);

@@ -52,6 +52,8 @@ function sameFile(left: FileStat, right: FileStat): boolean {
   return (
     left.kind === right.kind &&
     left.size === right.size &&
+    left.nlink === right.nlink &&
+    left.mode === right.mode &&
     left.mtimeMs === right.mtimeMs &&
     left.ino === right.ino &&
     left.dev === right.dev
