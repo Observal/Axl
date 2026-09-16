@@ -308,6 +308,10 @@ impl PairingInvitation {
 
     pub(crate) fn verify_with_clock(&self, clock: &dyn Clock) -> Result<(), PairingError> {
         let now_ms = clock.now_ms().map_err(|_| PairingError::ClockRollback)?;
+        self.verify_at(now_ms)
+    }
+
+    pub(crate) fn verify_at(&self, now_ms: u64) -> Result<(), PairingError> {
         self.validate_time(now_ms)?;
         self.verify_signature()
     }
@@ -318,6 +322,10 @@ impl PairingInvitation {
 
     pub fn nonce_hash(&self) -> Result<[u8; 48], PairingError> {
         sha384(&self.invitation_nonce)
+    }
+
+    pub(crate) fn invitation_nonce(&self) -> [u8; 32] {
+        self.invitation_nonce
     }
 
     fn fields_before_signature(&self) -> Result<Vec<u8>, PairingError> {
@@ -429,6 +437,17 @@ impl PairingClaimV1 {
         device_signer: &SignatureKeyPair,
     ) -> Result<Self, PairingError> {
         invitation.verify()?;
+        Self::create_after_verification(invitation, device_credential, key_package, device_signer)
+    }
+
+    pub(crate) fn create_at(
+        invitation: &PairingInvitation,
+        device_credential: PairingCredential,
+        key_package: &[u8],
+        device_signer: &SignatureKeyPair,
+        now_ms: u64,
+    ) -> Result<Self, PairingError> {
+        invitation.verify_at(now_ms)?;
         Self::create_after_verification(invitation, device_credential, key_package, device_signer)
     }
 
@@ -711,13 +730,85 @@ impl fmt::Display for PairingError {
 }
 impl std::error::Error for PairingError {}
 
-// Session 50.2 will consume this crate-private classifier from the durable owner.
-#[allow(dead_code)]
+/// Crate-private classification consumed by the durable pairing owner.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FailedClaimReason {
     Credential,
     KeyPackage,
     Signature,
+}
+
+pub(crate) enum ClassifiedClaim {
+    NonCounting,
+    EligibleFailure {
+        claim_hash: [u8; 48],
+        reason: FailedClaimReason,
+    },
+    Eligible {
+        claim_hash: [u8; 48],
+        claim: Box<PairingClaimV1>,
+    },
+}
+
+fn classify_claim(
+    invitation: &PairingInvitation,
+    claim_bytes: &[u8],
+    now_ms: u64,
+) -> ClassifiedClaim {
+    if claim_bytes.len() > PAIRING_CLAIM_MAX_BYTES {
+        return ClassifiedClaim::NonCounting;
+    }
+    let Ok(claim) = PairingClaimV1::decode(claim_bytes) else {
+        return ClassifiedClaim::NonCounting;
+    };
+    if claim.validate_bindings(invitation).is_err() {
+        return ClassifiedClaim::NonCounting;
+    }
+    let Ok(claim_hash) = sha384(claim_bytes) else {
+        return ClassifiedClaim::NonCounting;
+    };
+    match claim.verify_signature_and_bindings(invitation) {
+        Ok(()) => {
+            let Ok(provider) = provider() else {
+                return ClassifiedClaim::EligibleFailure {
+                    claim_hash,
+                    reason: FailedClaimReason::KeyPackage,
+                };
+            };
+            if crate::validate_phone_key_package(
+                &provider,
+                claim.key_package(),
+                claim.device_credential().identity(),
+                now_ms,
+            )
+            .is_err()
+            {
+                ClassifiedClaim::EligibleFailure {
+                    claim_hash,
+                    reason: FailedClaimReason::KeyPackage,
+                }
+            } else {
+                ClassifiedClaim::Eligible {
+                    claim_hash,
+                    claim: Box::new(claim),
+                }
+            }
+        }
+        Err(PairingError::InvalidSignature) => ClassifiedClaim::EligibleFailure {
+            claim_hash,
+            reason: FailedClaimReason::Signature,
+        },
+        Err(PairingError::IdentityMismatch | PairingError::CryptographicFailure) => {
+            ClassifiedClaim::EligibleFailure {
+                claim_hash,
+                reason: FailedClaimReason::KeyPackage,
+            }
+        }
+        Err(_) => ClassifiedClaim::EligibleFailure {
+            claim_hash,
+            reason: FailedClaimReason::Credential,
+        },
+    }
 }
 
 /// Exact accepted result. Debug output never prints its bytes.
@@ -794,6 +885,14 @@ impl fmt::Debug for PairingClaimAccountant {
 
 #[allow(dead_code)]
 impl PairingClaimAccountant {
+    pub(crate) fn classify(
+        invitation: &PairingInvitation,
+        claim_bytes: &[u8],
+        now_ms: u64,
+    ) -> ClassifiedClaim {
+        classify_claim(invitation, claim_bytes, now_ms)
+    }
+
     pub(crate) fn new_with_clock(
         invitation: PairingInvitation,
         clock: Arc<dyn Clock>,
@@ -907,7 +1006,7 @@ fn provider() -> Result<CoreProvider, PairingError> {
     CoreProvider::new().map_err(|_| PairingError::CryptographicFailure)
 }
 
-fn sha384(bytes: &[u8]) -> Result<[u8; 48], PairingError> {
+pub(crate) fn sha384(bytes: &[u8]) -> Result<[u8; 48], PairingError> {
     provider()?
         .crypto()
         .hash(SUITE.hash_algorithm(), bytes)
