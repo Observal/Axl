@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-License-Identifier: Apache-2.0
+
+paths:
+  .github/workflows/ci.yml:
+    ignore:
+      # actionlint 1.7.7 predates GitHub's current standard Intel runner label.
+      - 'label "macos-15-intel" is unknown'

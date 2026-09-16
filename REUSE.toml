@@ -85,6 +85,8 @@ SPDX-License-Identifier = "Apache-2.0"
 path = [
   "packages/e2ee/Cargo.lock",
   "packages/e2ee/fixtures/v1/*.tls",
+  "packages/e2ee/bindings/node/package.json",
+  "packages/e2ee/bindings/node/artifact/manifest-source.json",
 ]
 SPDX-FileCopyrightText = "2026 VishnuM449"
 SPDX-License-Identifier = "Apache-2.0"
