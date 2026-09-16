@@ -102,7 +102,7 @@ const validPayloads = {
   "config.entitlement": { entitlementId: "credential-reference" },
   "config.profile": { profile: "exec" },
   "config.thinking": { requested: "high", effective: "medium", clamped: true },
-  "config.tools": { webFetch: true, webSearch: false },
+  "config.tools": { webFetch: true, webSearch: false, browser: false },
   "config.dialect": {
     dialectId: "openai-chat",
     rosterFingerprint: "f".repeat(64),

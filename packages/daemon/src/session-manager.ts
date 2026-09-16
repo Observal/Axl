@@ -1335,6 +1335,7 @@ export class SessionManager {
     let requestSettings: ModelRequestSettings | undefined;
     let webFetch: boolean | undefined;
     let webSearch: boolean | undefined;
+    let browser: boolean | undefined;
     let profile: SessionConfiguration["profile"] = created.payload.profile;
     for (const event of events) {
       if (event.type === "config.provider") providerId = event.payload.providerId;
@@ -1345,6 +1346,7 @@ export class SessionManager {
       else if (event.type === "config.tools") {
         webFetch = event.payload.webFetch;
         webSearch = event.payload.webSearch;
+        browser = event.payload.browser;
       }
     }
     return this.open(sessionId, created.payload.cwd, {
@@ -1356,6 +1358,7 @@ export class SessionManager {
       ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
       ...(webFetch === undefined ? {} : { webFetch }),
       ...(webSearch === undefined ? {} : { webSearch }),
+      ...(browser === undefined ? {} : { browser }),
       profile: profile ?? "standard",
     });
   }
@@ -1391,6 +1394,7 @@ export class SessionManager {
     profile: NonNullable<SessionConfiguration["profile"]>;
     webFetch: boolean;
     webSearch: boolean;
+    browser: boolean;
     requestSettings: ModelRequestSettings;
     boundaryEventIds: readonly EventId[];
   }> {
@@ -1417,7 +1421,7 @@ export class SessionManager {
         : {}),
       ...(request?.type === "config.request" ? { requestSettings: request.payload } : {}),
       ...(tools?.type === "config.tools"
-        ? { webFetch: tools.payload.webFetch, webSearch: tools.payload.webSearch }
+        ? { webFetch: tools.payload.webFetch, webSearch: tools.payload.webSearch, browser: tools.payload.browser }
         : {}),
       ...(profile?.type === "config.profile" ? { profile: profile.payload.profile } : {}),
       ...managed.selection,
@@ -1434,7 +1438,8 @@ export class SessionManager {
       (update.modelId !== undefined && update.modelId !== managed.selection.modelId)
         ? "model_switch"
         : (update.webFetch !== undefined && update.webFetch !== managed.selection.webFetch) ||
-            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch)
+            (update.webSearch !== undefined && update.webSearch !== managed.selection.webSearch) ||
+            (update.browser !== undefined && update.browser !== managed.selection.browser)
           ? "tool_change"
           : "config_change";
     const before = managed.events.length;
@@ -1465,6 +1470,7 @@ export class SessionManager {
     profile: NonNullable<SessionConfiguration["profile"]>;
     webFetch: boolean;
     webSearch: boolean;
+    browser: boolean;
     requestSettings: ModelRequestSettings;
     boundaryEventIds: readonly EventId[];
   } {
@@ -1495,6 +1501,7 @@ export class SessionManager {
       profile: managed.selection.profile ?? "standard",
       webFetch: tools?.type === "config.tools" ? tools.payload.webFetch : false,
       webSearch: tools?.type === "config.tools" ? tools.payload.webSearch : false,
+      browser: tools?.type === "config.tools" ? tools.payload.browser : false,
       boundaryEventIds: boundaryEvents.map((event) => event.id),
     };
   }

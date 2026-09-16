@@ -917,6 +917,7 @@
         "profile": "standard",
         "webFetch": true,
         "webSearch": false,
+        "browser": false,
         "boundaryEventIds": ["00000000-0000-4000-8000-000000000001"]
       }
     },
@@ -9254,7 +9255,8 @@
       "type": "config.tools",
       "payload": {
         "webFetch": true,
-        "webSearch": false
+        "webSearch": false,
+        "browser": false
       }
     },
     {

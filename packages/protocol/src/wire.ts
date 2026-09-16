@@ -60,6 +60,7 @@ export interface SessionModelSelection {
 export interface SessionToolSelection {
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly browser?: boolean;
 }
 
 export type SessionSelection = SessionModelSelection & SessionToolSelection;
@@ -919,6 +920,7 @@ export interface RpcMethodMap {
       readonly profile: SessionProfile;
       readonly webFetch: boolean;
       readonly webSearch: boolean;
+      readonly browser: boolean;
       readonly boundaryEventIds: readonly EventId[];
     };
   };
@@ -1514,7 +1516,7 @@ function selection(params: Record<string, unknown>, path: string): SessionSelect
       `must be one of: ${thinkingLevels.join(", ")}`,
     );
   }
-  for (const field of ["webFetch", "webSearch"] as const) {
+  for (const field of ["webFetch", "webSearch", "browser"] as const) {
     if (params[field] !== undefined && typeof params[field] !== "boolean") {
       throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
     }
@@ -1533,6 +1535,7 @@ function selection(params: Record<string, unknown>, path: string): SessionSelect
     ...(thinkingLevel === undefined ? {} : { thinkingLevel: thinkingLevel as ThinkingLevel }),
     ...(params.webFetch === undefined ? {} : { webFetch: params.webFetch as boolean }),
     ...(params.webSearch === undefined ? {} : { webSearch: params.webSearch as boolean }),
+    ...(params.browser === undefined ? {} : { browser: params.browser as boolean }),
   };
 }
 
@@ -1652,6 +1655,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       "requestSettings",
       "webFetch",
       "webSearch",
+      "browser",
       "profile",
     ]);
     const profile = sessionProfile(params.profile, "request.params.profile");
@@ -1929,6 +1933,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       "requestSettings",
       "webFetch",
       "webSearch",
+      "browser",
       "profile",
     ]);
     const configured = selection(params, "request.params");
@@ -1940,11 +1945,12 @@ export function parseWireRequest(value: unknown): WireRequest {
       configured.thinkingLevel === undefined &&
       configured.webFetch === undefined &&
       configured.webSearch === undefined &&
+      configured.browser === undefined &&
       profile === undefined
     ) {
       throw new ProtocolValidationError(
         "request.params",
-        "must include providerId, modelId, thinkingLevel, requestSettings, webFetch, webSearch, or profile",
+        "must include providerId, modelId, thinkingLevel, requestSettings, webFetch, webSearch, browser, or profile",
       );
     }
     return {
@@ -2760,6 +2766,7 @@ export function parseRpcResult<Method extends RpcMethod>(
       "profile",
       "webFetch",
       "webSearch",
+      "browser",
       "boundaryEventIds",
     ]);
     if (!thinkingLevels.includes(result.requestedThinkingLevel as ThinkingLevel)) {
@@ -2774,7 +2781,7 @@ export function parseRpcResult<Method extends RpcMethod>(
         "must be a thinking level",
       );
     }
-    for (const field of ["webFetch", "webSearch"] as const) {
+    for (const field of ["webFetch", "webSearch", "browser"] as const) {
       if (typeof result[field] !== "boolean") {
         throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
       }
@@ -2795,6 +2802,7 @@ export function parseRpcResult<Method extends RpcMethod>(
       profile,
       webFetch: result.webFetch,
       webSearch: result.webSearch,
+      browser: result.browser,
       boundaryEventIds: result.boundaryEventIds.map((id, index) =>
         parseEventId(id, `${path}.boundaryEventIds[${index}]`),
       ),

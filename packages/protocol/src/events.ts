@@ -140,6 +140,7 @@ export type EventPayloadMap = {
   "config.tools": {
     readonly webFetch: boolean;
     readonly webSearch: boolean;
+    readonly browser: boolean;
   };
   "config.dialect": {
     readonly dialectId: string;
@@ -527,9 +528,10 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "config.tools": (payload, path) => {
-    exact(payload, path, ["webFetch", "webSearch"]);
+    exact(payload, path, ["webFetch", "webSearch", "browser"]);
     boolean(payload.webFetch, `${path}.webFetch`);
     boolean(payload.webSearch, `${path}.webSearch`);
+    boolean(payload.browser, `${path}.browser`);
     return payload;
   },
   "config.dialect": (payload, path) => {

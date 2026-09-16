@@ -4,7 +4,8 @@
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-License-Identifier: Apache-2.0
 
-import { access, readdir } from "node:fs/promises";
+import { access, readdir, mkdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
 
 import type { CredentialStore } from "@axl/ai";
@@ -30,6 +31,7 @@ export interface LocalRuntimeDefaults {
   readonly thinkingLevel: ThinkingLevel;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly browser?: boolean;
 }
 
 export type LocalSandboxSelection =
@@ -240,6 +242,18 @@ export interface LocalDaemonOptions {
 export async function startLocalDaemon(options: LocalDaemonOptions): Promise<AxlDaemon> {
   const { axlHome, stateDirectory, socketPath, defaults, store, unsafe } = options;
   const sandboxSelection = options.sandbox ?? { type: "native" as const };
+  // Tracks the live browser session per session ID. The runtime factory runs
+  // again on every rebuild boundary (model switch, tool change, reload). Any
+  // prior browser process for the same session must be closed before a new one
+  // starts, and when the browser tool is toggled off no new one is created.
+  const browserSessions = new Map<string, { close(): Promise<void> }>();
+  const closeBrowserSession = async (sessionId: string): Promise<void> => {
+    const existing = browserSessions.get(sessionId);
+    if (existing !== undefined) {
+      browserSessions.delete(sessionId);
+      await existing.close().catch(() => {});
+    }
+  };
   let assemblyPromise:
     | Promise<{
         ai: typeof import("@axl/ai");
@@ -305,6 +319,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       ...args: Parameters<import("@axl/daemon").ProviderManagementService["logout"]>
     ) => createProviderManagementService((await loadAssembly()).providers).logout(...args),
     dispose: async () => {
+      for (const sessionId of [...browserSessions.keys()]) await closeBrowserSession(sessionId);
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
@@ -353,6 +368,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         thinkingLevel: selection.thinkingLevel ?? defaults.thinkingLevel,
         webFetch: profile === "standard" && (selection.webFetch ?? defaults.webFetch ?? true),
         webSearch: profile === "standard" && (selection.webSearch ?? defaults.webSearch ?? true),
+        browser: profile === "standard" && (selection.browser ?? defaults.browser ?? false),
       };
       const modelInfo = await validateProviderSelection(
         providers,
@@ -403,6 +419,48 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         );
       }
 
+      // Close any browser process from a prior runtime build for this session.
+      // A rebuild boundary (tool_change, model_switch, reload) reruns this
+      // factory; the old browser must not outlive its runtime. When the browser
+      // tool is toggled off, this closes it and no replacement is created.
+      await closeBrowserSession(sessionId);
+      let browserPromptSection: import("@axl/kernel").PromptSection | undefined;
+      if (active.browser) {
+        const browserPackage = await import("@axl/extension-browser");
+        const screenshotDir = join(cwd, ".axl-screenshots");
+        await mkdir(screenshotDir, { recursive: true });
+        const browserSession = await browserPackage.createPlaywrightSession({
+          downloadDirectory: join(cwd, ".axl-downloads"),
+          signal: AbortSignal.any([]),
+          launchPolicy: {
+            userDataDir: join(stateDirectory, "browser", sessionId),
+            downloadDirectory: join(cwd, ".axl-downloads"),
+            outerSandboxActive: !unsafe,
+          },
+        });
+        browserSessions.set(sessionId, browserSession);
+        for (const tool of browserPackage.makeBrowserTools({
+          session: browserSession,
+          screenshotDirectory: screenshotDir,
+          onScreenshotSaved: (path) => {
+            if (process.platform === "darwin") {
+              execFile("open", [path], () => {});
+            } else if (process.platform === "linux") {
+              execFile("xdg-open", [path], () => {});
+            } else if (process.platform === "win32") {
+              execFile("cmd", ["/c", "start", "", path], () => {});
+            }
+          },
+        })) {
+          tools.register(tool);
+        }
+        browserPromptSection = {
+          name: "browser",
+          source: "core",
+          content: browserPackage.BROWSER_PROMPT_SECTION,
+        };
+      }
+
       if (skillsPackage !== undefined && skills.length > 0) {
         tools.register(skillsPackage.makeSkillTool(skills));
       }
@@ -436,7 +494,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
               ],
             }
           : {}),
-        instructions: [...instructions, ...(skillSection === undefined ? [] : [skillSection])],
+        instructions: [
+          ...instructions,
+          ...(skillSection === undefined ? [] : [skillSection]),
+          ...(browserPromptSection === undefined ? [] : [browserPromptSection]),
+        ],
       });
       return {
         model,
@@ -456,7 +518,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         configRequest: requestSettings,
         configThinking: thinking,
         configProfile: { profile },
-        configTools: { webFetch: active.webFetch, webSearch: active.webSearch },
+        configTools: { webFetch: active.webFetch, webSearch: active.webSearch, browser: active.browser },
         ...(boundary === "config_change"
           ? {}
           : {
