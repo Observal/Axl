@@ -75,6 +75,9 @@ test("browser requests queue and presence capabilities but omits trusted login",
   assert.equal(WEB_REQUESTED_CAPABILITIES.includes("session.queue.requeue"), true);
   assert.equal(WEB_REQUESTED_CAPABILITIES.includes("session.queue.restore"), true);
   assert.equal(WEB_REQUESTED_CAPABILITIES.includes("session.presence"), true);
+  assert.equal(WEB_REQUESTED_CAPABILITIES.includes("adoption.plan"), true);
+  assert.equal(WEB_REQUESTED_CAPABILITIES.includes("adoption.start"), true);
+  assert.equal(WEB_REQUESTED_CAPABILITIES.includes("adoption.approve-activation"), true);
 });
 
 test("project folder validation sends one exact path to the trusted host", async () => {

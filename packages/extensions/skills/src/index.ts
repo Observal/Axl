@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Dirent } from "node:fs";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { TerminalExtension } from "@axl/extension-api";
@@ -21,6 +21,8 @@ export interface AgentSkill {
   readonly compatibility?: string;
   readonly metadata: Readonly<Record<string, string>>;
   readonly allowedTools?: string;
+  /** Pi compatibility metadata. Manual-only skills are never model-visible or model-invocable. */
+  readonly manualOnly: boolean;
   readonly directory: string;
   readonly instructions: string;
 }
@@ -78,7 +80,15 @@ function parseMetadata(value: unknown, path: string): Readonly<Record<string, st
   return metadata;
 }
 
-export async function loadSkill(directory: string): Promise<AgentSkill> {
+export interface LoadSkillOptions {
+  /** Expected immutable registry name when the storage directory is content-addressed. */
+  readonly expectedName?: string;
+}
+
+export async function loadSkill(
+  directory: string,
+  options: LoadSkillOptions = {},
+): Promise<AgentSkill> {
   const canonicalDirectory = await realpath(directory).catch((cause: unknown) => {
     throw new SkillValidationError(directory, `cannot resolve skill directory: ${String(cause)}`);
   });
@@ -118,13 +128,22 @@ export async function loadSkill(directory: string): Promise<AgentSkill> {
       "must contain lowercase letters, digits, and single hyphens only",
     );
   }
-  if (name !== basename(canonicalDirectory)) {
-    throw new SkillValidationError(`${skillPath}:name`, "must match the parent directory name");
+  if (name !== (options.expectedName ?? basename(canonicalDirectory))) {
+    throw new SkillValidationError(
+      `${skillPath}:name`,
+      options.expectedName === undefined
+        ? "must match the parent directory name"
+        : "must match the immutable registry name",
+    );
   }
 
   const license = optionalString(fields.license, `${skillPath}:license`);
   const compatibility = optionalString(fields.compatibility, `${skillPath}:compatibility`, 500);
   const allowedTools = optionalString(fields["allowed-tools"], `${skillPath}:allowed-tools`);
+  const manualOnlyValue = fields["disable-model-invocation"];
+  if (manualOnlyValue !== undefined && typeof manualOnlyValue !== "boolean") {
+    throw new SkillValidationError(`${skillPath}:disable-model-invocation`, "must be a boolean");
+  }
   return {
     name,
     description,
@@ -132,6 +151,7 @@ export async function loadSkill(directory: string): Promise<AgentSkill> {
     ...(compatibility === undefined ? {} : { compatibility }),
     metadata: parseMetadata(fields.metadata, `${skillPath}:metadata`),
     ...(allowedTools === undefined ? {} : { allowedTools }),
+    manualOnly: manualOnlyValue === true,
     directory: canonicalDirectory,
     instructions: match[2] as string,
   };
@@ -178,13 +198,14 @@ export async function discoverSkills(
 }
 
 export function skillCatalogSection(skills: readonly AgentSkill[]): PromptSection | undefined {
-  if (skills.length === 0) return undefined;
+  const modelVisible = skills.filter((skill) => !skill.manualOnly);
+  if (modelVisible.length === 0) return undefined;
   return {
     name: "skills",
     source: "agent-skills",
     content: [
       "Available skills. Load one with the skill tool when its description matches the task:",
-      ...skills.map((skill) => `- ${skill.name}: ${skill.description}`),
+      ...modelVisible.map((skill) => `- ${skill.name}: ${skill.description}`),
     ].join("\n"),
   };
 }
@@ -239,7 +260,8 @@ export const skillTerminalExtension: TerminalExtension = {
 };
 
 export function makeSkillTool(skills: readonly AgentSkill[]): KernelTool {
-  const byName = new Map(skills.map((skill) => [skill.name, skill]));
+  const modelVisible = skills.filter((skill) => !skill.manualOnly);
+  const byName = new Map(modelVisible.map((skill) => [skill.name, skill]));
   return {
     name: "skill",
     description:

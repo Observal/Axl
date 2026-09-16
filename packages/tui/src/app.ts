@@ -35,6 +35,8 @@ import type {
 } from "@axl/protocol";
 import { parseEventId, parseOperationId, parseSessionId } from "@axl/protocol";
 import {
+  type AdoptionCandidate,
+  AdoptionController,
   type AxlClient,
   AxlClientError,
   type ClientModelInfo,
@@ -56,6 +58,7 @@ import {
 } from "@axl/sdk";
 
 import { ActivityComponent } from "./activity.ts";
+import { adoptionInspectionLines, adoptionPickerItems } from "./adoption-presentation.ts";
 import { droppedImages, type LocalAttachment, readImageFile } from "./attachments.ts";
 import {
   type ClipboardContent,
@@ -528,6 +531,7 @@ export interface AxlAppOptions {
   readonly diffLayout?: DiffLayout;
   readonly workspaceReview?: boolean;
   readonly imageDisplay?: ImageDisplay;
+  readonly adoptionDismissedScanGeneration?: string;
   readonly mediaCapabilities?: TerminalMediaCapabilities;
   readonly extensions?: readonly TerminalExtension[];
   readonly onPreferenceChange?: (update: {
@@ -552,6 +556,7 @@ export interface AxlAppOptions {
     diffLayout?: DiffLayout;
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
+    adoptionDismissedScanGeneration?: string | undefined;
   }) => void | Promise<void>;
   /** Compatibility hook called after the daemon accepts a model switch. */
   readonly onModelChange?: (modelId: string) => void;
@@ -583,6 +588,8 @@ export class AxlApp {
   private readonly options: AxlAppOptions;
   private client: AxlClient;
   private commandController: CommandController;
+  private adoptionController: AdoptionController;
+  private adoptionFindingsLoad: Promise<void> | undefined;
   private daemonHost: DaemonHostControl | undefined;
   private openWeb:
     | ((sessionId: SessionId, cwd: string, providerHost: TrustedProviderHost) => Promise<string>)
@@ -616,6 +623,7 @@ export class AxlApp {
   private diffLayout: DiffLayout;
   private workspaceReviewEnabled: boolean;
   private imageDisplay: ImageDisplay;
+  private adoptionDismissedScanGeneration: string | undefined;
   private readonly pendingAttachments: BlobReference[] = [];
   private attachmentBusy = false;
   private clipboardBusy = false;
@@ -720,6 +728,7 @@ export class AxlApp {
     this.diffLayout = options.diffLayout ?? "unified";
     this.workspaceReviewEnabled = options.workspaceReview ?? false;
     this.imageDisplay = options.imageDisplay ?? "auto";
+    this.adoptionDismissedScanGeneration = options.adoptionDismissedScanGeneration;
     this.webFetchEnabled = options.webFetch ?? true;
     this.webSearchEnabled = options.webSearch ?? true;
     this.initialResumePending = options.initialResume ?? false;
@@ -769,6 +778,7 @@ export class AxlApp {
     this.view.toolOutputDisplay = options.toolOutputDisplay ?? "compact";
     this.extensionHost = new TerminalExtensionHost(options.extensions);
     this.commandController = this.createCommandController(options.client);
+    this.adoptionController = this.createAdoptionController(options.client);
     this.extensionWidgetsAbove = new ExtensionWidgetsComponent(
       this.extensionHost,
       "aboveEditor",
@@ -850,11 +860,25 @@ export class AxlApp {
     return new CommandController(client, () => this.presentationCommands());
   }
 
+  private createAdoptionController(client: AxlClient): AdoptionController {
+    return new AdoptionController(client, {
+      ...(this.adoptionDismissedScanGeneration === undefined
+        ? {}
+        : { dismissedScanGeneration: this.adoptionDismissedScanGeneration }),
+      onDismissedScanGeneration: (adoptionDismissedScanGeneration) => {
+        this.adoptionDismissedScanGeneration = adoptionDismissedScanGeneration;
+        return this.persistPreferences({ adoptionDismissedScanGeneration });
+      },
+    });
+  }
+
   private bindClient(client: AxlClient): void {
     const previous = this.client;
     this.unsubscribeDisconnect();
     this.client = client;
     this.commandController = this.createCommandController(client);
+    this.adoptionController.dispose();
+    this.adoptionController = this.createAdoptionController(client);
     this.unsubscribeDisconnect = client.onDisconnect((error) => {
       if (error instanceof AxlClientError && error.code === "daemon_stopping") {
         this.reconnectGeneration += 1;
@@ -1094,6 +1118,9 @@ export class AxlApp {
       else app.repaintRegularTranscript();
       app.paint();
       if (initialResume) void app.openResume();
+      app.adoptionFindingsLoad = app.loadAdoptionFindings().finally(() => {
+        app.adoptionFindingsLoad = undefined;
+      });
       return app;
     } catch (error) {
       try {
@@ -1124,6 +1151,7 @@ export class AxlApp {
     this.extensionCommandControllers.clear();
     this.providerOperation?.abort();
     this.providerOperation = undefined;
+    this.adoptionController.dispose();
 
     const failures: unknown[] = [];
     const extensionCleanup = this.extensionHost.dispose();
@@ -2336,6 +2364,10 @@ export class AxlApp {
       return;
     }
     this.quitPending = true;
+    // A first-launch scan is disposable derived work. Cancel and observe it before
+    // taking the daemon shutdown snapshot so it cannot create a stale status race.
+    this.adoptionController.dispose();
+    await this.adoptionFindingsLoad;
     const context: { sessionId: string; attachmentId?: string } = { sessionId: this.sessionId };
     let status: DaemonHostStatus | undefined;
     try {
@@ -2609,6 +2641,9 @@ export class AxlApp {
       return;
     }
     switch (outcome.surface) {
+      case "adopt":
+        await this.openAdoption(outcome.argument === "scan");
+        return;
       case "model":
         await this.selectModel("");
         return;
@@ -2674,6 +2709,143 @@ export class AxlApp {
       case "delete":
         await this.disposeSession(true);
         return;
+    }
+  }
+
+  private adoptionDiscoveryScope() {
+    return this.initialResumePending
+      ? ({ scopes: ["global"], includeMalformed: true } as const)
+      : ({
+          projectRoot: this.cwd,
+          scopes: ["global", "project"],
+          includeMalformed: true,
+        } as const);
+  }
+
+  private async loadAdoptionFindings(): Promise<void> {
+    if (this.adoptionController.state.status === "unavailable") return;
+    try {
+      const state = await this.adoptionController.loadAll(this.adoptionDiscoveryScope());
+      if (
+        !this.stopped &&
+        state.candidates.length > 0 &&
+        !state.findingsDismissed &&
+        this.notice === undefined
+      ) {
+        this.notice = this.view.palette.accent(
+          `Existing setups found · ${plural(state.candidates.length, "resource")} · run /adopt to review`,
+        );
+        this.redraw();
+      }
+    } catch {
+      // First-launch discovery is opportunistic and must never delay or disrupt a session.
+    }
+  }
+
+  private async openAdoption(forceRefresh: boolean): Promise<void> {
+    const state = this.adoptionController.state;
+    if (state.status === "unavailable") {
+      this.notice = this.view.palette.error("✖ adoption discovery is unavailable");
+      return;
+    }
+    this.notice = this.view.palette.dim("· scanning existing agent setups…");
+    try {
+      const loaded = forceRefresh
+        ? await this.adoptionController.refresh(this.adoptionDiscoveryScope())
+        : await this.adoptionController.load(this.adoptionDiscoveryScope());
+      while (this.adoptionController.state.hasMore) await this.adoptionController.loadMore();
+      void loaded;
+      this.adoptionController.dismissFindings();
+      this.openAdoptionPicker();
+      this.notice = undefined;
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${sanitizeTerminalText(error instanceof Error ? error.message : "adoption scan failed")}`,
+      );
+    }
+  }
+
+  private openAdoptionPicker(): void {
+    const state = this.adoptionController.state;
+    const candidates = state.candidates;
+    this.openPicker({
+      title: "Adopt · discovered resources",
+      items: adoptionPickerItems(candidates),
+      current: "__rescan__",
+      onPick: (value) => {
+        if (value === "__rescan__") void this.openAdoption(true);
+        else if (value === "__dismiss__") {
+          this.adoptionController.dismissFindings();
+          this.notice = this.view.palette.dim("· adoption findings dismissed");
+        } else {
+          const candidate = candidates.find((entry) => entry.candidateId === value);
+          if (candidate !== undefined) void this.inspectAdoptionCandidate(candidate);
+        }
+      },
+      preview: () => [
+        this.view.palette.dim(
+          `${plural(candidates.length, "candidate")} · ${plural(state.warnings.length, "scan warning")}`,
+        ),
+        ...state.warnings
+          .slice(0, 3)
+          .map((warning) =>
+            this.view.palette.dim(`${warning.code} · ${sanitizeTerminalText(warning.message)}`),
+          ),
+        this.view.palette.dim(
+          "Select a valid Agent Skill to inspect it and review native installation.",
+        ),
+      ],
+    });
+  }
+
+  private async inspectAdoptionCandidate(candidate: AdoptionCandidate): Promise<void> {
+    this.notice = this.view.palette.dim(
+      `· inspecting ${sanitizeTerminalText(candidate.displayName)}…`,
+    );
+    try {
+      const report = await this.adoptionController.inspect(candidate);
+      if (report === undefined) return;
+      this.commitLines(adoptionInspectionLines(report));
+      if (candidate.kind !== "skill" || report.trustReview === undefined) {
+        this.notice = undefined;
+        return;
+      }
+      if (
+        report.trustReview.executableFiles.length > 0 ||
+        report.trustReview.conflicts.length > 0
+      ) {
+        this.notice = this.view.palette.error(
+          "✖ native installation is blocked by the trust review",
+        );
+        return;
+      }
+      const planned = await this.adoptionController.planNativeSkill(candidate, candidate.scope);
+      const confirmed = await this.confirmShutdown(`Activate ${candidate.displayName}?`, [
+        `Source ${report.trustReview.sourceContentSha256}`,
+        `Destination ${candidate.scope}`,
+        `${plural(report.surfaceCount, "resource")} · ${plural(report.trustReview.capabilityRequests.length, "capability request")}`,
+        "The immutable skill will become available to new and safely reloaded sessions.",
+      ]);
+      if (!confirmed) {
+        this.notice = this.view.palette.dim("· native skill installation cancelled");
+        return;
+      }
+      this.notice = this.view.palette.dim(`· installing ${candidate.displayName}…`);
+      const staged = await this.adoptionController.stageNativeSkill(planned.operationId);
+      if (staged.revisionId === undefined)
+        throw new Error("Native skill installation did not produce a revision");
+      await this.adoptionController.approveNativeSkill({
+        operationId: planned.operationId,
+        revisionId: staged.revisionId,
+        reviewBindingSha256: report.trustReview.bindingSha256,
+        policyGeneration: report.trustReview.policyGeneration,
+      });
+      this.commitLines([`Activated Agent Skill · ${sanitizeTerminalText(candidate.displayName)}`]);
+      this.notice = undefined;
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${sanitizeTerminalText(error instanceof Error ? error.message : "inspection failed")}`,
+      );
     }
   }
 
@@ -5116,6 +5288,7 @@ export class AxlApp {
     diffLayout?: DiffLayout;
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
+    adoptionDismissedScanGeneration?: string | undefined;
   }): Promise<void> {
     try {
       await this.options.onPreferenceChange?.(update);

@@ -6,10 +6,10 @@ import {
   type CommandListResult,
   type EventId,
   type ModelRequestSettings,
-  parseCommandListResult,
-  parseModelRequestSettings,
   type ProviderAuthenticationStatus,
   type ProviderCatalogRefreshResult,
+  parseCommandListResult,
+  parseModelRequestSettings,
   type SessionConfiguration,
   type SessionForkResult,
   type SessionId,
@@ -36,6 +36,7 @@ export interface EffectiveCommand extends CommandDescriptor {
 export type PresentationCommandSource = () => readonly PresentationCommand[];
 
 export type CommandSurface =
+  | "adopt"
   | "model"
   | "thinking"
   | "providers"
@@ -212,6 +213,15 @@ export class CommandController {
     }
 
     switch (command.name) {
+      case "adopt":
+        if (argument !== undefined && argument !== "scan") {
+          throw new AxlClientError("invalid_command_argument", "Use /adopt or /adopt scan");
+        }
+        return {
+          state: "focus",
+          surface: "adopt",
+          ...(argument === undefined ? {} : { argument }),
+        };
       case "model": {
         if (!argument) return { state: "focus", surface: "model" };
         const separator = argument.indexOf("/");

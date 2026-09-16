@@ -26,6 +26,7 @@ export interface WebPreferences {
   readonly changesView: "files" | "all";
   /** Open dock panes in tiling order. */
   readonly panes: readonly PaneId[];
+  readonly adoptionDismissedScanGeneration?: string | undefined;
 }
 
 export type WebHostCapability = "project.folder.validate" | "provider.auth.login";
@@ -95,6 +96,9 @@ export function parseWebPreferences(value: unknown): WebPreferences {
     Number(preferences.dockWidth) < DOCK_WIDTH_RANGE.min ||
     Number(preferences.dockWidth) > DOCK_WIDTH_RANGE.max ||
     typeof preferences.sidebarCollapsed !== "boolean" ||
+    (preferences.adoptionDismissedScanGeneration !== undefined &&
+      (typeof preferences.adoptionDismissedScanGeneration !== "string" ||
+        new TextEncoder().encode(preferences.adoptionDismissedScanGeneration).byteLength > 128)) ||
     (preferences.changesView !== "files" && preferences.changesView !== "all")
   )
     throw new Error("Invalid web preferences");
@@ -110,6 +114,9 @@ export function parseWebPreferences(value: unknown): WebPreferences {
     sidebarCollapsed: preferences.sidebarCollapsed,
     changesView: preferences.changesView,
     panes,
+    ...(preferences.adoptionDismissedScanGeneration === undefined
+      ? {}
+      : { adoptionDismissedScanGeneration: preferences.adoptionDismissedScanGeneration }),
   };
 }
 

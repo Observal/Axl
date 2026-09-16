@@ -88,6 +88,8 @@ importers:
         specifier: 8.18.1
         version: 8.18.1
 
+  packages/compiler: {}
+
   packages/daemon:
     dependencies:
       '@axl/kernel':
@@ -155,6 +157,9 @@ importers:
       '@axl/ai':
         specifier: workspace:*
         version: link:../ai
+      '@axl/compiler':
+        specifier: workspace:*
+        version: link:../compiler
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon

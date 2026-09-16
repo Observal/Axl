@@ -48,6 +48,7 @@ test("command catalog narrows descriptors to granted capabilities and session co
 
 test("command catalog publishes the complete built-in shared directory", () => {
   const capabilities = new Set([
+    "adoption.discover",
     "provider.auth.login",
     "provider.catalog.refresh",
     "provider.list",
@@ -77,10 +78,11 @@ test("command catalog publishes the complete built-in shared directory", () => {
     parseSessionId("00000000-0000-4000-8000-000000000001"),
   );
 
-  assert.equal(catalog.generation, "builtin-3");
+  assert.equal(catalog.generation, "builtin-4");
   assert.deepEqual(
     catalog.commands.map((command) => command.name),
     [
+      "adopt",
       "model",
       "thinking",
       "providers",

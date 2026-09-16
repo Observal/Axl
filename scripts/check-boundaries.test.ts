@@ -23,9 +23,15 @@ function writePackage(
   writeFileSync(join(directory, "src/index.ts"), source);
 }
 
-test("enforces protocol, kernel, runtime, TUI, and extension dependency boundaries", () => {
+test("enforces protocol, compiler, kernel, runtime, TUI, and extension dependency boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "axl-boundaries-"));
   writePackage(root, "protocol", { name: "@axl/protocol", dependencies: { typebox: "1.0.0" } });
+  writePackage(
+    root,
+    "compiler",
+    { name: "@axl/compiler", dependencies: { "@axl/sdk": "workspace:*" } },
+    'import "@axl/daemon";\n',
+  );
   writePackage(root, "kernel", {
     name: "@axl/kernel",
     dependencies: { "@axl/protocol": "workspace:*", yaml: "1.0.0" },
@@ -59,9 +65,11 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
 
   assert.deepEqual(checkWorkspace(root), [
     "packages/protocol must be dependency-free, found typebox",
+    "packages/compiler may depend only on @axl/protocol, found @axl/sdk",
     "packages/kernel may depend only on @axl/protocol, found yaml",
     "packages/runtime must not depend on presentation package @axl/tui",
     "packages/tui may depend only on client-facing packages, found @axl/runtime",
+    "packages/compiler/src/index.ts imports @axl/daemon; compiler may import only Node.js and @axl/protocol",
     "packages/extensions/example/src/index.ts imports private kernel path @axl/kernel/private",
     "packages/tui/src/index.ts imports @axl/ai; TUI source may import only client-facing packages",
     "apps/example/index.ts imports @axl/kernel; apps may import only @axl/sdk",

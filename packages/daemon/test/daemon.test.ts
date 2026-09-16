@@ -29,6 +29,8 @@ import { promisify } from "node:util";
 
 import { JsonlEventLog, type ModelPort, type ModelRetryOptions, ToolRegistry } from "@axl/kernel";
 import type {
+  AdoptionDiscoverResult,
+  AdoptionInspectResult,
   BlobReference,
   CanonicalEvent,
   ModelStreamEvent,
@@ -45,6 +47,7 @@ import {
   encodeWireMessage,
   isRpcErrorAllowed,
   MAX_CANONICAL_EVENT_BYTES,
+  parseAdoptionCandidateId,
   parseEventId,
   parseOperationId,
   parseServerMessage,
@@ -65,7 +68,12 @@ import {
 } from "@axl/sdk";
 import { connectUnixClient, nodeIdempotencyKeys, UnixSocketTransportFactory } from "@axl/sdk/unix";
 import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
-import { AxlDaemon, DaemonError, normalizeDaemonRpcErrorCode } from "../src/index.ts";
+import {
+  type AdoptionService,
+  AxlDaemon,
+  DaemonError,
+  normalizeDaemonRpcErrorCode,
+} from "../src/index.ts";
 import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
 
 const usage: Usage = { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -144,6 +152,7 @@ async function startDaemon(
     readonly cursorLifetimeMs?: number;
     readonly retry?: ModelRetryOptions | false;
     readonly tools?: (sessionId: SessionId, dataDirectory: string) => ToolRegistry;
+    readonly adoptionService?: AdoptionService;
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
@@ -151,7 +160,7 @@ async function startDaemon(
   const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
   const dataDirectory = join(directory, "data");
-  const { retry, tools, ...daemonOptions } = deliveryOptions;
+  const { retry, tools, adoptionService, ...daemonOptions } = deliveryOptions;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory,
@@ -159,6 +168,7 @@ async function startDaemon(
     ...(sandboxProvider === undefined ? {} : { sandboxProvider }),
     ...(sandboxImage === undefined ? {} : { sandboxImage }),
     ...daemonOptions,
+    ...(adoptionService === undefined ? {} : { adoptionService }),
     runtime: ({ sessionId }) => ({
       model: port,
       tools: tools?.(sessionId, dataDirectory) ?? new ToolRegistry(),
@@ -4507,11 +4517,23 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "axl.sock");
   const boundaries: string[] = [];
+  let holdReload = false;
+  let failReload = false;
+  let releaseReload: (() => void) | undefined;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
-    runtime: ({ boundary }) => {
+    runtime: async ({ boundary }) => {
       boundaries.push(boundary);
+      if (boundary === "reload" && failReload) {
+        failReload = false;
+        throw new Error("injected adoption reload failure");
+      }
+      if (boundary === "reload" && holdReload) {
+        await new Promise<void>((resolve) => {
+          releaseReload = resolve;
+        });
+      }
       return {
         model: replyPort(),
         tools: new ToolRegistry(),
@@ -4553,6 +4575,29 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
       .filter((event) => reloaded.boundaryEventIds.includes(event.id))
       .every((event) => event.operationId === reloadKey),
     true,
+  );
+
+  daemon.scheduleAdoptionReload("project", 1, directory);
+  await waitFor(() => boundaries.length === 3, "idle adoption catalog reload");
+  assert.equal(boundaries[2], "reload");
+
+  holdReload = true;
+  daemon.scheduleAdoptionReload("project", 2, directory);
+  await waitFor(() => boundaries.length === 4, "first coalesced adoption reload");
+  daemon.scheduleAdoptionReload("project", 3, directory);
+  holdReload = false;
+  releaseReload?.();
+  await waitFor(() => boundaries.length === 5, "newer adoption generation reload");
+
+  failReload = true;
+  daemon.scheduleAdoptionReload("project", 4, directory);
+  await waitFor(
+    () => daemon.adoptionReloadFailure(created.sessionId) !== undefined,
+    "observable adoption reload failure",
+  );
+  await waitFor(
+    () => boundaries.length >= 7 && daemon.adoptionReloadFailure(created.sessionId) === undefined,
+    "adoption reload retry",
   );
 
   client.close();
@@ -4600,4 +4645,149 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
     content: [{ type: "text", text: "after reload" }],
   });
   assert.equal(sent.stopReason, "stop");
+});
+
+test("dispatches cancellable adoption discovery only to capable attachments", async (context) => {
+  const adoptionCandidateId = parseAdoptionCandidateId("123e4567-e89b-812d-a456-426614174000");
+  let discoverCalls = 0;
+  let openedProjectRoots: readonly string[] = [];
+  const adoptionService: AdoptionService = {
+    async discover(_params, requestContext, signal): Promise<AdoptionDiscoverResult> {
+      discoverCalls += 1;
+      openedProjectRoots = requestContext.openedProjectRoots;
+      await new Promise<void>((resolvePromise, reject) => {
+        const timer = setTimeout(resolvePromise, 5);
+        signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            reject(new DOMException("cancelled", "AbortError"));
+          },
+          { once: true },
+        );
+      });
+      return { scanGeneration: "scan-1", candidates: [], warnings: [] };
+    },
+    async inspect(): Promise<AdoptionInspectResult> {
+      return {
+        candidate: {
+          candidateId: adoptionCandidateId,
+          discoveryFingerprint: "a".repeat(64),
+          ecosystem: "pi",
+          scope: "global",
+          kind: "extension",
+          displayName: "hello",
+          source: { kind: "local", canonicalPath: "/tmp/pi" },
+          relativeResourcePath: "extensions/hello.ts",
+          primary: true,
+          executable: true,
+          resourceCount: 1,
+          warningCount: 0,
+          malformed: false,
+        },
+        adapter: { id: "pi", version: "1", sourceSchemaVersion: "1" },
+        license: { expressions: [], notices: [] },
+        inventory: { fileCount: 1, totalBytes: 1, executable: true },
+        limits: {
+          maxTraversalDepth: 32,
+          maxEntries: 50_000,
+          maxFiles: 20_000,
+          maxTotalBytes: 67_108_864,
+          maxFileBytes: 1_048_576,
+          maxManifestBytes: 262_144,
+        },
+        surfaceCount: 0,
+        diagnosticCount: 0,
+        detailOffset: 0,
+        surfaces: [],
+        diagnostics: [],
+      };
+    },
+  };
+  const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
+    adoptionService,
+  });
+  const client = await connectUnixClient(fixture.socketPath, {
+    requestedCapabilities: [
+      "command.list",
+      "session.create",
+      "adoption.discover",
+      "adoption.inspect",
+      "adoption.plan",
+    ],
+  });
+  context.after(() => client.close());
+  assert.deepEqual(client.connection.grantedCapabilities, [
+    "command.list",
+    "session.create",
+    "adoption.discover",
+    "adoption.inspect",
+  ]);
+  await client.request("session.create", { cwd: fixture.cwd });
+  const result = await client.request("adoption.discover", { pageSize: 10 });
+  assert.equal(result.scanGeneration, "scan-1");
+  assert.deepEqual(openedProjectRoots, [fixture.cwd]);
+  assert.equal(discoverCalls, 1);
+  const inspected = await client.request("adoption.inspect", {
+    candidateId: adoptionCandidateId,
+    expectedDiscoveryFingerprint: "a".repeat(64),
+    pageSize: 10,
+  });
+  assert.equal(inspected.adapter.id, "pi");
+  const commands = await client.listCommands();
+  assert.equal(commands.generation, "builtin-4");
+  assert.equal(
+    commands.commands.some((command) => command.id === "core.adopt"),
+    true,
+  );
+
+  const unauthorized = await connectUnixClient(fixture.socketPath, {
+    requestedCapabilities: [],
+  });
+  context.after(() => unauthorized.close());
+  await assert.rejects(
+    unauthorized.request("adoption.discover", { pageSize: 10 }),
+    (error: unknown) => error instanceof AxlClientError && error.code === "unsupported_capability",
+  );
+});
+
+test("cancels an in-flight adoption scan", async (context) => {
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolvePromise) => {
+    markStarted = resolvePromise;
+  });
+  const adoptionService: AdoptionService = {
+    discover(_params, _requestContext, signal): Promise<AdoptionDiscoverResult> {
+      markStarted();
+      return new Promise((_, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("cancelled", "AbortError")),
+          { once: true },
+        );
+      });
+    },
+    inspect() {
+      throw new Error("not used");
+    },
+  };
+  const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
+    adoptionService,
+  });
+  const client = await connectUnixClient(fixture.socketPath, {
+    requestedCapabilities: ["adoption.discover"],
+  });
+  context.after(() => client.close());
+  const controller = new AbortController();
+  const request = client.request(
+    "adoption.discover",
+    { pageSize: 10 },
+    { signal: controller.signal },
+  );
+  await started;
+  controller.abort();
+  await assert.rejects(
+    request,
+    (error: unknown) => error instanceof AxlClientError && error.code === "cancelled",
+  );
 });

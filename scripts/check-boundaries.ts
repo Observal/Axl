@@ -88,6 +88,9 @@ export function checkWorkspace(root: string): string[] {
   const protocol = packages.find(
     ({ directory }) => directory === resolve(root, "packages/protocol"),
   );
+  const compiler = packages.find(
+    ({ directory }) => directory === resolve(root, "packages/compiler"),
+  );
   const kernel = packages.find(({ directory }) => directory === resolve(root, "packages/kernel"));
   const runtime = packages.find(({ directory }) => directory === resolve(root, "packages/runtime"));
   const sdk = packages.find(({ directory }) => directory === resolve(root, "packages/sdk"));
@@ -118,6 +121,16 @@ export function checkWorkspace(root: string): string[] {
       errors.push(
         `${relative(root, protocol.directory)} must be dependency-free, found ${dependency}`,
       );
+    }
+  }
+
+  if (compiler) {
+    for (const dependency of runtimeDependencies(compiler.manifest)) {
+      if (dependency !== protocolName) {
+        errors.push(
+          `${relative(root, compiler.directory)} may depend only on ${protocolName}, found ${dependency}`,
+        );
+      }
     }
   }
 
@@ -175,6 +188,16 @@ export function checkWorkspace(root: string): string[] {
         if (directory === protocol?.directory && !specifier.startsWith(".")) {
           errors.push(
             `${relative(root, path)} imports ${specifier}; protocol may use only relative imports`,
+          );
+        }
+        if (
+          directory === compiler?.directory &&
+          !specifier.startsWith(".") &&
+          !specifier.startsWith("node:") &&
+          specifier !== protocolName
+        ) {
+          errors.push(
+            `${relative(root, path)} imports ${specifier}; compiler may import only Node.js and ${protocolName}`,
           );
         }
         if (

@@ -64,6 +64,7 @@ export interface WebPreferences {
   readonly sidebarCollapsed: boolean;
   readonly changesView: "files" | "all";
   readonly panes: readonly WebPaneId[];
+  readonly adoptionDismissedScanGeneration?: string | undefined;
 }
 
 const MAX_WEB_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -104,7 +105,14 @@ function parsePreferences(value: unknown): WebPreferences {
   if (
     Object.keys(record).some(
       (key) =>
-        !["sidebarWidth", "dockWidth", "sidebarCollapsed", "changesView", "panes"].includes(key),
+        ![
+          "sidebarWidth",
+          "dockWidth",
+          "sidebarCollapsed",
+          "changesView",
+          "panes",
+          "adoptionDismissedScanGeneration",
+        ].includes(key),
     ) ||
     !Number.isInteger(record.sidebarWidth) ||
     Number(record.sidebarWidth) < 200 ||
@@ -113,6 +121,9 @@ function parsePreferences(value: unknown): WebPreferences {
     Number(record.dockWidth) < 380 ||
     Number(record.dockWidth) > 1200 ||
     typeof record.sidebarCollapsed !== "boolean" ||
+    (record.adoptionDismissedScanGeneration !== undefined &&
+      (typeof record.adoptionDismissedScanGeneration !== "string" ||
+        Buffer.byteLength(record.adoptionDismissedScanGeneration, "utf8") > 128)) ||
     (record.changesView !== "files" && record.changesView !== "all")
   )
     throw new Error("Web preferences are invalid");
@@ -122,6 +133,9 @@ function parsePreferences(value: unknown): WebPreferences {
     sidebarCollapsed: record.sidebarCollapsed,
     changesView: record.changesView,
     panes: parsePaneIds(record.panes),
+    ...(record.adoptionDismissedScanGeneration === undefined
+      ? {}
+      : { adoptionDismissedScanGeneration: record.adoptionDismissedScanGeneration }),
   };
 }
 

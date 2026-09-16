@@ -326,6 +326,8 @@ export class SessionManager {
   private readonly opening = new Map<SessionId, Promise<ManagedSession>>();
   private readonly quarantined = new Map<SessionId, EventLogMigrationRequiredError>();
   private readonly incompleteMigrations = new Set<SessionId>();
+  private readonly pendingAdoptionReloads = new Map<SessionId, number>();
+  private readonly adoptionReloadFailures = new Map<SessionId, Error>();
   private readonly workspaceCheckpoints: WorkspaceCheckpointStore;
   private readonly workspace: WorkspaceService;
   private readonly blobs: BlobStore;
@@ -947,6 +949,10 @@ export class SessionManager {
     };
   }
 
+  openedProjectRoots(): readonly string[] {
+    return [...new Set([...this.sessions.values()].map((managed) => managed.cwd))].sort();
+  }
+
   async list(): Promise<readonly StoredSessionSummary[]> {
     const directory = join(this.options.dataDirectory, "sessions");
     let entries: Dirent[];
@@ -1358,6 +1364,66 @@ export class SessionManager {
       ...(webSearch === undefined ? {} : { webSearch }),
       profile: profile ?? "standard",
     });
+  }
+
+  /** Pins active turns to their current catalog and coalesces every newer registry generation. */
+  scheduleAdoptionReload(
+    scope: "global" | "project",
+    registryGeneration: number,
+    projectRoot?: string,
+  ): void {
+    for (const [sessionId, managed] of this.sessions) {
+      if (scope === "project" && managed.cwd !== projectRoot) continue;
+      const pending = this.pendingAdoptionReloads.get(sessionId);
+      this.pendingAdoptionReloads.set(sessionId, Math.max(pending ?? 0, registryGeneration));
+      if (pending !== undefined) continue;
+      const apply = async (): Promise<void> => {
+        const current = this.sessions.get(sessionId);
+        if (current === undefined || current.disposing) {
+          this.pendingAdoptionReloads.delete(sessionId);
+          this.adoptionReloadFailures.delete(sessionId);
+          return;
+        }
+        if (current.activeTurn !== undefined) {
+          void current.activeTurn.done.finally(() => void apply());
+          return;
+        }
+        if (current.rebuilding !== undefined) {
+          void current.rebuilding.finally(() => void apply());
+          return;
+        }
+        if (current.interruptDelivery !== undefined || current.interactions.size > 0) {
+          setTimeout(() => void apply(), 25).unref();
+          return;
+        }
+        const targetGeneration = this.pendingAdoptionReloads.get(sessionId);
+        if (targetGeneration === undefined) return;
+        try {
+          await this.reload(sessionId);
+          this.adoptionReloadFailures.delete(sessionId);
+        } catch (cause) {
+          const error = cause instanceof Error ? cause : new Error(String(cause));
+          this.adoptionReloadFailures.set(sessionId, error);
+          console.error(
+            `Failed to reload session ${sessionId} for adoption registry generation ${targetGeneration}`,
+            error,
+          );
+          setTimeout(() => void apply(), 250).unref();
+          return;
+        }
+        const newest = this.pendingAdoptionReloads.get(sessionId);
+        if (newest === undefined || newest <= targetGeneration) {
+          this.pendingAdoptionReloads.delete(sessionId);
+          return;
+        }
+        queueMicrotask(() => void apply());
+      };
+      queueMicrotask(() => void apply());
+    }
+  }
+
+  adoptionReloadFailure(sessionId: SessionId): Error | undefined {
+    return this.adoptionReloadFailures.get(sessionId);
   }
 
   async reload(

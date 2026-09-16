@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "@axl/protocol";
+export * from "./adoption.ts";
 export * from "./blobs.ts";
 export * from "./client.ts";
 export * from "./commands.ts";

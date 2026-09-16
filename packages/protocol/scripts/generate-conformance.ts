@@ -17,6 +17,12 @@ import {
   isRpcErrorAllowed,
   isRpcErrorRetryable,
   PRE_RPC_ERROR_CODES,
+  parseAdoptionApprovalId,
+  parseAdoptionCandidateId,
+  parseAdoptionId,
+  parseAdoptionOperationId,
+  parseAdoptionRevisionId,
+  parseAdoptionSubscriptionId,
   parseEvent,
   parseEventId,
   parseOperationId,
@@ -41,6 +47,86 @@ const otherEventId = parseEventId("00000000-0000-4000-8000-000000000002");
 const operationId = parseOperationId("00000000-0000-4000-8000-000000000010");
 const idempotencyKey = "00000000-0000-4000-8000-000000000020";
 const digest = "a".repeat(64);
+const adoptionCandidateId = parseAdoptionCandidateId("018f0000-0000-8000-8000-000000000001");
+const adoptionOperationId = parseAdoptionOperationId("018f0000-0000-7000-8000-000000000002");
+const adoptionId = parseAdoptionId("018f0000-0000-7000-8000-000000000003");
+const adoptionRevisionId = parseAdoptionRevisionId("018f0000-0000-7000-8000-000000000004");
+const adoptionApprovalId = parseAdoptionApprovalId("018f0000-0000-7000-8000-000000000005");
+const adoptionSubscriptionId = parseAdoptionSubscriptionId("018f0000-0000-7000-8000-000000000006");
+const adoptionSource = { kind: "local", canonicalPath: "/workspace/.opencode/tools" } as const;
+const adoptionCandidate = {
+  candidateId: adoptionCandidateId,
+  discoveryFingerprint: digest,
+  ecosystem: "opencode",
+  scope: "project",
+  kind: "package",
+  displayName: "math tools",
+  source: adoptionSource,
+  relativeResourcePath: ".opencode/tools/math.ts",
+  primary: true,
+  executable: true,
+  resourceCount: 1,
+  warningCount: 0,
+  malformed: false,
+} as const;
+const adoptionSurface = {
+  surfaceId: digest,
+  kind: "extension",
+  name: "math_add",
+  relativePath: ".opencode/tools/math.ts",
+  primary: true,
+  executable: true,
+  compatibility: "adapted",
+  requiredCapabilities: [],
+  diagnosticCount: 0,
+  dynamicBehavior: "none",
+} as const;
+const adoptionCompatibilitySummary = {
+  primarySurfaceId: digest,
+  overall: "adapted",
+  surfaceCount: 1,
+  unsupportedSurfaceCount: 0,
+  partialAcknowledgementRequired: false,
+} as const;
+const adoptionCompatibility = {
+  ...adoptionCompatibilitySummary,
+  surfaces: [adoptionSurface],
+} as const;
+const adoptionOperation = {
+  operationId: adoptionOperationId,
+  state: "inspected",
+  phase: "inspection",
+  statusText: "Inspection complete",
+  sequence: 2,
+  createdAt: 1,
+  updatedAt: 2,
+} as const;
+const adoptionOperationDetail = {
+  ...adoptionOperation,
+  candidate: adoptionCandidate,
+  compatibility: adoptionCompatibility,
+  capabilityRequests: [],
+  diagnosticCount: 0,
+  detailOffset: 0,
+  diagnostics: [],
+} as const;
+const adoptedPackage = {
+  adoptionId,
+  displayName: "math tools",
+  ecosystem: "opencode",
+  scope: "project",
+  enabled: true,
+  activeRevisionId: adoptionRevisionId,
+  revisionCount: 1,
+} as const;
+const adoptedRevision = {
+  revisionId: adoptionRevisionId,
+  createdAt: 2,
+  active: true,
+  manifestSha256: digest,
+  compatibility: "adapted",
+} as const;
+const verification = { status: "passed", steps: [], evidenceSha256: digest } as const;
 
 const eventPayloads = {
   "session.created": { cwd: "/workspace" },
@@ -263,6 +349,57 @@ const params = {
   "session.dispose": { sessionId },
   "session.rename": { sessionId, title: "Focused work" },
   "session.delete": { sessionId },
+  "adoption.discover": {
+    ecosystems: ["opencode"],
+    scopes: ["project"],
+    projectRoot: "/workspace",
+    pageSize: 50,
+  },
+  "adoption.inspect": {
+    candidateId: adoptionCandidateId,
+    expectedDiscoveryFingerprint: digest,
+    pageSize: 50,
+  },
+  "adoption.plan": {
+    candidateId: adoptionCandidateId,
+    expectedDiscoveryFingerprint: digest,
+    selectedSurfaceIds: [digest],
+    targetScope: "project",
+  },
+  "adoption.start": { operationId: adoptionOperationId },
+  "adoption.operation.get": { operationId: adoptionOperationId, detailPageSize: 50 },
+  "adoption.operation.list": { states: ["inspected"], pageSize: 50 },
+  "adoption.operation.cancel": { operationId: adoptionOperationId },
+  "adoption.operation.approveConversion": {
+    operationId: adoptionOperationId,
+    disclosureManifestSha256: digest,
+  },
+  "adoption.operation.acknowledgePartial": {
+    operationId: adoptionOperationId,
+    reportSha256: digest,
+    rationale: "Reviewed unsupported secondary surfaces",
+  },
+  "adoption.operation.approveActivation": {
+    operationId: adoptionOperationId,
+    revisionId: adoptionRevisionId,
+    reviewBindingSha256: digest,
+    policyGeneration: "native-skill-policy-v1",
+  },
+  "adoption.list": { scopes: ["project"], pageSize: 50 },
+  "adoption.revision.get": { adoptionId, revisionId: adoptionRevisionId, detailPageSize: 50 },
+  "adoption.diff": { adoptionId, toRevisionId: adoptionRevisionId },
+  "adoption.update": { adoptionId, previewOnly: true },
+  "adoption.rollback": {
+    adoptionId,
+    targetRevisionId: adoptionRevisionId,
+    expectedActiveRevisionId: adoptionRevisionId,
+  },
+  "adoption.disable": { adoptionId, expectedActiveRevisionId: adoptionRevisionId },
+  "adoption.remove": { adoptionId },
+  "adoption.purge": { adoptionId, purgePlanSha256: digest, confirmAdoptionId: adoptionId },
+  "adoption.subscribe": {},
+  "adoption.ack": { subscriptionId: adoptionSubscriptionId, cursor: "cursor-1" },
+  "adoption.unsubscribe": { subscriptionId: adoptionSubscriptionId },
 } satisfies { readonly [Method in RpcMethod]: RpcParams<Method> };
 
 const opened = {
@@ -496,6 +633,92 @@ const results = {
   "session.dispose": { disposed: true, historyPreserved: true },
   "session.rename": { title: "Focused work", eventId },
   "session.delete": { deleted: true, historyPreserved: false },
+  "adoption.discover": { scanGeneration: "scan-1", candidates: [adoptionCandidate], warnings: [] },
+  "adoption.inspect": {
+    candidate: adoptionCandidate,
+    adapter: { id: "opencode", version: "1", sourceSchemaVersion: "1" },
+    license: { expressions: ["MIT"], notices: [] },
+    inventory: { fileCount: 1, totalBytes: 100, executable: true },
+    limits: {
+      maxTraversalDepth: 32,
+      maxEntries: 50_000,
+      maxFiles: 20_000,
+      maxTotalBytes: 67_108_864,
+      maxFileBytes: 1_048_576,
+      maxManifestBytes: 262_144,
+    },
+    surfaceCount: 1,
+    diagnosticCount: 0,
+    detailOffset: 0,
+    surfaces: [adoptionSurface],
+    diagnostics: [],
+  },
+  "adoption.plan": { operationId: adoptionOperationId, operation: adoptionOperationDetail },
+  "adoption.start": adoptionOperation,
+  "adoption.operation.get": adoptionOperationDetail,
+  "adoption.operation.list": { operations: [adoptionOperation] },
+  "adoption.operation.cancel": {
+    ...adoptionOperation,
+    state: "cancelled",
+    sequence: 3,
+    updatedAt: 3,
+  },
+  "adoption.operation.approveConversion": {
+    approvalId: adoptionApprovalId,
+    operation: adoptionOperation,
+  },
+  "adoption.operation.acknowledgePartial": {
+    approvalId: adoptionApprovalId,
+    operation: adoptionOperation,
+  },
+  "adoption.operation.approveActivation": {
+    approvalId: adoptionApprovalId,
+    operation: adoptionOperation,
+  },
+  "adoption.list": { adoptions: [adoptedPackage] },
+  "adoption.revision.get": {
+    adoption: adoptedPackage,
+    revision: adoptedRevision,
+    compatibility: adoptionCompatibility,
+    verification,
+    diagnosticCount: 0,
+    detailOffset: 0,
+    diagnostics: [],
+  },
+  "adoption.diff": {
+    toRevisionId: adoptionRevisionId,
+    filesChanged: 1,
+    surfacesChanged: 1,
+    truncated: false,
+  },
+  "adoption.update": {
+    preview: {
+      adoptionId,
+      currentRevisionId: adoptionRevisionId,
+      source: adoptionSource,
+      available: false,
+    },
+  },
+  "adoption.rollback": {
+    preview: {
+      adoptionId,
+      fromRevisionId: adoptionRevisionId,
+      toRevisionId: adoptionRevisionId,
+      compatibility: adoptionCompatibilitySummary,
+    },
+    operation: adoptionOperation,
+  },
+  "adoption.disable": { ...adoptedPackage, enabled: false },
+  "adoption.remove": { removed: true, retainedRevisions: 1 },
+  "adoption.purge": { purged: true, tombstoneSha256: digest },
+  "adoption.subscribe": {
+    subscriptionId: adoptionSubscriptionId,
+    boundaryCursor: "cursor-1",
+    operations: [adoptionOperation],
+    resumed: false,
+  },
+  "adoption.ack": { cursor: "cursor-1" },
+  "adoption.unsubscribe": { unsubscribed: true },
 } satisfies { readonly [Method in RpcMethod]: RpcResult<Method> };
 
 const requests = Object.entries(params).map(([method, methodParams], index) => ({
@@ -594,6 +817,12 @@ const serverMessages = [
     frame: { operationId, sequence: 1, type: "text_delta", text: "working" },
   },
   { kind: "sessions_changed", generation: 1 },
+  {
+    kind: "adoption_operation",
+    subscriptionId: adoptionSubscriptionId,
+    cursor: "cursor-2",
+    operation: adoptionOperation,
+  },
   {
     kind: "presence",
     attachments: [
