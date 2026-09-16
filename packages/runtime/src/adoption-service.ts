@@ -8,15 +8,15 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import {
   DEFAULT_INSPECTION_LIMITS,
-  DiscoveryError,
-  discover,
-  inspectCandidate,
-  sourceAdapters,
   type DiscoveryCandidate,
   type DiscoveryContext,
   type DiscoveryDiagnostic,
+  DiscoveryError,
   type DiscoveryResult,
+  discover,
+  inspectCandidate,
   type ResourceSurface,
+  sourceAdapters,
 } from "@axl/compiler";
 import {
   type AdoptionRequestContext,
@@ -24,6 +24,7 @@ import {
   AdoptionServiceError,
 } from "@axl/daemon";
 import {
+  ADOPTION_LIMITS,
   type AdoptionCandidate,
   type AdoptionDiagnosticSummary,
   type AdoptionDiscoverParams,
@@ -53,7 +54,8 @@ interface DiscoverCursor {
   readonly generation: string;
   readonly candidates: readonly AdoptionCandidate[];
   readonly warnings: readonly AdoptionDiagnosticSummary[];
-  readonly offset: number;
+  readonly candidateOffset: number;
+  readonly warningOffset: number;
   readonly createdAt: number;
 }
 
@@ -112,7 +114,10 @@ function diagnostic(input: DiscoveryDiagnostic): AdoptionDiagnosticSummary {
   return {
     code: input.code,
     severity: input.severity,
-    message: input.message,
+    // Compiler diagnostics can wrap parser failures whose native messages include
+    // source fragments. Public diagnostics identify the condition without copying
+    // hostile or potentially sensitive source content across the daemon boundary.
+    message: `Source inspection reported ${input.code}`,
     ...(input.relativePath === undefined ? {} : { relativePath: input.relativePath }),
   };
 }
@@ -171,20 +176,6 @@ function publicCandidate(candidate: DiscoveryCandidate): AdoptionCandidate {
   };
 }
 
-function safeWarnings(
-  diagnostics: readonly DiscoveryDiagnostic[],
-): readonly AdoptionDiagnosticSummary[] {
-  const values = diagnostics.slice(0, 63).map(diagnostic);
-  if (diagnostics.length > values.length) {
-    values.push({
-      code: "diagnostics-truncated",
-      severity: "warning",
-      message: `${diagnostics.length - values.length} additional scan diagnostics were omitted`,
-    });
-  }
-  return values;
-}
-
 function mapError(error: unknown): never {
   if (error instanceof AdoptionServiceError) throw error;
   if (error instanceof DiscoveryError) {
@@ -206,7 +197,7 @@ function mapError(error: unknown): never {
     });
   }
   if (error instanceof DOMException && error.name === "AbortError") throw error;
-  throw new AdoptionServiceError("adoption_source_unavailable", "Adoption discovery failed");
+  throw new AdoptionServiceError("internal_error", "Adoption discovery failed");
 }
 
 /** Runtime composition of the data-only compiler behind the daemon service contract. */
@@ -259,6 +250,7 @@ export class LocalAdoptionService implements AdoptionService {
       const operationSignal = this.operationSignal(signal);
       this.ready(operationSignal);
       const requestKey = canonicalJson({
+        attachmentId: context.attachmentId,
         ecosystems: params.ecosystems ?? null,
         scopes: params.scopes ?? null,
         projectRoot: params.projectRoot ?? null,
@@ -289,8 +281,9 @@ export class LocalAdoptionService implements AdoptionService {
           requestKey,
           generation: scan.generation,
           candidates,
-          warnings: safeWarnings(scan.result.diagnostics),
-          offset: 0,
+          warnings: scan.result.diagnostics.map(diagnostic),
+          candidateOffset: 0,
+          warningOffset: 0,
           createdAt: Date.now(),
         },
         params.pageSize,
@@ -309,6 +302,7 @@ export class LocalAdoptionService implements AdoptionService {
       const operationSignal = this.operationSignal(signal);
       this.ready(operationSignal);
       const requestKey = canonicalJson({
+        attachmentId: context.attachmentId,
         candidateId: params.candidateId,
         fingerprint: params.expectedDiscoveryFingerprint,
       });
@@ -336,11 +330,20 @@ export class LocalAdoptionService implements AdoptionService {
           "Project root is no longer an opened Axl session root",
         );
       }
+      const cachedCandidate = cached.result.candidates.find(
+        (candidate) => candidate.candidateId === params.candidateId,
+      );
+      if (cachedCandidate === undefined) {
+        throw new AdoptionServiceError(
+          "adoption_candidate_not_found",
+          "Candidate is not present in a current discovery snapshot",
+        );
+      }
       const inspected = await inspectCandidate(
         cached.context,
         params.candidateId,
         params.expectedDiscoveryFingerprint,
-        { signal: operationSignal },
+        { ecosystems: [cachedCandidate.ecosystem], signal: operationSignal },
       );
       this.ready(operationSignal);
       const publicValue = publicCandidate(inspected);
@@ -506,18 +509,54 @@ export class LocalAdoptionService implements AdoptionService {
   }
 
   private discoveryPage(cursor: DiscoverCursor, pageSize: number): AdoptionDiscoverResult {
-    const candidates = cursor.candidates.slice(cursor.offset, cursor.offset + pageSize);
-    const offset = cursor.offset + candidates.length;
-    const nextPageCursor =
-      offset < cursor.candidates.length
-        ? this.storeCursor({ ...cursor, offset, createdAt: Date.now() })
-        : undefined;
-    return parseRpcResult("adoption.discover", {
-      scanGeneration: cursor.generation,
-      candidates,
-      warnings: cursor.warnings,
-      ...(nextPageCursor === undefined ? {} : { nextPageCursor }),
-    });
+    let candidateCount = Math.min(pageSize, cursor.candidates.length - cursor.candidateOffset);
+    let warningCount = Math.min(
+      ADOPTION_LIMITS.pageWarnings,
+      cursor.warnings.length - cursor.warningOffset,
+    );
+    const nextCursorValue = randomUUID();
+    let result: AdoptionDiscoverResult;
+    for (;;) {
+      const candidates = cursor.candidates.slice(
+        cursor.candidateOffset,
+        cursor.candidateOffset + candidateCount,
+      );
+      const warnings = cursor.warnings.slice(
+        cursor.warningOffset,
+        cursor.warningOffset + warningCount,
+      );
+      const candidateOffset = cursor.candidateOffset + candidates.length;
+      const warningOffset = cursor.warningOffset + warnings.length;
+      const hasMore =
+        candidateOffset < cursor.candidates.length || warningOffset < cursor.warnings.length;
+      const value = {
+        scanGeneration: cursor.generation,
+        candidates,
+        warnings,
+        ...(hasMore ? { nextPageCursor: nextCursorValue } : {}),
+      };
+      if (
+        new TextEncoder().encode(JSON.stringify(value)).byteLength <= ADOPTION_LIMITS.resultBytes
+      ) {
+        result = parseRpcResult("adoption.discover", value);
+        if (hasMore) {
+          this.storeCursor(
+            { ...cursor, candidateOffset, warningOffset, createdAt: Date.now() },
+            nextCursorValue,
+          );
+        }
+        break;
+      }
+      if (candidateCount > 0) candidateCount -= 1;
+      else if (warningCount > 0) warningCount -= 1;
+      else {
+        throw new AdoptionServiceError(
+          "adoption_scan_limit_exceeded",
+          "A discovery item exceeds the result size limit",
+        );
+      }
+    }
+    return result;
   }
 
   private inspectionPage(cursor: InspectCursor, pageSize: number): AdoptionInspectResult {
@@ -543,8 +582,8 @@ export class LocalAdoptionService implements AdoptionService {
     });
   }
 
-  private storeCursor(record: CursorRecord): string {
-    const cursor = randomUUID();
+  private storeCursor(record: CursorRecord, value = randomUUID()): string {
+    const cursor = value;
     this.cursors.set(cursor, record);
     while (this.cursors.size > CURSOR_ENTRIES)
       this.cursors.delete(this.cursors.keys().next().value as string);

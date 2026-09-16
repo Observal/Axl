@@ -93,6 +93,49 @@ test("local adoption service discovers, pages, and revalidates inspection", asyn
   await service.dispose();
 });
 
+test("local adoption service pages every safe diagnostic without disclosing source", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "axl-adoption-diagnostics-"));
+  const themes = join(home, ".pi", "agent", "themes");
+  await mkdir(themes, { recursive: true });
+  const sentinel = "secret-value-that-must-not-cross-the-daemon-boundary";
+  for (let index = 0; index < 70; index += 1) {
+    await writeFile(
+      join(themes, `broken-${String(index).padStart(2, "0")}.json`),
+      `{"token":"${sentinel}"`,
+    );
+  }
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const service = new LocalAdoptionService({ homeDirectory: home, environment: {} });
+  const warnings: Array<{
+    readonly code: string;
+    readonly message: string;
+    readonly relativePath?: string;
+  }> = [];
+  let pageCursor: string | undefined;
+  do {
+    const page = await service.discover(
+      {
+        ecosystems: ["pi"],
+        scopes: ["global"],
+        includeMalformed: true,
+        pageSize: 1,
+        ...(pageCursor === undefined ? {} : { pageCursor }),
+      },
+      requestContext,
+    );
+    warnings.push(...page.warnings);
+    pageCursor = page.nextPageCursor;
+  } while (pageCursor !== undefined);
+  assert.equal(warnings.filter((warning) => warning.code === "theme-invalid").length, 70);
+  assert.equal(new Set(warnings.map((warning) => warning.relativePath)).size, 70);
+  assert.equal(JSON.stringify(warnings).includes(sentinel), false);
+  assert.equal(
+    warnings.every((warning) => warning.message === `Source inspection reported ${warning.code}`),
+    true,
+  );
+  await service.dispose();
+});
+
 test("local adoption service rejects roots without an opened Axl session", async (context) => {
   const { home, project } = await fixture(context);
   const service = new LocalAdoptionService({ homeDirectory: home, environment: {} });

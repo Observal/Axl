@@ -63,7 +63,13 @@ test("adoption controller pages discovery and inspection into immutable state", 
                     displayName: "second",
                   },
                 ],
-          warnings: [],
+          warnings: [
+            {
+              code: cursor === undefined ? "first-warning" : "second-warning",
+              severity: "warning",
+              message: cursor === undefined ? "first" : "second",
+            },
+          ],
           ...(cursor === undefined ? { nextPageCursor: "next" } : {}),
         } satisfies AdoptionDiscoverResult;
       }
@@ -109,6 +115,10 @@ test("adoption controller pages discovery and inspection into immutable state", 
   const controller = new AdoptionController(fake);
   await controller.loadAll({ projectRoot: "/tmp/project", scopes: ["global", "project"] });
   assert.equal(controller.state.candidates.length, 2);
+  assert.deepEqual(
+    controller.state.warnings.map((warning) => warning.code),
+    ["first-warning", "second-warning"],
+  );
   assert.equal(controller.state.hasMore, false);
   assert.equal(Object.isFrozen(controller.state), true);
   const report = await controller.inspect(candidate);
@@ -132,7 +142,10 @@ test("adoption controller exposes unavailable state and ignores a stale response
   let instance = "daemon-1";
   const staleClient = {
     get connection() {
-      return { daemonInstanceId: instance, grantedCapabilities: ["adoption.discover"] };
+      return {
+        daemonInstanceId: instance,
+        grantedCapabilities: ["adoption.discover", "adoption.inspect"],
+      };
     },
     request: () =>
       new Promise<AdoptionDiscoverResult>((resolvePromise) => {
@@ -161,7 +174,7 @@ test("adoption dismissal is bound to one scan generation and refreshes are fresh
           warnings: [],
         } satisfies AdoptionDiscoverResult;
       },
-      capabilities: ["adoption.discover"],
+      capabilities: ["adoption.discover", "adoption.inspect"],
     }),
     {
       dismissedScanGeneration: "scan-1",

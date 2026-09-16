@@ -29,6 +29,8 @@ import { promisify } from "node:util";
 
 import { JsonlEventLog, type ModelPort, type ModelRetryOptions, ToolRegistry } from "@axl/kernel";
 import type {
+  AdoptionDiscoverResult,
+  AdoptionInspectResult,
   BlobReference,
   CanonicalEvent,
   ModelStreamEvent,
@@ -39,13 +41,13 @@ import type {
   SessionSubscribeResult,
   Usage,
   WorkspaceStatusResult,
-  AdoptionDiscoverResult,
 } from "@axl/protocol";
 import {
   DEFAULT_MODEL_REQUEST_SETTINGS,
   encodeWireMessage,
   isRpcErrorAllowed,
   MAX_CANONICAL_EVENT_BYTES,
+  parseAdoptionCandidateId,
   parseEventId,
   parseOperationId,
   parseServerMessage,
@@ -4611,6 +4613,7 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
 });
 
 test("dispatches cancellable adoption discovery only to capable attachments", async (context) => {
+  const adoptionCandidateId = parseAdoptionCandidateId("123e4567-e89b-812d-a456-426614174000");
   let discoverCalls = 0;
   let openedProjectRoots: readonly string[] = [];
   const adoptionService: AdoptionService = {
@@ -4630,8 +4633,40 @@ test("dispatches cancellable adoption discovery only to capable attachments", as
       });
       return { scanGeneration: "scan-1", candidates: [], warnings: [] };
     },
-    inspect() {
-      throw new Error("not used");
+    async inspect(): Promise<AdoptionInspectResult> {
+      return {
+        candidate: {
+          candidateId: adoptionCandidateId,
+          discoveryFingerprint: "a".repeat(64),
+          ecosystem: "pi",
+          scope: "global",
+          kind: "extension",
+          displayName: "hello",
+          source: { kind: "local", canonicalPath: "/tmp/pi" },
+          relativeResourcePath: "extensions/hello.ts",
+          primary: true,
+          executable: true,
+          resourceCount: 1,
+          warningCount: 0,
+          malformed: false,
+        },
+        adapter: { id: "pi", version: "1", sourceSchemaVersion: "1" },
+        license: { expressions: [], notices: [] },
+        inventory: { fileCount: 1, totalBytes: 1, executable: true },
+        limits: {
+          maxTraversalDepth: 32,
+          maxEntries: 50_000,
+          maxFiles: 20_000,
+          maxTotalBytes: 67_108_864,
+          maxFileBytes: 1_048_576,
+          maxManifestBytes: 262_144,
+        },
+        surfaceCount: 0,
+        diagnosticCount: 0,
+        detailOffset: 0,
+        surfaces: [],
+        diagnostics: [],
+      };
     },
   };
   const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
@@ -4658,6 +4693,12 @@ test("dispatches cancellable adoption discovery only to capable attachments", as
   assert.equal(result.scanGeneration, "scan-1");
   assert.deepEqual(openedProjectRoots, [fixture.cwd]);
   assert.equal(discoverCalls, 1);
+  const inspected = await client.request("adoption.inspect", {
+    candidateId: adoptionCandidateId,
+    expectedDiscoveryFingerprint: "a".repeat(64),
+    pageSize: 10,
+  });
+  assert.equal(inspected.adapter.id, "pi");
   const commands = await client.listCommands();
   assert.equal(commands.generation, "builtin-4");
   assert.equal(

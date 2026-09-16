@@ -75,6 +75,7 @@ function immutableCandidate(candidate: AdoptionCandidate): AdoptionCandidate {
 function immutableState(state: AdoptionControllerState): AdoptionControllerState {
   return Object.freeze({
     ...state,
+    ...(state.error === undefined ? {} : { error: Object.freeze({ ...state.error }) }),
     scope: Object.freeze({
       ...state.scope,
       ...(state.scope.ecosystems === undefined
@@ -164,9 +165,10 @@ export class AdoptionController {
     this.requestController = controller;
     this.publish({ status: "loading" });
     try {
+      const requestedCursor = this.nextPageCursor;
       const page = await this.client.request(
         "adoption.discover",
-        this.params(scope, this.nextPageCursor),
+        this.params(scope, requestedCursor),
         { signal: controller.signal },
       );
       if (!this.current(generation, daemonInstanceId, scope)) return this.stateValue;
@@ -176,11 +178,38 @@ export class AdoptionController {
       ) {
         throw new AxlClientError("adoption_source_changed", "Discovery changed while paging");
       }
+      if (page.nextPageCursor === requestedCursor) {
+        throw new AxlClientError("protocol_error", "Discovery cursor did not advance");
+      }
+      const candidates = [...this.stateValue.candidates];
+      const byId = new Map(candidates.map((candidate) => [candidate.candidateId, candidate]));
+      for (const candidate of page.candidates) {
+        const existing = byId.get(candidate.candidateId);
+        if (existing !== undefined) {
+          throw new AxlClientError(
+            existing.discoveryFingerprint === candidate.discoveryFingerprint
+              ? "protocol_error"
+              : "adoption_source_changed",
+            "Discovery returned a duplicate candidate",
+          );
+        }
+        byId.set(candidate.candidateId, candidate);
+        candidates.push(candidate);
+      }
+      const warnings = [...this.stateValue.warnings];
+      const warningKeys = new Set(warnings.map((warning) => JSON.stringify(warning)));
+      for (const warning of page.warnings) {
+        const key = JSON.stringify(warning);
+        if (!warningKeys.has(key)) {
+          warningKeys.add(key);
+          warnings.push(warning);
+        }
+      }
       this.nextPageCursor = page.nextPageCursor;
       this.publish({
         status: "ready",
-        candidates: [...this.stateValue.candidates, ...page.candidates],
-        warnings: page.warnings,
+        candidates,
+        warnings,
         scanGeneration: page.scanGeneration,
         hasMore: page.nextPageCursor !== undefined,
         findingsDismissed: this.dismissedScanGeneration === page.scanGeneration,
@@ -198,7 +227,14 @@ export class AdoptionController {
 
   async loadAll(scope: AdoptionDiscoveryScope = {}): Promise<AdoptionControllerState> {
     await this.load(scope);
-    while (this.stateValue.hasMore) await this.loadMore();
+    let pages = 1;
+    while (this.stateValue.hasMore) {
+      if (pages >= 512) {
+        throw new AxlClientError("protocol_error", "Discovery exceeded the page limit");
+      }
+      await this.loadMore();
+      pages += 1;
+    }
     return this.stateValue;
   }
 
@@ -222,9 +258,15 @@ export class AdoptionController {
     try {
       let pageCursor: string | undefined;
       let first: AdoptionInspectResult | undefined;
+      let pages = 0;
       const surfaces: AdoptionInspectResult["surfaces"][number][] = [];
+      const surfaceIds = new Set<string>();
       const diagnostics: AdoptionInspectResult["diagnostics"][number][] = [];
       do {
+        if (pages >= 256) {
+          throw new AxlClientError("protocol_error", "Inspection exceeded the page limit");
+        }
+        const requestedCursor = pageCursor;
         const page = await this.client.request(
           "adoption.inspect",
           {
@@ -245,12 +287,43 @@ export class AdoptionController {
             "Inspection no longer matches discovery",
           );
         }
+        if (page.detailOffset !== surfaces.length + diagnostics.length) {
+          throw new AxlClientError("protocol_error", "Inspection detail offset is inconsistent");
+        }
+        if (first !== undefined) {
+          const stable = (value: AdoptionInspectResult) =>
+            JSON.stringify({
+              candidate: value.candidate,
+              adapter: value.adapter,
+              license: value.license,
+              inventory: value.inventory,
+              limits: value.limits,
+              surfaceCount: value.surfaceCount,
+              diagnosticCount: value.diagnosticCount,
+            });
+          if (stable(first) !== stable(page)) {
+            throw new AxlClientError("adoption_source_changed", "Inspection changed while paging");
+          }
+        }
         first ??= page;
-        surfaces.push(...page.surfaces);
+        for (const surface of page.surfaces) {
+          if (surfaceIds.has(surface.surfaceId)) {
+            throw new AxlClientError("protocol_error", "Inspection returned a duplicate surface");
+          }
+          surfaceIds.add(surface.surfaceId);
+          surfaces.push(surface);
+        }
         diagnostics.push(...page.diagnostics);
+        if (page.nextPageCursor === requestedCursor) {
+          throw new AxlClientError("protocol_error", "Inspection cursor did not advance");
+        }
         pageCursor = page.nextPageCursor;
+        pages += 1;
       } while (pageCursor !== undefined);
       if (first === undefined) throw new Error("Adoption inspection returned no page");
+      if (surfaces.length !== first.surfaceCount || diagnostics.length !== first.diagnosticCount) {
+        throw new AxlClientError("protocol_error", "Inspection detail counts are inconsistent");
+      }
       const { nextPageCursor: _nextPageCursor, ...base } = first;
       const inspection = Object.freeze({
         ...base,
