@@ -42,6 +42,12 @@ export function adoptionInspectionLines(report: AdoptionInspectResult): readonly
     dsh: "DSH",
     "claude-code": "Claude Code",
   }[candidate.ecosystem];
+  const sourceIdentity =
+    candidate.source.kind === "local"
+      ? candidate.source.canonicalPath
+      : candidate.source.kind === "npm"
+        ? `${candidate.source.packageName}@${candidate.source.requested} · ${candidate.source.registryOrigin}`
+        : `${candidate.source.repositoryUri}#${candidate.source.requestedRef}`;
   return [
     "Adoption inspection",
     `  ${sanitizeTerminalText(candidate.displayName)}`,
@@ -68,6 +74,44 @@ export function adoptionInspectionLines(report: AdoptionInspectResult): readonly
           ...report.diagnostics.map(
             (entry) =>
               `  ${entry.severity.toUpperCase()} · ${entry.code} · ${sanitizeTerminalText(entry.message)}`,
+          ),
+        ]),
+    ...(report.trustReview === undefined
+      ? []
+      : [
+          "",
+          "Trust review",
+          `  Source      ${sanitizeTerminalText(sourceIdentity)}`,
+          `  Source hash ${report.trustReview.sourceContentSha256}`,
+          `  Policy      ${report.trustReview.policyGeneration}`,
+          `  Destination ${report.trustReview.targetScope}`,
+          `  License     ${report.trustReview.licenseExpressions.join(", ") || "Not declared"}`,
+          `  Licenses    ${plural(report.trustReview.licenseFiles.length, "file")}`,
+          `  Notices     ${plural(report.trustReview.noticeFiles.length, "file")}`,
+          `  Capabilities ${plural(report.trustReview.capabilityRequests.length, "request")}`,
+          `  Documents   ${plural(report.trustReview.declarativeFiles.length, "file")}`,
+          `  Executables ${plural(report.trustReview.executableFiles.length, "file")}`,
+          `  Conflicts   ${plural(report.trustReview.conflicts.length, "conflict")}`,
+          ...report.trustReview.licenseFiles.map(
+            (file) => `    license · ${sanitizeTerminalText(file.relativePath)}`,
+          ),
+          ...report.trustReview.noticeFiles.map(
+            (file) => `    notice · ${sanitizeTerminalText(file.relativePath)}`,
+          ),
+          ...report.trustReview.declarativeFiles.map(
+            (file) => `    document · ${sanitizeTerminalText(file.relativePath)}`,
+          ),
+          ...report.trustReview.executableFiles.map(
+            (file) => `    executable · ${sanitizeTerminalText(file.relativePath)}`,
+          ),
+          ...report.trustReview.capabilityRequests.map(
+            (request) => `    capability · ${sanitizeTerminalText(request.capability)}`,
+          ),
+          ...report.trustReview.conflicts.map(
+            (conflict) => `    conflict · ${sanitizeTerminalText(conflict)}`,
+          ),
+          ...report.trustReview.precedenceChanges.map(
+            (change) => `    precedence · ${sanitizeTerminalText(change)}`,
           ),
         ]),
     "",

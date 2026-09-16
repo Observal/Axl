@@ -174,6 +174,42 @@ export class AdoptionAcquisitionCoordinator {
     this.#store = store;
   }
 
+  readRegistry(): ReturnType<AdoptionStore["readRegistry"]> {
+    return this.#store.readRegistry();
+  }
+
+  activeSkills(): ReturnType<AdoptionStore["activeSkills"]> {
+    return this.#store.activeSkills();
+  }
+
+  readRevision(
+    ...args: Parameters<AdoptionStore["readRevision"]>
+  ): ReturnType<AdoptionStore["readRevision"]> {
+    return this.#store.readRevision(...args);
+  }
+
+  listNativeOperations(): ReturnType<AdoptionStore["listNativeOperations"]> {
+    return this.#store.listNativeOperations();
+  }
+
+  readNativeOperation(
+    ...args: Parameters<AdoptionStore["readNativeOperation"]>
+  ): ReturnType<AdoptionStore["readNativeOperation"]> {
+    return this.#store.readNativeOperation(...args);
+  }
+
+  writeNativeOperation(
+    ...args: Parameters<AdoptionStore["writeNativeOperation"]>
+  ): ReturnType<AdoptionStore["writeNativeOperation"]> {
+    return this.#store.writeNativeOperation(...args);
+  }
+
+  updateRegistry(
+    ...args: Parameters<AdoptionStore["updateRegistry"]>
+  ): ReturnType<AdoptionStore["updateRegistry"]> {
+    return this.#store.updateRegistry(...args);
+  }
+
   async #acquire(request: AdoptionAcquisitionRequest): Promise<AcquiredAdoptionSource> {
     if (request.selectionKind === "discovered") {
       if (

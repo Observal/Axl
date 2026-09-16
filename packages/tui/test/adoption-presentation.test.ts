@@ -46,6 +46,35 @@ test("TUI adoption presentation exposes rescan and inspection-only warnings", ()
     },
     surfaceCount: 0,
     diagnosticCount: 1,
+    trustReview: {
+      bindingSha256: "b".repeat(64),
+      sourceContentSha256: "c".repeat(64),
+      fileInventorySha256: "d".repeat(64),
+      targetScope: "project",
+      licenseExpressions: ["Apache-2.0"],
+      licenseFiles: [
+        { relativePath: "LICENSE", sha256: "e".repeat(64), sizeBytes: 10, executable: false },
+      ],
+      noticeFiles: [],
+      declarativeFiles: [
+        { relativePath: "SKILL.md", sha256: "e".repeat(64), sizeBytes: 10, executable: false },
+      ],
+      executableFiles: [
+        {
+          relativePath: "scripts/run.sh",
+          sha256: "f".repeat(64),
+          sizeBytes: 10,
+          executable: true,
+        },
+      ],
+      capabilityRequests: [
+        { capability: "process.execute", required: true, rationale: "Runs helper" },
+      ],
+      conflicts: ["Local project skill hello already exists"],
+      precedenceChanges: [],
+      policyGeneration: "policy-v1",
+      registryGeneration: 1,
+    },
     detailOffset: 0,
     surfaces: [],
     diagnostics: [{ code: "malformed", severity: "error", message: "Invalid source" }],
@@ -56,6 +85,11 @@ test("TUI adoption presentation exposes rescan and inspection-only warnings", ()
   assert.match(text, /Execution {3}Contains executable surfaces/u);
   assert.match(text, /Resources \(0\)\n {2}None/u);
   assert.match(text, /Diagnostics\n {2}ERROR · malformed · Invalid source/u);
+  assert.match(text, /Trust review/u);
+  assert.match(text, /license · LICENSE/u);
+  assert.match(text, /executable · scripts\/run\.sh/u);
+  assert.match(text, /capability · process\.execute/u);
+  assert.match(text, /conflict · Local project skill hello already exists/u);
   assert.match(text, /Safety\n {2}Inspection only\. No source was executed/u);
   assert.doesNotMatch(text, /Install|Activate/u);
 });

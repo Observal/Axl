@@ -13,6 +13,7 @@ import {
   ADOPTION_SCOPES,
   hashCanonicalRequest,
   isRetryableMutationMethod,
+  ProtocolValidationError,
   parseAdoptionCandidateId,
   parseAdoptionOperationDetail,
   parseAdoptionOperationId,
@@ -21,9 +22,8 @@ import {
   parseAdoptionSourceLocator,
   parseServerMessage,
   parseWireRequest,
-  ProtocolValidationError,
-  requiredCapability,
   RPC_METHOD_ERROR_CODES,
+  requiredCapability,
 } from "../src/index.ts";
 
 const candidateId = "018f0000-0000-8000-8000-000000000001";
@@ -587,6 +587,33 @@ test("validates inspection primary surfaces and bounded source identity", () => 
     },
     surfaceCount: 1,
     diagnosticCount: 0,
+    trustReview: {
+      bindingSha256: digest,
+      sourceContentSha256: digest,
+      fileInventorySha256: digest,
+      targetScope: "project",
+      licenseExpressions: ["MIT"],
+      licenseFiles: [{ relativePath: "LICENSE", sha256: digest, sizeBytes: 10, executable: false }],
+      noticeFiles: [],
+      declarativeFiles: [
+        { relativePath: "SKILL.md", sha256: digest, sizeBytes: 10, executable: false },
+      ],
+      executableFiles: [
+        {
+          relativePath: ".opencode/tools/math.ts",
+          sha256: digest,
+          sizeBytes: 10,
+          executable: true,
+        },
+      ],
+      capabilityRequests: [
+        { capability: "tool.register", required: true, rationale: "Registers a tool" },
+      ],
+      conflicts: [],
+      precedenceChanges: ["project resource shadows global resource"],
+      policyGeneration: "policy-v1",
+      registryGeneration: 2,
+    },
     detailOffset: 0,
     surfaces: [
       {

@@ -7,7 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { discoverSkills, loadSkill, makeSkillTool, SkillValidationError } from "../src/index.ts";
+import {
+  discoverSkills,
+  loadSkill,
+  makeSkillTool,
+  SkillValidationError,
+  skillCatalogSection,
+} from "../src/index.ts";
 
 async function fixture(name: string, source: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "axl-skill-"));
@@ -42,6 +48,35 @@ Follow [details](references/details.md).
   assert.equal(skill.metadata.version, "1.0");
   assert.equal(skill.allowedTools, "Bash(git:*) Read");
   assert.match(skill.instructions, /Release check/);
+});
+
+test("manual-only Pi skills are never model visible or model invocable", async (context) => {
+  const directory = await fixture(
+    "manual-review",
+    "---\nname: manual-review\ndescription: User-only review\ndisable-model-invocation: true\n---\nManual instructions.\n",
+  );
+  context.after(() => rm(join(directory, ".."), { recursive: true, force: true }));
+  const skill = await loadSkill(directory);
+  assert.equal(skill.manualOnly, true);
+  assert.equal(skillCatalogSection([skill]), undefined);
+  await assert.rejects(
+    makeSkillTool([skill]).execute(
+      { action: "load", name: "manual-review" },
+      new AbortController().signal,
+    ),
+    /unknown skill/u,
+  );
+});
+
+test("loads a validated immutable skill under a content-addressed directory", async (context) => {
+  const directory = await fixture(
+    "content-addressed-directory",
+    "---\nname: review-code\ndescription: Review code\n---\nReview it.\n",
+  );
+  context.after(() => rm(join(directory, ".."), { recursive: true, force: true }));
+  const skill = await loadSkill(directory, { expectedName: "review-code" });
+  assert.equal(skill.name, "review-code");
+  await assert.rejects(loadSkill(directory), /must match the parent directory name/u);
 });
 
 test("rejects invalid names and directory mismatches", async (context) => {

@@ -21,22 +21,29 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   ADOPTION_ECOSYSTEMS,
+  type AdoptionCandidate,
   type AdoptionEcosystem,
   type AdoptionManifest,
   type AdoptionOperationId,
+  type AdoptionResourceSurface,
   type AdoptionRevisionId,
   type AdoptionScope,
   type AdoptionSourceLocator,
   type AdoptionSourceLock,
+  type AdoptionTrustReview,
+  parseAdoptionApprovalId,
+  parseAdoptionCandidate,
   parseAdoptionEcosystem,
   parseAdoptionId,
   parseAdoptionManifest,
   parseAdoptionOperationId,
   parseAdoptionOperationState,
+  parseAdoptionResourceSurface,
   parseAdoptionRevisionId,
   parseAdoptionScope,
   parseAdoptionSourceLocator,
   parseAdoptionSourceLock,
+  parseAdoptionTrustReview,
 } from "@axl/protocol";
 
 const STORE_VERSION = 1 as const;
@@ -116,17 +123,54 @@ export interface AdoptionOperationRecord {
   readonly revisionId?: AdoptionRevisionId;
 }
 
+export interface NativeAdoptionOperationRecord {
+  readonly version: typeof STORE_VERSION;
+  readonly operationId: AdoptionOperationId;
+  readonly sequence: number;
+  readonly state: "awaiting-plan-approval" | "awaiting-activation-approval" | "active" | "failed";
+  readonly candidate: AdoptionCandidate;
+  readonly surface: AdoptionResourceSurface;
+  readonly adapter: {
+    readonly id: string;
+    readonly version: string;
+    readonly sourceSchemaVersion: string;
+  };
+  readonly targetScope: AdoptionScope;
+  readonly review: AdoptionTrustReview;
+  readonly projectRoot?: string;
+  readonly packageId: string;
+  readonly adoptionId: ReturnType<typeof parseAdoptionId>;
+  readonly revisionId: AdoptionRevisionId;
+  readonly createdAt: number;
+  readonly approvalId?: ReturnType<typeof parseAdoptionApprovalId>;
+}
+
 export interface AdoptionRegistryEntry {
   readonly adoptionId: ReturnType<typeof parseAdoptionId>;
   readonly scope: AdoptionScope;
   readonly packageKey: string;
+  readonly projectRoot?: string;
   readonly activeRevisionId: AdoptionRevisionId | null;
+  readonly approvalId?: ReturnType<typeof parseAdoptionApprovalId>;
+  readonly reviewBindingSha256?: string;
+  readonly policyGeneration?: string;
 }
 
 export interface AdoptionRegistry {
   readonly version: typeof STORE_VERSION;
   readonly generation: number;
   readonly entries: readonly AdoptionRegistryEntry[];
+}
+
+export interface ActiveAdoptedSkill {
+  readonly adoptionId: ReturnType<typeof parseAdoptionId>;
+  readonly revisionId: AdoptionRevisionId;
+  readonly packageKey: string;
+  readonly scope: AdoptionScope;
+  readonly projectRoot?: string;
+  readonly name: string;
+  /** Immutable directory containing SKILL.md and all referenced assets. */
+  readonly directory: string;
 }
 
 interface RevisionIndexFile {
@@ -369,6 +413,91 @@ function parseOperation(value: unknown): AdoptionOperationRecord {
   });
 }
 
+function parseNativeOperation(value: unknown): NativeAdoptionOperationRecord {
+  const input = exactObject(value, "nativeOperation", [
+    "version",
+    "operationId",
+    "sequence",
+    "state",
+    "candidate",
+    "surface",
+    "adapter",
+    "targetScope",
+    "review",
+    "projectRoot",
+    "packageId",
+    "adoptionId",
+    "revisionId",
+    "createdAt",
+    "approvalId",
+  ]);
+  if (
+    input.version !== STORE_VERSION ||
+    !Number.isSafeInteger(input.sequence) ||
+    (input.sequence as number) < 1 ||
+    !Number.isSafeInteger(input.createdAt) ||
+    (input.createdAt as number) < 0 ||
+    !["awaiting-plan-approval", "awaiting-activation-approval", "active", "failed"].includes(
+      String(input.state),
+    )
+  )
+    fail("corrupt", "native operation header is invalid");
+  const candidate = parseAdoptionCandidate(input.candidate, "nativeOperation.candidate");
+  if (candidate.source.kind !== "local") fail("corrupt", "native Agent Skill source must be local");
+  const surface = parseAdoptionResourceSurface(input.surface, "nativeOperation.surface");
+  if (surface.kind !== "skill" || !surface.primary)
+    fail("corrupt", "native operation surface must be a primary skill");
+  const adapter = exactObject(input.adapter, "nativeOperation.adapter", [
+    "id",
+    "version",
+    "sourceSchemaVersion",
+  ]);
+  const targetScope = parseAdoptionScope(input.targetScope, "nativeOperation.targetScope");
+  const review = parseAdoptionTrustReview(input.review, "nativeOperation.review");
+  if (review.targetScope !== targetScope)
+    fail("corrupt", "native operation review scope does not match target scope");
+  const projectRoot = optionalBoundedString(
+    input.projectRoot,
+    "nativeOperation.projectRoot",
+    4_096,
+  );
+  if ((targetScope === "project") !== (projectRoot !== undefined))
+    fail("corrupt", "project native operations require exactly one project root");
+  if (projectRoot !== undefined && resolve(projectRoot) !== projectRoot)
+    fail("corrupt", "native operation project root must be canonical and absolute");
+  const approvalId =
+    input.approvalId === undefined
+      ? undefined
+      : parseAdoptionApprovalId(input.approvalId, "nativeOperation.approvalId");
+  if ((input.state === "active") !== (approvalId !== undefined))
+    fail("corrupt", "only active native operations carry an approval identity");
+  return Object.freeze({
+    version: STORE_VERSION,
+    operationId: parseAdoptionOperationId(input.operationId, "nativeOperation.operationId"),
+    sequence: input.sequence as number,
+    state: input.state as NativeAdoptionOperationRecord["state"],
+    candidate,
+    surface,
+    adapter: Object.freeze({
+      id: boundedString(adapter.id, "nativeOperation.adapter.id", 256),
+      version: boundedString(adapter.version, "nativeOperation.adapter.version", 128),
+      sourceSchemaVersion: boundedString(
+        adapter.sourceSchemaVersion,
+        "nativeOperation.adapter.sourceSchemaVersion",
+        128,
+      ),
+    }),
+    targetScope,
+    review,
+    ...(projectRoot === undefined ? {} : { projectRoot }),
+    packageId: boundedString(input.packageId, "nativeOperation.packageId", 512),
+    adoptionId: parseAdoptionId(input.adoptionId, "nativeOperation.adoptionId"),
+    revisionId: parseAdoptionRevisionId(input.revisionId, "nativeOperation.revisionId"),
+    createdAt: input.createdAt as number,
+    ...(approvalId === undefined ? {} : { approvalId }),
+  });
+}
+
 function parseRegistry(value: unknown): AdoptionRegistry {
   const input = exactObject(value, "registry", ["version", "generation", "entries"]);
   if (
@@ -384,22 +513,65 @@ function parseRegistry(value: unknown): AdoptionRegistry {
       "adoptionId",
       "scope",
       "packageKey",
+      "projectRoot",
       "activeRevisionId",
+      "approvalId",
+      "reviewBindingSha256",
+      "policyGeneration",
     ]);
+    const scope = parseAdoptionScope(entry.scope, `registry.entries[${index}].scope`);
+    const projectRoot = optionalBoundedString(
+      entry.projectRoot,
+      `registry.entries[${index}].projectRoot`,
+      4_096,
+    );
+    if ((scope === "project") !== (projectRoot !== undefined))
+      fail("corrupt", "project registry entries require exactly one project root");
+    if (projectRoot !== undefined && resolve(projectRoot) !== projectRoot)
+      fail("corrupt", "registry project root must be canonical and absolute");
+    const activeRevisionId =
+      entry.activeRevisionId === null
+        ? null
+        : parseAdoptionRevisionId(
+            entry.activeRevisionId,
+            `registry.entries[${index}].activeRevisionId`,
+          );
+    const approvalId =
+      entry.approvalId === undefined
+        ? undefined
+        : parseAdoptionApprovalId(entry.approvalId, `registry.entries[${index}].approvalId`);
+    const reviewBindingSha256 = optionalBoundedString(
+      entry.reviewBindingSha256,
+      `registry.entries[${index}].reviewBindingSha256`,
+      64,
+    );
+    if (reviewBindingSha256 !== undefined && !SHA256.test(reviewBindingSha256))
+      fail("corrupt", "registry review binding must be lowercase SHA-256");
+    const policyGeneration = optionalBoundedString(
+      entry.policyGeneration,
+      `registry.entries[${index}].policyGeneration`,
+      128,
+    );
+    if (
+      activeRevisionId !== null &&
+      ((approvalId === undefined) !== (reviewBindingSha256 === undefined) ||
+        (approvalId === undefined) !== (policyGeneration === undefined))
+    )
+      fail("corrupt", "active registry approval binding is incomplete");
     return Object.freeze({
       adoptionId: parseAdoptionId(entry.adoptionId, `registry.entries[${index}].adoptionId`),
-      scope: parseAdoptionScope(entry.scope, `registry.entries[${index}].scope`),
+      scope,
       packageKey: boundedString(entry.packageKey, `registry.entries[${index}].packageKey`, 1_024),
-      activeRevisionId:
-        entry.activeRevisionId === null
-          ? null
-          : parseAdoptionRevisionId(
-              entry.activeRevisionId,
-              `registry.entries[${index}].activeRevisionId`,
-            ),
+      ...(projectRoot === undefined ? {} : { projectRoot }),
+      activeRevisionId,
+      ...(approvalId === undefined ? {} : { approvalId }),
+      ...(reviewBindingSha256 === undefined ? {} : { reviewBindingSha256 }),
+      ...(policyGeneration === undefined ? {} : { policyGeneration }),
     });
   });
-  const keys = entries.map((entry) => `${entry.scope}:${entry.packageKey}`);
+  const keys = entries.map(
+    (entry) => `${entry.scope}:${entry.projectRoot ?? ""}:${entry.packageKey}`,
+  );
   if (new Set(keys).size !== keys.length)
     fail("corrupt", "registry contains duplicate package pointers");
   if (new Set(entries.map((entry) => entry.adoptionId)).size !== entries.length)
@@ -490,6 +662,8 @@ export class AdoptionStore {
     await chmod(this.root, 0o700);
     await mkdir(join(this.root, "operations"), { recursive: true, mode: 0o700 });
     await this.#assertDirectory(join(this.root, "operations"));
+    await mkdir(join(this.root, "operations", "native"), { recursive: true, mode: 0o700 });
+    await this.#assertDirectory(join(this.root, "operations", "native"));
     await mkdir(join(this.root, "cache"), { recursive: true, mode: 0o700 });
     await this.#assertDirectory(join(this.root, "cache"));
     await mkdir(join(this.root, "cache", "quarantine"), { recursive: true, mode: 0o700 });
@@ -866,6 +1040,53 @@ export class AdoptionStore {
     }
   }
 
+  async writeNativeOperation(
+    value: NativeAdoptionOperationRecord,
+  ): Promise<NativeAdoptionOperationRecord> {
+    const record = parseNativeOperation(value);
+    const path = join(this.root, "operations", "native", `${record.operationId}.json`);
+    let previous: NativeAdoptionOperationRecord | undefined;
+    try {
+      previous = parseNativeOperation(
+        parseJson(await readStableRegularFile(path, MAX_JSON_BYTES), "native operation"),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (
+      (previous === undefined && record.sequence !== 1) ||
+      (previous !== undefined && record.sequence !== previous.sequence + 1)
+    )
+      fail("conflict", "native operation sequence did not advance exactly once");
+    await this.#atomicJson(path, record, true);
+    return record;
+  }
+
+  async readNativeOperation(
+    operationId: AdoptionOperationId,
+  ): Promise<NativeAdoptionOperationRecord> {
+    const path = join(this.root, "operations", "native", `${operationId}.json`);
+    return parseNativeOperation(
+      parseJson(await readStableRegularFile(path, MAX_JSON_BYTES), "native operation"),
+    );
+  }
+
+  async listNativeOperations(): Promise<readonly NativeAdoptionOperationRecord[]> {
+    const directory = join(this.root, "operations", "native");
+    const entries = await readdir(directory, { withFileTypes: true });
+    const operations: NativeAdoptionOperationRecord[] = [];
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      if (!entry.isFile() || !entry.name.endsWith(".json"))
+        fail("corrupt", "native operation directory contains an unexpected entry");
+      const operationId = parseAdoptionOperationId(entry.name.slice(0, -5));
+      const operation = await this.readNativeOperation(operationId);
+      if (operation.operationId !== operationId)
+        fail("corrupt", "native operation filename does not match its identity");
+      operations.push(operation);
+    }
+    return Object.freeze(operations);
+  }
+
   async publishRevision(input: PublishRevisionInput): Promise<PublishedRevision> {
     const manifest = parseAdoptionManifest(input.manifest);
     const finalDirectory = this.revisionDirectory(
@@ -1114,6 +1335,45 @@ export class AdoptionStore {
         throw error;
       fail("corrupt", "registry.json failed schema validation", error);
     }
+  }
+
+  async activeSkills(): Promise<{
+    readonly generation: number;
+    readonly skills: readonly ActiveAdoptedSkill[];
+  }> {
+    const registry = await this.readRegistry();
+    const skills: ActiveAdoptedSkill[] = [];
+    for (const entry of registry.entries) {
+      if (entry.activeRevisionId === null) continue;
+      const separator = entry.packageKey.indexOf(":");
+      if (separator <= 0) fail("corrupt", "active registry package key is invalid");
+      const ecosystem = parseAdoptionEcosystem(entry.packageKey.slice(0, separator));
+      const packageId = entry.packageKey.slice(separator + 1);
+      const revision = await this.readRevision(ecosystem, packageId, entry.activeRevisionId);
+      for (const surface of revision.manifest.surfaces) {
+        if (surface.kind !== "skill" || surface.compatibility !== "native") continue;
+        if (surface.sourcePath === undefined || basename(surface.sourcePath) !== "SKILL.md")
+          fail("corrupt", "active native skill surface must identify SKILL.md");
+        const directory = resolve(revision.directory, "source", dirname(surface.sourcePath));
+        if (!within(directory, join(revision.directory, "source")))
+          fail("corrupt", "active native skill directory escapes its immutable revision");
+        skills.push({
+          adoptionId: entry.adoptionId,
+          revisionId: entry.activeRevisionId,
+          packageKey: entry.packageKey,
+          scope: entry.scope,
+          ...(entry.projectRoot === undefined ? {} : { projectRoot: entry.projectRoot }),
+          name: surface.name,
+          directory,
+        });
+      }
+    }
+    skills.sort((left, right) =>
+      `${left.scope}:${left.name}:${left.packageKey}`.localeCompare(
+        `${right.scope}:${right.name}:${right.packageKey}`,
+      ),
+    );
+    return Object.freeze({ generation: registry.generation, skills: Object.freeze(skills) });
   }
 
   async updateRegistry(

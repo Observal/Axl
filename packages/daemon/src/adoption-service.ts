@@ -6,6 +6,7 @@ import type {
   AdoptionDiscoverResult,
   AdoptionInspectParams,
   AdoptionInspectResult,
+  AdoptionRpcMethodMap,
   ClientIdentity,
   JsonObject,
 } from "@axl/protocol";
@@ -33,6 +34,20 @@ export interface AdoptionService {
     context: AdoptionRequestContext,
     signal?: AbortSignal,
   ): Promise<AdoptionInspectResult>;
+  plan?(
+    params: AdoptionRpcMethodMap["adoption.plan"]["params"],
+    context: AdoptionRequestContext,
+    signal?: AbortSignal,
+  ): Promise<AdoptionRpcMethodMap["adoption.plan"]["result"]>;
+  start?(
+    params: AdoptionRpcMethodMap["adoption.start"]["params"],
+    context: AdoptionRequestContext,
+    signal?: AbortSignal,
+  ): Promise<AdoptionRpcMethodMap["adoption.start"]["result"]>;
+  approveActivation?(
+    params: AdoptionRpcMethodMap["adoption.operation.approveActivation"]["params"],
+    context: AdoptionRequestContext,
+  ): Promise<AdoptionRpcMethodMap["adoption.operation.approveActivation"]["result"]>;
   prime?(): Promise<void>;
   dispose?(): Promise<void>;
 }

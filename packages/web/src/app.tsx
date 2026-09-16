@@ -50,6 +50,7 @@ import {
 } from "@axl/sdk";
 
 import { AdoptionDialog } from "./adoption-dialog.tsx";
+import { activateNativeSkill } from "./adoption-workflow.ts";
 import { BrowserPane, type BrowserPaneState, EMPTY_BROWSER_STATE } from "./browser-pane.tsx";
 import { CommandPalette } from "./command-palette.tsx";
 import {
@@ -2324,6 +2325,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         void adoptionController.current?.inspect(candidate).catch((cause: unknown) =>
           setError(cause instanceof Error ? cause.message : "Adoption inspection failed"),
         );
+      }}
+      onActivate={async (candidate, report) => {
+        const adoption = adoptionController.current;
+        if (adoption === undefined) throw new Error("Adoption is unavailable");
+        await activateNativeSkill(adoption, candidate, report);
       }}
       onDismissFindings={() => {
         adoptionController.current?.dismissFindings();

@@ -10,6 +10,7 @@ import {
   type AdoptionInspectResult,
   type AxlClient,
   parseAdoptionCandidateId,
+  parseAdoptionRevisionId,
 } from "../src/index.ts";
 
 const candidateId = parseAdoptionCandidateId("123e4567-e89b-812d-a456-426614174000");
@@ -232,4 +233,46 @@ test("adoption dismissal is bound to one scan generation and refreshes are fresh
   controller.dismissFindings();
   assert.equal(controller.state.dismissedScanGeneration, "scan-2");
   assert.deepEqual(persisted, ["scan-2"]);
+});
+
+test("adoption controller exposes typed native skill review and approval actions", async () => {
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const operationId = "018f1f60-7b2a-7ccd-8f7a-4c57d8532d92";
+  const revisionId = parseAdoptionRevisionId("018f1f60-7b2a-7ccd-8f7a-4c57d8532d93");
+  const skill = { ...candidate, kind: "skill" as const, executable: false };
+  const controller = new AdoptionController(
+    client({
+      capabilities: [
+        "adoption.discover",
+        "adoption.inspect",
+        "adoption.plan",
+        "adoption.start",
+        "adoption.approve-activation",
+      ],
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "adoption.plan") return { operationId, operation: {} };
+        if (method === "adoption.start") return { operationId, revisionId };
+        return { approvalId: "018f1f60-7b2a-7ccd-8f7a-4c57d8532d94", operation: {} };
+      },
+    }),
+  );
+  const planned = await controller.planNativeSkill(skill);
+  await controller.stageNativeSkill(planned.operationId);
+  await controller.approveNativeSkill({
+    operationId: planned.operationId,
+    revisionId,
+    reviewBindingSha256: "b".repeat(64),
+    policyGeneration: "policy-v1",
+  });
+  assert.deepEqual(
+    requests.map((request) => request.method),
+    ["adoption.plan", "adoption.start", "adoption.operation.approveActivation"],
+  );
+  assert.deepEqual(requests[2]?.params, {
+    operationId,
+    revisionId,
+    reviewBindingSha256: "b".repeat(64),
+    policyGeneration: "policy-v1",
+  });
 });

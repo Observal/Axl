@@ -153,19 +153,33 @@ export interface Frontmatter {
 }
 
 export function parseFrontmatter(text: string, allowedFields: ReadonlySet<string>): Frontmatter {
-  if (!text.startsWith("---\n")) return { attributes: {}, body: text, unknownFields: [] };
-  const end = text.indexOf("\n---\n", 4);
+  const normalized = text.replaceAll("\r\n", "\n");
+  if (!normalized.startsWith("---\n"))
+    return { attributes: {}, body: normalized, unknownFields: [] };
+  const end = normalized.indexOf("\n---\n", 4);
   if (end < 0) throw new DiscoveryError("adoption_manifest_invalid", "unterminated frontmatter");
   const attributes: Record<string, string | boolean> = {};
   const unknownFields: string[] = [];
-  for (const line of text.slice(4, end).split("\n")) {
+  const lines = normalized.slice(4, end).split("\n");
+  let nestedField: "metadata" | "block" | undefined;
+  let blockKey: string | undefined;
+  for (const line of lines) {
     if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
     if (/^\s/u.test(line)) {
-      throw new DiscoveryError(
-        "adoption_manifest_invalid",
-        "nested frontmatter YAML is unsupported",
-      );
+      if (nestedField === "metadata") {
+        if (!/^\s+[A-Za-z0-9_.-]+:\s*\S.*$/u.test(line))
+          throw new DiscoveryError("adoption_manifest_invalid", "invalid metadata entry");
+        continue;
+      }
+      if (nestedField === "block" && blockKey !== undefined) {
+        const value = line.trim();
+        attributes[blockKey] = `${String(attributes[blockKey] ?? "")} ${value}`.trim();
+        continue;
+      }
+      throw new DiscoveryError("adoption_manifest_invalid", "unsupported nested frontmatter YAML");
     }
+    nestedField = undefined;
+    blockKey = undefined;
     const colon = line.indexOf(":");
     if (colon <= 0)
       throw new DiscoveryError("adoption_manifest_invalid", "invalid frontmatter entry");
@@ -174,26 +188,42 @@ export function parseFrontmatter(text: string, allowedFields: ReadonlySet<string
       throw new DiscoveryError("adoption_manifest_invalid", `duplicate frontmatter field ${key}`);
     }
     let raw: string | boolean = line.slice(colon + 1).trim();
-    if (
-      typeof raw === "string" &&
-      (/^(?:[!&*|>]|<<:|\$\{|\{\{)/u.test(raw) || raw.startsWith("[") || raw.startsWith("{"))
+    if (key === "metadata" && raw === "") {
+      attributes[key] = "mapping";
+      nestedField = "metadata";
+    } else if (
+      (raw === ">" || raw === ">-" || raw === "|" || raw === "|-") &&
+      key === "description"
     ) {
-      throw new DiscoveryError(
-        "adoption_manifest_invalid",
-        "complex frontmatter YAML is unsupported",
-      );
+      attributes[key] = "";
+      nestedField = "block";
+      blockKey = key;
+    } else {
+      if (
+        typeof raw === "string" &&
+        (/^(?:[!&*]|<<:|\$\{|\{\{)/u.test(raw) || raw.startsWith("[") || raw.startsWith("{"))
+      ) {
+        throw new DiscoveryError(
+          "adoption_manifest_invalid",
+          "complex frontmatter YAML is unsupported",
+        );
+      }
+      if (raw === "true") raw = true;
+      else if (raw === "false") raw = false;
+      else if (
+        (raw.startsWith('"') && raw.endsWith('"')) ||
+        (raw.startsWith("'") && raw.endsWith("'"))
+      )
+        raw = raw.slice(1, -1);
+      attributes[key] = raw;
     }
-    if (raw === "true") raw = true;
-    else if (raw === "false") raw = false;
-    else if (
-      (raw.startsWith('"') && raw.endsWith('"')) ||
-      (raw.startsWith("'") && raw.endsWith("'"))
-    )
-      raw = raw.slice(1, -1);
-    attributes[key] = raw;
     if (!allowedFields.has(key)) unknownFields.push(key);
   }
-  return { attributes, body: text.slice(end + 5), unknownFields: unknownFields.sort() };
+  return {
+    attributes,
+    body: normalized.slice(end + 5),
+    unknownFields: unknownFields.sort(),
+  };
 }
 
 function globRegex(pattern: string): RegExp {

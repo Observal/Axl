@@ -6,6 +6,9 @@ import type {
   AdoptionDiagnosticSummary,
   AdoptionDiscoverParams,
   AdoptionInspectResult,
+  AdoptionOperationSummary,
+  AdoptionRpcMethodMap,
+  AdoptionScope,
 } from "@axl/protocol";
 
 import { type AxlClient, AxlClientError } from "./client.ts";
@@ -300,6 +303,7 @@ export class AdoptionController {
               limits: value.limits,
               surfaceCount: value.surfaceCount,
               diagnosticCount: value.diagnosticCount,
+              trustReview: value.trustReview,
             });
           if (stable(first) !== stable(page)) {
             throw new AxlClientError("adoption_source_changed", "Inspection changed while paging");
@@ -337,6 +341,21 @@ export class AdoptionController {
         }),
         inventory: Object.freeze({ ...base.inventory }),
         limits: Object.freeze({ ...base.limits }),
+        ...(base.trustReview === undefined
+          ? {}
+          : {
+              trustReview: Object.freeze({
+                ...base.trustReview,
+                licenseExpressions: Object.freeze([...base.trustReview.licenseExpressions]),
+                licenseFiles: Object.freeze([...base.trustReview.licenseFiles]),
+                noticeFiles: Object.freeze([...base.trustReview.noticeFiles]),
+                declarativeFiles: Object.freeze([...base.trustReview.declarativeFiles]),
+                executableFiles: Object.freeze([...base.trustReview.executableFiles]),
+                capabilityRequests: Object.freeze([...base.trustReview.capabilityRequests]),
+                conflicts: Object.freeze([...base.trustReview.conflicts]),
+                precedenceChanges: Object.freeze([...base.trustReview.precedenceChanges]),
+              }),
+            }),
         detailOffset: 0,
         surfaces: Object.freeze(
           surfaces.map((surface) =>
@@ -360,6 +379,40 @@ export class AdoptionController {
     } finally {
       if (this.requestController === controller) this.requestController = undefined;
     }
+  }
+
+  async planNativeSkill(
+    candidate: AdoptionCandidate,
+    targetScope: AdoptionScope = candidate.scope,
+  ): Promise<AdoptionRpcMethodMap["adoption.plan"]["result"]> {
+    this.requireCapability("adoption.plan");
+    return this.client.request("adoption.plan", {
+      candidateId: candidate.candidateId,
+      expectedDiscoveryFingerprint: candidate.discoveryFingerprint,
+      targetScope,
+    });
+  }
+
+  async stageNativeSkill(
+    operationId: AdoptionRpcMethodMap["adoption.start"]["params"]["operationId"],
+  ): Promise<AdoptionOperationSummary> {
+    this.requireCapability("adoption.start");
+    return this.client.request("adoption.start", { operationId });
+  }
+
+  async approveNativeSkill(
+    params: AdoptionRpcMethodMap["adoption.operation.approveActivation"]["params"],
+  ): Promise<AdoptionRpcMethodMap["adoption.operation.approveActivation"]["result"]> {
+    this.requireCapability("adoption.approve-activation");
+    return this.client.request("adoption.operation.approveActivation", params);
+  }
+
+  private requireCapability(capability: string): void {
+    if (this.client.connection.grantedCapabilities?.includes(capability) !== true)
+      throw new AxlClientError(
+        "unsupported_capability",
+        `${capability} is not available on this connection`,
+      );
   }
 
   dismissFindings(): void {

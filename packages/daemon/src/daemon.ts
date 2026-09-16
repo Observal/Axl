@@ -258,7 +258,12 @@ export class AxlDaemon {
         (this.providerManagement !== undefined || !capability.startsWith("provider.")) &&
         (!capability.startsWith("adoption.") ||
           (this.adoptionService !== undefined &&
-            (capability === "adoption.discover" || capability === "adoption.inspect"))),
+            (capability === "adoption.discover" ||
+              capability === "adoption.inspect" ||
+              (capability === "adoption.plan" && this.adoptionService.plan !== undefined) ||
+              (capability === "adoption.start" && this.adoptionService.start !== undefined) ||
+              (capability === "adoption.approve-activation" &&
+                this.adoptionService.approveActivation !== undefined)))),
     );
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
@@ -339,6 +344,18 @@ export class AxlDaemon {
       }
       throw error;
     }
+  }
+
+  scheduleAdoptionReload(
+    scope: "global" | "project",
+    registryGeneration: number,
+    projectRoot?: string,
+  ): void {
+    this.sessions.scheduleAdoptionReload(scope, registryGeneration, projectRoot);
+  }
+
+  adoptionReloadFailure(sessionId: SessionId): Error | undefined {
+    return this.sessions.adoptionReloadFailure(sessionId);
   }
 
   stop(): Promise<void> {
@@ -817,6 +834,8 @@ export class AxlDaemon {
         request.method === "provider.auth.logout" ||
         request.method === "adoption.discover" ||
         request.method === "adoption.inspect" ||
+        request.method === "adoption.plan" ||
+        request.method === "adoption.start" ||
         request.method === "session.history" ||
         request.method === "session.workspace.list" ||
         request.method === "session.workspace.read" ||
@@ -1047,6 +1066,24 @@ export class AxlDaemon {
         return this.adoptions().discover(request.params, this.adoptionContext(state), signal);
       case "adoption.inspect":
         return this.adoptions().inspect(request.params, this.adoptionContext(state), signal);
+      case "adoption.plan": {
+        const service = this.adoptions();
+        if (service.plan === undefined)
+          throw new DaemonError("unsupported_capability", "Adoption planning is unavailable");
+        return service.plan(request.params, this.adoptionContext(state), signal);
+      }
+      case "adoption.start": {
+        const service = this.adoptions();
+        if (service.start === undefined)
+          throw new DaemonError("unsupported_capability", "Adoption installation is unavailable");
+        return service.start(request.params, this.adoptionContext(state), signal);
+      }
+      case "adoption.operation.approveActivation": {
+        const service = this.adoptions();
+        if (service.approveActivation === undefined)
+          throw new DaemonError("unsupported_capability", "Adoption activation is unavailable");
+        return service.approveActivation(request.params, this.adoptionContext(state));
+      }
       case "provider.list":
         return this.providers().list(request.params, signal);
       case "provider.catalog.refresh":

@@ -4517,11 +4517,23 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "axl.sock");
   const boundaries: string[] = [];
+  let holdReload = false;
+  let failReload = false;
+  let releaseReload: (() => void) | undefined;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
-    runtime: ({ boundary }) => {
+    runtime: async ({ boundary }) => {
       boundaries.push(boundary);
+      if (boundary === "reload" && failReload) {
+        failReload = false;
+        throw new Error("injected adoption reload failure");
+      }
+      if (boundary === "reload" && holdReload) {
+        await new Promise<void>((resolve) => {
+          releaseReload = resolve;
+        });
+      }
       return {
         model: replyPort(),
         tools: new ToolRegistry(),
@@ -4563,6 +4575,29 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
       .filter((event) => reloaded.boundaryEventIds.includes(event.id))
       .every((event) => event.operationId === reloadKey),
     true,
+  );
+
+  daemon.scheduleAdoptionReload("project", 1, directory);
+  await waitFor(() => boundaries.length === 3, "idle adoption catalog reload");
+  assert.equal(boundaries[2], "reload");
+
+  holdReload = true;
+  daemon.scheduleAdoptionReload("project", 2, directory);
+  await waitFor(() => boundaries.length === 4, "first coalesced adoption reload");
+  daemon.scheduleAdoptionReload("project", 3, directory);
+  holdReload = false;
+  releaseReload?.();
+  await waitFor(() => boundaries.length === 5, "newer adoption generation reload");
+
+  failReload = true;
+  daemon.scheduleAdoptionReload("project", 4, directory);
+  await waitFor(
+    () => daemon.adoptionReloadFailure(created.sessionId) !== undefined,
+    "observable adoption reload failure",
+  );
+  await waitFor(
+    () => boundaries.length >= 7 && daemon.adoptionReloadFailure(created.sessionId) === undefined,
+    "adoption reload retry",
   );
 
   client.close();

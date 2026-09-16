@@ -8,8 +8,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import {
-  DiscoveryError,
+  type BoundedFileSystem,
   candidateId,
+  DiscoveryError,
   decodeUtf8,
   discover,
   expandPatterns,
@@ -17,10 +18,9 @@ import {
   mergeLimits,
   nodeFileSystem,
   parseFrontmatter,
-  parseJsonObject,
   parseJsoncObject,
+  parseJsonObject,
   snapshotTree,
-  type BoundedFileSystem,
 } from "../src/index.ts";
 import { cordisSequenceConformance, ecosystemFailureFixtures } from "./fixtures/ecosystem-cases.ts";
 
@@ -363,9 +363,10 @@ test("strict Agent Skill inspection reports standard and Pi-lenient behavior", a
       "---\nname: INVALID Name\ndescription: Present\nunknown-field: value\ndisable-model-invocation: true\n---\nBody",
     ".pi/agent/skills/mismatch/helper.py": "print('never run')",
     ".pi/agent/skills/complex/SKILL.md":
-      "---\nname: complex\ndescription: Present\nmetadata:\n  nested: value\n---\nBody",
+      "---\r\nname: complex\r\ndescription: Present\r\nmetadata:\r\n  nested: value\r\n---\r\nBody",
     ".pi/agent/skills/flat.md": "Flat Pi skill",
     ".pi/agent/skills/long/SKILL.md": `---\nname: ${"a".repeat(65)}\ndescription: ${"x".repeat(1_025)}\n---\nBody`,
+    ".pi/agent/skills/unicode/SKILL.md": `---\nname: unicode\ndescription: ${"é".repeat(600)}\n---\nBody`,
     ".pi/agent/skills/one/SKILL.md": "---\nname: shared\ndescription: First\n---\nBody",
     ".pi/agent/skills/two/SKILL.md": "---\nname: shared\ndescription: Second\n---\nBody",
   });
@@ -387,16 +388,17 @@ test("strict Agent Skill inspection reports standard and Pi-lenient behavior", a
     "skill-collision",
     "skill-pi-disable-model-invocation",
     "skill-executable-helper",
-    "skill-frontmatter-invalid",
   ]) {
     assert.ok(codes.has(code), code);
   }
-  assert.ok(
-    result.candidates.some(
-      (candidate) =>
-        candidate.provenance.relativePath === "skills/complex/SKILL.md" && candidate.malformed,
-    ),
-  );
+  for (const relativePath of ["skills/complex/SKILL.md", "skills/unicode/SKILL.md"]) {
+    assert.ok(
+      result.candidates.some(
+        (candidate) => candidate.provenance.relativePath === relativePath && !candidate.malformed,
+      ),
+      relativePath,
+    );
+  }
 });
 
 test("Pi project discovery requires trust and honors environment roots and exact filters", async () => {

@@ -395,6 +395,32 @@ export interface AdoptionInspectParams {
   readonly pageSize: number;
   readonly pageCursor?: string;
 }
+export interface AdoptionTrustReviewFile {
+  readonly relativePath: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+  readonly executable: boolean;
+}
+
+/** Canonical, bounded trust input shown before a native adoption is installed. */
+export interface AdoptionTrustReview {
+  readonly bindingSha256: string;
+  readonly sourceContentSha256: string;
+  readonly fileInventorySha256: string;
+  readonly targetScope: AdoptionScope;
+  readonly licenseExpressions: readonly string[];
+  readonly licenseFiles: readonly AdoptionTrustReviewFile[];
+  readonly noticeFiles: readonly AdoptionTrustReviewFile[];
+  /** Every non-executable document or asset in the selected resource subtree. */
+  readonly declarativeFiles: readonly AdoptionTrustReviewFile[];
+  readonly executableFiles: readonly AdoptionTrustReviewFile[];
+  readonly capabilityRequests: readonly AdoptionCapabilityRequest[];
+  readonly conflicts: readonly string[];
+  readonly precedenceChanges: readonly string[];
+  readonly policyGeneration: string;
+  readonly registryGeneration: number;
+}
+
 export interface AdoptionInspectResult {
   readonly candidate: AdoptionCandidate;
   readonly adapter: {
@@ -421,6 +447,7 @@ export interface AdoptionInspectResult {
   };
   readonly surfaceCount: number;
   readonly diagnosticCount: number;
+  readonly trustReview?: AdoptionTrustReview;
   /** Offset in the combined surfaces-then-diagnostics detail stream. */
   readonly detailOffset: number;
   readonly surfaces: readonly AdoptionResourceSurface[];
@@ -503,6 +530,8 @@ export type AdoptionRpcMethodMap = {
     readonly params: {
       readonly operationId: AdoptionOperationId;
       readonly revisionId: AdoptionRevisionId;
+      readonly reviewBindingSha256: string;
+      readonly policyGeneration: string;
       readonly rationale?: string;
     };
     readonly result: {
@@ -799,10 +828,18 @@ export function parseAdoptionRpcParams<Method extends AdoptionRpcMethod>(
       rationale: text(input.rationale, `${path}.rationale`, 2_048),
     };
   } else if (method === "adoption.operation.approveActivation") {
-    exact(input, path, ["operationId", "revisionId", "rationale"]);
+    exact(input, path, [
+      "operationId",
+      "revisionId",
+      "reviewBindingSha256",
+      "policyGeneration",
+      "rationale",
+    ]);
     parsed = {
       operationId: parseAdoptionOperationId(input.operationId, `${path}.operationId`),
       revisionId: parseAdoptionRevisionId(input.revisionId, `${path}.revisionId`),
+      reviewBindingSha256: sha(input.reviewBindingSha256, `${path}.reviewBindingSha256`),
+      policyGeneration: text(input.policyGeneration, `${path}.policyGeneration`, 128),
       ...(input.rationale === undefined
         ? {}
         : { rationale: text(input.rationale, `${path}.rationale`, 2_048) }),
@@ -1055,17 +1092,6 @@ export function parseAdoptionSourceLock(value: unknown, path = "sourceLock"): Ad
   return parseSourceLock(value, path);
 }
 
-export function parseAdoptionCandidate(value: unknown, path = "candidate"): AdoptionCandidate {
-  return parseCandidate(value, path);
-}
-
-export function parseAdoptionResourceSurface(
-  value: unknown,
-  path = "surface",
-): AdoptionResourceSurface {
-  return parseSurface(value, path);
-}
-
 export function parseAdoptionDiagnosticSummary(
   value: unknown,
   path = "diagnostic",
@@ -1165,7 +1191,7 @@ function parseInspectParams(input: Record<string, unknown>, path: string): Adopt
 function parseDiscoverResult(input: Record<string, unknown>, path: string): AdoptionDiscoverResult {
   exact(input, path, ["scanGeneration", "candidates", "warnings", "nextPageCursor"]);
   const candidates = array(input.candidates, `${path}.candidates`, 100).map((v, i) =>
-    parseCandidate(v, `${path}.candidates[${i}]`),
+    parseAdoptionCandidate(v, `${path}.candidates[${i}]`),
   );
   assertUniqueBy(candidates, (candidate) => candidate.candidateId, `${path}.candidates`);
   return {
@@ -1188,6 +1214,7 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
     "limits",
     "surfaceCount",
     "diagnosticCount",
+    "trustReview",
     "detailOffset",
     "surfaces",
     "diagnostics",
@@ -1212,7 +1239,7 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
   const diagnosticCount = count(input.diagnosticCount, `${path}.diagnosticCount`, 10_000);
   const detailOffset = count(input.detailOffset, `${path}.detailOffset`, 20_000);
   const surfaces = array(input.surfaces, `${path}.surfaces`, 100).map((value, index) =>
-    parseSurface(value, `${path}.surfaces[${index}]`),
+    parseAdoptionResourceSurface(value, `${path}.surfaces[${index}]`),
   );
   const diagnostics = array(input.diagnostics, `${path}.diagnostics`, 100).map((value, index) =>
     parseDiagnostic(value, `${path}.diagnostics[${index}]`),
@@ -1229,7 +1256,7 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
     path,
   );
   return {
-    candidate: parseCandidate(input.candidate, `${path}.candidate`),
+    candidate: parseAdoptionCandidate(input.candidate, `${path}.candidate`),
     adapter: {
       id: code(adapter.id, `${path}.adapter.id`),
       version: text(adapter.version, `${path}.adapter.version`, 128),
@@ -1262,13 +1289,92 @@ function parseInspectResult(input: Record<string, unknown>, path: string): Adopt
     },
     surfaceCount,
     diagnosticCount,
+    ...(input.trustReview === undefined
+      ? {}
+      : { trustReview: parseAdoptionTrustReview(input.trustReview, `${path}.trustReview`) }),
     detailOffset,
     surfaces,
     diagnostics,
     ...(nextPageCursor === undefined ? {} : { nextPageCursor }),
   };
 }
-function parseCandidate(value: unknown, path: string): AdoptionCandidate {
+
+function parseTrustReviewFile(value: unknown, path: string): AdoptionTrustReviewFile {
+  const input = object(value, path);
+  exact(input, path, ["relativePath", "sha256", "sizeBytes", "executable"]);
+  return {
+    relativePath: pathText(input.relativePath, `${path}.relativePath`, false),
+    sha256: sha(input.sha256, `${path}.sha256`),
+    sizeBytes: count(input.sizeBytes, `${path}.sizeBytes`),
+    executable: bool(input.executable, `${path}.executable`),
+  };
+}
+
+export function parseAdoptionTrustReview(
+  value: unknown,
+  path = "trustReview",
+): AdoptionTrustReview {
+  const input = object(value, path);
+  exact(input, path, [
+    "bindingSha256",
+    "sourceContentSha256",
+    "fileInventorySha256",
+    "targetScope",
+    "licenseExpressions",
+    "licenseFiles",
+    "noticeFiles",
+    "declarativeFiles",
+    "executableFiles",
+    "capabilityRequests",
+    "conflicts",
+    "precedenceChanges",
+    "policyGeneration",
+    "registryGeneration",
+  ]);
+  const files = (
+    field: "licenseFiles" | "noticeFiles" | "declarativeFiles" | "executableFiles",
+  ) => {
+    const parsed = array(input[field], `${path}.${field}`, 20_000).map((item, index) =>
+      parseTrustReviewFile(item, `${path}.${field}[${index}]`),
+    );
+    assertUniqueBy(parsed, (file) => file.relativePath, `${path}.${field}`);
+    return parsed;
+  };
+  const capabilityRequests = array(
+    input.capabilityRequests,
+    `${path}.capabilityRequests`,
+    ADOPTION_LIMITS.capabilityRequestsPerRevision,
+  ).map((item, index) => parseCapabilityRequest(item, `${path}.capabilityRequests[${index}]`));
+  assertUniqueBy(capabilityRequests, (request) => request.capability, `${path}.capabilityRequests`);
+  return {
+    bindingSha256: sha(input.bindingSha256, `${path}.bindingSha256`),
+    sourceContentSha256: sha(input.sourceContentSha256, `${path}.sourceContentSha256`),
+    fileInventorySha256: sha(input.fileInventorySha256, `${path}.fileInventorySha256`),
+    targetScope: parseAdoptionScope(input.targetScope, `${path}.targetScope`),
+    licenseExpressions: uniqueArray(
+      input.licenseExpressions,
+      `${path}.licenseExpressions`,
+      32,
+      (item, itemPath) => text(item, itemPath, 256),
+    ),
+    licenseFiles: files("licenseFiles"),
+    noticeFiles: files("noticeFiles"),
+    declarativeFiles: files("declarativeFiles"),
+    executableFiles: files("executableFiles"),
+    capabilityRequests,
+    conflicts: array(input.conflicts, `${path}.conflicts`, 1_000).map((item, index) =>
+      text(item, `${path}.conflicts[${index}]`, ADOPTION_LIMITS.rationaleBytes),
+    ),
+    precedenceChanges: array(input.precedenceChanges, `${path}.precedenceChanges`, 1_000).map(
+      (item, index) =>
+        text(item, `${path}.precedenceChanges[${index}]`, ADOPTION_LIMITS.rationaleBytes),
+    ),
+    policyGeneration: text(input.policyGeneration, `${path}.policyGeneration`, 128),
+    registryGeneration: count(input.registryGeneration, `${path}.registryGeneration`),
+  };
+}
+
+export function parseAdoptionCandidate(value: unknown, path = "candidate"): AdoptionCandidate {
   const x = object(value, path);
   exact(x, path, [
     "candidateId",
@@ -1375,7 +1481,10 @@ function parseSourceLock(value: unknown, path: string): AdoptionSourceLock {
   }
   return fail(`${path}.kind`, "must be local-snapshot, npm, or git");
 }
-function parseSurface(value: unknown, path: string): AdoptionResourceSurface {
+export function parseAdoptionResourceSurface(
+  value: unknown,
+  path = "surface",
+): AdoptionResourceSurface {
   const x = object(value, path);
   exact(x, path, [
     "surfaceId",
@@ -1530,7 +1639,7 @@ function parseOperationDetail(value: unknown, path: string): AdoptionOperationDe
     ...base,
     ...(x.candidate === undefined
       ? {}
-      : { candidate: parseCandidate(x.candidate, `${path}.candidate`) }),
+      : { candidate: parseAdoptionCandidate(x.candidate, `${path}.candidate`) }),
     ...(x.sourceLock === undefined
       ? {}
       : { sourceLock: parseSourceLock(x.sourceLock, `${path}.sourceLock`) }),
@@ -1663,7 +1772,7 @@ function parseCompatibilityReport(value: unknown, path: string): AdoptionCompati
     "partialAcknowledgementRequired",
   ]);
   const surfaces = array(x.surfaces, `${path}.surfaces`, 100).map((v, i) =>
-    parseSurface(v, `${path}.surfaces[${i}]`),
+    parseAdoptionResourceSurface(v, `${path}.surfaces[${i}]`),
   );
   assertUniqueBy(surfaces, (surface) => surface.surfaceId, `${path}.surfaces`);
   if (surfaces.length > summary.surfaceCount) {

@@ -329,6 +329,13 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     runtime: async ({ sessionId, cwd, boundary, selection, interact, readBlob }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";
+      const adoptedCatalog =
+        profile === "standard"
+          ? await adoptionStore.activeSkills()
+          : { generation: 0, skills: [] as const };
+      const activeAdoptedSkills = adoptedCatalog.skills.filter(
+        (skill) => skill.scope === "global" || skill.projectRoot === cwd,
+      );
       const [hasMcpConfig, hasSkills] =
         profile !== "standard"
           ? [false, false]
@@ -340,21 +347,50 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
               Promise.all([
                 exists(join(axlHome, "skills")),
                 exists(join(cwd, ".axl", "skills")),
-              ]).then((values) => values.some(Boolean)),
+              ]).then((values) => values.some(Boolean) || activeAdoptedSkills.length > 0),
             ]);
       const [mcpPackage, skillsPackage] = await Promise.all([
         hasMcpConfig ? import("@axl/extension-mcp") : Promise.resolve(undefined),
         hasSkills ? import("@axl/extension-skills") : Promise.resolve(undefined),
       ]);
-      const [instructions, skills, mcpServers] = await Promise.all([
+      const [instructions, mutableSkills, adoptedSkills, mcpServers] = await Promise.all([
         kernel.loadAgentsInstructions({ cwd, globalPath: join(axlHome, "AGENTS.md") }),
         skillsPackage === undefined
           ? Promise.resolve([])
           : skillsPackage.discoverSkills({ cwd, globalDirectory: join(axlHome, "skills") }),
+        skillsPackage === undefined
+          ? Promise.resolve([])
+          : Promise.all(
+              activeAdoptedSkills.map(async (entry) => ({
+                entry,
+                skill: await skillsPackage.loadSkill(entry.directory, {
+                  expectedName: entry.name,
+                }),
+              })),
+            ),
         mcpPackage === undefined
           ? Promise.resolve([])
           : mcpPackage.loadMcpConfig({ cwd, globalDirectory: axlHome }),
       ]);
+      const skillCatalog = new Map(mutableSkills.map((skill) => [skill.name, skill]));
+      const adoptedOwners = new Map<string, (typeof activeAdoptedSkills)[number]>();
+      for (const { entry, skill } of adoptedSkills) {
+        if (skill.name !== entry.name)
+          throw new Error(`Adopted skill manifest name does not match ${skill.name}`);
+        const mutable = skillCatalog.get(skill.name);
+        if (mutable !== undefined)
+          throw new Error(`Adopted skill ${skill.name} conflicts with a local Axl skill`);
+        const previous = adoptedOwners.get(skill.name);
+        if (previous !== undefined && previous.packageKey !== entry.packageKey)
+          throw new Error(`Active adopted skills collide on ${skill.name}`);
+        if (previous === undefined || entry.scope === "project") {
+          adoptedOwners.set(skill.name, entry);
+          skillCatalog.set(skill.name, skill);
+        }
+      }
+      const skills = [...skillCatalog.values()].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
       const active = {
         providerId: selection.providerId ?? defaults.providerId ?? "azure-openai-responses",
         modelId: selection.modelId ?? defaults.modelId,
@@ -475,6 +511,9 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             }),
       };
     },
+  });
+  adoptionService.setActivationListener((scope, registryGeneration, projectRoot) => {
+    daemon.scheduleAdoptionReload(scope, registryGeneration, projectRoot);
   });
   await daemon.start();
   return daemon;

@@ -2792,7 +2792,7 @@ export class AxlApp {
             this.view.palette.dim(`${warning.code} · ${sanitizeTerminalText(warning.message)}`),
           ),
         this.view.palette.dim(
-          "Inspection only. Installation and activation are unavailable in this stage.",
+          "Select a valid Agent Skill to inspect it and review native installation.",
         ),
       ],
     });
@@ -2806,6 +2806,41 @@ export class AxlApp {
       const report = await this.adoptionController.inspect(candidate);
       if (report === undefined) return;
       this.commitLines(adoptionInspectionLines(report));
+      if (candidate.kind !== "skill" || report.trustReview === undefined) {
+        this.notice = undefined;
+        return;
+      }
+      if (
+        report.trustReview.executableFiles.length > 0 ||
+        report.trustReview.conflicts.length > 0
+      ) {
+        this.notice = this.view.palette.error(
+          "✖ native installation is blocked by the trust review",
+        );
+        return;
+      }
+      const planned = await this.adoptionController.planNativeSkill(candidate, candidate.scope);
+      const confirmed = await this.confirmShutdown(`Activate ${candidate.displayName}?`, [
+        `Source ${report.trustReview.sourceContentSha256}`,
+        `Destination ${candidate.scope}`,
+        `${plural(report.surfaceCount, "resource")} · ${plural(report.trustReview.capabilityRequests.length, "capability request")}`,
+        "The immutable skill will become available to new and safely reloaded sessions.",
+      ]);
+      if (!confirmed) {
+        this.notice = this.view.palette.dim("· native skill installation cancelled");
+        return;
+      }
+      this.notice = this.view.palette.dim(`· installing ${candidate.displayName}…`);
+      const staged = await this.adoptionController.stageNativeSkill(planned.operationId);
+      if (staged.revisionId === undefined)
+        throw new Error("Native skill installation did not produce a revision");
+      await this.adoptionController.approveNativeSkill({
+        operationId: planned.operationId,
+        revisionId: staged.revisionId,
+        reviewBindingSha256: report.trustReview.bindingSha256,
+        policyGeneration: report.trustReview.policyGeneration,
+      });
+      this.commitLines([`Activated Agent Skill · ${sanitizeTerminalText(candidate.displayName)}`]);
       this.notice = undefined;
     } catch (error) {
       this.notice = this.view.palette.error(

@@ -11,7 +11,7 @@ import {
   stringArray,
   stringRecord,
 } from "../parsing.ts";
-import type { SourceAdapter, AdapterResult } from "../source-adapter.ts";
+import type { AdapterResult, SourceAdapter } from "../source-adapter.ts";
 import type {
   DiscoveryCandidate,
   DiscoveryContext,
@@ -292,7 +292,7 @@ function parseSkill(
   const diagnostics: DiscoveryDiagnostic[] = [];
   const text = decodeUtf8(file);
   const standardSkill = file.relativePath.endsWith("/SKILL.md");
-  if (standardSkill && !text.startsWith("---\n")) {
+  if (standardSkill && !/^---\r?\n/u.test(text)) {
     diagnostics.push({
       code: "skill-frontmatter-required",
       severity: "error",
@@ -329,11 +329,11 @@ function parseSkill(
       message: "standard Agent Skill frontmatter requires a nonempty description",
       relativePath: file.relativePath,
     });
-  } else if (typeof description === "string" && Buffer.byteLength(description, "utf8") > 1_024) {
+  } else if (typeof description === "string" && [...description].length > 1_024) {
     diagnostics.push({
       code: "skill-description-too-long",
       severity: "error",
-      message: "skill description exceeds 1024 UTF-8 bytes",
+      message: "skill description exceeds 1024 Unicode characters",
       relativePath: file.relativePath,
     });
   }
