@@ -9,9 +9,9 @@ import { dirname } from "node:path";
 
 import { THINKING_LEVELS } from "@axl/ai/models";
 import {
-  type ThinkingLevel,
   type ModelRequestSettings,
   parseModelRequestSettings,
+  type ThinkingLevel,
 } from "@axl/protocol";
 
 type ImageDisplay = "auto" | "inline" | "metadata";

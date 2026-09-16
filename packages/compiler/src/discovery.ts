@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import { DiscoveryError } from "./errors.ts";
-import { mergeLimits, nodeFileSystem, type BoundedFileSystem } from "./filesystem.ts";
-import type { SourceAdapter } from "./source-adapter.ts";
-import type { DiscoveryCandidate, DiscoveryContext, DiscoveryResult, Ecosystem } from "./types.ts";
 import { claudeCodeAdapter, dshAdapter, openCodeAdapter } from "./ecosystems/declarative.ts";
 import { piAdapter } from "./ecosystems/pi.ts";
+import { DiscoveryError } from "./errors.ts";
+import { type BoundedFileSystem, mergeLimits, nodeFileSystem } from "./filesystem.ts";
+import type { SourceAdapter } from "./source-adapter.ts";
+import type { DiscoveryCandidate, DiscoveryContext, DiscoveryResult, Ecosystem } from "./types.ts";
 
 export const sourceAdapters: readonly SourceAdapter[] = Object.freeze([
   openCodeAdapter,

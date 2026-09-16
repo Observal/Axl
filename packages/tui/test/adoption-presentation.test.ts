@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseAdoptionCandidateId, type AdoptionInspectResult } from "@axl/sdk";
+import { type AdoptionInspectResult, parseAdoptionCandidateId } from "@axl/sdk";
 import { adoptionInspectionLines, adoptionPickerItems } from "../src/adoption-presentation.ts";
 
 const candidate = {
