@@ -27,7 +27,7 @@ type PackageManifest = {
 function walk(directory: string, visit: (path: string) => void): void {
   if (!existsSync(directory)) return;
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if ([".git", "_build", "deps", "dist", "node_modules"].includes(entry.name)) continue;
+    if ([".git", "_build", "deps", "dist", "node_modules", "target"].includes(entry.name)) continue;
     if (entry.isSymbolicLink()) continue;
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) walk(path, visit);
@@ -99,6 +99,9 @@ export function checkWorkspace(root: string): string[] {
   const controlPlane = packages.find(
     ({ directory }) => directory === resolve(root, "services/control-plane"),
   );
+  const e2eeNode = packages.find(
+    ({ directory }) => directory === resolve(root, "packages/e2ee/bindings/node"),
+  );
   const protocolName = protocol?.manifest.name ?? "@axl/protocol";
   const kernelName = kernel?.manifest.name ?? "@axl/kernel";
   const tuiName = tui?.manifest.name ?? "@axl/tui";
@@ -154,6 +157,14 @@ export function checkWorkspace(root: string): string[] {
           `${relative(root, controlPlane.directory)} may depend only on ${protocolName}, found ${dependency}`,
         );
       }
+    }
+  }
+
+  if (e2eeNode) {
+    for (const dependency of runtimeDependencies(e2eeNode.manifest)) {
+      errors.push(
+        `${relative(root, e2eeNode.directory)} must not have npm runtime dependencies, found ${dependency}`,
+      );
     }
   }
 

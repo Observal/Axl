@@ -9,6 +9,10 @@ rust-version = "1.96"
 license = "Apache-2.0"
 publish = false
 
+[workspace]
+members = ["bindings/node"]
+resolver = "2"
+
 [dependencies]
 openmls = { version = "=0.9.0", default-features = false, features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_basic_credential = { version = "=0.6.0", default-features = false }

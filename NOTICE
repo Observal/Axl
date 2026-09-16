@@ -30,3 +30,6 @@ and `openmls_libcrux_crypto` 0.4.0 as unmodified external dependencies under MIT
 Their dependency graph includes the unmodified `hpke-rs`, `hpke-rs-crypto`, and
 `hpke-rs-libcrux` 0.7.0 crates under MPL-2.0. Applicable license texts and notices
 remain in Cargo source distributions and must be included in distributed packages.
+
+Axl's private Node endpoint binding uses napi-rs (`napi` 3.12.5, `napi-derive`
+3.6.6, and `napi-build` 2.4.2) as unmodified external dependencies under MIT.

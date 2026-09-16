@@ -101,6 +101,8 @@ importers:
         specifier: workspace:*
         version: link:../sdk
 
+  packages/e2ee/bindings/node: {}
+
   packages/extensions/api: {}
 
   packages/extensions/mcp:
