@@ -296,6 +296,13 @@ export class AxlClient {
     return this.request("provider.auth.logout", params, options);
   }
 
+  respondToInteraction(
+    params: RpcParams<"session.interaction.respond">,
+    options: RequestOptions = {},
+  ): Promise<RpcResult<"session.interaction.respond">> {
+    return this.request("session.interaction.respond", params, options);
+  }
+
   async readBlob(
     sessionId: SessionId,
     blob: BlobReference,

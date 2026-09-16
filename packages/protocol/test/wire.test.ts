@@ -343,6 +343,29 @@ test("validates every request shape", () => {
   }
 });
 
+test("defaults legacy session configuration results to non-interactive", () => {
+  const result = {
+    providerId: "openai",
+    modelId: "gpt-5",
+    requestedThinkingLevel: "medium",
+    effectiveThinkingLevel: "medium",
+    requestSettings: { maxOutputTokens: null, httpIdleTimeoutMs: 300_000 },
+    profile: "standard",
+    webFetch: true,
+    webSearch: true,
+    boundaryEventIds: [],
+  } as const;
+  assert.deepEqual(
+    parseServerMessage({ kind: "success", id: 1, method: "session.configure", result }),
+    {
+      kind: "success",
+      id: 1,
+      method: "session.configure",
+      result: { ...result, userQuestions: false },
+    },
+  );
+});
+
 test("requires idempotency keys only for retryable mutations", () => {
   assert.throws(
     () =>

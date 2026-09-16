@@ -4,6 +4,7 @@
 import type { ProviderAuthentication, ResolvedAuth } from "./auth.ts";
 import { AuthError } from "./auth.ts";
 import { safeProviderMessage } from "./diagnostics.ts";
+import { consumeContextLimitResponse } from "./model-error.ts";
 import type {
   AuthMethod,
   ModelErrorCategory,
@@ -71,6 +72,7 @@ export interface HttpSseProviderOptions {
 }
 
 function category(status: number): ModelErrorCategory {
+  if (status === 413) return "context_limit";
   if (status === 401) return "authentication";
   if (status === 403) return "authorization";
   if (status === 408) return "timeout";
@@ -270,13 +272,13 @@ export class HttpSseProvider implements ModelProvider {
         }
         continue;
       }
-      await response.body?.cancel();
+      const contextLimit = await consumeContextLimitResponse(response, signal);
       yield {
         type: "error",
         code: `http_${response.status}`,
         message: `Provider ${this.id} returned ${response.status}`,
         retryable,
-        category: category(response.status),
+        category: contextLimit ? "context_limit" : category(response.status),
         requestPhase: "awaiting_response",
       };
       return;

@@ -186,13 +186,13 @@ test("focus mode hides routine success while retaining failures and edits", () =
   assert.match(failed.join("\n"), /not found/);
 });
 
-test("first-party MCP and skill views use public renderer registrations", async () => {
+test("first-party MCP and capability views use public renderer registrations", async () => {
   const host = new TerminalExtensionHost([mcpTerminalExtension, skillTerminalExtension]);
   await host.activate();
   const mcpRenderer = host.toolRenderer("mcp");
-  const skillRenderer = host.toolRenderer("skill");
+  const capabilityRenderer = host.toolRenderer("capability_search");
   assert.ok(mcpRenderer);
-  assert.ok(skillRenderer);
+  assert.ok(capabilityRenderer);
   const mcp = renderToolTransaction({
     callId: "mcp-call",
     name: "mcp",
@@ -203,29 +203,29 @@ test("first-party MCP and skill views use public renderer registrations", async 
     palette: PLAIN_PALETTE,
     renderer: mcpRenderer,
   });
-  const skill = renderToolTransaction({
-    callId: "skill-call",
-    name: "skill",
-    args: { action: "load", name: "review" },
+  const capability = renderToolTransaction({
+    callId: "capability-call",
+    name: "capability_search",
+    args: { action: "activate", identities: ["skill:review"] },
     status: "running",
     width: 80,
     mode: "compact",
     palette: PLAIN_PALETTE,
-    renderer: skillRenderer,
+    renderer: capabilityRenderer,
   });
   assert.match(mcp.join("\n"), /MCP {2}docs · search/);
-  assert.match(skill.join("\n"), /SKILL {2}load · review/);
-  assert.equal(skill.join("\n").includes("TOOL SKILL"), false);
+  assert.match(capability.join("\n"), /CAPABILITY {2}activate · skill:review/);
+  assert.equal(capability.join("\n").includes("TOOL CAPABILITY_SEARCH"), false);
   const settledSkill = renderToolTransaction({
-    callId: "skill-call",
-    name: "skill",
-    args: { action: "load", name: "review" },
+    callId: "capability-call",
+    name: "capability_search",
+    args: { action: "activate", identities: ["skill:review"] },
     result: "a very long skill body that should stay out of compact mode",
     status: "succeeded",
     width: 80,
     mode: "compact",
     palette: PLAIN_PALETTE,
-    renderer: skillRenderer,
+    renderer: capabilityRenderer,
   });
   assert.equal(settledSkill.join("\n").includes("a very long skill body"), false);
   await host.dispose();

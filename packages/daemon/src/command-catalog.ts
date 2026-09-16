@@ -1,9 +1,36 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { CapabilityId, CommandDescriptor, CommandListResult, SessionId } from "@axl/protocol";
+import {
+  makeCompactContextTool,
+  makeReloadContextTool,
+  ToolCapabilityService,
+  type CapabilitySource,
+  type ToolRegistry,
+} from "@axl/kernel";
+import type {
+  CapabilityId,
+  CapabilityRecord,
+  CommandDescriptor,
+  CommandListResult,
+  SessionId,
+} from "@axl/protocol";
 
-const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
+interface ModelToolContext {
+  readonly tools: ToolRegistry;
+  readonly compact: (instructions?: string) => Promise<unknown>;
+  readonly reload: () => Promise<unknown>;
+}
+
+interface BuiltInCommand extends Omit<CommandDescriptor, "availability"> {
+  readonly modelTool?: {
+    readonly identity: string;
+    readonly aliases: readonly string[];
+    readonly create: (context: ModelToolContext) => ReturnType<typeof makeCompactContextTool>;
+  };
+}
+
+const BUILT_INS: readonly BuiltInCommand[] = [
   {
     id: "core.model",
     name: "model",
@@ -66,6 +93,11 @@ const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
     context: "session",
     argument: { required: false },
     requiredCapabilities: ["session.reload"],
+    modelTool: {
+      identity: "tool:reload-context",
+      aliases: ["reload context", "reload instructions"],
+      create: ({ reload }) => makeReloadContextTool(reload),
+    },
   },
   {
     id: "core.compact",
@@ -75,6 +107,11 @@ const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
     context: "session",
     argument: { required: false, hint: "instructions" },
     requiredCapabilities: ["session.compact"],
+    modelTool: {
+      identity: "tool:compact-context",
+      aliases: ["compact context", "context compaction"],
+      create: ({ compact }) => makeCompactContextTool(compact),
+    },
   },
   {
     id: "core.request",
@@ -199,7 +236,7 @@ export function commandCatalog(
     generation: "builtin-3",
     commands: BUILT_INS.filter((command) =>
       command.requiredCapabilities.every((capability) => capabilities.has(capability)),
-    ).map((command) => ({
+    ).map(({ modelTool: _modelTool, ...command }) => ({
       ...command,
       availability:
         command.context === "session" && sessionId === undefined
@@ -207,4 +244,38 @@ export function commandCatalog(
           : { state: "available" as const },
     })),
   };
+}
+
+/** Installs the model-callable subset from the same registry that owns user commands. */
+export function installDaemonCommandCapabilities(context: ModelToolContext): {
+  readonly source: CapabilitySource;
+  readonly grantedAuthorities: ReadonlySet<string>;
+} {
+  const definitions = BUILT_INS.filter((command) => command.modelTool !== undefined);
+  const grantedAuthorities = new Set(
+    definitions.flatMap((command) => command.requiredCapabilities),
+  );
+  const records: CapabilityRecord[] = [];
+  for (const definition of definitions) {
+    const modelTool = definition.modelTool;
+    if (modelTool === undefined) continue;
+    const tool = modelTool.create(context);
+    context.tools.registerCapability(modelTool.identity, tool);
+    records.push({
+      identity: modelTool.identity,
+      kind: "tool",
+      name: definition.name,
+      description: tool.description,
+      aliases: modelTool.aliases,
+      path: `builtin:${tool.name}`,
+      scope: "global",
+      provenance: definition.id,
+      enabled: true,
+      trust: "trusted",
+      available: true,
+      requiredAuthority: definition.requiredCapabilities,
+    });
+  }
+  const service = new ToolCapabilityService(records, grantedAuthorities);
+  return { source: { records, service }, grantedAuthorities };
 }

@@ -14,7 +14,7 @@ import test from "node:test";
 import { FileCredentialStore, getStaticModelCatalog } from "@axl/ai";
 import { AxlDaemon } from "@axl/daemon";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
-import type { ModelStreamEvent } from "@axl/protocol";
+import type { CanonicalEvent, ModelStreamEvent } from "@axl/protocol";
 import { AxlClientError } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
 
@@ -220,7 +220,12 @@ test("assembles an authoritative local runtime without a presentation client", a
   const workspace = join(root, "workspace");
   const stateDirectory = join(axlHome, "unsafe");
   const socketPath = join(stateDirectory, "axl.sock");
-  await mkdir(workspace, { recursive: true });
+  await mkdir(join(workspace, ".axl", "skills", "ignored"), { recursive: true });
+  await writeFile(join(workspace, "AGENTS.md"), "Use the repository instructions.\n");
+  await writeFile(
+    join(workspace, ".axl", "skills", "ignored", "SKILL.md"),
+    "---\nname: ignored\ndescription: Must not enter the stable prompt.\n---\nIgnored.\n",
+  );
 
   const store = new FileCredentialStore(join(axlHome, "credentials.json"));
   const customSource = getStaticModelCatalog("deepseek")[0];
@@ -249,7 +254,16 @@ test("assembles an authoritative local runtime without a presentation client", a
     axlHome,
     stateDirectory,
     socketPath,
-    defaults: { modelId: "gpt-5", thinkingLevel: "medium" },
+    defaults: {
+      modelId: "gpt-5",
+      thinkingLevel: "medium",
+      compaction: {
+        enabled: true,
+        reserveTokens: 12_000,
+        keepRecentTokens: 20_000,
+        modelOverrides: { "azure-openai-responses/gpt-5": { keepRecentTokens: 30_000 } },
+      },
+    },
     store,
     unsafe: true,
   });
@@ -338,7 +352,10 @@ test("assembles an authoritative local runtime without a presentation client", a
     providerId: "deepseek",
     phase: "logged_out",
   });
-  const opened = await client.request("session.create", { cwd: workspace });
+  const opened = await client.request("session.create", {
+    cwd: workspace,
+    userQuestions: true,
+  });
   const subscription = await client.request("session.subscribe", {
     sessionId: opened.sessionId,
   });
@@ -358,11 +375,57 @@ test("assembles an authoritative local runtime without a presentation client", a
     events
       .filter((event) => event.type === "tool.schema")
       .map((event) => (event.type === "tool.schema" ? event.payload.name : "")),
-    ["bash", "read", "write", "edit", "web_fetch", "web_search"],
+    [
+      "bash",
+      "read",
+      "write",
+      "edit",
+      "web_fetch",
+      "web_search",
+      "ask_user_question",
+      "capability_search",
+    ],
   );
+  const prompt = events
+    .filter((event) => event.type === "prompt.section")
+    .map((event) => (event.type === "prompt.section" ? event.payload.content : ""))
+    .join("\n\n");
+  assert.match(prompt, /<project_instructions path=.*AGENTS\.md/);
+  assert.match(prompt, /Use the repository instructions\./);
+  assert.doesNotMatch(prompt, /Must not enter the stable prompt|<available_skills>/);
+  assert.deepEqual(events.find((event) => event.type === "context.resources")?.payload, {
+    resources: [
+      {
+        kind: "agents",
+        scope: "project",
+        path: join(workspace, "AGENTS.md"),
+        content: "Use the repository instructions.",
+      },
+    ],
+  });
+
+  const pushed: CanonicalEvent[] = [];
+  client.onEvent((message) => pushed.push(message.event));
+  await writeFile(join(workspace, "AGENTS.override.md"), "Use the reloaded override.\n");
+  const reloaded = await client.request("session.reload", { sessionId: opened.sessionId });
+  const reloadedResources = pushed.find(
+    (event) => event.type === "context.resources" && reloaded.boundaryEventIds.includes(event.id),
+  );
+  assert.deepEqual(
+    reloadedResources?.type === "context.resources"
+      ? reloadedResources.payload.resources.map(({ path, content }) => [path, content])
+      : undefined,
+    [[join(workspace, "AGENTS.override.md"), "Use the reloaded override."]],
+  );
+
   assert.deepEqual(events.find((event) => event.type === "config.request")?.payload, {
     maxOutputTokens: null,
     httpIdleTimeoutMs: 300_000,
+  });
+  assert.deepEqual(events.find((event) => event.type === "config.compaction")?.payload, {
+    enabled: true,
+    reserveTokens: 12_000,
+    keepRecentTokens: 30_000,
   });
   assert.deepEqual(events.find((event) => event.type === "config.profile")?.payload, {
     profile: "standard",
@@ -370,7 +433,28 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.deepEqual(events.find((event) => event.type === "config.tools")?.payload, {
     webFetch: true,
     webSearch: true,
+    userQuestions: true,
   });
+
+  const unattended = await client.request("session.create", { cwd: workspace });
+  const unattendedSubscription = await client.request("session.subscribe", {
+    sessionId: unattended.sessionId,
+  });
+  assert.equal(
+    unattendedSubscription.snapshot?.page.events.some(
+      (event) => event.type === "tool.schema" && event.payload.name === "ask_user_question",
+    ),
+    false,
+  );
+  assert.equal(
+    unattendedSubscription.snapshot?.page.events
+      .filter((event) => event.type === "prompt.section")
+      .some(
+        (event) =>
+          event.type === "prompt.section" && event.payload.content.includes("ask_user_question"),
+      ),
+    false,
+  );
 
   for (const [profile, expectedTools] of [
     ["minimal", ["bash", "edit"]],

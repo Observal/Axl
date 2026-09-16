@@ -60,6 +60,7 @@ export interface SessionModelSelection {
 export interface SessionToolSelection {
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly userQuestions?: boolean;
 }
 
 export type SessionSelection = SessionModelSelection & SessionToolSelection;
@@ -865,7 +866,11 @@ export interface RpcMethodMap {
   };
   readonly "session.compact": {
     readonly params: { readonly sessionId: SessionId; readonly instructions?: string };
-    readonly result: { readonly eventId: EventId };
+    readonly result: {
+      readonly state: "completed" | "queued";
+      readonly operationId: OperationId;
+      readonly eventId: EventId;
+    };
   };
   readonly "session.queue.enqueue": {
     readonly params: {
@@ -919,6 +924,7 @@ export interface RpcMethodMap {
       readonly profile: SessionProfile;
       readonly webFetch: boolean;
       readonly webSearch: boolean;
+      readonly userQuestions: boolean;
       readonly boundaryEventIds: readonly EventId[];
     };
   };
@@ -1008,6 +1014,7 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.import",
   "session.send",
   "session.interruptAndDeliver",
+  "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
   "session.queue.restore",
@@ -1091,6 +1098,7 @@ export const RPC_ERROR_CODES = [
   "empty_session",
   "unknown_interaction",
   "interaction_already_resolved",
+  "invalid_interaction_response",
   "unknown_subscription",
   "unknown_cursor",
   "snapshot_required",
@@ -1514,7 +1522,7 @@ function selection(params: Record<string, unknown>, path: string): SessionSelect
       `must be one of: ${thinkingLevels.join(", ")}`,
     );
   }
-  for (const field of ["webFetch", "webSearch"] as const) {
+  for (const field of ["webFetch", "webSearch", "userQuestions"] as const) {
     if (params[field] !== undefined && typeof params[field] !== "boolean") {
       throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
     }
@@ -1533,6 +1541,9 @@ function selection(params: Record<string, unknown>, path: string): SessionSelect
     ...(thinkingLevel === undefined ? {} : { thinkingLevel: thinkingLevel as ThinkingLevel }),
     ...(params.webFetch === undefined ? {} : { webFetch: params.webFetch as boolean }),
     ...(params.webSearch === undefined ? {} : { webSearch: params.webSearch as boolean }),
+    ...(params.userQuestions === undefined
+      ? {}
+      : { userQuestions: params.userQuestions as boolean }),
   };
 }
 
@@ -1652,6 +1663,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       "requestSettings",
       "webFetch",
       "webSearch",
+      "userQuestions",
       "profile",
     ]);
     const profile = sessionProfile(params.profile, "request.params.profile");
@@ -1929,6 +1941,7 @@ export function parseWireRequest(value: unknown): WireRequest {
       "requestSettings",
       "webFetch",
       "webSearch",
+      "userQuestions",
       "profile",
     ]);
     const configured = selection(params, "request.params");
@@ -2664,8 +2677,15 @@ export function parseRpcResult<Method extends RpcMethod>(
     };
   } else if (method === "session.compact") {
     const result = object(value, path);
-    exact(result, path, ["eventId"]);
-    parsed = { eventId: parseEventId(result.eventId, `${path}.eventId`) };
+    exact(result, path, ["state", "operationId", "eventId"]);
+    if (result.state !== "completed" && result.state !== "queued") {
+      throw new ProtocolValidationError(`${path}.state`, "must be completed or queued");
+    }
+    parsed = {
+      state: result.state,
+      operationId: parseOperationId(result.operationId, `${path}.operationId`),
+      eventId: parseEventId(result.eventId, `${path}.eventId`),
+    };
   } else if (method === "session.queue.enqueue" || method === "session.queue.requeue") {
     const result = object(value, path);
     exact(result, path, ["queueItemId", "state"]);
@@ -2760,6 +2780,7 @@ export function parseRpcResult<Method extends RpcMethod>(
       "profile",
       "webFetch",
       "webSearch",
+      "userQuestions",
       "boundaryEventIds",
     ]);
     if (!thinkingLevels.includes(result.requestedThinkingLevel as ThinkingLevel)) {
@@ -2779,6 +2800,9 @@ export function parseRpcResult<Method extends RpcMethod>(
         throw new ProtocolValidationError(`${path}.${field}`, "must be a boolean");
       }
     }
+    if (result.userQuestions !== undefined && typeof result.userQuestions !== "boolean") {
+      throw new ProtocolValidationError(`${path}.userQuestions`, "must be a boolean");
+    }
     if (!Array.isArray(result.boundaryEventIds) || result.boundaryEventIds.length > 256) {
       throw new ProtocolValidationError(`${path}.boundaryEventIds`, "must contain at most 256 IDs");
     }
@@ -2795,6 +2819,7 @@ export function parseRpcResult<Method extends RpcMethod>(
       profile,
       webFetch: result.webFetch,
       webSearch: result.webSearch,
+      userQuestions: result.userQuestions ?? false,
       boundaryEventIds: result.boundaryEventIds.map((id, index) =>
         parseEventId(id, `${path}.boundaryEventIds[${index}]`),
       ),
@@ -3170,7 +3195,12 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_corrupt",
     "content_too_large",
   ],
-  "session.compact": [...SESSION_BASE_ERRORS, "operation_active", "content_too_large"],
+  "session.compact": [
+    ...SESSION_BASE_ERRORS,
+    "operation_active",
+    ...MUTATION_ERRORS,
+    "content_too_large",
+  ],
   "session.queue.enqueue": [
     ...SESSION_BASE_ERRORS,
     ...MUTATION_ERRORS,
@@ -3234,6 +3264,7 @@ export const RPC_METHOD_ERROR_CODES = {
     ...SESSION_BASE_ERRORS,
     "unknown_interaction",
     "interaction_already_resolved",
+    "invalid_interaction_response",
     ...MUTATION_ERRORS,
     "content_too_large",
   ],

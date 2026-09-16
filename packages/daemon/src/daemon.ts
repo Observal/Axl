@@ -1041,6 +1041,7 @@ export class AxlDaemon {
           thinkingLevel,
           webFetch,
           webSearch,
+          userQuestions,
           profile,
           requestSettings,
         } = request.params;
@@ -1054,6 +1055,7 @@ export class AxlDaemon {
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             ...(webFetch === undefined ? {} : { webFetch }),
             ...(webSearch === undefined ? {} : { webSearch }),
+            ...(userQuestions === undefined ? {} : { userQuestions }),
             profile: profile ?? "standard",
           },
           reservation,
@@ -1144,7 +1146,11 @@ export class AxlDaemon {
             : parseOperationId(acceptance.affectedOperationId, "affectedOperationId"),
         );
       case "session.compact":
-        return this.sessions.compact(request.params.sessionId, request.params.instructions);
+        return this.sessions.compact(
+          request.params.sessionId,
+          request.params.instructions,
+          this.mutationOperationId(acceptance),
+        );
       case "session.queue.enqueue":
         return this.sessions.enqueue(
           request.params.sessionId,
@@ -1192,6 +1198,7 @@ export class AxlDaemon {
           thinkingLevel,
           webFetch,
           webSearch,
+          userQuestions,
           profile,
           requestSettings,
         } = request.params;
@@ -1204,6 +1211,7 @@ export class AxlDaemon {
             ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
             ...(webFetch === undefined ? {} : { webFetch }),
             ...(webSearch === undefined ? {} : { webSearch }),
+            ...(userQuestions === undefined ? {} : { userQuestions }),
             ...(profile === undefined ? {} : { profile }),
           },
           this.mutationOperationId(acceptance),

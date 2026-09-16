@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
+export * from "./command-catalog.ts";
 export * from "./daemon.ts";
 export * from "./event-migration.ts";
 export * from "./provider-management.ts";

@@ -280,6 +280,10 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
       return <SystemNotice title={`Sandbox denied ${item.event.payload.capability}`} detail={item.event.payload.reason} tone="warning" alert />;
     case "context.injected":
       return <SystemNotice title="Context added" detail={item.event.payload.source} />;
+    case "compaction.queued":
+      return <SystemNotice title="Compaction queued" detail="It will run after the active response." />;
+    case "compaction.failed":
+      return <SystemNotice title="Compaction failed" detail={item.event.payload.message} tone="error" alert />;
     case "context.compacted":
       return <CompactionRecord item={item} searchQuery={searchQuery} />;
     case "session.error":
@@ -300,16 +304,22 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     case "interrupt.updated":
     case "tool.result":
     case "config.request":
+    case "config.compaction":
     case "model.request_configured":
     case "config.model":
     case "config.provider":
     case "config.entitlement":
     case "config.profile":
     case "config.tools":
+    case "context.resources":
     case "prompt.section":
     case "tool.schema":
     case "context.extension":
+    case "capability.searched":
+    case "capability.activated":
+    case "capability.denied":
     case "interaction.resolved":
+    case "compaction.started":
       return null;
     default:
       return assertNever(item);

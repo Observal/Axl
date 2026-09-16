@@ -62,7 +62,27 @@ test("projects messages, configuration, usage, interactions, and generic tools d
       modelMaxOutputTokens: 64000,
     }),
     event("config.provider", { providerId: "fixture" }),
+    event("context.resources", {
+      resources: [
+        {
+          kind: "agents",
+          scope: "project",
+          path: "/workspace/AGENTS.md",
+          content: "Use pnpm.",
+        },
+      ],
+    }),
     event("config.thinking", { requested: "high", effective: "medium", clamped: true }),
+    event("context.resources", {
+      resources: [
+        {
+          kind: "agents",
+          scope: "project",
+          path: "/workspace/packages/AGENTS.override.md",
+          content: "Use the nearest rules.",
+        },
+      ],
+    }),
     event("tool.call", { callId: "future-1", name: "future_tool", input: { value: 1 } }),
     event("tool.result", {
       callId: "future-1",
@@ -101,6 +121,14 @@ test("projects messages, configuration, usage, interactions, and generic tools d
     maxOutputTokens: null,
     httpIdleTimeoutMs: 300_000,
   });
+  assert.deepEqual(one.state.contextResources, [
+    {
+      kind: "agents",
+      scope: "project",
+      path: "/workspace/packages/AGENTS.override.md",
+      content: "Use the nearest rules.",
+    },
+  ]);
   assert.equal(one.state.lastRequest?.maxOutputTokens, 64000);
   assert.equal(one.state.tools[0]?.renderIntent, "generic");
   assert.equal(one.state.tools[0]?.result?.content[0]?.type, "text");
@@ -113,6 +141,47 @@ test("projects messages, configuration, usage, interactions, and generic tools d
     reasoningTokens: 3,
     costUsd: 0.01,
   });
+});
+
+test("projects capability discovery and retains activation across operations", () => {
+  const projector = new ConversationProjector(sessionId);
+  const first = parseOperationId("00000000-0000-4000-8000-000000000091");
+  const second = parseOperationId("00000000-0000-4000-8000-000000000092");
+  const capability = {
+    identity: "skill:release",
+    kind: "skill" as const,
+    name: "release",
+    description: "Prepare releases",
+    path: "/workspace/.agents/skills/release/SKILL.md",
+    scope: "project" as const,
+    provenance: "project:/workspace/.agents/skills",
+  };
+  projector.applyEvent(event("session.created", { cwd: "/workspace" }));
+  projector.applyEvent(
+    event("user.message", { content: [{ type: "text", text: "release" }] }, null, first),
+  );
+  projector.applyEvent(
+    event(
+      "capability.searched",
+      { query: "release", limit: 5, results: [capability] },
+      null,
+      first,
+    ),
+  );
+  projector.applyEvent(
+    event("capability.activated", { capability, content: "instructions" }, null, first),
+  );
+  projector.applyEvent(
+    event("capability.denied", { identity: "skill:other", reason: "denied" }, null, first),
+  );
+  assert.equal(projector.state.capabilitySearches.length, 1);
+  assert.equal(projector.state.activeCapabilities[0]?.payload.capability.identity, "skill:release");
+  assert.equal(projector.state.capabilityDenials.length, 1);
+
+  projector.applyEvent(
+    event("user.message", { content: [{ type: "text", text: "next" }] }, null, second),
+  );
+  assert.equal(projector.state.activeCapabilities[0]?.payload.capability.identity, "skill:release");
 });
 
 test("classifies first-party tool presentation intents", () => {
@@ -314,6 +383,9 @@ test("overview reads remain history-free for a 100,000-event session", () => {
     compactedEventIds: _compactedEventIds,
     tools: _tools,
     interactions: _interactions,
+    capabilitySearches: _capabilitySearches,
+    activeCapabilities: _activeCapabilities,
+    capabilityDenials: _capabilityDenials,
     operations: _operations,
     queue: _queue,
     interruptDeliveries: _interruptDeliveries,

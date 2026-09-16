@@ -59,6 +59,7 @@ export interface CommandInvocationOptions {
 
 export type CommandOutcome =
   | { readonly state: "completed"; readonly command: string }
+  | { readonly state: "queued"; readonly command: string }
   | {
       readonly state: "session-configured";
       readonly command: "model" | "thinking" | "request";
@@ -353,12 +354,13 @@ export class CommandController {
         if (argument) throw new AxlClientError("invalid_command_argument", "Use /reload");
         await this.client.request("session.reload", { sessionId: sessionId as SessionId });
         return { state: "completed", command: command.name };
-      case "compact":
-        await this.client.request("session.compact", {
+      case "compact": {
+        const result = await this.client.request("session.compact", {
           sessionId: sessionId as SessionId,
           ...(argument === undefined ? {} : { instructions: argument }),
         });
-        return { state: "completed", command: command.name };
+        return { state: result.state, command: command.name };
+      }
       case "clone": {
         if (argument) throw new AxlClientError("invalid_command_argument", "Use /clone");
         const session = await this.client.request("session.clone", {

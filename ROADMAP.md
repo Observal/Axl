@@ -606,7 +606,7 @@ Rules:
 - Dynamic information should leave the stable prompt prefix unchanged. The user request and other per-turn content follow that prefix.
 - If a capability is unavailable for a request, it contributes zero prompt tokens.
 
-Provider caches match the longest unchanged prefix, so Axl appends new context instead of rewriting old content. The base prompt and core tool schemas stay stable. Skills, context, and injected instructions arrive after the user message. BM25-selected tool schemas may change at a user-turn boundary, then remain frozen through every continuation in that turn. Correct tool selection takes priority over retaining every possible cache hit.
+Provider caches match the longest unchanged prefix, so Axl appends new context instead of rewriting old content. The base prompt and core tool schemas stay stable. Skills, context, and injected instructions arrive after that prefix. BM25-selected tool schemas are added when activated and remain in the session roster. Correct tool selection takes priority over retaining every possible cache hit.
 
 #### 7.2 Global AGENTS.md
 
@@ -646,7 +646,7 @@ Tool identity is canonical, but provider adapters render each selected tool in t
 
 Axl distinguishes four directions of invocation:
 
-- **Model to harness:** typed tools selected for the current turn
+- **Model to harness:** typed tools selected progressively for the session
 - **User to harness:** commands such as `/goal`, `/slow`, `/btw`, `/subagents`, `/learn`, `/adopt`, and `/insights`
 - **Harness to model:** roles such as compaction, facet extraction, and vision description
 - **Internal work:** hooks, learning records, tips, and reconciliation
@@ -655,13 +655,13 @@ A scoped harness-control tool may expose user commands to the model when request
 
 #### 7.5 Progressive capability disclosure
 
-Axl maintains one disposable local BM25 index for enabled skills, tools, commands, and agent definitions. Each record contains a name, kind, description, aliases, path, and scope. The index is rebuilt from manifests and frontmatter and is never authoritative.
+Axl maintains a disposable local BM25 index for authorized optional capabilities. Agent Skills are the first indexed kind; tools, commands, and agent definitions join when their runtime paths exist. Each normalized record contains a stable identity, kind, name, description, aliases, canonical path, scope, provenance, enabled state, trust state, availability, and required authority. The index is rebuilt from validated metadata and is never authoritative.
 
-Before the first model request for each user turn, Axl searches the index using the user's text. Exact names and aliases rank first, project entries win ties against global entries, and results below a fixed relevance threshold are discarded. At most three matches are disclosed, and the event log records what was selected.
+The stable `capability_search` tool supports explicit `search`, `activate`, and active-capability `read` actions. Exact names and aliases rank first, deterministic BM25 ranks remaining lexical matches, project entries win equivalent scores, and stable identity breaks the final tie. Zero-score records are omitted. Limits are bounded per call, with no fixed session activation ceiling.
 
-Skills, commands, and agent definitions contribute only compact metadata and a path. The model uses the normal read tool to load a full body when needed. An explicit request such as `/skill:pull-request` skips ranking and loads that item directly.
+Search returns only compact metadata and paths. Activation rechecks identity, trust, policy, authority, availability, and containment before loading full instructions. Activated capabilities are additive and remain active for the rest of the session, including after restart. Referenced Skill files are read through the same capability tool only while that Skill is active, so host paths do not need to enter the workspace sandbox. Search, activation, denial, and exact model-visible content are canonical events. An explicit request such as `/skill:pull-request` may later skip ranking and load that item directly.
 
-A selected executable tool contributes its complete provider-native schema before inference. The model calls it directly by its rendered name. Axl freezes the selected roster and implementation bindings through every continuation in that turn, then may select a new roster for the next user turn. Dispatch validates tool input against the frozen schema.
+A selected executable tool contributes its complete provider-native schema before inference. The model calls it directly by its rendered name. Axl adds the selected tool to the session roster and preserves its implementation binding for the rest of the session. Dispatch validates tool input against the frozen schema.
 
 The stable prompt says only that optional capabilities may be supplied with a request. Axl does not preload the catalog, depend on provider-native `tool_search`, use embeddings, maintain a vector index, or route normal calls through a generic untyped tool. Discovery never grants authority, and disabled, unavailable, or untrusted capabilities are removed before ranking.
 
@@ -1799,9 +1799,9 @@ After this gate, use Axl for ordinary development. Continue independent review o
 The Phase 4 gate still stands, but several current paths need replacement before dogfooding expands:
 
 - [x] Add a strict `exec` profile that exposes only sandboxed Bash and activates no Skills or MCP servers.
-- [ ] Replace the prompt-wide skill catalog with BM25 selection before each user turn.
+- [x] Replace the prompt-wide skill catalog with daemon-owned BM25 search and session-scoped activation.
 - [ ] Replace the generic MCP invocation path with turn-selected, provider-native tool schemas and frozen per-turn bindings.
-- [ ] Add `ask_user_question` to interactive sessions and verify that it is absent from goals and headless runs.
+- [x] Add `ask_user_question` to interactive sessions and verify that it is absent from goals and headless runs.
 - [ ] Add blind credential brokering before dogfooding credentialed third-party extensions or local MCP servers.
 - [x] Keep the fail-closed sandbox default and test the explicit `--unsafe` mode separately.
 
@@ -1827,16 +1827,16 @@ The checked TUI items in this phase were pulled forward as an explicit exception
 
 #### Compaction
 
-- [ ] Implement proactive threshold compaction and overflow recovery.
+- [x] Implement proactive threshold compaction and overflow recovery.
 - [x] Implement manual compaction.
 - [x] Preserve turn boundaries and tool call/result integrity.
 - [x] Handle split turns and previous-summary iteration.
 - [x] Produce structured continuation summaries.
-- [ ] Track cumulative read and modified files.
+- [x] Track cumulative read and modified files.
 - [ ] Summarize branches independently and exclude side-channel branches.
 - [x] Retain original history outside the compacted model surface.
 - [x] Track compaction tokens and cost.
-- [ ] Add independent compaction behavior fixtures.
+- [x] Add independent compaction behavior fixtures.
 
 #### Session controls
 
@@ -1917,7 +1917,7 @@ The client-local terminal presentation surface was brought forward with the TUI.
 
 #### Resource formats
 
-The checked standards items were brought forward by request. They do not complete the Phase 6 extension API. The current prompt-wide skill catalog and generic MCP gateway are temporary and must be replaced by the BM25 and direct-tool path below.
+The checked standards items were brought forward by request. They do not complete the Phase 6 extension API. Agent Skills now use daemon-owned BM25 discovery and session-scoped activation. The generic MCP gateway remains temporary and must be replaced by the direct-tool path below.
 
 - [ ] Support native extensions, skills, hooks, prompt templates, themes, MCP servers, and `AGENTS.md`.
 - [x] Implement MCP natively against protocol version `2025-11-25`.
@@ -1927,20 +1927,20 @@ The checked standards items were brought forward by request. They do not complet
 
 #### Progressive capability discovery
 
-- [ ] Build one disposable BM25 index over enabled skill, tool, command, and agent metadata.
-- [ ] Store each capability's name, kind, description, aliases, path, and project or global scope.
-- [ ] Rank each user-authored turn before its first model request, with exact names and aliases first and project scope as the tie-breaker.
-- [ ] Apply a fixed relevance threshold and disclose no more than three matches.
-- [ ] Keep the stable prompt to a short statement that optional capabilities may be supplied with a request.
-- [ ] Append only compact metadata and a path for matching skills, commands, and agents. Let the model use the normal read tool to load full bodies.
+- [x] Build a disposable deterministic BM25 index for enabled Agent Skill metadata.
+- [x] Store stable identity, kind, name, description, aliases, path, scope, provenance, state, trust, availability, and required authority.
+- [x] Expose bounded explicit search with exact-name and alias priority, BM25 ranking, project-scope ties, and stable identity ordering.
+- [x] Omit zero-score records without imposing a fixed per-turn activation ceiling.
+- [x] Keep the stable prompt free of capability catalogs and Skill bodies.
+- [x] Return only compact metadata and canonical paths during search, then load full Skill instructions only during activation.
 - [ ] Let explicit user requests such as `/skill:pull-request` bypass ranking and load the named capability.
-- [ ] Expose a matching executable tool through its complete provider-native schema before inference, then dispatch it directly.
-- [ ] Freeze the selected tool roster and implementation bindings through every continuation in that turn.
-- [ ] Recompute the roster only at the next user-turn boundary and validate input again at dispatch.
-- [ ] Record every disclosed capability in the canonical log.
-- [ ] Remove disabled, unavailable, and untrusted capabilities before ranking. Discovery does not grant authority.
+- [ ] Expose matching executable tools through complete provider-native schemas before inference, then dispatch them directly.
+- [x] Keep additive Skill activations active for the rest of the session and restore them from canonical events after restart.
+- [x] Validate identity, policy, authority, availability, and containment at activation.
+- [x] Record searches, activations, denials, and exact model-visible additions canonically.
+- [x] Remove disabled, unavailable, untrusted, and unauthorized capabilities before indexing. Discovery does not grant authority.
 - [ ] Do not add embeddings, a vector database, provider-native `tool_search`, or generic untyped invocation for normal tool execution.
-- [ ] Add a scoped harness-control capability for daemon RPCs.
+- [x] Add scoped harness-control capabilities for the `/compact` and `/reload` daemon operations.
 
 #### Blind credential foundation
 
@@ -2489,8 +2489,8 @@ Resolve each decision only before its dependent phase:
 
 Complete these dogfood fixes before continuing Phase 5:
 
-1. Add interactive-only `ask_user_question` with visible blocker behavior for non-interactive goals.
-2. Build the local BM25 capability index and log the three-or-fewer records disclosed for each user turn.
+1. [Complete] Add interactive-only `ask_user_question` with visible blocker behavior for non-interactive goals.
+2. [Complete] Build local BM25 capability search and canonical session-scoped Agent Skill activation.
 3. Replace the generic MCP gateway with selected provider-native tool schemas and frozen per-turn dispatch bindings.
 4. Add the bearer-token and basic-auth credential broker before using credentialed third-party processes in dogfood sessions.
 5. Serialize `edit` and `write` operations by canonical file path, re-read inside the queue, and reject stale exact-text edits before writing.

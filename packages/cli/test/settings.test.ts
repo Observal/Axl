@@ -38,6 +38,12 @@ test("persists and restores session defaults atomically", async (context) => {
     modelId: "gpt-5.6",
     thinkingLevel: "high" as const,
     requestSettings: { maxOutputTokens: null, httpIdleTimeoutMs: 300_000 },
+    compaction: {
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      modelOverrides: { "openai/gpt-5.6": { keepRecentTokens: 30_000 } },
+    },
     theme: "ocean",
     webFetch: false,
     webSearch: true,
@@ -96,6 +102,13 @@ test("uses empty defaults only for a missing file and rejects invalid settings",
   await assert.rejects(loadTuiSettings(path), /httpIdleTimeoutMs/);
   await writeFile(path, '{"version":1,"webFetch":"yes"}\n');
   await assert.rejects(loadTuiSettings(path), /webFetch must be a boolean/);
+  await writeFile(path, '{"version":1,"compaction":{"reserveTokens":0}}\n');
+  await assert.rejects(loadTuiSettings(path), /reserveTokens/);
+  await writeFile(
+    path,
+    '{"version":1,"compaction":{"modelOverrides":{"openai/gpt-5":{"enabled":"yes"}}}}\n',
+  );
+  await assert.rejects(loadTuiSettings(path), /enabled/);
 });
 
 test("expanded tool inspection does not become the next startup default", async (context) => {

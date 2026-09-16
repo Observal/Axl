@@ -13,13 +13,13 @@ This document specifies typed RPC, negotiation, errors, package ownership, and t
 
 ## Current baseline
 
-Wire version 16 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, session-catalog invalidation, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool selection, manual compaction, steering, follow-ups, durable queue restoration, atomic interrupt-and-deliver, canonical model-retry attempts, provider management, model-request configuration, bounded human-command discovery, and durable session rename and deletion.
+Wire version 19 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, session-catalog invalidation, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool and user-question selection, manual compaction, steering, follow-ups, durable queue restoration, atomic interrupt-and-deliver, canonical model-retry attempts, provider management, model-request configuration, bounded human-command discovery, loaded context-resource snapshots, and durable session rename and deletion.
 
-The TUI consumes these contracts through `packages/sdk`. The two former branch tips both used version 11 for incompatible additions: provider management on the feature branch and daemon-owned request settings on `main`. Version 12 combines both surfaces. Version 13 adds atomic interrupt-and-deliver. Version 14 adds the capability-filtered `command.list` catalog. Version 15 adds canonical session titles, typed rename and permanent deletion, and session-catalog invalidation notifications. Version 16 adds atomic queue restoration with optional interruption. Host-control version 1 remains separate from session wire negotiation and is available only to trusted process hosts.
+The TUI consumes these contracts through `packages/sdk`. The two former branch tips both used version 11 for incompatible additions: provider management on the feature branch and daemon-owned request settings on `main`. Version 12 combines both surfaces. Version 13 adds atomic interrupt-and-deliver. Version 14 adds the capability-filtered `command.list` catalog. Version 15 adds canonical session titles, typed rename and permanent deletion, and session-catalog invalidation notifications. Version 16 adds atomic queue restoration with optional interruption. Version 17 adds daemon-owned user questionnaires and durable session eligibility for them. Version 18 adds canonical compaction configuration and lifecycle events plus queued manual compaction. Version 19 adds canonical loaded context-resource snapshots. Host-control version 1 remains separate from session wire negotiation and is available only to trusted process hosts.
 
 ## Versioning
 
-The current wire version is 16. Version 8 introduced typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence. Version 9 adds the canonical `model.retry_scheduled` event. Version 10 adds `daemon_stopping` as a pre-RPC and universal RPC error. The two incompatible version-11 development surfaces are superseded. Version 12 combines provider-management RPCs with `config.request`, `model.request_configured`, and request settings in session create and configure RPCs. Version 13 adds atomic interrupt-and-deliver events and RPC. Version 14 adds the bounded command catalog used by first-party command interfaces. Version 15 adds canonical session titles, rename and permanent-delete RPCs, and session-catalog invalidation. Version 16 adds atomic queue restoration with optional interruption. Compatible capability additions that do not alter accepted wire data do not require a bump. Pre-1.0 clients require an exact wire-version match.
+The current wire version is 19. Version 8 introduced typed envelopes, initialization, errors, retry metadata, subscriptions, cursors, acknowledgements, and presence. Version 9 adds the canonical `model.retry_scheduled` event. Version 10 adds `daemon_stopping` as a pre-RPC and universal RPC error. The two incompatible version-11 development surfaces are superseded. Version 12 combines provider-management RPCs with `config.request`, `model.request_configured`, and request settings in session create and configure RPCs. Version 13 adds atomic interrupt-and-deliver events and RPC. Version 14 adds the bounded command catalog used by first-party command interfaces. Version 15 adds canonical session titles, rename and permanent-delete RPCs, and session-catalog invalidation. Version 16 adds atomic queue restoration with optional interruption. Version 17 adds daemon-owned user questionnaires and the `userQuestions` session tool setting. Version 18 adds `config.compaction`, compaction queue/start/failure events, and completed-or-queued `session.compact` results. Version 19 adds `context.resources` snapshots for daemon-owned loaded context. Compatible capability additions that do not alter accepted wire data do not require a bump. Pre-1.0 clients require an exact wire-version match.
 
 The daemon sends `hello` first:
 
@@ -258,7 +258,7 @@ The following table lists the additional errors each method may return. The expo
 | `session.shell` | `unknown_session`, `event_migration_required`, `operation_active`, `idempotency_conflict`, `content_too_large` |
 | `session.interrupt` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict` |
 | `session.reload`, `session.configure` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
-| `session.interaction.respond` | `unknown_session`, `event_migration_required`, `unknown_interaction`, `interaction_already_resolved`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.interaction.respond` | `unknown_session`, `event_migration_required`, `unknown_interaction`, `interaction_already_resolved`, `invalid_interaction_response`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
 | `session.dispose` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict` |
 | `session.subscribe` | `unknown_session`, `event_migration_required`, `snapshot_required` |
 | `session.workspace.list` | `unknown_session`, `event_migration_required`, `workspace_unavailable`, `workspace_changed`, `invalid_path`, `path_denied`, `symlink_escape`, `not_found`, `unsupported_file_type`, `unsupported_filename_encoding` |
@@ -294,6 +294,7 @@ interface SessionModelSelection {
   readonly thinkingLevel?: ThinkingLevel;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly userQuestions?: boolean;
 }
 
 interface SessionCreateParams extends SessionModelSelection {
@@ -401,6 +402,7 @@ interface SessionConfigureResult {
   readonly profile: SessionProfile;
   readonly webFetch: boolean;
   readonly webSearch: boolean;
+  readonly userQuestions: boolean;
   readonly boundaryEventIds: readonly EventId[];
 }
 
@@ -426,7 +428,7 @@ interface SessionDisposeResult {
 
 `session.configure` includes at least one changed field. It returns event IDs rather than duplicate full events; the canonical events arrive through the subscription.
 
-`session.interaction.respond` resolves daemon-owned MCP approvals, URL elicitation, sampling review, and structured form elicitation. Clients submit only the actions and schema-conforming content supported by the canonical request. Permission history is separate and has no client response RPC.
+`session.interaction.respond` resolves daemon-owned user questionnaires, MCP approvals, URL elicitation, sampling review, and structured form elicitation. Clients submit only the actions and schema-conforming content supported by the canonical request. User questionnaires are enabled explicitly with the durable `userQuestions` session setting, so non-interactive sessions receive no corresponding tool schema or prompt text. Permission history is separate and has no client response RPC.
 
 `delivery: "prompt"` is ordinary prompt behavior. The version-7 `session.steer` and `session.followUp` methods remain available in version 8. The `session.send` delivery variants `steer` and `follow_up` remain unavailable until their separate capabilities are implemented, and clients must not simulate them.
 
@@ -438,7 +440,7 @@ The SDK `deliverPrompt` workflow maps explicit prompt, steer, follow-up, interru
 
 `session.shell` is correlated by its caller-supplied operation ID but is never retried automatically. Its SDK wrapper returns either `{ state: "completed", result }` or `{ state: "uncertain", operationId }`. If transport loss prevents the SDK from proving a canonical `user.shell` result, it preserves the command for explicit user review. `session.interrupt` may cancel the active shell operation, but cancellation does not imply that prior shell side effects were rolled back.
 
-The web client invokes manual compaction through the shared `/compact [instructions]` command and presents its in-progress, cancellation, and failure states locally until canonical `context.compacted` evidence arrives. Direct shell input uses `!command` to include output in model context and `!!command` to exclude it. Both operations remain daemon-owned and are cancelled only through `session.interrupt`.
+The web client invokes manual compaction through the shared `/compact [instructions]` command. If an agent response is active, the daemon records the compaction as queued and runs it after that response. The web client renders canonical queued, in-progress, cancellation, failure, and `context.compacted` state. Direct shell input uses `!command` to include output in model context and `!!command` to exclude it. Both operations remain daemon-owned and are cancelled only through `session.interrupt`.
 
 A profile is accepted only when the daemon can enforce, persist, log, and restore it. Web chat maps to the zero-tool `chat` profile. `minimal` provides Bash and editing, `standard` provides the normal tool set, and `exec` is Bash-only. The non-chat profiles use the code interface.
 

@@ -7,7 +7,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { discoverSkills, loadSkill, makeSkillTool, SkillValidationError } from "../src/index.ts";
+import {
+  discoverSkills,
+  loadSkill,
+  SkillCapabilityService,
+  SkillValidationError,
+} from "../src/index.ts";
 
 async function fixture(name: string, source: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "axl-skill-"));
@@ -17,7 +22,16 @@ async function fixture(name: string, source: string): Promise<string> {
   return directory;
 }
 
-test("loads complete Agent Skills frontmatter", async (context) => {
+async function writeSkill(root: string, name: string, description: string, body = "Use it.\n") {
+  const directory = join(root, name);
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "SKILL.md"),
+    `---\nname: ${name}\ndescription: ${description}\n---\n${body}`,
+  );
+}
+
+test("loads complete Agent Skills frontmatter only during activation", async (context) => {
   const directory = await fixture(
     "release-check",
     `---
@@ -50,63 +64,87 @@ test("rejects invalid names and directory mismatches", async (context) => {
   await assert.rejects(loadSkill(directory), SkillValidationError);
 });
 
-test("project skills override global skills and resources cannot escape", async (context) => {
+test("discovers both global roots and broad-to-nearest project overrides", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-skills-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  const global = join(root, "global");
-  const project = join(root, "project");
-  for (const [base, description] of [
-    [global, "global instructions"],
-    [join(project, ".axl", "skills"), "project instructions"],
-  ] as const) {
-    const directory = join(base, "review");
-    await mkdir(join(directory, "references"), { recursive: true });
-    await writeFile(
-      join(directory, "SKILL.md"),
-      `---\nname: review\ndescription: ${description}\n---\nDo the review.\n`,
-    );
-    await writeFile(join(directory, "references", "guide.md"), "guide");
-  }
-  const outside = join(root, "outside.txt");
-  await writeFile(outside, "outside");
-  await symlink(outside, join(project, ".axl", "skills", "review", "references", "escape.md"));
+  const globalAxl = join(root, "home", ".axl", "skills");
+  const globalAgents = join(root, "home", ".agents", "skills");
+  const repository = join(root, "repo");
+  const cwd = join(repository, "packages", "app");
+  await mkdir(join(repository, ".git"), { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  await writeSkill(globalAxl, "release", "global axl");
+  await writeSkill(globalAgents, "review", "global agents");
+  await writeSkill(join(repository, ".agents", "skills"), "release", "repository");
+  await writeSkill(join(repository, "packages", ".axl", "skills"), "release", "package");
+  await writeSkill(join(cwd, ".agents", "skills"), "release", "nearest", "Nearest body.\n");
 
-  const skills = await discoverSkills({ cwd: project, globalDirectory: global });
-  assert.equal(skills.length, 1);
-  assert.equal(skills[0]?.description, "project instructions");
-  const tool = makeSkillTool(skills);
-  const loaded = await tool.execute(
-    { action: "load", name: "review" },
-    new AbortController().signal,
+  const skills = await discoverSkills({ cwd, globalDirectories: [globalAxl, globalAgents] });
+  assert.deepEqual(
+    skills.map((skill) => [skill.record.identity, skill.record.description, skill.record.scope]),
+    [
+      ["skill:release", "nearest", "project"],
+      ["skill:review", "global agents", "global"],
+    ],
   );
-  assert.match(loaded.content[0]?.type === "text" ? loaded.content[0].text : "", /Do the review/);
-  const resource = await tool.execute(
-    { action: "read", name: "review", path: "references/guide.md" },
-    new AbortController().signal,
-  );
-  assert.equal(resource.content[0]?.type === "text" && resource.content[0].text, "guide");
-  await assert.rejects(
-    tool.execute(
-      { action: "read", name: "review", path: "references/escape.md" },
-      new AbortController().signal,
-    ),
-    /escapes the skill directory/,
-  );
+
+  const service = new SkillCapabilityService(skills, {
+    grantedAuthorities: new Set(["skills.activate"]),
+  });
+  assert.equal((await service.search("release", 5)).results[0]?.identity, "skill:release");
+  const result = await service.activate(["skill:release"]);
+  assert.match(result.activated[0]?.content ?? "", /Nearest body/);
 });
 
-test("discovery rejects skill-directory symlink escapes and invalid UTF-8", async (context) => {
+test("filters untrusted Skills before search and rechecks authorization on activation", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-skills-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace");
+  await mkdir(cwd);
+  await writeSkill(join(cwd, ".axl", "skills"), "release", "Publish a release");
+
+  const untrusted = await discoverSkills({ cwd, trust: () => "untrusted" });
+  const filtered = new SkillCapabilityService(untrusted, {
+    grantedAuthorities: new Set(["skills.activate"]),
+  });
+  assert.deepEqual((await filtered.search("release", 5)).results, []);
+
+  const trusted = await discoverSkills({ cwd });
+  let denied = false;
+  const service = new SkillCapabilityService(trusted, {
+    grantedAuthorities: new Set(["skills.activate"]),
+    authorize: () => (denied ? "project policy changed" : undefined),
+  });
+  denied = true;
+  assert.deepEqual(await service.activate(["skill:release"]), {
+    activated: [],
+    denied: [{ identity: "skill:release", reason: "project policy changed" }],
+  });
+});
+
+test("rejects Skill and optional-directory symlink escapes", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-skills-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, "project");
-  const outside = join(root, "escape");
+  const outside = join(root, "outside");
   await mkdir(join(project, ".axl", "skills"), { recursive: true });
   await mkdir(outside);
-  await writeFile(join(outside, "SKILL.md"), "---\nname: escape\ndescription: escaped\n---\n");
-  await symlink(outside, join(project, ".axl", "skills", "escape"));
+  await writeSkill(outside, "escape", "escaped");
+  await symlink(join(outside, "escape"), join(project, ".axl", "skills", "escape"));
   await assert.rejects(discoverSkills({ cwd: project }), /escapes its discovery root/);
 
-  const invalid = join(root, "invalid");
-  await mkdir(invalid);
-  await writeFile(join(invalid, "SKILL.md"), Buffer.from([0xff]));
-  await assert.rejects(loadSkill(invalid), /valid UTF-8/);
+  await rm(join(project, ".axl", "skills", "escape"));
+  await writeSkill(join(project, ".axl", "skills"), "safe", "safe");
+  await symlink(outside, join(project, ".axl", "skills", "safe", "references"));
+  await assert.rejects(discoverSkills({ cwd: project }), /escapes the skill directory/);
+});
+
+test("rejects invalid UTF-8 during metadata discovery", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-skills-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const directory = join(project, ".agents", "skills", "invalid");
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, "SKILL.md"), Buffer.from([0xff]));
+  await assert.rejects(discoverSkills({ cwd: project }), /valid UTF-8/);
 });

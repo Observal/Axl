@@ -106,6 +106,7 @@ const eventPayloads = {
     details: { lines: 1 },
   },
   "config.request": { maxOutputTokens: null, httpIdleTimeoutMs: 300_000 },
+  "config.compaction": { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
   "model.request_configured": {
     maxOutputTokens: 8192,
     httpIdleTimeoutMs: 300_000,
@@ -126,6 +127,16 @@ const eventPayloads = {
     reason: "model_switch",
   },
   "prompt.section": { name: "identity", source: "core", content: "You are Axl." },
+  "context.resources": {
+    resources: [
+      {
+        kind: "agents",
+        scope: "project",
+        path: "/workspace/AGENTS.md",
+        content: "Use pnpm.",
+      },
+    ],
+  },
   "tool.schema": {
     name: "read",
     description: "Read a file",
@@ -137,14 +148,54 @@ const eventPayloads = {
     source: "hook",
     content: "Additional context",
   },
+  "capability.searched": {
+    query: "publish release",
+    limit: 5,
+    results: [
+      {
+        identity: "skill:release",
+        kind: "skill",
+        name: "release",
+        description: "Prepare and publish releases",
+        path: "/workspace/.agents/skills/release/SKILL.md",
+        scope: "project",
+        provenance: "project:/workspace/.agents/skills",
+      },
+    ],
+  },
+  "capability.activated": {
+    capability: {
+      identity: "skill:release",
+      kind: "skill",
+      name: "release",
+      description: "Prepare and publish releases",
+      path: "/workspace/.agents/skills/release/SKILL.md",
+      scope: "project",
+      provenance: "project:/workspace/.agents/skills",
+    },
+    content:
+      '<skill name="release" path="/workspace/.agents/skills/release/SKILL.md">\nPublish safely.\n</skill>',
+  },
+  "capability.denied": { identity: "skill:unsafe", reason: "capability is not trusted" },
   "permission.requested": { capability: "filesystem.write", description: "Write README.md" },
   "permission.resolved": { requestId: eventId, decision: "allow_once" },
   "interaction.requested": {
     interactionId: "interaction-1",
-    kind: "mcp_elicitation_form",
-    source: "mcp:example",
-    message: "Choose a value",
-    data: { requestedSchema: { type: "object" } },
+    kind: "user_question",
+    source: "ask_user_question",
+    message: "Choose a value?",
+    data: {
+      questions: [
+        {
+          header: "Choice",
+          question: "Choose a value?",
+          options: [
+            { label: "One", description: "Choose one" },
+            { label: "Two", description: "Choose two" },
+          ],
+        },
+      ],
+    },
   },
   "interaction.resolved": {
     interactionId: "interaction-1",
@@ -158,7 +209,28 @@ const eventPayloads = {
     details: { landlock: "full" },
   },
   "sandbox.violation": { capability: "filesystem.write", reason: "outside workspace" },
-  "context.compacted": { summary: "Earlier work", replacedEventIds: [otherEventId] },
+  "compaction.queued": { instructions: "Keep decisions" },
+  "compaction.started": {
+    reason: "manual",
+    estimatedInputTokens: 50_000,
+    contextWindow: 128_000,
+    reserveTokens: 16_384,
+    keepRecentTokens: 20_000,
+  },
+  "compaction.failed": {
+    reason: "overflow",
+    code: "summarization_failed",
+    message: "Provider unavailable",
+    willRetry: false,
+  },
+  "context.compacted": {
+    summary: "Earlier work",
+    replacedEventIds: [otherEventId],
+    reason: "manual",
+    willRetry: false,
+    readFiles: ["README.md"],
+    modifiedFiles: ["src/main.ts"],
+  },
   "session.error": { code: "provider_failed", message: "Provider unavailable", retryable: true },
   "child.result": {
     childSessionId: otherSessionId,
@@ -202,6 +274,7 @@ const params = {
     providerId: "provider-1",
     modelId: "model-1",
     profile: "standard",
+    userQuestions: true,
   },
   "session.resume": { sessionId },
   "session.list": { scope: "all_local", order: "recent", pageSize: 50 },
@@ -403,7 +476,7 @@ const results = {
     stopReason: "stop",
     targetOperationId: operationId,
   },
-  "session.compact": { eventId },
+  "session.compact": { state: "completed", operationId, eventId },
   "session.queue.enqueue": { queueItemId: eventId, state: "queued" },
   "session.queue.requeue": { queueItemId: eventId, state: "queued" },
   "session.queue.restore": {
@@ -430,6 +503,7 @@ const results = {
     profile: "standard",
     webFetch: true,
     webSearch: false,
+    userQuestions: true,
     boundaryEventIds: [eventId],
   },
   "session.interaction.respond": {

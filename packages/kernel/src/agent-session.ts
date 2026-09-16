@@ -12,6 +12,8 @@ import {
   type AssistantContent,
   type AssistantStopReason,
   type CanonicalEvent,
+  type CompactionSettings,
+  DEFAULT_COMPACTION_SETTINGS,
   EVENT_FORMAT_VERSION,
   type EventId,
   type EventPayloadMap,
@@ -32,11 +34,9 @@ import {
 } from "@axl/protocol";
 
 import {
-  type CompactionSettings,
-  DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
-  DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
   messagesFromCompactedLineage,
   prepareCompaction,
+  shouldCompact,
   summarizeCompaction,
 } from "./compaction.ts";
 import { type ExtensionHost, NOOP_EXTENSION_HOST } from "./extension-host.ts";
@@ -152,6 +152,28 @@ function unansweredInteractions(
   return [...pending.values()];
 }
 
+function unfinishedCompactions(events: readonly CanonicalEvent[]): Array<{
+  readonly operationId: OperationId;
+  readonly reason: "manual" | "threshold" | "overflow";
+  readonly started: boolean;
+}> {
+  const queued = new Map<
+    OperationId,
+    { reason: "manual" | "threshold" | "overflow"; started: boolean }
+  >();
+  for (const event of events) {
+    if (event.operationId === undefined) continue;
+    if (event.type === "compaction.queued") {
+      queued.set(event.operationId, { reason: "manual", started: false });
+    } else if (event.type === "compaction.started") {
+      queued.set(event.operationId, { reason: event.payload.reason, started: true });
+    } else if (event.type === "context.compacted" || event.type === "compaction.failed") {
+      queued.delete(event.operationId);
+    }
+  }
+  return [...queued].map(([operationId, value]) => ({ operationId, ...value }));
+}
+
 export interface AgentSessionOptions {
   readonly model: ModelPort;
   readonly tools: ToolRegistry;
@@ -161,10 +183,13 @@ export interface AgentSessionOptions {
    */
   readonly prompt?: StablePrompt;
   readonly system?: string;
+  readonly contextResources?: EventPayloadMap["context.resources"]["resources"];
+  readonly recordPromptSnapshot?: boolean;
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
   readonly retry?: ModelRetryOptions | false;
   readonly compaction?: Partial<CompactionSettings>;
+  readonly modelContextWindow?: number;
   readonly log?: EventLogOptions;
   /** Sandbox state announced at every open as a `sandbox.configured` event. */
   readonly sandbox?: EventPayloadMap["sandbox.configured"];
@@ -173,6 +198,7 @@ export interface AgentSessionOptions {
   /** Model configuration announced at every open as a `config.model` event. */
   readonly configModel?: EventPayloadMap["config.model"];
   readonly configRequest?: EventPayloadMap["config.request"];
+  readonly configCompaction?: EventPayloadMap["config.compaction"];
   /** Thinking configuration announced at every open as a `config.thinking` event. */
   readonly configThinking?: EventPayloadMap["config.thinking"];
   /** Effective tool profile announced at every open as a `config.profile` event. */
@@ -238,12 +264,14 @@ export class AgentSession {
   private readonly retrySleep: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   private readonly retryRandom: () => number;
   private readonly compaction: CompactionSettings;
+  private readonly modelContextWindow: number;
   private tip: EventId | null;
   private messages: ModelMessage[];
   private activeOperation: OperationId | null = null;
   private acceptingQueuedMessages = false;
   private readonly steeringMessages: Array<readonly UserContent[]> = [];
   private readonly followUpMessages: Array<readonly UserContent[]> = [];
+  private readonly activeCapabilityContent = new Map<string, string>();
 
   private constructor(
     log: JsonlEventLog,
@@ -262,18 +290,30 @@ export class AgentSession {
       options.retry === false ? abortableSleep : (options.retry?.sleep ?? abortableSleep);
     this.retryRandom =
       options.retry === false ? Math.random : (options.retry?.random ?? Math.random);
-    this.compaction = {
-      keepRecentTokens:
-        options.compaction?.keepRecentTokens ?? DEFAULT_COMPACTION_KEEP_RECENT_TOKENS,
-      maxOutputTokens: options.compaction?.maxOutputTokens ?? DEFAULT_COMPACTION_MAX_OUTPUT_TOKENS,
-    };
-    for (const [name, value] of Object.entries(this.compaction)) {
+    this.compaction = { ...DEFAULT_COMPACTION_SETTINGS, ...options.compaction };
+    if (typeof this.compaction.enabled !== "boolean") {
+      throw new TypeError("compaction.enabled must be a boolean");
+    }
+    for (const [name, value] of [
+      ["reserveTokens", this.compaction.reserveTokens],
+      ["keepRecentTokens", this.compaction.keepRecentTokens],
+    ] as const) {
       if (!Number.isSafeInteger(value) || value < 1) {
         throw new TypeError(`compaction.${name} must be a positive safe integer`);
       }
     }
+    this.modelContextWindow = options.modelContextWindow ?? Number.MAX_SAFE_INTEGER;
+    if (!Number.isSafeInteger(this.modelContextWindow) || this.modelContextWindow < 1) {
+      throw new TypeError("modelContextWindow must be a positive safe integer");
+    }
     this.tip = events.at(-1)?.id ?? null;
     this.messages = [...messagesFromLineage(events)];
+    for (const event of events) {
+      if (event.type === "capability.activated") {
+        this.activeCapabilityContent.set(event.payload.capability.identity, event.payload.content);
+        this.tools.activateCapability(event.payload.capability.identity);
+      }
+    }
   }
 
   /**
@@ -292,6 +332,16 @@ export class AgentSession {
     const tip = opened.events.at(-1)?.id;
     const lineage = tip === undefined ? [] : tree.lineage(tip);
     const session = new AgentSession(opened.log, lineage, options);
+    for (const compaction of unfinishedCompactions(lineage)) {
+      await session.append(compaction.operationId, "compaction.failed", {
+        reason: compaction.reason,
+        code: "daemon_restart",
+        message: compaction.started
+          ? "Compaction was interrupted because the daemon restarted."
+          : "Queued compaction was cancelled because the daemon restarted.",
+        willRetry: false,
+      });
+    }
     for (const interaction of unansweredInteractions(lineage)) {
       await session.append(interaction.operationId, "interaction.resolved", {
         interactionId: interaction.payload.interactionId,
@@ -319,11 +369,18 @@ export class AgentSession {
         isError: true,
       });
     }
-    if (opened.events.length === 0) {
+    const fresh = opened.events.length === 0;
+    if (fresh) {
       await session.append(options.creationOperationId, "session.created", { cwd: options.cwd });
-      // The stable prompt freezes at session start; its sections are logged once.
+    }
+    const hasResourceSnapshot = opened.events.some((event) => event.type === "context.resources");
+    if (fresh || options.recordPromptSnapshot === true || !hasResourceSnapshot) {
+      await session.append(options.boundaryOperationId, "context.resources", {
+        resources: options.contextResources ?? [],
+      });
+      // Prompt sections are a canonical snapshot at every explicit runtime boundary.
       for (const section of options.prompt?.sections ?? []) {
-        await session.append(undefined, "prompt.section", section);
+        await session.append(options.boundaryOperationId, "prompt.section", section);
       }
     }
     // Tool schemas are model-visible configuration, so every runtime boundary
@@ -341,6 +398,12 @@ export class AgentSession {
     }
     if (options.configRequest !== undefined)
       await session.append(options.boundaryOperationId, "config.request", options.configRequest);
+    if (options.configCompaction !== undefined)
+      await session.append(
+        options.boundaryOperationId,
+        "config.compaction",
+        options.configCompaction,
+      );
     if (options.configModel !== undefined) {
       await session.append(options.boundaryOperationId, "config.model", options.configModel);
     }
@@ -494,25 +557,80 @@ export class AgentSession {
         `Operation ${this.activeOperation} already owns this branch`,
       );
     }
+    const operationId = requestedOperationId ?? parseOperationId(randomUUID(), "operationId");
+    this.activeOperation = operationId;
+    try {
+      const event = await this.compactOwned("manual", operationId, customInstructions, signal);
+      if (event === undefined) throw new CompactionUnavailableError(false);
+      return event;
+    } finally {
+      this.activeOperation = null;
+    }
+  }
+
+  private effectiveSystem(): string | undefined {
+    const capabilities = [...this.activeCapabilityContent.values()];
+    if (capabilities.length === 0) return this.system;
+    return [this.system, ...capabilities].filter((value) => value !== undefined).join("\n\n");
+  }
+
+  private estimatedInputTokens(): number {
+    return this.contextUsage === undefined
+      ? estimateModelInputTokens({
+          system: this.effectiveSystem(),
+          messages: this.messages,
+          tools: this.tools.declarations(),
+        })
+      : this.contextUsage.tokens +
+          this.messages
+            .slice(this.contextUsage.messageCount)
+            .reduce((sum, message) => sum + estimateModelMessageTokens(message), 0);
+  }
+
+  private async compactOwned(
+    reason: "manual" | "threshold" | "overflow",
+    operationId: OperationId,
+    customInstructions?: string,
+    signal?: AbortSignal,
+  ): Promise<CanonicalEvent<"context.compacted"> | undefined> {
     const instructions = customInstructions?.trim();
     if (customInstructions !== undefined && !instructions) {
       throw new TypeError("Compaction instructions must not be empty");
     }
-    const operationId = requestedOperationId ?? parseOperationId(randomUUID(), "operationId");
-    this.activeOperation = operationId;
-    try {
-      const stored = await this.log.read();
-      const tree = SessionTree.fromEvents(this.log.sessionId, stored.events);
-      const lineage = this.tip === null ? [] : tree.lineage(this.tip);
-      const plan = prepareCompaction(lineage, this.compaction.keepRecentTokens);
-      if (plan === undefined)
+    const stored = await this.log.read();
+    const tree = SessionTree.fromEvents(this.log.sessionId, stored.events);
+    const lineage = this.tip === null ? [] : tree.lineage(this.tip);
+    const adaptiveRecentTokens = Math.max(
+      1,
+      this.modelContextWindow -
+        Math.min(this.compaction.reserveTokens, Math.floor(this.modelContextWindow / 2)),
+    );
+    const plan = prepareCompaction(
+      lineage,
+      reason === "manual"
+        ? this.compaction.keepRecentTokens
+        : Math.min(this.compaction.keepRecentTokens, adaptiveRecentTokens),
+    );
+    if (plan === undefined) {
+      if (reason === "manual") {
         throw new CompactionUnavailableError(lineage.at(-1)?.type === "context.compacted");
+      }
+      return undefined;
+    }
+    await this.append(operationId, "compaction.started", {
+      reason,
+      estimatedInputTokens: this.estimatedInputTokens(),
+      contextWindow: this.modelContextWindow,
+      reserveTokens: this.compaction.reserveTokens,
+      keepRecentTokens: this.compaction.keepRecentTokens,
+    });
+    try {
       const result = await summarizeCompaction(
         plan,
         this.model,
         instructions,
         signal,
-        this.compaction.maxOutputTokens,
+        this.compaction.reserveTokens,
         async (configuration) => {
           await this.append(operationId, "model.request_configured", configuration);
         },
@@ -521,13 +639,23 @@ export class AgentSession {
       const event = await this.append(operationId, "context.compacted", {
         summary: result.summary,
         replacedEventIds: plan.replacedEventIds,
+        reason,
+        willRetry: reason !== "manual",
+        readFiles: result.readFiles,
+        modifiedFiles: result.modifiedFiles,
         usage: result.usage,
       });
       this.messages = [...messagesFromLineage([...lineage, event])];
       this.contextUsage = undefined;
       return event;
-    } finally {
-      this.activeOperation = null;
+    } catch (error) {
+      await this.append(operationId, "compaction.failed", {
+        reason,
+        code: signal?.aborted ? "cancelled" : "summarization_failed",
+        message: error instanceof Error ? error.message : "Compaction failed",
+        willRetry: false,
+      });
+      throw error;
     }
   }
 
@@ -550,8 +678,40 @@ export class AgentSession {
       await this.appendUserMessage(operationId, content, appended);
 
       const activity = { sequence: 0 };
+      let overflowRetried = false;
       while (true) {
+        if (shouldCompact(this.estimatedInputTokens(), this.modelContextWindow, this.compaction)) {
+          const compacted = await this.compactOwned("threshold", operationId, undefined, signal);
+          if (compacted !== undefined) {
+            while (
+              await this.appendNextQueuedMessage(this.steeringMessages, operationId, appended)
+            ) {
+              // Steering received during summarization belongs before the resumed request.
+            }
+          }
+        }
         const outcome = await this.modelTurn(operationId, activity, signal, appended);
+        if (
+          this.compaction.enabled &&
+          !overflowRetried &&
+          !outcome.exposedOutput &&
+          outcome.error?.category === "context_limit"
+        ) {
+          overflowRetried = true;
+          try {
+            const compacted = await this.compactOwned("overflow", operationId, undefined, signal);
+            if (compacted !== undefined) {
+              while (
+                await this.appendNextQueuedMessage(this.steeringMessages, operationId, appended)
+              ) {
+                // Preserve steering at the recovered model boundary.
+              }
+              continue;
+            }
+          } catch {
+            // The durable compaction failure and original provider error explain the failed turn.
+          }
+        }
         const assistantEvent = await this.append(operationId, "assistant.message", {
           content: outcome.content,
           stopReason: outcome.stopReason,
@@ -761,23 +921,13 @@ export class AgentSession {
 
     try {
       // Snapshot: the port must never observe the turn mutating history under it.
-      const estimatedInputTokens =
-        this.contextUsage === undefined
-          ? estimateModelInputTokens({
-              system: this.system,
-              messages: this.messages,
-              tools: this.tools.declarations(),
-            })
-          : this.contextUsage.tokens +
-            this.messages
-              .slice(this.contextUsage.messageCount)
-              .reduce((sum, message) => sum + estimateModelMessageTokens(message), 0);
+      const estimatedInputTokens = this.estimatedInputTokens();
       for await (const event of this.model.stream({
         estimatedInputTokens,
         onRequestConfigured: async (configuration) => {
           appended.push(await this.append(operationId, "model.request_configured", configuration));
         },
-        system: this.system,
+        system: this.effectiveSystem(),
         messages: [...this.messages],
         tools: this.tools.declarations(),
         signal,
@@ -853,6 +1003,29 @@ export class AgentSession {
       return { content, toolCalls: [], stopReason: "aborted", exposedOutput };
     }
     return { content, toolCalls: [], stopReason: "error", error: terminal, exposedOutput };
+  }
+
+  /** Appends daemon-owned compaction queue lifecycle state to the canonical session log. */
+  recordCompactionQueued(
+    operationId: OperationId,
+    instructions?: string,
+  ): Promise<CanonicalEvent<"compaction.queued">> {
+    return this.append(operationId, "compaction.queued", {
+      ...(instructions === undefined ? {} : { instructions }),
+    });
+  }
+
+  recordCompactionFailed(
+    operationId: OperationId,
+    code: string,
+    message: string,
+  ): Promise<CanonicalEvent<"compaction.failed">> {
+    return this.append(operationId, "compaction.failed", {
+      reason: "manual",
+      code,
+      message,
+      willRetry: false,
+    });
   }
 
   /** Appends daemon-owned queue lifecycle state to the canonical session log. */
@@ -933,6 +1106,20 @@ export class AgentSession {
         content: resultEvent.payload.content,
         isError: result.isError,
       });
+      for (const effect of result.sessionEffects ?? []) {
+        appended.push(await this.append(operationId, effect.type, effect.payload as never));
+        if (effect.type === "capability.activated") {
+          this.activeCapabilityContent.set(
+            effect.payload.capability.identity,
+            effect.payload.content,
+          );
+          const declaration = this.tools.activateCapability(effect.payload.capability.identity);
+          if (declaration !== undefined) {
+            appended.push(await this.append(operationId, "tool.schema", declaration));
+          }
+          this.contextUsage = undefined;
+        }
+      }
       if (signal?.aborted) return true;
     }
     return false;
@@ -953,7 +1140,13 @@ export class AgentSession {
       };
     }
     try {
-      return { result: await tool.execute(call.input, signal ?? new AbortController().signal) };
+      const result = await tool.execute(call.input, signal ?? new AbortController().signal, {
+        activeCapabilities: new Set(this.activeCapabilityContent.keys()),
+      });
+      if (result.sessionEffects !== undefined && call.name !== "capability_search") {
+        throw new Error(`Tool ${call.name} cannot emit session effects`);
+      }
+      return { result };
     } catch (error) {
       const failure = {
         content: [

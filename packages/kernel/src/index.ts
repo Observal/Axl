@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "./agent-session.ts";
+export * from "./capabilities.ts";
 export type { CompactionSettings } from "./compaction.ts";
 export * from "./event-reader-fuzz.ts";
 export * from "./extension-host.ts";
@@ -16,6 +17,7 @@ export * from "./replay.ts";
 export * from "./session-tree.ts";
 export * from "./tools.ts";
 export * from "./tools/edit.ts";
+export * from "./tools/pending.ts";
 export * from "./tools/read.ts";
 export * from "./tools/shell.ts";
 export * from "./tools/validate.ts";

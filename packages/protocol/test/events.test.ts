@@ -17,6 +17,8 @@ import {
   parseEventId,
   parseOperationId,
   parseSessionId,
+  parseUserQuestionRequest,
+  parseUserQuestionResponse,
 } from "../src/index.ts";
 
 const eventId = parseEventId("018f47a5-4f18-7cc2-8000-123456789abc");
@@ -89,6 +91,7 @@ const validPayloads = {
     details: { lines: 1 },
   },
   "config.request": { maxOutputTokens: null, httpIdleTimeoutMs: 300_000 },
+  "config.compaction": { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
   "model.request_configured": {
     maxOutputTokens: 8192,
     httpIdleTimeoutMs: 300_000,
@@ -109,6 +112,16 @@ const validPayloads = {
     reason: "model_switch",
   },
   "prompt.section": { name: "identity", source: "core", content: "You are Axl." },
+  "context.resources": {
+    resources: [
+      {
+        kind: "agents",
+        scope: "project",
+        path: "/workspace/AGENTS.md",
+        content: "Use pnpm.",
+      },
+    ],
+  },
   "tool.schema": {
     name: "read",
     description: "Read a file",
@@ -120,6 +133,34 @@ const validPayloads = {
     source: "hook",
     content: "Additional context",
   },
+  "capability.searched": {
+    query: "release",
+    limit: 5,
+    results: [
+      {
+        identity: "skill:release",
+        kind: "skill",
+        name: "release",
+        description: "Prepare releases",
+        path: "/workspace/.agents/skills/release/SKILL.md",
+        scope: "project",
+        provenance: "fixture",
+      },
+    ],
+  },
+  "capability.activated": {
+    capability: {
+      identity: "skill:release",
+      kind: "skill",
+      name: "release",
+      description: "Prepare releases",
+      path: "/workspace/.agents/skills/release/SKILL.md",
+      scope: "project",
+      provenance: "fixture",
+    },
+    content: "Release safely.",
+  },
+  "capability.denied": { identity: "skill:unsafe", reason: "not trusted" },
   "permission.requested": { capability: "filesystem.write", description: "Write README.md" },
   "permission.resolved": { requestId: eventId, decision: "allow_once" },
   "interaction.requested": {
@@ -141,7 +182,28 @@ const validPayloads = {
     details: { landlock: "full", seccompPolicy: "axl-linux-deny-v1" },
   },
   "sandbox.violation": { capability: "filesystem.write", reason: "outside workspace" },
-  "context.compacted": { summary: "Earlier work", replacedEventIds: [secondEventId] },
+  "compaction.queued": { instructions: "Keep decisions" },
+  "compaction.started": {
+    reason: "manual",
+    estimatedInputTokens: 50_000,
+    contextWindow: 128_000,
+    reserveTokens: 16_384,
+    keepRecentTokens: 20_000,
+  },
+  "compaction.failed": {
+    reason: "overflow",
+    code: "summarization_failed",
+    message: "Provider unavailable",
+    willRetry: false,
+  },
+  "context.compacted": {
+    summary: "Earlier work",
+    replacedEventIds: [secondEventId],
+    reason: "manual",
+    willRetry: false,
+    readFiles: ["README.md"],
+    modifiedFiles: ["src/main.ts"],
+  },
   "session.error": { code: "provider_failed", message: "Provider unavailable", retryable: true },
   "child.result": { childSessionId: sessionId, status: "completed", result: { summary: "done" } },
 } satisfies EventPayloadMap;
@@ -162,6 +224,71 @@ test("validates every canonical event variant", () => {
   for (const [type, payload] of Object.entries(validPayloads)) {
     assert.equal(parseEvent(event(type, payload)).type, type);
   }
+});
+
+test("validates questionnaire requests and answers", () => {
+  const request = parseUserQuestionRequest({
+    questions: [
+      {
+        header: "Runtime",
+        question: "Which runtime?",
+        options: [
+          { label: "Node", description: "Use Node.js", preview: "node index.js" },
+          { label: "Bun", description: "Use Bun" },
+        ],
+      },
+      {
+        header: "Checks",
+        question: "Which checks?",
+        multiSelect: true,
+        options: [
+          { label: "Test", description: "Run tests" },
+          { label: "Lint", description: "Run lint" },
+        ],
+      },
+    ],
+  });
+  assert.deepEqual(
+    parseUserQuestionResponse(
+      {
+        answers: [
+          { questionIndex: 0, selectedLabels: ["Node"] },
+          { questionIndex: 1, selectedLabels: ["Test"], customAnswer: "Typecheck" },
+        ],
+      },
+      request,
+    ).answers[1],
+    { questionIndex: 1, selectedLabels: ["Test"], customAnswer: "Typecheck" },
+  );
+  assert.throws(
+    () =>
+      parseUserQuestionRequest({
+        questions: [
+          {
+            header: "Choice",
+            question: "Choose?",
+            options: [
+              { label: "Other", description: "Reserved" },
+              { label: "Two", description: "Second" },
+            ],
+          },
+        ],
+      }),
+    ProtocolValidationError,
+  );
+  assert.throws(
+    () =>
+      parseUserQuestionResponse(
+        {
+          answers: [
+            { questionIndex: 0, selectedLabels: ["Unknown"] },
+            { questionIndex: 1, selectedLabels: ["Test"] },
+          ],
+        },
+        request,
+      ),
+    ProtocolValidationError,
+  );
 });
 
 test("rejects unknown event types", () => {
