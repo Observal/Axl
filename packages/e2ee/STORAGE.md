@@ -132,7 +132,43 @@ are excluded from the production WASM, JavaScript exports, declarations, and tar
 
 This equivalence does not relax rollback detection. IndexedDB, persistent-storage permission,
 WebAuthn counters, and a non-extractable WebCrypto key do not supply an independent monotonic anchor.
-Browser pairing remains disabled until that requirement is met by a separately approved design.
+The approved hosted witness protocol supplies that anchor, but browser pairing remains disabled
+until its production adapter, witness integration, artifact isolation, and runtime evidence pass.
+
+## Rollback-witness transition format
+
+The shared core now defines the transport-independent witness protocol and the acyclic successor
+format selected by the production storage RFC. The inner payload contains the complete successor
+state and the exact committed operation result. The core seals that payload first, calculates its
+SHA-384 commitment from the exact sealed bytes and authenticated clear header, signs one canonical
+register or advance request with the endpoint credential, and seals that exact request and its hash
+in a separate outer envelope. The envelopes use the same fresh state DEK with distinct
+random nonces and domain-separated associated data. Swapping or modifying either envelope fails
+authentication or commitment reconstruction.
+
+A prepared transition has no witness-request accessor. Only the storage adapter may convert it to a
+pending witness operation after atomically committing the sealed successor record. The exact result
+has no independently replaceable encoding outside the authenticated inner envelope. The pending
+operation exposes only the immutable signed request. It releases the exact
+result only after current-key activation, validation of a unanimous certificate from the three
+pinned distinct replicas, and obsolete-key erasure. Recovery decrypts the committed envelopes and
+returns the same result, request bytes, nonce, signature, and request hash.
+
+Endpoint reconciliation compares the authenticated local committed and last-confirmed heads with a
+fresh unanimous witness state. It distinguishes clean state, exact pending resend, accepted-response
+loss, stale local state, commitment conflicts, impossible local advancement, witness rollback,
+missing lineages, revocation, immediate and historical forks, and mixed or inconsistent replicas.
+Terminal outcomes persist as quarantine or revocation, leave pending operations blocked, and never
+fast-forward private state from witness metadata. A matching fresh reconciliation produces one
+private mutation authorization bound to the confirmed head, while a fresh confirmed absent lineage
+produces one initial-registration authorization. Preparation consumes it. Restart, witness
+unavailability, resend, accepted-operation recovery, conflict, revocation, and quarantine hold no
+mutation authority.
+
+The current native and browser test adapters still use their pre-production injected anchor paths.
+The shared witness state machine does not make those constructors production-ready. Focused later
+changes must wire this format into each platform transaction and remove every legacy test anchor
+from production artifacts before enabling endpoint creation.
 
 ## Session 50.2 pairing records
 
