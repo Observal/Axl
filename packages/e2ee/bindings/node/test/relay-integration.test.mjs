@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -38,8 +39,13 @@ import {
 import * as fixture from "./fixture-loader.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
-const installationId = parseInstallationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-const deviceId = parseDeviceId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+const externalControlPlaneOrigin = process.env.AXL_REAL_E2EE_CONTROL_PLANE_ORIGIN;
+const installationId = parseInstallationId(
+  process.env.AXL_REAL_E2EE_INSTALLATION_ID ?? "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+);
+const deviceId = parseDeviceId(
+  process.env.AXL_REAL_E2EE_DEVICE_ID ?? "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+);
 const daemonId = parseDeviceId("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
 const cryptoSessionId = parseCryptoSessionId("dddddddd-dddd-7ddd-9ddd-dddddddddddd");
 
@@ -174,12 +180,14 @@ class LoopbackWebSocketFactory {
   }
 }
 
-const enabled =
-  process.env.AXL_RUN_REAL_E2EE_RELAY_INTEGRATION === "1" &&
+const localRelayAvailable =
   spawnSync("mix", ["--version"], {
     cwd: join(repositoryRoot, "services/relay"),
     stdio: "ignore",
   }).status === 0;
+const enabled =
+  process.env.AXL_RUN_REAL_E2EE_RELAY_INTEGRATION === "1" &&
+  (externalControlPlaneOrigin !== undefined || localRelayAvailable);
 
 test(
   "real OpenMLS application and epoch traffic crosses the real relay",
@@ -202,29 +210,47 @@ test(
     await authority.registerLocalDevice(deviceId, ["observe"]);
     await authority.applyHostedGrant(deviceId, 1, ["observe"]);
 
-    const controlPlane = createServer(
-      createControlPlaneHandler({
-        tickets: new RelayTicketService({
-          store: new InMemoryRelayTicketStore(),
-          relayUrl: "wss://relay.invalid/v1/connect",
-          authorizer: { currentGeneration: async () => 1 },
-          proofVerifier: { verify: async () => true },
+    let controlPlane;
+    let relay;
+    let controlOrigin;
+    let sockets;
+    let authenticationToken;
+    let possessionProof;
+    if (externalControlPlaneOrigin !== undefined) {
+      controlOrigin = externalControlPlaneOrigin;
+      authenticationToken = process.env.AXL_REAL_E2EE_PUBLIC_TOKEN;
+      const encodedProof = process.env.AXL_REAL_E2EE_POSSESSION_PROOF;
+      if (authenticationToken === undefined || encodedProof === undefined) {
+        throw new Error("external relay testing requires authentication and possession proof");
+      }
+      possessionProof = Buffer.from(encodedProof, "base64");
+    } else {
+      controlPlane = createServer(
+        createControlPlaneHandler({
+          tickets: new RelayTicketService({
+            store: new InMemoryRelayTicketStore(),
+            relayUrl: "wss://relay.invalid/v1/connect",
+            authorizer: { currentGeneration: async () => 1 },
+            proofVerifier: { verify: async () => true },
+          }),
+          publicAuthentication: { authenticate: async () => ({ accountId: "account-fixture" }) },
+          internalAuthentication: { authenticate: async () => true },
         }),
-        publicAuthentication: { authenticate: async () => ({ accountId: "account-fixture" }) },
-        internalAuthentication: { authenticate: async () => true },
-      }),
-    );
-    controlPlane.listen(0, "127.0.0.1");
-    await once(controlPlane, "listening");
-    const address = controlPlane.address();
-    assert.ok(address && typeof address !== "string");
-    const controlOrigin = `http://127.0.0.1:${address.port}`;
-    const relayPort = await freePort();
-    const relay = await startRelay(relayPort, controlOrigin);
+      );
+      controlPlane.listen(0, "127.0.0.1");
+      await once(controlPlane, "listening");
+      const address = controlPlane.address();
+      assert.ok(address && typeof address !== "string");
+      controlOrigin = `http://127.0.0.1:${address.port}`;
+      const relayPort = await freePort();
+      relay = await startRelay(relayPort, controlOrigin);
+      sockets = new LoopbackWebSocketFactory(`ws://127.0.0.1:${relayPort}/v1/connect`);
+      authenticationToken = "test";
+      possessionProof = Uint8Array.of(1);
+    }
 
-    const sockets = new LoopbackWebSocketFactory(`ws://127.0.0.1:${relayPort}/v1/connect`);
     const proof = {
-      create: async () => ({ connectionNonce: "real-e2ee", possessionProof: Uint8Array.of(1) }),
+      create: async () => ({ connectionNonce: randomUUID(), possessionProof }),
     };
     const tickets = (role) =>
       new HttpRelayTicketProvider({
@@ -234,12 +260,14 @@ test(
           role,
           ...(role === "device" ? { deviceId } : {}),
         },
-        authenticationHeaders: async () => ({ authorization: "Bearer test" }),
+        authenticationHeaders: async () => ({
+          authorization: `Bearer ${authenticationToken}`,
+        }),
         proof,
-        allowInsecureLoopbackForTests: true,
+        allowInsecureLoopbackForTests: externalControlPlaneOrigin === undefined,
       });
     const common = {
-      sockets,
+      ...(sockets === undefined ? {} : { sockets }),
       reconnect: {
         maximumAttempts: 4,
         initialDelayMs: 20,
@@ -343,9 +371,11 @@ test(
       await bridge.shutdown();
       pair.deviceEndpoint.close();
       await daemon.stop();
-      await stopRelay(relay);
-      controlPlane.closeAllConnections();
-      await new Promise((resolve) => controlPlane.close(resolve));
+      if (relay !== undefined) await stopRelay(relay);
+      if (controlPlane !== undefined) {
+        controlPlane.closeAllConnections();
+        await new Promise((resolve) => controlPlane.close(resolve));
+      }
       rmSync(root, { recursive: true, force: true });
     }
   },
