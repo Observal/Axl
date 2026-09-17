@@ -20,9 +20,6 @@ path = [
   "packages/extensions/prompts/package.json",
   "packages/extensions/prompts/tsconfig.build.json",
   "packages/extensions/prompts/tsconfig.json",
-  "packages/extensions/browser/package.json",
-  "packages/extensions/browser/tsconfig.build.json",
-  "packages/extensions/browser/tsconfig.json",
   "packages/extensions/skills/tsconfig.json",
   "packages/kernel/package.json",
   "packages/kernel/tsconfig.build.json",
@@ -43,6 +40,15 @@ path = [
   "tsconfig.json",
 ]
 SPDX-FileCopyrightText = "2026 Hari Srinivasan"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
+  "packages/extensions/browser/package.json",
+  "packages/extensions/browser/tsconfig.build.json",
+  "packages/extensions/browser/tsconfig.json",
+]
+SPDX-FileCopyrightText = "2026 Tanvi Reddy"
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
