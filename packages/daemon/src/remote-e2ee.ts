@@ -4,14 +4,15 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  type DeviceId,
   encodeRemoteDaemonMessage,
   encodeRemoteE2eeEnvelope,
+  type OperationId,
   parseAuthenticatedRemoteRequest,
   parseDeviceId,
   parseRemoteE2eeEnvelope,
-  type DeviceId,
-  type OperationId,
   type RemoteDaemonMessage,
+  type RemoteE2eeEnvelope,
   type RequestId,
   type RouteId,
   type ServerMessage,
@@ -35,6 +36,11 @@ interface NativePlaintext {
   readonly plaintext: Uint8Array;
 }
 
+interface NativeEpochReadyAcceptance {
+  readonly cryptoSessionId: Uint8Array;
+  readonly commitId: Uint8Array;
+}
+
 /** Narrow structural subset of the private Node binding used by the daemon. */
 export interface NativeDaemonE2eeEndpoint {
   prepareApplication(
@@ -49,6 +55,22 @@ export interface NativeDaemonE2eeEndpoint {
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
   ): Promise<NativePlaintext>;
+  receiveReplacementProposal?(
+    operationId: Uint8Array,
+    ciphertext: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+  ): Promise<"accepted">;
+  createUpdateCommit?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+  ): Promise<NativeCiphertext>;
+  acceptEpochReady?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    ciphertext: Uint8Array,
+  ): Promise<NativeEpochReadyAcceptance>;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
@@ -84,6 +106,12 @@ function idBytes(value: string): Uint8Array {
   return Uint8Array.from({ length: 16 }, (_, index) =>
     Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16),
   );
+}
+
+function uuidText(value: Uint8Array): OperationId {
+  if (value.byteLength !== 16) throw new Error("Invalid native operation identity");
+  const encoded = Buffer.from(value).toString("hex");
+  return `${encoded.slice(0, 8)}-${encoded.slice(8, 12)}-${encoded.slice(12, 16)}-${encoded.slice(16, 20)}-${encoded.slice(20)}` as OperationId;
 }
 
 function derivedId(
@@ -155,9 +183,6 @@ export class WindowsRemoteE2eeBridge {
     let incomingOperation: Uint8Array | undefined;
     try {
       const envelope = parseRemoteE2eeEnvelope(bytes);
-      if (envelope.messageClass !== "application_request") {
-        throw new Error("Remote E2EE envelope is not an application request");
-      }
       const authority = this.options.authority.snapshot(this.options.deviceId);
       if (
         authority?.hostedGeneration !== envelope.hostedGrantGeneration ||
@@ -167,6 +192,17 @@ export class WindowsRemoteE2eeBridge {
       }
       this.currentRoute = sourceRouteId;
       incomingOperation = idBytes(envelope.operationId);
+      if (envelope.messageClass === "update_proposal") {
+        await this.receiveUpdateProposal(sourceRouteId, envelope, incomingOperation);
+        return;
+      }
+      if (envelope.messageClass === "epoch_ready") {
+        await this.receiveEpochReady(envelope, incomingOperation);
+        return;
+      }
+      if (envelope.messageClass !== "application_request") {
+        throw new Error("Remote E2EE envelope has an invalid device-to-daemon class");
+      }
       const opened = await this.options.endpoint.receiveApplication(
         incomingOperation,
         envelope.ciphertext,
@@ -202,6 +238,82 @@ export class WindowsRemoteE2eeBridge {
     } finally {
       bytes.fill(0);
       incomingOperation?.fill(0);
+    }
+  }
+
+  private async receiveUpdateProposal(
+    routeId: RouteId,
+    envelope: RemoteE2eeEnvelope,
+    incomingOperation: Uint8Array,
+  ): Promise<void> {
+    const receive = this.options.endpoint.receiveReplacementProposal;
+    const createCommit = this.options.endpoint.createUpdateCommit;
+    if (receive === undefined || createCommit === undefined) {
+      throw new Error("Native endpoint does not support MLS updates");
+    }
+    const logical = idBytes(envelope.logicalMessageId);
+    try {
+      await receive.call(
+        this.options.endpoint,
+        incomingOperation,
+        envelope.ciphertext,
+        logical,
+        BigInt(envelope.hostedGrantGeneration),
+      );
+      const commitOperation = derivedId(
+        "axl-e2ee-daemon-commit-operation-v1",
+        envelope.operationId,
+      );
+      const commitLogical = derivedId(
+        "axl-e2ee-daemon-commit-logical-v1",
+        envelope.logicalMessageId,
+      );
+      try {
+        const commit = await createCommit.call(
+          this.options.endpoint,
+          commitOperation.bytes,
+          commitLogical.bytes,
+          BigInt(envelope.hostedGrantGeneration),
+        );
+        await this.sendPrepared(routeId, commit, envelope.hostedGrantGeneration, "commit");
+      } finally {
+        commitOperation.bytes.fill(0);
+        commitLogical.bytes.fill(0);
+      }
+      const acknowledgement = derivedId(
+        "axl-e2ee-update-proposal-receive-ack-v1",
+        envelope.operationId,
+      );
+      try {
+        await this.options.endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation);
+      } finally {
+        acknowledgement.bytes.fill(0);
+      }
+    } finally {
+      logical.fill(0);
+    }
+  }
+
+  private async receiveEpochReady(
+    envelope: RemoteE2eeEnvelope,
+    incomingOperation: Uint8Array,
+  ): Promise<void> {
+    const accept = this.options.endpoint.acceptEpochReady;
+    if (accept === undefined) throw new Error("Native endpoint does not support epoch readiness");
+    const logical = idBytes(envelope.logicalMessageId);
+    try {
+      await accept.call(this.options.endpoint, incomingOperation, logical, envelope.ciphertext);
+      const acknowledgement = derivedId(
+        "axl-e2ee-epoch-ready-receive-ack-v1",
+        envelope.operationId,
+      );
+      try {
+        await this.options.endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation);
+      } finally {
+        acknowledgement.bytes.fill(0);
+      }
+    } finally {
+      logical.fill(0);
     }
   }
 
@@ -242,23 +354,37 @@ export class WindowsRemoteE2eeBridge {
         BigInt(authority.hostedGeneration),
         plaintext,
       );
-      if (prepared.messageClass !== "application_delivery") {
-        throw new Error("Native endpoint returned the wrong message class");
-      }
-      await this.options.sender.send(
+      await this.sendPrepared(
         routeId,
-        encodeRemoteE2eeEnvelope({
-          operationId: operation.text as OperationId,
-          logicalMessageId: logical.text as OperationId,
-          messageClass: "application_delivery",
-          hostedGrantGeneration: authority.hostedGeneration,
-          ciphertext: prepared.ciphertext,
-        }),
+        prepared,
+        authority.hostedGeneration,
+        "application_delivery",
       );
     } finally {
       plaintext.fill(0);
       operation.bytes.fill(0);
       logical.bytes.fill(0);
     }
+  }
+
+  private async sendPrepared(
+    routeId: RouteId,
+    prepared: NativeCiphertext,
+    hostedGrantGeneration: number,
+    expectedClass: RemoteE2eeEnvelope["messageClass"],
+  ): Promise<void> {
+    if (prepared.messageClass !== expectedClass) {
+      throw new Error("Native endpoint returned the wrong message class");
+    }
+    await this.options.sender.send(
+      routeId,
+      encodeRemoteE2eeEnvelope({
+        operationId: uuidText(prepared.operationId),
+        logicalMessageId: uuidText(prepared.logicalMessageId),
+        messageClass: expectedClass,
+        hostedGrantGeneration,
+        ciphertext: prepared.ciphertext,
+      }),
+    );
   }
 }

@@ -11,8 +11,8 @@ import { type ModelPort, ToolRegistry } from "@axl/kernel";
 import {
   decodeRemoteDaemonMessage,
   encodeRemoteE2eeEnvelope,
-  type ModelStreamEvent,
   hashCanonicalRequest,
+  type ModelStreamEvent,
   parseDeviceId,
   parseInstallationId,
   parseOperationId,
@@ -25,8 +25,8 @@ import {
 import { DeterministicFakeRemoteCryptoAdapter } from "../../protocol/test/support/fake-remote-crypto.ts";
 import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
 import { AxlDaemon } from "../src/daemon.ts";
-import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
 import { RemoteAuthorityError, RemoteDeviceAuthorityStore } from "../src/remote-authority.ts";
+import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
 import { remoteRpcMethods, requiredRemoteScope } from "../src/remote-rpc.ts";
 
 const installationId = parseInstallationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -168,6 +168,94 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
     assert.equal(response.method, "daemon.info");
   }
   assert.equal(prepared.length, 1);
+});
+
+test("the Windows E2EE bridge prioritizes update commits and epoch readiness", async (context) => {
+  const { daemon, dataDirectory } = await startDaemon(context);
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.registerLocalDevice(deviceId, ["observe"]);
+  await authority.applyHostedGrant(deviceId, 3, ["observe"]);
+  const updateOperation = parseOperationId("11111111-1111-4111-8111-111111111111");
+  const updateLogical = parseOperationId("22222222-2222-4222-8222-222222222222");
+  const epochOperation = parseOperationId("33333333-3333-4333-8333-333333333333");
+  const epochLogical = parseOperationId("44444444-4444-4444-8444-444444444444");
+  const accepted: string[] = [];
+  const acknowledgements: Uint8Array[] = [];
+  const endpoint: NativeDaemonE2eeEndpoint = {
+    async prepareApplication() {
+      throw new Error("not used");
+    },
+    async receiveApplication() {
+      throw new Error("not used");
+    },
+    async receiveReplacementProposal(_operation, ciphertext, _logical, generation) {
+      assert.deepEqual(ciphertext, Uint8Array.of(7));
+      assert.equal(generation, 3n);
+      accepted.push("proposal");
+      return "accepted";
+    },
+    async createUpdateCommit(operationId, logicalMessageId, generation) {
+      assert.equal(generation, 3n);
+      accepted.push("commit");
+      return {
+        operationId,
+        logicalMessageId,
+        messageClass: "commit",
+        ciphertext: Uint8Array.of(8),
+      };
+    },
+    async acceptEpochReady() {
+      accepted.push("epoch_ready");
+      return { cryptoSessionId: new Uint8Array(16), commitId: new Uint8Array(48) };
+    },
+    async acknowledgeOutbox() {
+      throw new Error("not used");
+    },
+    async acknowledgeReceive(operationId) {
+      acknowledgements.push(operationId.slice());
+      return "acknowledged";
+    },
+    close() {},
+  };
+  const sent: Uint8Array[] = [];
+  const bridge = new WindowsRemoteE2eeBridge({
+    daemon,
+    deviceId,
+    authority,
+    endpoint,
+    sender: {
+      send(_route, envelope) {
+        sent.push(envelope.slice());
+      },
+    },
+  });
+  context.after(() => bridge.close());
+  const sourceRouteId = parseRouteId("55555555-5555-4555-8555-555555555555");
+  await bridge.receive({
+    sourceRouteId,
+    opaqueEnvelope: encodeRemoteE2eeEnvelope({
+      operationId: updateOperation,
+      logicalMessageId: updateLogical,
+      messageClass: "update_proposal",
+      hostedGrantGeneration: 3,
+      ciphertext: Uint8Array.of(7),
+    }),
+  });
+  assert.deepEqual(accepted, ["proposal", "commit"]);
+  assert.equal(sent.length, 1);
+  assert.equal(parseRemoteE2eeEnvelope(sent[0] ?? new Uint8Array()).messageClass, "commit");
+  await bridge.receive({
+    sourceRouteId,
+    opaqueEnvelope: encodeRemoteE2eeEnvelope({
+      operationId: epochOperation,
+      logicalMessageId: epochLogical,
+      messageClass: "epoch_ready",
+      hostedGrantGeneration: 3,
+      ciphertext: Uint8Array.of(9),
+    }),
+  });
+  assert.deepEqual(accepted, ["proposal", "commit", "epoch_ready"]);
+  assert.equal(acknowledgements.length, 2);
 });
 
 test("intersects local and hosted grants without allowing hosted widening", async () => {
