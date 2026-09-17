@@ -101,4 +101,5 @@ hosted transport, and the full runtime matrix; remote-web wiring remains out of 
 explicit browser security non-claims.
 
 The exact toolchain is in `rust-toolchain.toml`. The implementation dependency and maintenance
-exception record is in `DEPENDENCIES.md`.
+exception record is in `DEPENDENCIES.md`. The implementation and unavailable-runtime matrix is in
+[`PRODUCTION_STORAGE_EVIDENCE.md`](PRODUCTION_STORAGE_EVIDENCE.md).
