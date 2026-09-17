@@ -176,6 +176,23 @@ export class WindowsRemoteE2eeBridge {
     return operation;
   }
 
+  async drain(): Promise<void> {
+    while (true) {
+      const current = this.tail;
+      await current;
+      if (current === this.tail) return;
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.attachment.close();
+    await this.drain();
+    this.options.endpoint.close();
+    this.currentRoute = undefined;
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;

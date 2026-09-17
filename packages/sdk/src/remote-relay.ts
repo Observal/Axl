@@ -826,6 +826,21 @@ export class RemoteHostedDelivery {
     return starting;
   }
 
+  async drain(): Promise<void> {
+    while (true) {
+      const flush = this.flushTail;
+      const inbound = this.inboundTail;
+      await Promise.all([flush, inbound]);
+      if (flush === this.flushTail && inbound === this.inboundTail) return;
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    this.started = false;
+    this.options.connection.close();
+    await this.drain();
+  }
+
   close(): void {
     this.started = false;
     this.options.connection.close();
@@ -931,8 +946,10 @@ export class RemoteHostedDelivery {
       this.publish({ requestId: message.requestId, state: "daemon_accepted" });
       await this.options.outbox.removeAccepted(message.requestId);
     } else if (message.type === "daemon_result") {
+      await this.options.outbox.markCompleted(message.requestId);
       this.publish({ requestId: message.requestId, state: "completed" });
     } else if (message.type === "daemon_error") {
+      await this.options.outbox.markCompleted(message.requestId);
       this.publish({ requestId: message.requestId, state: "failed" });
     }
     for (const listener of this.messageListeners) listener(message);

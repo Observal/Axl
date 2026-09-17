@@ -31,6 +31,7 @@
     "pack:local": "node scripts/package.mjs"
   },
   "devDependencies": {
+    "@axl/control-plane": "workspace:*",
     "@axl/daemon": "workspace:*",
     "@axl/kernel": "workspace:*",
     "@axl/protocol": "workspace:*",
