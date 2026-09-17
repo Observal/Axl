@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Production E2EE storage and rollback
@@ -792,7 +793,7 @@ No candidate below is approved by this RFC.
 | --- | --- | --- | --- | --- |
 | `security-framework` 3.7.0 with default features off and `OSX_10_15` | crates.io SHA-256 `b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d`; tag object `4efde9cf6495e2ac366a98134c1f98f9eced627b`; source commit `5f6e65114b77d5bc161d2b099cad09f2a67609d2` | MIT OR Apache-2.0; released 2026-02-20; current stable candidate found in the evaluation | 6 external pairs including the direct crate; links Apple frameworks; no downloaded binary | Preferred macOS binding. Direct manual FFI is rejected because it adds an avoidable unsafe CoreFoundation ownership boundary. |
 | `windows-sys` 0.61.2 with only required Win32 features | crates.io SHA-256 `ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc`; source commit `32c3144490c016fe496a0aed769bce60987a2e9d`; no distinct crate tag was found in the evaluated source metadata | MIT OR Apache-2.0; current stable candidate | 2 external pairs: `windows-sys` 0.61.2 and `windows-link` 0.2.1; links Windows system DLLs | Preferred Windows bindings. It is smaller than the high-level `windows` crate for this narrow API. |
-| `secret-service` 5.2.0 with `rt-async-io-crypto-rust` | crates.io SHA-256 `5107b24b91445dd2aa449a258a1807b63240942157292354dc5bfdbeb8bc6db8`; tag and commit `1fe4fbe405b152bc969deb5de417847e1e4e4c7b` | MIT OR Apache-2.0; released 2026-08-29; current maintained release in the evaluation | 111 external pairs in the isolated lock, 96 selected normal/build pairs; D-Bus service required; no native crypto library with the Rust crypto feature | Preferred Linux desktop client, subject to graph review. Direct D-Bus framing is rejected as unnecessary protocol and cryptographic risk. |
+| Axl-maintained `secret-service` 5.2.0 fork with `rt-async-io-crypto-rust` | exact commit `1721451b21acfc3450be8799d92947653a5656e3`, based directly on upstream tag and commit `1fe4fbe405b152bc969deb5de417847e1e4e4c7b`; upstream crates.io checksum `5107b24b91445dd2aa449a258a1807b63240942157292354dc5bfdbeb8bc6db8` no longer authenticates the fork | MIT OR Apache-2.0; the maintained fork adds only no-prompt item creation and deletion outcomes | 101 external pairs in the selected Linux normal/build closure; D-Bus service required; no native crypto library with the Rust crypto feature | Selected Linux desktop client after the released API was found to execute returned prompts internally. The exact fork restores a fail-closed no-prompt boundary without reimplementing D-Bus framing or session cryptography. Replace it with an upstream release after equivalent APIs ship and pass dependency review. |
 | `tss-esapi` 7.7.0, defaults off | crates.io SHA-256 `3f10b25a84912b894d0e6d68f4a3771c923e9c44ddaaed7920cde92ed28aa84e`; tag and commit `27d506313be57a22c62d632d4f7b21b3f5b7b422` | Apache-2.0; released 2026-04-24; stable 7.x while 8.0.0 is alpha | 39 external selected pairs; requires `tss-esapi-sys` 0.6.0, `pkg-config`, and system TSS2 libraries | Deferred, not selected for v1 headless support. |
 
 The isolated candidate lock hashes were:
@@ -800,7 +801,7 @@ The isolated candidate lock hashes were:
 ```text
 security-framework 3.7.0: c2d3ad0f09b27da0f93f441e7734e82eab6a98166155a9da077edf99baeafbe3
 windows-sys 0.61.2:      387d6b9f2d51c9b1267daa83f58c77619d092a15c2634044ac15ef3920f42e62
-secret-service 5.2.0:    a59c3db2a6ab7c69e089e082e80e3af040dd4ef4923bbfde3d23d64435bc09da
+secret-service 5.2.0 upstream candidate: a59c3db2a6ab7c69e089e082e80e3af040dd4ef4923bbfde3d23d64435bc09da
 tss-esapi 7.7.0:         1c8efd8a427f747f0c9ecbc90051aa47523189764e880f92226f5da5bef4b063
 ```
 
@@ -990,6 +991,7 @@ The responsible human approved these sequencing decisions for this draft PR:
 
 - The hosted-witness implementation begins behind typed injected storage, signing, authentication, journal, and recovery interfaces with deterministic in-memory test implementations. Production assembly and deployment remain blocked until a focused decision selects and approves each replica's concrete datastore, Ed25519 signing-key service, immutable journal, failure domain, backup identity, and recovery authority. No deployment is part of this PR.
 - The macOS, Linux desktop, and Windows dependency candidates recorded above are the preferred starting points, not unconditional dependency approvals. Each dependency-bearing commit must regenerate and receive approval for its exact current lockfile, features, transitive graph, licenses, advisories, build scripts, native requirements, and runtime evidence.
+- Source review found that released `secret-service` 5.2.0 automatically executes prompts returned by item creation and item deletion. The approved minimal Axl-maintained fork adds no-prompt variants for only those operations and remains pinned by full commit. The adapter uses the existing unlocked default collection and never requests collection creation or unlock. No other upstream behavior is changed. This exception does not permit a moving branch dependency, direct Secret Service protocol implementation, or an enabled Linux support row without the required runtime evidence.
 - Platform implementation proceeds in this order unless hardware availability requires a reviewed change: macOS, Linux desktop, Windows, then the production browser path. Ordering is not a support claim.
 - Missing physical runtime evidence does not block merging code that remains fail-closed. It does block setting the target to `supported`, shipping an enabled production artifact for that target, or enabling endpoint creation. Emulation does not replace physical evidence where this RFC requires physical hardware.
 

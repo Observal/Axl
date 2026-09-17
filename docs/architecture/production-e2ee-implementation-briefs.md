@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Production E2EE implementation briefs
@@ -145,14 +146,19 @@ identity behavior, package notices, and arm64/x64 runtime results.
 Candidate declaration:
 
 ```toml
-secret-service = { version = "=5.2.0", default-features = false, features = ["rt-async-io-crypto-rust"] }
+secret-service = { git = "https://github.com/Observal/secret-service-rs.git", rev = "1721451b21acfc3450be8799d92947653a5656e3", version = "=5.2.0", default-features = false, features = ["rt-async-io-crypto-rust"] }
+zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 ```
 
-The prior evaluation selected a large D-Bus and cryptography graph. Recompute all normal, build, and
-development packages. Confirm that the implementation requests only
-`dh-ietf1024-sha256-aes128-cbc-pkcs7`, rejects `plain`, rejects prompts, pins a tested user-session
-bus and service owner, and names each supported Secret Service implementation. Headless Linux and
-unknown service implementations remain unsupported.
+The released 5.2.0 API executed returned prompts internally. The approved exact-commit fork is based
+directly on upstream tag `v5.2.0` and adds only no-prompt item creation and deletion outcomes. The
+adapter uses the existing unlocked default collection and never requests collection creation or
+unlock. Direct `zbus` use is limited to verifying the session connection, service
+owner, UID, PID, and executable; Secret Service framing and encrypted-session cryptography remain in
+the fork. Recompute all normal, build, and development packages. Confirm that the implementation
+requests only `dh-ietf1024-sha256-aes128-cbc-pkcs7`, rejects `plain`, rejects prompts, pins a tested
+user-session bus and service owner, and names each supported Secret Service implementation.
+Headless Linux and unknown service implementations remain unsupported.
 
 ### Windows, third platform
 

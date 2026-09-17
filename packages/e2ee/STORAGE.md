@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Native E2EE storage schema
@@ -282,8 +283,22 @@ key IDs, the SHA-384 authenticated-context hash, lifecycle, and the exact 32-byt
 service, account, and label attributes contain only the Axl service identifier plus format version,
 session ID, key ID, and lifecycle. It disables authentication UI, rejects root and processes outside
 the active console login, verifies deletion by an exact read, reports no hardware backing, and has
-no fallback. The injected `RollbackAnchor` keeps monotonic state outside the database snapshot
-domain. Both dependencies must report availability or the adapter fails closed.
+no fallback.
+
+On Linux, `linux_secret_service::LinuxSecretServiceEnvelopeKeyStore` implements the same lifecycle
+through the existing unlocked default collection on the same user's desktop session bus. It never
+requests collection creation or unlock. It accepts only an explicitly selected GNOME Keyring or
+KWallet 6 executable, verifies the unique service owner and UID before and after operations,
+negotiates only Secret Service's encrypted DH/AES session, and uses the fork's no-prompt item
+operations. A locked collection or returned prompt fails closed. Item
+attributes contain only the service, format, session, key, and lifecycle identifiers. The complete
+record remains in the encrypted item secret. Deletion is followed by an exact attribute search.
+Headless sessions, root, unexpected runtime directories or bus addresses, unknown service
+executables, owner changes, duplicate records, and missing services fail closed. The implementation
+reports `hardware_backing = false` and is not wired into Node.
+
+The injected `RollbackAnchor` keeps monotonic state outside the database snapshot domain. Both
+dependencies must report availability or the adapter fails closed.
 
 The implementation uses the pinned libcrux provider's CSPRNG and AES-256-GCM. It defines no KDF or
 new cryptographic primitive. A fresh 256-bit DEK protects each successor state image. AAD binds the
@@ -296,9 +311,11 @@ operations. Filesystem snapshots, backups, crash dumps, storage-controller cache
 media are excluded. Session 50 evaluates browser WebCrypto and IndexedDB behavior without claiming
 that they supply an independent rollback anchor. The macOS Keychain store is implemented but remains
 unwired and unsupported pending the required signed, unsigned, lock, login, backup, installer,
-arm64, and native x64 runtime evidence. Linux and
-Windows stores, Android Keystore, generated mobile SDKs, and production mobile applications remain
-later work.
+arm64, and native x64 runtime evidence. The Linux Secret Service store is also unwired and
+unsupported pending named GNOME Keyring and KWallet 6 runtime, login, lock, owner-change, restart,
+crash, installer, glibc arm64, and glibc x64 evidence. Headless Linux remains unsupported. Windows
+storage, Android Keystore, generated mobile SDKs, and production mobile applications remain later
+work.
 
 The monotonic anchor detects a database older than the last anchored commit. The peer epoch
 authenticator detects a divergent epoch once authenticated peer evidence is available. Rollback of

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
 [graph]
@@ -42,4 +43,4 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+allow-git = ["https://github.com/Observal/secret-service-rs.git"]

@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl endpoint E2EE core
@@ -48,10 +49,13 @@ detection, erasure boundary, and explicit exclusions. Session 50's approved plat
 [`../../docs/architecture/e2ee-platform-bindings.md`](../../docs/architecture/e2ee-platform-bindings.md).
 Browser transaction evidence remains required. The approved hosted witness protocol supplies the
 independent rollback anchor, but browser pairing stays disabled until its production persistence,
-witness integration, artifact isolation, and runtime evidence pass. A target-gated macOS
-`EnvelopeKeyStore` now uses the data-protection Keychain, but it is not wired into Node or any
-production endpoint constructor and has no enabled support row. Linux and Windows secure stores,
-Android Keystore, generated mobile SDKs, and mobile applications remain later work.
+witness integration, artifact isolation, and runtime evidence pass. Target-gated macOS and Linux
+`EnvelopeKeyStore` implementations now use the data-protection Keychain and an encrypted desktop
+Secret Service session respectively, but neither is wired into Node or any production endpoint
+constructor and neither has an enabled support row. Linux requires an unlocked graphical login
+session and a selected GNOME Keyring or KWallet 6 service; unknown and headless environments fail
+closed. Windows secure storage, Android Keystore, generated mobile SDKs, and mobile applications
+remain later work.
 
 Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
 upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim
