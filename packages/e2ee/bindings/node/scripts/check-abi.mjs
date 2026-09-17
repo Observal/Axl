@@ -24,9 +24,16 @@ const errorBlock = declarations.match(/export type AxlE2eeErrorCode =([\s\S]*?);
 const declaredErrors = [...errorBlock.matchAll(/"([a-z0-9_]+)"/gu)].map((match) => match[1]).sort();
 assert.deepEqual(declaredErrors, [...native.errorCodes()].sort());
 
-for (const [className, interfaceName] of [["DaemonEndpoint", "DaemonEndpoint"], ["DeviceEndpoint", "DeviceEndpoint"]]) {
+for (const [className, interfaceName] of [
+  ["DaemonEndpoint", "DaemonEndpoint"],
+  ["DeviceEndpoint", "DeviceEndpoint"],
+  ["NativePendingWitness", "NativePendingWitness"],
+]) {
   const body = declarations.match(new RegExp(`export interface ${interfaceName} \\{([\\s\\S]*?)\\n\\}`, "u"))?.[1] ?? "";
-  const declared = [...body.matchAll(/^  ([A-Za-z0-9_]+)\(/gmu)].map((match) => match[1]).sort();
+  const declared = [
+    ...body.matchAll(/^  ([A-Za-z0-9_]+)\(/gmu),
+    ...body.matchAll(/^  readonly ([A-Za-z0-9_]+):/gmu),
+  ].map((match) => match[1]).sort();
   const actual = Object.getOwnPropertyNames(native[className].prototype).filter((name) => name !== "constructor").sort();
   assert.deepEqual(declared, actual, `${className} declaration drift`);
 }

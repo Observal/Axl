@@ -1105,6 +1105,12 @@ pub(crate) struct AuthorizedWitnessTransition {
 }
 
 /// The only public continuation for a locally committed state transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PendingWitnessStatus {
+    AwaitingQuorum,
+    Ready,
+}
+
 #[derive(Clone)]
 pub struct PendingWitnessOperation {
     request: WitnessRequest,
@@ -1127,6 +1133,14 @@ impl PendingWitnessOperation {
     }
     pub fn request_hash(&self) -> [u8; 48] {
         self.request_hash
+    }
+
+    pub fn status(&self) -> PendingWitnessStatus {
+        if self.current_key_active && self.quorum_confirmed && self.obsolete_key_erased {
+            PendingWitnessStatus::Ready
+        } else {
+            PendingWitnessStatus::AwaitingQuorum
+        }
     }
 
     pub fn confirm_quorum(
@@ -1179,6 +1193,29 @@ impl PendingWitnessOperation {
         self.obsolete_key_erased = true;
         Ok(())
     }
+}
+
+#[cfg(feature = "node-test-fixtures")]
+#[doc(hidden)]
+pub fn test_pending_witness_operation(
+    request_bytes: &[u8],
+    exact_result: &[u8],
+) -> Result<PendingWitnessOperation, WitnessError> {
+    if exact_result.len() > MAX_RESULT_BYTES {
+        return Err(WitnessError::BoundExceeded);
+    }
+    let request = WitnessRequest::decode(request_bytes)?;
+    Ok(PendingWitnessOperation {
+        request_hash: request.request_hash()?,
+        request,
+        request_bytes: request_bytes.to_vec(),
+        exact_result: exact_result.to_vec(),
+        current_key_active: true,
+        quorum_confirmed: false,
+        obsolete_key_erased: true,
+        revocation_generation: None,
+        certificate_hash: None,
+    })
 }
 
 /// Serializes state-advancing work for one endpoint. A locally committed operation remains the

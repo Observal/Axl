@@ -55,6 +55,8 @@ const nativeBytes = readFileSync(join(staging, manifest.artifacts[0].path));
 for (const forbidden of [
   "testDaemonEndpoint",
   "testDeviceEndpoint",
+  "testWitnessPending",
+  "test_pending_witness_operation",
   "TestKeys",
   "TestAnchor",
   "FakeKeychain",
