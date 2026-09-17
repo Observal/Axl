@@ -1255,6 +1255,16 @@ impl Daemon {
             .receive_control(bytes, MessageClass::EpochReady, id, generation)
     }
 
+    pub(crate) fn prepare_resync_control(
+        &mut self,
+        id: Id,
+        generation: u64,
+        plaintext: &[u8],
+    ) -> Result<PreparedEnvelope, Error> {
+        self.endpoint
+            .prepare_control(MessageClass::ResyncControl, id, generation, plaintext)
+    }
+
     #[cfg(any(test, feature = "browser-test-fixtures"))]
     pub(crate) fn finish_transaction(&mut self, outcome: TransactionOutcome) -> Result<(), Error> {
         self.endpoint.finish_transaction(outcome)
@@ -1593,6 +1603,16 @@ impl Phone {
     ) -> Result<PreparedEnvelope, Error> {
         self.endpoint_mut()?
             .prepare_control(MessageClass::EpochReady, id, generation, plaintext)
+    }
+
+    pub(crate) fn receive_resync_control(
+        &mut self,
+        bytes: &[u8],
+        id: Id,
+        generation: u64,
+    ) -> Result<PreparedPlaintext, Error> {
+        self.endpoint_mut()?
+            .receive_control(bytes, MessageClass::ResyncControl, id, generation)
     }
 
     #[cfg(any(test, feature = "browser-test-fixtures"))]

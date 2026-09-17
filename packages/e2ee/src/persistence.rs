@@ -1817,6 +1817,29 @@ impl DurableDaemon {
         )
     }
 
+    pub fn prepare_resync_control(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        hosted_generation: u64,
+        plaintext: &[u8],
+    ) -> Result<OutboxRecord, PersistenceError> {
+        self.send_operation(
+            operation_id,
+            operation_fingerprint_parts(
+                30,
+                &[
+                    &logical_message_id,
+                    &hosted_generation.to_be_bytes(),
+                    plaintext,
+                ],
+            )?,
+            |daemon| {
+                daemon.prepare_resync_control(logical_message_id, hosted_generation, plaintext)
+            },
+        )
+    }
+
     pub fn prepare_commit(
         &mut self,
         operation_id: Id,

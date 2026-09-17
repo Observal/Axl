@@ -248,6 +248,12 @@ export interface DaemonEndpoint {
     hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
   ): Promise<NativeEpochReadyAcceptance>;
+  prepareEpochReadyConfirmation(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    acceptance: NativeEpochReadyAcceptance,
+  ): Promise<NativeOutbox>;
   removeDevice(
     operationId: Uint8Array,
     logicalId: Uint8Array,
@@ -311,6 +317,12 @@ export interface DeviceEndpoint {
     hostedGrantGeneration: bigint,
     epochReadyLogicalId: Uint8Array,
   ): Promise<NativeOutbox>;
+  acceptEpochReadyConfirmation(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    ciphertext: Uint8Array,
+  ): Promise<PairState>;
   acknowledgeEpochReady(
     operationId: Uint8Array,
     acceptance: NativeEpochReadyAcceptance,

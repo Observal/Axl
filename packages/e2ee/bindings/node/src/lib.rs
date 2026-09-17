@@ -1267,6 +1267,26 @@ impl DaemonEndpoint {
         })
     }
     #[napi]
+    pub fn prepare_epoch_ready_confirmation(
+        &self,
+        operation_id: Buffer,
+        logical_id: Buffer,
+        generation: BigInt,
+        acceptance: &NativeEpochReadyAcceptance,
+    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+        let op = id(operation_id.as_ref())?;
+        let logical = id(logical_id.as_ref())?;
+        let generation = u64_from_bigint(&generation)?;
+        let acceptance = acceptance.inner.clone();
+        self.work(move |slot, _| {
+            Ok(outbox(
+                daemon_mut(slot)?
+                    .prepare_epoch_ready_confirmation(op, logical, generation, &acceptance)
+                    .map_err(map_persistence)?,
+            ))
+        })
+    }
+    #[napi]
     pub fn remove_device(
         &self,
         operation_id: Buffer,
@@ -1625,6 +1645,26 @@ impl DeviceEndpoint {
             Ok(outbox(
                 device_mut(slot)?
                     .apply_received_update_commit(op, &bytes, logical, generation, ready)
+                    .map_err(map_persistence)?,
+            ))
+        })
+    }
+    #[napi]
+    pub fn accept_epoch_ready_confirmation(
+        &self,
+        operation_id: Buffer,
+        logical_id: Buffer,
+        generation: BigInt,
+        ciphertext: Buffer,
+    ) -> Result<AsyncTask<Work<String>>> {
+        let op = id(operation_id.as_ref())?;
+        let logical = id(logical_id.as_ref())?;
+        let generation = u64_from_bigint(&generation)?;
+        let bytes = copy_bounded(ciphertext.as_ref(), 2 * 1024, "bound_exceeded")?;
+        self.work(move |slot, _| {
+            Ok(lifecycle(
+                device_mut(slot)?
+                    .accept_epoch_ready_confirmation(op, logical, generation, &bytes)
                     .map_err(map_persistence)?,
             ))
         })

@@ -56,6 +56,12 @@ export interface NativeDeviceE2eeEndpoint {
     hostedGrantGeneration: bigint,
     epochReadyLogicalId: Uint8Array,
   ): Promise<NativeCiphertext>;
+  acceptEpochReadyConfirmation?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    ciphertext: Uint8Array,
+  ): Promise<"active">;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
@@ -284,6 +290,31 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
 
   async open(opaqueEnvelope: Uint8Array): Promise<AuthenticatedRemotePayload> {
     const envelope: RemoteE2eeEnvelope = parseRemoteE2eeEnvelope(opaqueEnvelope);
+    if (envelope.messageClass === "resync_control") {
+      const accept = this.options.endpoint.acceptEpochReadyConfirmation;
+      if (accept === undefined) {
+        throw new TypeError("Native endpoint does not support epoch-ready confirmation");
+      }
+      const operation = derivedId(envelope.operationId, 0x47);
+      const logical = uuidBytes(envelope.logicalMessageId);
+      try {
+        await accept.call(
+          this.options.endpoint,
+          operation,
+          logical,
+          BigInt(envelope.hostedGrantGeneration),
+          envelope.ciphertext,
+        );
+        return {
+          authenticatedPeerId: this.options.daemonDeviceId,
+          plaintext: new Uint8Array(),
+          controlOnly: true,
+        };
+      } finally {
+        operation.fill(0);
+        logical.fill(0);
+      }
+    }
     if (envelope.messageClass === "commit") {
       const operation = derivedId(envelope.operationId, 0x45);
       const readyLogical = derivedId(envelope.logicalMessageId, 0x46);
