@@ -1409,6 +1409,75 @@ impl Phone {
         Ok(())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn join_published_welcome(
+        &mut self,
+        bytes: &[u8],
+        crypto_session_id: Id,
+        daemon_identity: Identity,
+        clock: Arc<dyn Clock>,
+    ) -> Result<PairContext, Error> {
+        if bytes.len() > HANDSHAKE_MAX_BYTES {
+            return Err(Error::BoundExceeded("Welcome"));
+        }
+        if daemon_identity.role != Role::Daemon
+            || daemon_identity.account_id != self.identity.account_id
+            || daemon_identity.installation_id != self.identity.installation_id
+        {
+            return Err(Error::InvalidIdentity("Welcome daemon identity mismatch"));
+        }
+        let message = MlsMessageIn::tls_deserialize_exact(bytes)
+            .map_err(|_| Error::Crypto("invalid Welcome encoding"))?;
+        let MlsMessageBodyIn::Welcome(welcome_message) = message.extract() else {
+            return Err(Error::UnexpectedMessage);
+        };
+        if welcome_message.ciphersuite() != SUITE {
+            return Err(Error::WrongSuite);
+        }
+        let staged =
+            StagedWelcome::new_from_welcome(&self.provider, &join_config(), welcome_message, None)
+                .map_err(|_| Error::Crypto("Welcome join failed"))?;
+        let group_id: GroupIdBytes = staged
+            .group_context()
+            .group_id()
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::WrongGroup)?;
+        validate_members_iter(staged.members(), &daemon_identity, &self.identity)?;
+        let context = PairContext {
+            crypto_session_id,
+            group_id,
+            account_id: self.identity.account_id,
+            installation_id: self.identity.installation_id,
+            device_id: self.identity.device_id,
+        };
+        let group = staged
+            .into_group(&self.provider)
+            .map_err(|_| Error::Crypto("Welcome persistence failed"))?;
+        let last_wall_time_ms = clock.now_ms()?;
+        self.endpoint = Some(Endpoint {
+            provider: std::mem::replace(
+                &mut self.provider,
+                CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?,
+            ),
+            signer: std::mem::replace(
+                &mut self.signer,
+                SignatureKeyPair::new(SUITE.signature_algorithm())
+                    .map_err(|_| Error::Crypto("signer initialization failed"))?,
+            ),
+            group: Some(group),
+            identity: self.identity.clone(),
+            peer: daemon_identity,
+            context: context.clone(),
+            accepted: BTreeSet::new(),
+            previous_epoch_deadlines: BTreeMap::new(),
+            last_wall_time_ms,
+            clock,
+            transaction_pending: true,
+        });
+        Ok(context)
+    }
+
     #[cfg(any(test, feature = "browser-test-fixtures"))]
     fn endpoint(&self) -> Result<&Endpoint, Error> {
         self.endpoint.as_ref().ok_or(Error::WrongGroup)

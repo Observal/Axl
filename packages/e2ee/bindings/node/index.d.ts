@@ -281,6 +281,13 @@ export interface DeviceEndpoint {
   status(): Promise<PreJoinState>;
   publication(): Promise<Publication>;
   join(operationId: Uint8Array, welcome: NativeWelcome): Promise<PreJoinState>;
+  joinPublishedWelcome(
+    operationId: Uint8Array,
+    welcome: Uint8Array,
+    claimHash: Uint8Array,
+    welcomeHash: Uint8Array,
+    expiresAtMs: bigint,
+  ): Promise<PreJoinState>;
   prepareActivation(operationId: Uint8Array, logicalId: Uint8Array): Promise<NativeOutbox>;
   acknowledgeActivation(
     operationId: Uint8Array,

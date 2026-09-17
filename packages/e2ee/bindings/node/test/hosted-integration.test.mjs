@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { once } from "node:events";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,7 +21,14 @@ import {
   parseRemoteRequestId,
   parseRouteId,
 } from "@axl/protocol";
-import { NativeEndpointOutbox, RemoteDeviceE2ee } from "@axl/sdk";
+import { HostedPairingClient, NativeEndpointOutbox, RemoteDeviceE2ee } from "@axl/sdk";
+import {
+  InMemoryPairingRendezvousStore,
+  InMemoryRelayTicketStore,
+  PairingRendezvousService,
+  RelayTicketService,
+  createControlPlaneHandler,
+} from "@axl/control-plane";
 
 import * as fixture from "./fixture-loader.mjs";
 
@@ -30,6 +40,10 @@ function uuid(seed) {
 }
 
 const operation = (value) => uuid(value);
+const uuidText = (value) => {
+  const encoded = Buffer.from(value).toString("hex");
+  return `${encoded.slice(0, 8)}-${encoded.slice(8, 12)}-${encoded.slice(12, 16)}-${encoded.slice(16, 20)}-${encoded.slice(20)}`;
+};
 
 async function activatedPair(root) {
   const account = Buffer.alloc(16, 20);
@@ -74,6 +88,112 @@ function replyPort() {
 function nextDelivery(deliveries) {
   return new Promise((resolve) => deliveries.push(resolve));
 }
+
+test("real native pairing crosses the hosted claim and Welcome rendezvous", async () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-hosted-pairing-"));
+  const account = Buffer.alloc(16, 30);
+  const installation = uuid(31);
+  const session = uuid(32);
+  const nativeDeviceId = uuid(33);
+  const daemonEndpoint = fixture.testDaemonEndpoint(
+    join(root, "daemon"),
+    account,
+    installation,
+    session,
+  );
+  const deviceEndpoint = fixture.testDeviceEndpoint(
+    join(root, "device"),
+    account,
+    installation,
+    session,
+    nativeDeviceId,
+  );
+  const pairing = new PairingRendezvousService({
+    store: new InMemoryPairingRendezvousStore(),
+  });
+  const server = createServer(
+    createControlPlaneHandler({
+      tickets: new RelayTicketService({
+        store: new InMemoryRelayTicketStore(),
+        relayUrl: "wss://relay.invalid/v1/connect",
+        authorizer: { currentGeneration: async () => 1 },
+        proofVerifier: { verify: async () => true },
+      }),
+      pairing,
+      publicAuthentication: { authenticate: async () => ({ accountId: "account-fixture" }) },
+      internalAuthentication: { authenticate: async () => true },
+    }),
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const client = new HostedPairingClient({
+    origin: `http://127.0.0.1:${address.port}`,
+    authorization: async () => "fixture",
+    allowInsecureLoopbackForTests: true,
+  });
+  try {
+    const invitation = await daemonEndpoint.issue(operation(1));
+    const prejoin = await deviceEndpoint.prepare(invitation.bytes, operation(2));
+    const claimHash = createHash("sha384").update(prejoin.bytes).digest();
+    const binding = {
+      version: 1,
+      installationId: uuidText(installation),
+      deviceId: uuidText(nativeDeviceId),
+      cryptoSessionId: uuidText(session),
+      claimHash,
+    };
+    await client.publishClaim({ ...binding, claim: prejoin.bytes });
+    const reservationText = "34343434-3434-7434-b434-343434343434";
+    const reserved = await client.reserveClaim({
+      ...binding,
+      reservationId: reservationText,
+    });
+    const pending = await daemonEndpoint.submitClaim(operation(3), reserved.claim);
+    await daemonEndpoint.confirmClaim(
+      operation(4),
+      pending.hash,
+      Buffer.from(reservationText.replaceAll("-", ""), "hex"),
+    );
+    const welcome = await daemonEndpoint.createWelcome(
+      operation(5),
+      Buffer.from(reservationText.replaceAll("-", ""), "hex"),
+    );
+    const welcomeHash = createHash("sha384").update(welcome.bytes).digest();
+    await client.publishWelcome({
+      ...binding,
+      reservationId: reservationText,
+      welcome: welcome.bytes,
+      welcomeHash,
+    });
+    const published = await client.fetchWelcome(binding);
+    assert.equal(
+      await deviceEndpoint.joinPublishedWelcome(
+        operation(6),
+        published.welcome,
+        claimHash,
+        published.welcomeHash,
+        BigInt(published.expiresAt),
+      ),
+      "joined",
+    );
+    const activation = await deviceEndpoint.prepareActivation(operation(7), operation(8));
+    const acceptance = await daemonEndpoint.acceptActivation(
+      operation(9),
+      operation(8),
+      activation.ciphertext,
+    );
+    assert.equal(await deviceEndpoint.acknowledgeActivation(operation(10), acceptance), "active");
+    await client.acknowledgeWelcome({ ...binding, welcomeHash });
+  } finally {
+    daemonEndpoint.close();
+    deviceEndpoint.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
   const root = mkdtempSync(join(tmpdir(), "axl-real-e2ee-hosted-"));

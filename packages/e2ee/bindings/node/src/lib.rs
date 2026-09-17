@@ -1514,6 +1514,28 @@ impl DeviceEndpoint {
         })
     }
     #[napi]
+    pub fn join_published_welcome(
+        &self,
+        operation_id: Buffer,
+        welcome: Buffer,
+        claim_hash: Buffer,
+        welcome_hash: Buffer,
+        expires_at_ms: BigInt,
+    ) -> Result<AsyncTask<Work<String>>> {
+        let op = id(operation_id.as_ref())?;
+        let bytes = copy_bounded(welcome.as_ref(), HANDSHAKE_MAX_BYTES, "bound_exceeded")?;
+        let claim_hash = fixed::<48>(claim_hash.as_ref(), "invalid_hash")?;
+        let welcome_hash = fixed::<48>(welcome_hash.as_ref(), "invalid_hash")?;
+        let expires_at_ms = u64_from_bigint(&expires_at_ms)?;
+        self.work(move |slot, _| {
+            Ok(prejoin_lifecycle(
+                device_mut(slot)?
+                    .join_published_welcome(op, &bytes, claim_hash, welcome_hash, expires_at_ms)
+                    .map_err(map_persistence)?,
+            ))
+        })
+    }
+    #[napi]
     pub fn prepare_activation(
         &self,
         operation_id: Buffer,
