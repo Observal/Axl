@@ -168,6 +168,15 @@ impl WindowsDpapiEnvelopeKeyStore {
         })
     }
 
+    #[cfg(feature = "node-test-fixtures")]
+    pub(crate) fn for_current_process(root: &Path) -> Result<Self, PersistenceError> {
+        let sid = windows_fs::current_user_sid_string()?;
+        if matches!(sid.as_str(), "S-1-5-18" | "S-1-5-19" | "S-1-5-20") {
+            return Err(PersistenceError::SecureStoreAccessDenied);
+        }
+        Self::new(root, &sid)
+    }
+
     pub(crate) const fn hardware_backing(&self) -> bool {
         false
     }

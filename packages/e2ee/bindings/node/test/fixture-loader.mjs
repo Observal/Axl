@@ -43,8 +43,12 @@ function wrap(endpoint) {
   return proxy;
 }
 
-export const testDaemonEndpoint = (...args) => wrap(native.testDaemonEndpoint(...args));
-export const testDeviceEndpoint = (...args) => wrap(native.testDeviceEndpoint(...args));
+const daemonFactory =
+  process.platform === "win32" ? native.testWindowsDaemonEndpoint : native.testDaemonEndpoint;
+const deviceFactory =
+  process.platform === "win32" ? native.testWindowsDeviceEndpoint : native.testDeviceEndpoint;
+export const testDaemonEndpoint = (...args) => wrap(daemonFactory(...args));
+export const testDeviceEndpoint = (...args) => wrap(deviceFactory(...args));
 export const testPanic = (endpoint) => Promise.resolve(native.testPanic(targets.get(endpoint))).catch((cause) => { throw mapError(cause); });
 export const testWitnessPending = (...args) => wrap(native.testWitnessPending(...args));
 export const nativeExports = Object.freeze(Object.keys(native).sort());

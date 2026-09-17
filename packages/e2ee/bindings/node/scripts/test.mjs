@@ -8,7 +8,12 @@ import { fileURLToPath } from "node:url";
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 execFileSync(process.execPath, [join(packageRoot, "scripts/build.mjs"), "production"], { stdio: "inherit" });
 execFileSync(process.execPath, [join(packageRoot, "scripts/build.mjs"), "test"], { stdio: "inherit" });
-const target = process.platform === "darwin" ? `darwin-${process.arch}` : `linux-${process.arch}-gnu`;
+const target =
+  process.platform === "darwin"
+    ? `darwin-${process.arch}`
+    : process.platform === "win32"
+      ? `win32-${process.arch}-msvc`
+      : `linux-${process.arch}-gnu`;
 const result = spawnSync(process.execPath, ["--test", "test/*.test.mjs", "test/*.test.ts"], {
   cwd: packageRoot,
   env: {

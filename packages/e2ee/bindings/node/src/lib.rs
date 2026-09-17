@@ -388,6 +388,28 @@ fn config(
     })
 }
 
+#[cfg(all(feature = "test-fixtures", target_os = "windows"))]
+fn windows_test_config(
+    root: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+    device: Option<Buffer>,
+) -> Result<Config> {
+    let root = PathBuf::from(root);
+    let keys = axl_e2ee::persistence::windows_test_envelope_key_store(&root.join("dpapi"))
+        .map_err(map_persistence)?;
+    Ok(Config {
+        root,
+        account: id(account.as_ref())?,
+        installation: id(installation.as_ref())?,
+        session: id(session.as_ref())?,
+        device: device.map(|value| id(value.as_ref())).transpose()?,
+        keys,
+        anchor: test_anchor(),
+    })
+}
+
 #[cfg(feature = "test-fixtures")]
 fn test_keys() -> Arc<dyn EnvelopeKeyStore> {
     Arc::new(test_store::TestKeys::default())
@@ -491,6 +513,41 @@ pub fn test_device_endpoint(
         session,
         Some(device),
         true,
+    )?))
+}
+
+#[cfg(all(feature = "test-fixtures", target_os = "windows"))]
+#[napi]
+pub fn test_windows_daemon_endpoint(
+    root: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+) -> Result<DaemonEndpoint> {
+    Ok(daemon_handle(windows_test_config(
+        root,
+        account,
+        installation,
+        session,
+        None,
+    )?))
+}
+
+#[cfg(all(feature = "test-fixtures", target_os = "windows"))]
+#[napi]
+pub fn test_windows_device_endpoint(
+    root: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+    device: Buffer,
+) -> Result<DeviceEndpoint> {
+    Ok(device_handle(windows_test_config(
+        root,
+        account,
+        installation,
+        session,
+        Some(device),
     )?))
 }
 

@@ -175,6 +175,16 @@ pub trait EnvelopeKeyStore: Send + Sync {
     fn destroy_session(&self, crypto_session_id: Id) -> Result<(), PersistenceError>;
 }
 
+#[cfg(all(target_os = "windows", feature = "node-test-fixtures"))]
+#[doc(hidden)]
+pub fn windows_test_envelope_key_store(
+    root: &Path,
+) -> Result<Arc<dyn EnvelopeKeyStore>, PersistenceError> {
+    Ok(Arc::new(
+        windows_dpapi::WindowsDpapiEnvelopeKeyStore::for_current_process(root)?,
+    ))
+}
+
 /// State held outside the redb snapshot domain by a monotonic platform service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RollbackState {
