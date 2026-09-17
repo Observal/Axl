@@ -43,10 +43,14 @@ function wrap(endpoint) {
   return proxy;
 }
 
-const daemonFactory =
-  process.platform === "win32" ? native.testWindowsDaemonEndpoint : native.testDaemonEndpoint;
-const deviceFactory =
-  process.platform === "win32" ? native.testWindowsDeviceEndpoint : native.testDeviceEndpoint;
+const useWindowsDpapi =
+  process.platform === "win32" && process.env.AXL_RUN_WINDOWS_DPAPI_TESTS === "1";
+const daemonFactory = useWindowsDpapi
+  ? native.testWindowsDaemonEndpoint
+  : native.testDaemonEndpoint;
+const deviceFactory = useWindowsDpapi
+  ? native.testWindowsDeviceEndpoint
+  : native.testDeviceEndpoint;
 export const testDaemonEndpoint = (...args) => wrap(daemonFactory(...args));
 export const testDeviceEndpoint = (...args) => wrap(deviceFactory(...args));
 export const testPanic = (endpoint) => Promise.resolve(native.testPanic(targets.get(endpoint))).catch((cause) => { throw mapError(cause); });
