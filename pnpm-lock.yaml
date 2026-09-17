@@ -109,6 +109,9 @@ importers:
 
   packages/e2ee/bindings/node:
     devDependencies:
+      '@axl/control-plane':
+        specifier: workspace:*
+        version: link:../../../../services/control-plane
       '@axl/daemon':
         specifier: workspace:*
         version: link:../../../daemon

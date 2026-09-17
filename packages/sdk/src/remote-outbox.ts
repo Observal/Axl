@@ -21,6 +21,7 @@ export interface RemoteOutbox {
   beginAttempt(requestId: RequestId): Promise<OpaqueTransportAttempt>;
   markQueued(requestId: RequestId): Promise<void>;
   markDaemonAccepted(requestId: RequestId): Promise<void>;
+  markCompleted(requestId: RequestId): Promise<void>;
   removeAccepted(requestId: RequestId): Promise<void>;
   resetSendingAfterDisconnect(): Promise<void>;
   list(): Promise<readonly OpaqueOutboxRecord[]>;
@@ -169,6 +170,10 @@ export class OpaqueOutbox implements RemoteOutbox {
     });
   }
 
+  markCompleted(requestId: RequestId): Promise<void> {
+    return this.store.transact(requestId, () => ({ result: undefined }));
+  }
+
   removeAccepted(requestId: RequestId): Promise<void> {
     return this.store.transact(requestId, (current) => {
       if (current === undefined) return { result: undefined };
@@ -241,7 +246,12 @@ function uuidText(bytes: Uint8Array): string {
 
 function requestIdFor(record: NativeDurableOutboxRecord): RequestId {
   const bytes = record.logicalMessageId.slice();
-  if (record.messageClass === "application_request") bytes[0] = (bytes[0] ?? 0) ^ 0x41;
+  if (record.messageClass === "application_request") {
+    const ephemeral = bytes.slice();
+    ephemeral[0] = (ephemeral[0] ?? 0) ^ 0x42;
+    if (sameBytes(ephemeral, record.operationId)) return parseRemoteRequestId(uuidText(ephemeral));
+    bytes[0] = (bytes[0] ?? 0) ^ 0x41;
+  }
   return parseRemoteRequestId(uuidText(bytes));
 }
 
@@ -325,6 +335,18 @@ export class NativeEndpointOutbox implements RemoteOutbox {
     await this.#endpoint.acknowledgeOutbox(acknowledgement, record.operationId);
     this.#sending.delete(requestId);
     this.#accepted.add(requestId);
+  }
+
+  async markCompleted(requestId: RequestId): Promise<void> {
+    const record = (await this.#endpoint.pendingOutbox()).find(
+      (candidate) => requestIdFor(candidate) === requestId,
+    );
+    if (record === undefined) return;
+    const acknowledgement = record.operationId.slice();
+    acknowledgement[0] = (acknowledgement[0] ?? 0) ^ 0x49;
+    await this.#endpoint.acknowledgeOutbox(acknowledgement, record.operationId);
+    this.#sending.delete(requestId);
+    this.#accepted.delete(requestId);
   }
 
   async removeAccepted(requestId: RequestId): Promise<void> {

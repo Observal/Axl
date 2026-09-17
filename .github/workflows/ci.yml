@@ -352,6 +352,16 @@ jobs:
         if: needs.changes.outputs.e2ee == 'true'
         with:
           node-version: ${{ matrix.node }}
+      - name: Set up Erlang and Elixir for real relay integration
+        if: needs.changes.outputs.e2ee == 'true' && matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1'
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: 27.3.4.17
+          elixir-version: 1.18.5
+      - name: Fetch relay dependencies for real E2EE integration
+        if: needs.changes.outputs.e2ee == 'true' && matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1'
+        working-directory: services/relay
+        run: mix deps.get --check-locked
       - name: Install pinned pnpm
         if: needs.changes.outputs.e2ee == 'true'
         run: npm install --global pnpm@11.25.0 --ignore-scripts
@@ -360,6 +370,8 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build, test, verify, and package the Node binding
         if: needs.changes.outputs.e2ee == 'true'
+        env:
+          AXL_RUN_REAL_E2EE_RELAY_INTEGRATION: ${{ matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1' && '1' || '0' }}
         run: |
           pnpm --filter @axl/e2ee-node test
           pnpm --filter @axl/e2ee-node check:abi
