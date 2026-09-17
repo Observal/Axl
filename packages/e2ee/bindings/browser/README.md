@@ -14,9 +14,13 @@ subsequent calls fail with `endpoint_closed`. A malformed worker response or wor
 terminal and cannot transparently start a replacement worker.
 
 Production endpoint creation and opening fail with `rollback_anchor_unavailable`. The production
-package does not contain IndexedDB persistence, a browser rollback anchor, or persistence
-constructors. The separate test artifact implements the reviewed prepare-and-compare feasibility
-protocol with real IndexedDB, Web Locks, WebCrypto, and disposable WASM endpoints. It covers
+worker now contains a private persistence module with one lifetime Web Lock, one versioned IndexedDB
+database, a non-extractable AES-KW wrapping key, wrapped AES-GCM state keys, separately bound inner
+and outer envelopes, exact pending witness requests, strict generation-compare commits, certificate
+continuation, restart recovery, and buffer clearing. It is not reachable through the page protocol
+and cannot be constructed until private WASM finalization and pinned production witness trust are
+wired. The separate test artifact implements the broader prepare-and-compare feasibility protocol
+with real IndexedDB, Web Locks, WebCrypto, and disposable WASM endpoints. It covers
 close/reopen, exact-byte retry, operation conflicts, strict transaction faults, worker and document
 termination, lock contention, key reconciliation, corruption, schema handling, quota failure, and
 state loss. Test-only constructors and the explicitly test-only anchor remain inside the dedicated

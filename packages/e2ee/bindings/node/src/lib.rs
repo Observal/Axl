@@ -1713,7 +1713,7 @@ fn map_witness(value: WitnessError) -> napi::Error {
     use WitnessError::*;
     error(match value {
         BoundExceeded => "bound_exceeded",
-        CredentialMismatch | InvalidSignature => "witness_auth_failed",
+        CredentialMismatch => "witness_auth_failed",
         OperationConflict | OperationMismatch => "witness_operation_conflict",
         RegistrationConflict => "witness_registration_conflict",
         InvalidExpected | StaleExpected => "witness_invalid_expected",
@@ -1723,9 +1723,9 @@ fn map_witness(value: WitnessError) -> napi::Error {
         }
         Malformed | NonCanonical | ProfileMismatch | LineageMismatch | RoleMismatch
         | GenerationMismatch | CounterMismatch | CommitmentMismatch | PredecessorMismatch
-        | RequestHashMismatch | RevocationMismatch | InvalidQuorum | DuplicateReplica
-        | InvalidTrustSet | UnpinnedKey | MixedReceipts | UnexpectedResult | CorruptState
-        | Crypto => "witness_receipt_invalid",
+        | RequestHashMismatch | RevocationMismatch | InvalidSignature | InvalidQuorum
+        | DuplicateReplica | InvalidTrustSet | UnpinnedKey | MixedReceipts | UnexpectedResult
+        | CorruptState | Crypto => "witness_receipt_invalid",
     })
 }
 

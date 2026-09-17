@@ -90,12 +90,13 @@ activation, bidirectional application, update, commit, and epoch-ready lifecycle
 It also executes negative OpenMLS cases for replay, duplicate ciphertext, mutation, AAD and identity
 mismatch, profile mismatch, and competing commits.
 
-The separate test artifact implements browser persistence feasibility with real IndexedDB, Web
-Locks, WebCrypto, dedicated workers, strict prepare-and-compare transactions, wrapped-DEK restart
-reconciliation, exact ciphertext and sealed-plaintext recovery, and storage fault evidence. The
-production artifact, declarations, and tarball contain no test persistence constructor or test
-anchor. Production endpoint creation and opening continue to fail with
-`rollback_anchor_unavailable`, and remote-web wiring remains out of scope. See
+The production worker contains a private persistence foundation with lifetime Web Lock ownership,
+strict IndexedDB generation commits, a non-extractable AES-KW wrapping key, wrapped AES-GCM state
+keys, distinct envelopes, exact witness-request recovery, and certificate continuation. The separate
+test artifact retains broader fault and OpenMLS lifecycle evidence. Production artifacts contain no
+test persistence constructor or test anchor. Production endpoint creation and opening continue to
+fail with `rollback_anchor_unavailable` pending private WASM finalization, pinned production trust,
+hosted transport, and the full runtime matrix; remote-web wiring remains out of scope. See
 [`BROWSER_STORAGE.md`](BROWSER_STORAGE.md) for the schema, sequencing, failure policy, evidence, and
 explicit browser security non-claims.
 
