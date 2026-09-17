@@ -271,10 +271,10 @@ export class WindowsRemoteE2eeBridge {
         "axl-e2ee-daemon-commit-operation-v1",
         envelope.operationId,
       );
-      const commitLogical = derivedId(
-        "axl-e2ee-daemon-commit-logical-v1",
-        envelope.logicalMessageId,
-      );
+      const commitLogical = {
+        text: envelope.operationId,
+        bytes: idBytes(envelope.operationId),
+      };
       try {
         const commit = await createCommit.call(
           this.options.endpoint,
@@ -324,10 +324,10 @@ export class WindowsRemoteE2eeBridge {
         "axl-e2ee-epoch-ready-confirmation-operation-v1",
         envelope.operationId,
       );
-      const confirmationLogical = derivedId(
-        "axl-e2ee-epoch-ready-confirmation-logical-v1",
-        envelope.logicalMessageId,
-      );
+      const confirmationLogical = {
+        text: envelope.operationId,
+        bytes: idBytes(envelope.operationId),
+      };
       try {
         const confirmation = await prepareConfirmation.call(
           this.options.endpoint,
@@ -352,10 +352,18 @@ export class WindowsRemoteE2eeBridge {
         "axl-e2ee-epoch-ready-receive-ack-v1",
         envelope.operationId,
       );
+      const commitAcknowledgement = derivedId(
+        "axl-e2ee-commit-outbox-ack-v1",
+        envelope.logicalMessageId,
+      );
+      const commitOperation = idBytes(envelope.logicalMessageId);
       try {
+        await this.options.endpoint.acknowledgeOutbox(commitAcknowledgement.bytes, commitOperation);
         await this.options.endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation);
       } finally {
         acknowledgement.bytes.fill(0);
+        commitAcknowledgement.bytes.fill(0);
+        commitOperation.fill(0);
       }
     } finally {
       logical.fill(0);

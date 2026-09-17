@@ -96,6 +96,7 @@ test("prepares update proposals and applies daemon commits before epoch readines
   const readyOperation = parseOperationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
   const readyLogical = parseOperationId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
   let confirmed = false;
+  const acknowledgedOutbox: Uint8Array[] = [];
   const endpoint: NativeDeviceE2eeEndpoint = {
     async prepareApplication() {
       throw new Error("not used");
@@ -135,8 +136,14 @@ test("prepares update proposals and applies daemon commits before epoch readines
       confirmed = true;
       return "active";
     },
-    async acknowledgeOutbox() {
-      throw new Error("not used");
+    async acknowledgeOutbox(_operationId, targetOperationId) {
+      acknowledgedOutbox.push(targetOperationId.slice());
+      return {
+        operationId: targetOperationId,
+        logicalMessageId: targetOperationId,
+        messageClass: "epoch_ready",
+        ciphertext: new Uint8Array(),
+      };
     },
     async acknowledgeReceive() {
       return "acknowledged";
@@ -175,6 +182,7 @@ test("prepares update proposals and applies daemon commits before epoch readines
   const control = await adapter.open(confirmation);
   assert.equal(control.controlOnly, true);
   assert.equal(confirmed, true);
+  assert.deepEqual(acknowledgedOutbox, [uuidBytesForTest("dddddddd-dddd-4ddd-8ddd-dddddddddddd")]);
 });
 
 test("opens daemon delivery and acknowledges only after SDK acceptance", async () => {
