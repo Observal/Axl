@@ -11,12 +11,10 @@
 import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 
-import {
-  parseDeviceId,
-  parseInstallationId,
-  type ConsumeRelayTicketRequest,
-} from "@axl/protocol";
+import { parseDeviceId, parseInstallationId, type ConsumeRelayTicketRequest } from "@axl/protocol";
 
+import { DynamoPairingRendezvousStore, DynamoRelayTicketStore } from "./aws.ts";
+import { InMemoryPairingRendezvousStore, PairingRendezvousService } from "./pairing.ts";
 import { createControlPlaneHandler } from "./server.ts";
 import {
   InMemoryRelayTicketStore,
@@ -27,8 +25,7 @@ import {
 
 function required(name: string): string {
   const value = process.env[name];
-  if (value === undefined || value.length === 0)
-    throw new Error(`${name} is required`);
+  if (value === undefined || value.length === 0) throw new Error(`${name} is required`);
   return value;
 }
 
@@ -43,51 +40,46 @@ function secretEqual(actual: string | undefined, expected: string): boolean {
 }
 
 if (required("AXL_ENVIRONMENT") !== "deployment-test") {
-  throw new Error(
-    "The deployment-test control plane cannot run as a production environment",
-  );
+  throw new Error("The deployment-test control plane cannot run as a production environment");
 }
 
 const accountId = required("AXL_TEST_ACCOUNT_ID");
-const installationId = parseInstallationId(
-  required("AXL_TEST_INSTALLATION_ID"),
-);
+const installationId = parseInstallationId(required("AXL_TEST_INSTALLATION_ID"));
 const deviceId = parseDeviceId(required("AXL_TEST_DEVICE_ID"));
 const publicToken = required("AXL_TEST_PUBLIC_TOKEN");
 const relayToken = required("AXL_TEST_RELAY_TOKEN");
-const possessionProof = Buffer.from(
-  required("AXL_TEST_POSSESSION_PROOF"),
-  "base64",
-);
+const possessionProof = Buffer.from(required("AXL_TEST_POSSESSION_PROOF"), "base64");
 if (possessionProof.byteLength < 32 || possessionProof.byteLength > 1024) {
-  throw new Error(
-    "AXL_TEST_POSSESSION_PROOF must decode to 32 through 1024 bytes",
-  );
+  throw new Error("AXL_TEST_POSSESSION_PROOF must decode to 32 through 1024 bytes");
 }
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
-if (!Number.isSafeInteger(port) || port < 1 || port > 65_535)
-  throw new Error("PORT is invalid");
+if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("PORT is invalid");
+
+const tableName = process.env.AXL_TEST_IN_MEMORY === "1" ? undefined : required("AXL_TICKET_TABLE");
+const ticketStore =
+  tableName === undefined
+    ? new InMemoryRelayTicketStore()
+    : new DynamoRelayTicketStore({ tableName });
+const pairing = new PairingRendezvousService({
+  store:
+    tableName === undefined
+      ? new InMemoryPairingRendezvousStore()
+      : new DynamoPairingRendezvousStore({ tableName }),
+});
 
 const tickets = new RelayTicketService({
-  store: new InMemoryRelayTicketStore(),
+  store: ticketStore,
   relayUrl: required("AXL_TEST_RELAY_URL"),
   authorizer: {
     async currentGeneration(principal, request) {
-      if (
-        principal.accountId !== accountId ||
-        request.installationId !== installationId
-      )
+      if (principal.accountId !== accountId || request.installationId !== installationId)
         return undefined;
-      if (request.role === "daemon")
-        return request.deviceId === undefined ? 1 : undefined;
+      if (request.role === "daemon") return request.deviceId === undefined ? 1 : undefined;
       return request.deviceId === deviceId ? 1 : undefined;
     },
   },
   proofVerifier: {
-    async verify(
-      _ticket: Readonly<RelayTicketRecord>,
-      request: ConsumeRelayTicketRequest,
-    ) {
+    async verify(_ticket: Readonly<RelayTicketRecord>, request: ConsumeRelayTicketRequest) {
       return (
         request.possessionProof.byteLength === possessionProof.byteLength &&
         timingSafeEqual(Buffer.from(request.possessionProof), possessionProof)
@@ -98,6 +90,7 @@ const tickets = new RelayTicketService({
 
 const handler = createControlPlaneHandler({
   tickets,
+  pairing,
   publicAuthentication: {
     async authenticate(request): Promise<AccountPrincipal | undefined> {
       return secretEqual(request.headers.authorization, `Bearer ${publicToken}`)
@@ -125,9 +118,7 @@ const server = createServer((request, response) => {
 });
 
 server.listen(port, "0.0.0.0", () => {
-  process.stdout.write(
-    `Axl deployment-test control plane listening on ${port}\n`,
-  );
+  process.stdout.write(`Axl deployment-test control plane listening on ${port}\n`);
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

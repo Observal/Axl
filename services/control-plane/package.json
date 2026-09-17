@@ -21,6 +21,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@axl/protocol": "workspace:*"
+    "@aws-sdk/client-dynamodb": "3.1134.0",
+    "@axl/protocol": "workspace:*",
+    "jose": "6.2.12"
   }
 }
