@@ -208,6 +208,16 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
       accepted.push("epoch_ready");
       return { cryptoSessionId: new Uint8Array(16), commitId: new Uint8Array(48) };
     },
+    async prepareEpochReadyConfirmation(operationId, logicalMessageId, generation) {
+      assert.equal(generation, 3n);
+      accepted.push("confirmation");
+      return {
+        operationId,
+        logicalMessageId,
+        messageClass: "resync_control",
+        ciphertext: Uint8Array.of(10),
+      };
+    },
     async acknowledgeOutbox() {
       throw new Error("not used");
     },
@@ -254,8 +264,10 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
       ciphertext: Uint8Array.of(9),
     }),
   });
-  assert.deepEqual(accepted, ["proposal", "commit", "epoch_ready"]);
+  assert.deepEqual(accepted, ["proposal", "commit", "epoch_ready", "confirmation"]);
   assert.equal(acknowledgements.length, 2);
+  assert.equal(sent.length, 2);
+  assert.equal(parseRemoteE2eeEnvelope(sent[1] ?? new Uint8Array()).messageClass, "resync_control");
 });
 
 test("intersects local and hosted grants without allowing hosted widening", async () => {

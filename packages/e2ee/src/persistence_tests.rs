@@ -3454,6 +3454,7 @@ fn pairing_operation_discriminants_are_exhaustive() {
 
     assert!(validate_pairing_operation_discriminants_for_test(1, 1).is_ok());
     assert!(validate_pairing_operation_discriminants_for_test(21, 5).is_ok());
+    assert!(validate_pairing_operation_discriminants_for_test(22, 14).is_ok());
     assert_eq!(
         validate_pairing_operation_discriminants_for_test(0, 1),
         Err(PersistenceError::Corrupt)

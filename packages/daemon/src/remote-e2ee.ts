@@ -72,6 +72,12 @@ export interface NativeDaemonE2eeEndpoint {
     hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
   ): Promise<NativeEpochReadyAcceptance>;
+  prepareEpochReadyConfirmation?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    acceptance: NativeEpochReadyAcceptance,
+  ): Promise<NativeCiphertext>;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
@@ -303,13 +309,45 @@ export class WindowsRemoteE2eeBridge {
     if (accept === undefined) throw new Error("Native endpoint does not support epoch readiness");
     const logical = idBytes(envelope.logicalMessageId);
     try {
-      await accept.call(
+      const acceptance = await accept.call(
         this.options.endpoint,
         incomingOperation,
         logical,
         BigInt(envelope.hostedGrantGeneration),
         envelope.ciphertext,
       );
+      const prepareConfirmation = this.options.endpoint.prepareEpochReadyConfirmation;
+      if (prepareConfirmation === undefined) {
+        throw new Error("Native endpoint does not support epoch-ready confirmation");
+      }
+      const confirmationOperation = derivedId(
+        "axl-e2ee-epoch-ready-confirmation-operation-v1",
+        envelope.operationId,
+      );
+      const confirmationLogical = derivedId(
+        "axl-e2ee-epoch-ready-confirmation-logical-v1",
+        envelope.logicalMessageId,
+      );
+      try {
+        const confirmation = await prepareConfirmation.call(
+          this.options.endpoint,
+          confirmationOperation.bytes,
+          confirmationLogical.bytes,
+          BigInt(envelope.hostedGrantGeneration),
+          acceptance,
+        );
+        const route = this.currentRoute;
+        if (route === undefined) throw new Error("Remote route is unavailable");
+        await this.sendPrepared(
+          route,
+          confirmation,
+          envelope.hostedGrantGeneration,
+          "resync_control",
+        );
+      } finally {
+        confirmationOperation.bytes.fill(0);
+        confirmationLogical.bytes.fill(0);
+      }
       const acknowledgement = derivedId(
         "axl-e2ee-epoch-ready-receive-ack-v1",
         envelope.operationId,

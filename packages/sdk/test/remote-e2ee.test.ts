@@ -95,6 +95,7 @@ test("prepares update proposals and applies daemon commits before epoch readines
   const commitLogical = parseOperationId("99999999-9999-4999-8999-999999999999");
   const readyOperation = parseOperationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
   const readyLogical = parseOperationId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+  let confirmed = false;
   const endpoint: NativeDeviceE2eeEndpoint = {
     async prepareApplication() {
       throw new Error("not used");
@@ -128,6 +129,12 @@ test("prepares update proposals and applies daemon commits before epoch readines
         ciphertext: Uint8Array.of(9),
       };
     },
+    async acceptEpochReadyConfirmation(_operation, _logical, generation, ciphertext) {
+      assert.equal(generation, 7n);
+      assert.deepEqual(ciphertext, Uint8Array.of(10));
+      confirmed = true;
+      return "active";
+    },
     async acknowledgeOutbox() {
       throw new Error("not used");
     },
@@ -158,6 +165,16 @@ test("prepares update proposals and applies daemon commits before epoch readines
   );
   assert.equal(ready.messageClass, "epoch_ready");
   assert.deepEqual(ready.ciphertext, Uint8Array.of(9));
+  const confirmation = encodeRemoteE2eeEnvelope({
+    operationId: parseOperationId("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+    logicalMessageId: parseOperationId("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+    messageClass: "resync_control",
+    hostedGrantGeneration: 7,
+    ciphertext: Uint8Array.of(10),
+  });
+  const control = await adapter.open(confirmation);
+  assert.equal(control.controlOnly, true);
+  assert.equal(confirmed, true);
 });
 
 test("opens daemon delivery and acknowledges only after SDK acceptance", async () => {

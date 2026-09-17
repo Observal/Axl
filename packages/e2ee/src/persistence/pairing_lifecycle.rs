@@ -47,6 +47,7 @@ const OP_APPLY_REMOVAL: u8 = 18;
 const OP_RESET: u8 = 19;
 const OP_EXPIRE_WELCOME: u8 = 20;
 const OP_RELEASE_RESERVATION: u8 = 21;
+const OP_CONFIRM_EPOCH_READY: u8 = 22;
 const OUTCOME_ISSUED: u8 = 1;
 const OUTCOME_PREPARED: u8 = 2;
 const OUTCOME_PENDING: u8 = 3;
@@ -1446,6 +1447,29 @@ impl DurablePendingInvitation {
         )
     }
 
+    pub fn prepare_epoch_ready_confirmation(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        hosted_generation: u64,
+        acceptance: &EpochReadyAcceptance,
+    ) -> Result<super::OutboxRecord, PersistenceError> {
+        self.require_active()?;
+        if acceptance.crypto_session_id != self.store.crypto_session_id {
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        let payload = epoch_ready_acceptance_payload(acceptance);
+        super::DurableDaemon {
+            store: Arc::clone(&self.store),
+        }
+        .prepare_resync_control(
+            operation_id,
+            logical_message_id,
+            hosted_generation,
+            &payload,
+        )
+    }
+
     pub fn remove_device(
         &mut self,
         operation_id: Id,
@@ -2679,6 +2703,78 @@ impl DurablePreJoinDevice {
         }
     }
 
+    pub fn accept_epoch_ready_confirmation(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        hosted_generation: u64,
+        ciphertext: &[u8],
+    ) -> Result<PairLifecycle, PersistenceError> {
+        let fingerprint = operation_fingerprint_parts(
+            OP_CONFIRM_EPOCH_READY,
+            &[
+                &logical_message_id,
+                &hosted_generation.to_be_bytes(),
+                ciphertext,
+            ],
+        )?;
+        let mut transaction = begin_current(&self.store)?;
+        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
+            transaction.rollback()?;
+            return match existing {
+                super::CommittedOperation::Pairing(record)
+                    if record.kind == OP_CONFIRM_EPOCH_READY
+                        && record.outcome == OUTCOME_UPDATED =>
+                {
+                    Ok(PairLifecycle::Active)
+                }
+                _ => Err(PersistenceError::Conflict),
+            };
+        }
+        let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
+        let pending = lifecycle
+            .pending_commit
+            .clone()
+            .ok_or(PersistenceError::Conflict)?;
+        if lifecycle.pair_lifecycle != Some(PairLifecycle::WaitingForEpochReady) {
+            transaction.rollback()?;
+            return Err(PersistenceError::Conflict);
+        }
+        let mut phone = super::load_phone(
+            &transaction.provider,
+            Arc::clone(&self.store.clock),
+            transaction.accepted_ids.clone(),
+        )?;
+        let plaintext =
+            phone.receive_resync_control(ciphertext, logical_message_id, hosted_generation)?;
+        validate_epoch_ready_acceptance_payload(
+            plaintext.plaintext(),
+            lifecycle.crypto_session_id,
+            &pending,
+        )?;
+        lifecycle.pair_lifecycle = Some(PairLifecycle::Active);
+        lifecycle.pending_commit = None;
+        let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
+        endpoint.provider.insert_internal(
+            DEVICE_PREJOIN_KEY.to_vec(),
+            encode_device_record(&lifecycle)?,
+        );
+        super::persist_phone_metadata(&phone, &endpoint.provider, Some(&endpoint.context), 0);
+        transaction.replace_provider_values(endpoint.provider.storage_values())?;
+        transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
+        transaction.stage_operation(super::CommittedOperation::Pairing(
+            PairingOperationRecord {
+                operation_id,
+                crypto_session_id: self.store.crypto_session_id,
+                kind: OP_CONFIRM_EPOCH_READY,
+                outcome: OUTCOME_UPDATED,
+                artifact_hash: pending.commit_id,
+            },
+        ))?;
+        transaction.commit_operation()?;
+        Ok(PairLifecycle::Active)
+    }
+
     pub fn acknowledge_epoch_ready(
         &mut self,
         operation_id: Id,
@@ -3128,6 +3224,29 @@ fn validate_epoch_ready_payload(
     Ok(())
 }
 
+fn epoch_ready_acceptance_payload(acceptance: &EpochReadyAcceptance) -> Vec<u8> {
+    let mut out = b"Axl epoch ready accepted v1".to_vec();
+    out.extend_from_slice(&PROFILE_REVISION.to_be_bytes());
+    out.extend_from_slice(&acceptance.crypto_session_id);
+    out.extend_from_slice(&acceptance.commit_id);
+    out
+}
+
+fn validate_epoch_ready_acceptance_payload(
+    bytes: &[u8],
+    crypto_session_id: Id,
+    commit: &CommitMetadata,
+) -> Result<(), PersistenceError> {
+    let expected = EpochReadyAcceptance {
+        crypto_session_id,
+        commit_id: commit.commit_id,
+    };
+    if bytes != epoch_ready_acceptance_payload(&expected) {
+        return Err(PersistenceError::IdentityMismatch);
+    }
+    Ok(())
+}
+
 fn publication(record: &DaemonPairingRecord) -> InvitationPublication {
     InvitationPublication {
         bytes: record.invitation.clone(),
@@ -3223,7 +3342,7 @@ pub(super) fn validate_pairing_operation_kind(
         OP_CREATE_WELCOME => outcome == OUTCOME_WELCOME,
         OP_JOIN_WELCOME => outcome == OUTCOME_JOINED,
         OP_ACCEPT_ACTIVATION => outcome == OUTCOME_ACTIVATED,
-        OP_EPOCH_READY => outcome == OUTCOME_UPDATED,
+        OP_EPOCH_READY | OP_CONFIRM_EPOCH_READY => outcome == OUTCOME_UPDATED,
         OP_APPLY_REMOVAL => outcome == OUTCOME_REMOVED,
         OP_RESET => matches!(outcome, OUTCOME_REMOVED | OUTCOME_RESET),
         OP_RELEASE_RESERVATION => outcome == OUTCOME_REJECTED_KEY_PACKAGE,

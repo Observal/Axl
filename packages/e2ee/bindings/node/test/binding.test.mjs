@@ -322,8 +322,19 @@ test("fresh lifecycle preserves barriers, exact retries, copied input, and close
       7n,
       ready.ciphertext,
     );
+    const confirmation = await pair.daemon.prepareEpochReadyConfirmation(
+      operation(35),
+      operation(38),
+      7n,
+      epochAcceptance,
+    );
     assert.equal(
-      await pair.device.acknowledgeEpochReady(operation(35), epochAcceptance),
+      await pair.device.acceptEpochReadyConfirmation(
+        operation(39),
+        operation(38),
+        7n,
+        confirmation.ciphertext,
+      ),
       "active",
     );
 
