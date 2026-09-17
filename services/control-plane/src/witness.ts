@@ -386,7 +386,11 @@ function sameHead(left: WitnessHead, right: WitnessHead): boolean {
 }
 
 function rebuild(record: WitnessReplicaRecord): RebuiltState {
-  let head: WitnessHead = { counter: 0n, commitment: zero(48), predecessorCommitment: zero(48) };
+  let head: WitnessHead = {
+    counter: 0n,
+    commitment: zero(48),
+    predecessorCommitment: zero(48),
+  };
   let expectedSequence = 1n;
   let revocationGeneration = 0n;
   let revocation: WitnessLedgerPosition | undefined;
@@ -450,7 +454,10 @@ function rebuild(record: WitnessReplicaRecord): RebuiltState {
           503,
         );
       }
-      revocation = { sequence: event.sequence, revocationGeneration: event.revocationGeneration };
+      revocation = {
+        sequence: event.sequence,
+        revocationGeneration: event.revocationGeneration,
+      };
     }
   }
   if (record.derivedHead !== undefined && !sameHead(record.derivedHead, head)) {
@@ -517,7 +524,11 @@ function decide(
     if (rebuilt.revocation !== undefined && !acceptedBeforeRevocation(existing, rebuilt))
       return { result: "revoked" };
     if (existing.exactReceipt !== undefined)
-      return { result: existing.result, exactReceipt: existing.exactReceipt, existing };
+      return {
+        result: existing.result,
+        exactReceipt: existing.exactReceipt,
+        existing,
+      };
     return { result: existing.result, existing };
   }
   if (rebuilt.forkResult !== undefined) return { result: "forked" };
@@ -876,7 +887,11 @@ export class WitnessReplica implements WitnessReplicaClient {
       const rebuilt =
         current === undefined
           ? ({
-              head: { counter: 0n, commitment: zero(48), predecessorCommitment: zero(48) },
+              head: {
+                counter: 0n,
+                commitment: zero(48),
+                predecessorCommitment: zero(48),
+              },
               successors: [],
               lastSequence: 0n,
               revocationGeneration: 0n,
@@ -900,7 +915,11 @@ export class WitnessReplica implements WitnessReplicaClient {
       const base =
         record === undefined
           ? ({
-              head: { counter: 0n, commitment: zero(48), predecessorCommitment: zero(48) },
+              head: {
+                counter: 0n,
+                commitment: zero(48),
+                predecessorCommitment: zero(48),
+              },
               successors: [],
               lastSequence: 0n,
               revocationGeneration: 0n,
@@ -972,7 +991,10 @@ export class WitnessReplica implements WitnessReplicaClient {
                   result:
                     request.kind === "register" ? ("registered" as const) : ("advanced" as const),
                   successor: cloneHead(successor),
-                  acceptedAt: { sequence, revocationGeneration: base.revocationGeneration },
+                  acceptedAt: {
+                    sequence,
+                    revocationGeneration: base.revocationGeneration,
+                  },
                   receiptFields: fields,
                   journaled: false,
                 },
@@ -981,7 +1003,10 @@ export class WitnessReplica implements WitnessReplicaClient {
           : nextBase;
       const accepted = next.operations.at(-1);
       return {
-        value: { ...decision, ...(accepted === undefined ? {} : { existing: accepted }) },
+        value: {
+          ...decision,
+          ...(accepted === undefined ? {} : { existing: accepted }),
+        },
         next,
       };
     });
@@ -1302,7 +1327,10 @@ export class WitnessReplica implements WitnessReplicaClient {
   async #validateLocalState(
     lineage: Uint8Array,
     stored: WitnessReplicaRecord,
-  ): Promise<{ readonly record: WitnessReplicaRecord; readonly state: RebuiltState }> {
+  ): Promise<{
+    readonly record: WitnessReplicaRecord;
+    readonly state: RebuiltState;
+  }> {
     const state = rebuild(stored);
     if (state.lastSequence === 0n) {
       throw new WitnessServiceError("service_unavailable", "Witness ledger is empty", 503);
@@ -1380,7 +1408,11 @@ export class WitnessReplica implements WitnessReplicaClient {
           const state =
             record === undefined
               ? ({
-                  head: { counter: 0n, commitment: zero(48), predecessorCommitment: zero(48) },
+                  head: {
+                    counter: 0n,
+                    commitment: zero(48),
+                    predecessorCommitment: zero(48),
+                  },
                   successors: [],
                   lastSequence: 0n,
                   revocationGeneration: 0n,
