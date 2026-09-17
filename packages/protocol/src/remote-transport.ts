@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
-import { ProtocolValidationError } from "./event-envelope.ts";
+import { parseOperationId, ProtocolValidationError, type OperationId } from "./event-envelope.ts";
 import { parseServerMessage, type ServerMessage } from "./wire.ts";
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -10,6 +10,8 @@ const methodPattern = /^[a-z][a-z0-9]*(?:[._-][a-zA-Z0-9]+)*$/;
 const frameMagic = Uint8Array.of(0x41, 0x58, 0x4c, 0x52);
 const routedFrameHeaderBytes = 38;
 const shortFrameBytes = 23;
+const e2eeEnvelopeMagic = Uint8Array.of(0x41, 0x58, 0x4c, 0x45);
+const e2eeEnvelopeHeaderBytes = 46;
 
 declare const installationIdBrand: unique symbol;
 declare const deviceIdBrand: unique symbol;
@@ -43,6 +45,7 @@ export const RELAY_HEARTBEAT_INTERVAL_MS = 20_000;
 export const RELAY_IDLE_TIMEOUT_MS = 60_000;
 export const RELAY_TICKET_LIFETIME_MS = 60_000;
 export const MAX_RELAY_OPAQUE_PAYLOAD_BYTES = MAX_RELAY_FRAME_BYTES - routedFrameHeaderBytes;
+export const MAX_E2EE_CIPHERTEXT_BYTES = MAX_RELAY_OPAQUE_PAYLOAD_BYTES - e2eeEnvelopeHeaderBytes;
 
 export interface RelayLimits {
   readonly maxFrameBytes: number;
@@ -611,6 +614,102 @@ export function parseRelayRevocationNotification(value: unknown): RelayRevocatio
       : { deviceId: parseDeviceId(candidate.deviceId, "request.deviceId") }),
     generation: integer(candidate.generation, "request.generation", 1, Number.MAX_SAFE_INTEGER),
     effectiveAt: timestamp(candidate.effectiveAt, "request.effectiveAt"),
+  };
+}
+
+export type RemoteE2eeMessageClass =
+  | "application_request"
+  | "application_delivery"
+  | "update_proposal"
+  | "commit"
+  | "epoch_ready"
+  | "pair_activation"
+  | "resync_control";
+
+export interface RemoteE2eeEnvelope {
+  readonly operationId: OperationId;
+  readonly logicalMessageId: OperationId;
+  readonly messageClass: RemoteE2eeMessageClass;
+  readonly hostedGrantGeneration: number;
+  readonly ciphertext: Uint8Array;
+}
+
+const e2eeClassValues: Readonly<Record<RemoteE2eeMessageClass, number>> = Object.freeze({
+  application_request: 1,
+  application_delivery: 2,
+  update_proposal: 3,
+  commit: 4,
+  epoch_ready: 5,
+  pair_activation: 6,
+  resync_control: 7,
+});
+
+export function encodeRemoteE2eeEnvelope(value: RemoteE2eeEnvelope): Uint8Array {
+  const operationId = parseOperationId(value.operationId, "e2eeEnvelope.operationId");
+  const logicalMessageId = parseOperationId(
+    value.logicalMessageId,
+    "e2eeEnvelope.logicalMessageId",
+  );
+  const messageClass = e2eeClassValues[value.messageClass];
+  if (messageClass === undefined) fail("e2eeEnvelope.messageClass", "is invalid");
+  const generation = integer(
+    value.hostedGrantGeneration,
+    "e2eeEnvelope.hostedGrantGeneration",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!(value.ciphertext instanceof Uint8Array)) fail("e2eeEnvelope.ciphertext", "must be bytes");
+  if (
+    value.ciphertext.byteLength === 0 ||
+    value.ciphertext.byteLength > MAX_E2EE_CIPHERTEXT_BYTES
+  ) {
+    fail("e2eeEnvelope.ciphertext", `must contain 1 through ${MAX_E2EE_CIPHERTEXT_BYTES} bytes`);
+  }
+  const output = new Uint8Array(e2eeEnvelopeHeaderBytes + value.ciphertext.byteLength);
+  output.set(e2eeEnvelopeMagic, 0);
+  output[4] = REMOTE_TRANSPORT_VERSION;
+  output[5] = messageClass;
+  output.set(uuidBytes(operationId), 6);
+  output.set(uuidBytes(logicalMessageId), 22);
+  new DataView(output.buffer).setBigUint64(38, BigInt(generation), false);
+  output.set(value.ciphertext, e2eeEnvelopeHeaderBytes);
+  return output;
+}
+
+export function parseRemoteE2eeEnvelope(value: Uint8Array): RemoteE2eeEnvelope {
+  if (!(value instanceof Uint8Array)) fail("e2eeEnvelope", "must be bytes");
+  if (
+    value.byteLength <= e2eeEnvelopeHeaderBytes ||
+    value.byteLength > MAX_RELAY_OPAQUE_PAYLOAD_BYTES
+  ) {
+    fail(
+      "e2eeEnvelope",
+      `must contain ${e2eeEnvelopeHeaderBytes + 1} through ${MAX_RELAY_OPAQUE_PAYLOAD_BYTES} bytes`,
+    );
+  }
+  if (!e2eeEnvelopeMagic.every((byte, index) => value[index] === byte)) {
+    fail("e2eeEnvelope.magic", "is invalid");
+  }
+  if (value[4] !== REMOTE_TRANSPORT_VERSION) {
+    fail("e2eeEnvelope.version", `must equal ${REMOTE_TRANSPORT_VERSION}`);
+  }
+  const messageClass = Object.entries(e2eeClassValues).find(
+    (entry) => entry[1] === value[5],
+  )?.[0] as RemoteE2eeMessageClass | undefined;
+  if (messageClass === undefined) fail("e2eeEnvelope.messageClass", "is invalid");
+  const generation = new DataView(value.buffer, value.byteOffset, value.byteLength).getBigUint64(
+    38,
+    false,
+  );
+  if (generation === 0n || generation > BigInt(Number.MAX_SAFE_INTEGER)) {
+    fail("e2eeEnvelope.hostedGrantGeneration", "must be a positive safe integer");
+  }
+  return {
+    operationId: parseOperationId(bytesUuid(value, 6, "e2eeEnvelope.operationId")),
+    logicalMessageId: parseOperationId(bytesUuid(value, 22, "e2eeEnvelope.logicalMessageId")),
+    messageClass,
+    hostedGrantGeneration: Number(generation),
+    ciphertext: value.slice(e2eeEnvelopeHeaderBytes),
   };
 }
 

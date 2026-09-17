@@ -11,8 +11,10 @@ import {
   DEFAULT_RELAY_LIMITS,
   encodeBase64,
   encodeRemoteDaemonMessage,
+  encodeRemoteE2eeEnvelope,
   encodeInternalConsumeRelayTicketRequest,
   encodeRelayBinaryFrame,
+  MAX_E2EE_CIPHERTEXT_BYTES,
   MAX_RELAY_FRAME_BYTES,
   MAX_RELAY_OPAQUE_PAYLOAD_BYTES,
   parseInternalConsumeRelayTicketRequest,
@@ -21,10 +23,12 @@ import {
   parseInternalConsumeRelayTicketResult,
   parseIssueRelayTicketRequest,
   parseOpaqueOutboxRecord,
+  parseOperationId,
   parseRelayBinaryFrame,
   parseRelayDiscoveryMessage,
   parseRelayRevocationNotification,
   parseRemoteDeviceScopes,
+  parseRemoteE2eeEnvelope,
   parseRemoteRequestId,
   ProtocolValidationError,
   RELAY_FAILURE_CODE_VALUES,
@@ -145,6 +149,33 @@ test("validates role-scoped route discovery messages", () => {
         peers: [],
       }),
     (error) => error instanceof ProtocolValidationError && error.path === "discovery.sourceRoute",
+  );
+});
+
+test("encodes authenticated E2EE routing metadata inside the opaque relay payload", () => {
+  const envelope = {
+    operationId: parseOperationId("11111111-1111-4111-8111-111111111111"),
+    logicalMessageId: parseOperationId("22222222-2222-4222-8222-222222222222"),
+    messageClass: "application_request" as const,
+    hostedGrantGeneration: Number.MAX_SAFE_INTEGER,
+    ciphertext: Uint8Array.of(0, 1, 2, 255),
+  };
+  const encoded = encodeRemoteE2eeEnvelope(envelope);
+  assert.deepEqual(parseRemoteE2eeEnvelope(encoded), envelope);
+  assert.throws(
+    () =>
+      encodeRemoteE2eeEnvelope({
+        ...envelope,
+        ciphertext: new Uint8Array(MAX_E2EE_CIPHERTEXT_BYTES + 1),
+      }),
+    (error) => error instanceof ProtocolValidationError && error.path === "e2eeEnvelope.ciphertext",
+  );
+  const modified = encoded.slice();
+  modified[5] = 0;
+  assert.throws(
+    () => parseRemoteE2eeEnvelope(modified),
+    (error) =>
+      error instanceof ProtocolValidationError && error.path === "e2eeEnvelope.messageClass",
   );
 });
 
