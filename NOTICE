@@ -37,3 +37,8 @@ Axl's private Node endpoint binding uses napi-rs (`napi` 3.12.5, `napi-derive`
 Axl's macOS envelope-key store uses `security-framework` 3.7.0 and its
 `security-framework-sys`, `core-foundation`, and `core-foundation-sys` dependencies as
 unmodified external dependencies under MIT OR Apache-2.0.
+
+Axl's Linux envelope-key store uses an exact-commit fork of `secret-service` 5.2.0 under
+MIT OR Apache-2.0. The fork is based on upstream tag `v5.2.0` and adds bounded item creation and deletion APIs that
+return prompt-required outcomes without executing Secret Service prompts. Its D-Bus client dependency
+`zbus` 5.19.0 is distributed under MIT.

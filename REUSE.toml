@@ -83,7 +83,6 @@ SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [
-  "packages/e2ee/Cargo.lock",
   "packages/e2ee/fixtures/v1/*.tls",
   "packages/e2ee/fixtures/v1/*.bin",
   "packages/e2ee/bindings/node/package.json",
@@ -93,6 +92,14 @@ path = [
   "packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver/Cargo.lock",
 ]
 SPDX-FileCopyrightText = "2026 VishnuM449"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ["packages/e2ee/Cargo.lock"]
+SPDX-FileCopyrightText = [
+  "2026 VishnuM449",
+  "2026 Lokesh",
+]
 SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
