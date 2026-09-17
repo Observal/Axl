@@ -29,5 +29,11 @@
     "check:abi": "node scripts/check-abi.mjs",
     "test": "node scripts/test.mjs",
     "pack:local": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@axl/daemon": "workspace:*",
+    "@axl/kernel": "workspace:*",
+    "@axl/protocol": "workspace:*",
+    "@axl/sdk": "workspace:*"
   }
 }
