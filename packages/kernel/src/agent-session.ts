@@ -13,11 +13,11 @@ import {
   type AssistantStopReason,
   type CanonicalEvent,
   EVENT_FORMAT_VERSION,
-  estimateModelInputTokens,
-  estimateModelMessageTokens,
   type EventId,
   type EventPayloadMap,
   type EventType,
+  estimateModelInputTokens,
+  estimateModelMessageTokens,
   isTerminalModelStreamEvent,
   type ModelMessage,
   type ModelStreamError,
@@ -416,6 +416,26 @@ export class AgentSession {
 
   hasQueuedMessages(): boolean {
     return this.steeringMessages.length > 0 || this.followUpMessages.length > 0;
+  }
+
+  queuedMessages(): {
+    readonly steering: readonly (readonly UserContent[])[];
+    readonly followUp: readonly (readonly UserContent[])[];
+  } {
+    return { steering: [...this.steeringMessages], followUp: [...this.followUpMessages] };
+  }
+
+  clearQueuedMessages(): void {
+    this.steeringMessages.length = 0;
+    this.followUpMessages.length = 0;
+  }
+
+  restoreQueuedMessages(messages: {
+    readonly steering: readonly (readonly UserContent[])[];
+    readonly followUp: readonly (readonly UserContent[])[];
+  }): void {
+    this.steeringMessages.unshift(...messages.steering.map((content) => [...content]));
+    this.followUpMessages.unshift(...messages.followUp.map((content) => [...content]));
   }
 
   /** Starts a fresh turn for input left queued after an error or interruption. */
@@ -837,7 +857,12 @@ export class AgentSession {
 
   /** Appends daemon-owned queue lifecycle state to the canonical session log. */
   recordQueueEvent<
-    Type extends "queue.enqueued" | "queue.requeued" | "queue.started" | "queue.paused",
+    Type extends
+      | "queue.enqueued"
+      | "queue.requeued"
+      | "queue.started"
+      | "queue.paused"
+      | "queue.restored",
   >(
     operationId: OperationId,
     type: Type,

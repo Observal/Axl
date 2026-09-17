@@ -35,20 +35,22 @@ import {
   type AssistantStopReason,
   type BlobReference,
   type CanonicalEvent,
+  DEFAULT_MODEL_REQUEST_SETTINGS,
   EVENT_FORMAT_VERSION,
   type EventId,
   type EventPayloadMap,
   encodeCanonicalEvent,
-  DEFAULT_MODEL_REQUEST_SETTINGS,
-  type ModelRequestSettings,
   type InteractionAction,
   type JsonObject,
   type JsonValue,
+  MAX_WIRE_MESSAGE_BYTES,
+  type ModelRequestSettings,
   type OperationId,
   parseEvent,
   parseEventId,
   parseOperationId,
   parseSessionId,
+  type RestoredQueueItem,
   type SessionActivityFrame,
   type SessionConfiguration,
   type SessionId,
@@ -190,6 +192,7 @@ interface ManagedSession {
   readonly interactions: Map<string, PendingInteraction>;
   readonly queue: QueuedTurn[];
   queueDraining: boolean;
+  queueMutationActive: boolean;
   queueDrain?: Promise<void>;
   disposing: boolean;
   checkpointError?: WorkspaceCheckpointError;
@@ -207,6 +210,30 @@ function deferredTurn(
   return { kind, operationId, controller: new AbortController(), done, finish: resolveDone };
 }
 
+function reinsertQueueItem<Value>(
+  items: Map<EventId, Value>,
+  queueItemId: EventId,
+  value: Value,
+  priority: "front" | "back",
+): void {
+  items.delete(queueItemId);
+  if (priority === "back") {
+    items.set(queueItemId, value);
+    return;
+  }
+  const existing = [...items];
+  items.clear();
+  items.set(queueItemId, value);
+  for (const [id, item] of existing) items.set(id, item);
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const bytes = new TextEncoder().encode(value);
+  return bytes.byteLength <= maxBytes
+    ? value
+    : new TextDecoder().decode(bytes.subarray(0, maxBytes), { stream: true });
+}
+
 function userMessageText(event: CanonicalEvent): string | undefined {
   if (event.type !== "user.message") return undefined;
   const text = event.payload.content
@@ -214,7 +241,7 @@ function userMessageText(event: CanonicalEvent): string | undefined {
     .map((item) => item.text)
     .join("\n")
     .trim();
-  return text || undefined;
+  return text ? truncateUtf8(text, 4096) : undefined;
 }
 
 export type StoredSessionSummary = Omit<SessionSummary, "runtime" | "attachmentCount">;
@@ -568,6 +595,7 @@ export class SessionManager {
       interactions: new Map(),
       queue: [],
       queueDraining: false,
+      queueMutationActive: false,
       disposing: false,
       workspaceCheckpointsEnabled: false,
     };
@@ -762,6 +790,30 @@ export class SessionManager {
         return { interrupted: true, operationId: affected };
       }
       return { interrupted: false };
+    }
+    if (acceptance.method === "session.queue.restore") {
+      const restored = evidence.find((event) => event.type === "queue.restored");
+      if (restored?.type !== "queue.restored") return undefined;
+      await this.resume(target);
+      const base = this.restoredQueueResult(this.managed(target), restored.payload.items, false);
+      const affected =
+        acceptance.affectedOperationId === undefined
+          ? undefined
+          : parseOperationId(acceptance.affectedOperationId, "affectedOperationId");
+      if (affected === undefined) return base;
+      const terminal = stored.findLast(
+        (event) =>
+          event.operationId === affected &&
+          ((event.type === "assistant.message" && event.payload.stopReason !== "tool_use") ||
+            event.type === "session.error"),
+      );
+      if (terminal === undefined) {
+        await this.managed(target).session.abortRecoveredTurn(affected);
+        return { ...base, interrupted: true, operationId: affected };
+      }
+      return terminal.type === "assistant.message" && terminal.payload.stopReason === "aborted"
+        ? { ...base, interrupted: true, operationId: affected }
+        : base;
     }
     if (acceptance.method === "session.rename") {
       const renamed = evidence.find((event) => event.type === "session.renamed");
@@ -1201,6 +1253,14 @@ export class SessionManager {
             );
           }
           payload.queueItemId = queueItemId;
+        } else if (event.type === "queue.restored" && Array.isArray(payload.items)) {
+          payload.items = payload.items.map((value) => {
+            if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+            const item = value as Record<string, JsonValue>;
+            const replacement =
+              typeof item.queueItemId === "string" ? eventIds.get(item.queueItemId) : undefined;
+            return replacement === undefined ? item : { ...item, queueItemId: replacement };
+          });
         } else if (event.type === "context.compacted" && Array.isArray(payload.replacedEventIds)) {
           payload.replacedEventIds = payload.replacedEventIds.flatMap((id) => {
             const replacement = typeof id === "string" ? eventIds.get(id) : undefined;
@@ -1452,26 +1512,33 @@ export class SessionManager {
       (event) => event.type === "queue.enqueued" && event.operationId === operationId,
     );
     if (prior?.type === "queue.enqueued") return { queueItemId: prior.id, state: "queued" };
+    if (managed.queueMutationActive)
+      throw new DaemonError("operation_active", "Another queue mutation owns this session");
+    managed.queueMutationActive = true;
     try {
-      for (const item of content) {
-        if (item.type === "blob")
-          await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+      try {
+        for (const item of content) {
+          if (item.type === "blob")
+            await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+        }
+      } catch (error) {
+        if (error instanceof BlobStoreError) {
+          throw new DaemonError(error.code, error.message, { cause: error });
+        }
+        throw error;
       }
-    } catch (error) {
-      if (error instanceof BlobStoreError) {
-        throw new DaemonError(error.code, error.message, { cause: error });
-      }
-      throw error;
+      const queued = await managed.session.recordQueueEvent(operationId, "queue.enqueued", {
+        content,
+        priority,
+      });
+      const entry = { queueItemId: queued.id, operationId, content, priority };
+      if (priority === "front") managed.queue.unshift(entry);
+      else managed.queue.push(entry);
+      return { queueItemId: queued.id, state: "queued" };
+    } finally {
+      managed.queueMutationActive = false;
+      this.startQueueDrain(managed);
     }
-    const queued = await managed.session.recordQueueEvent(operationId, "queue.enqueued", {
-      content,
-      priority,
-    });
-    const entry = { queueItemId: queued.id, operationId, content, priority };
-    if (priority === "front") managed.queue.unshift(entry);
-    else managed.queue.push(entry);
-    this.startQueueDrain(managed);
-    return { queueItemId: queued.id, state: "queued" };
   }
 
   async requeue(
@@ -1487,6 +1554,8 @@ export class SessionManager {
       (event) => event.type === "queue.requeued" && event.operationId === operationId,
     );
     if (prior?.type === "queue.requeued") return { queueItemId, state: "queued" };
+    if (managed.queueMutationActive)
+      throw new DaemonError("operation_active", "Another queue mutation owns this session");
     const queued = managed.events.find(
       (event) => event.type === "queue.enqueued" && event.id === queueItemId,
     );
@@ -1503,20 +1572,139 @@ export class SessionManager {
     if (latest?.type !== "queue.paused") {
       throw new DaemonError("queue_not_paused", "Only a paused queued prompt can be re-queued");
     }
-    await managed.session.recordQueueEvent(operationId, "queue.requeued", {
-      queueItemId,
-      priority,
-    });
-    const entry = {
-      queueItemId,
-      operationId: queued.operationId,
-      content: queued.payload.content,
-      priority,
-    };
-    if (priority === "front") managed.queue.unshift(entry);
-    else managed.queue.push(entry);
-    this.startQueueDrain(managed);
-    return { queueItemId, state: "queued" };
+    managed.queueMutationActive = true;
+    try {
+      await managed.session.recordQueueEvent(operationId, "queue.requeued", {
+        queueItemId,
+        priority,
+      });
+      const entry = {
+        queueItemId,
+        operationId: queued.operationId,
+        content: queued.payload.content,
+        priority,
+      };
+      if (priority === "front") managed.queue.unshift(entry);
+      else managed.queue.push(entry);
+      return { queueItemId, state: "queued" };
+    } finally {
+      managed.queueMutationActive = false;
+      this.startQueueDrain(managed);
+    }
+  }
+
+  async restoreQueue(
+    sessionId: unknown,
+    interrupt: boolean,
+    operationId: OperationId | undefined,
+    acceptedTargetOperationId?: OperationId,
+  ): Promise<{
+    items: readonly RestoredQueueItem[];
+    interrupted: boolean;
+    operationId?: OperationId;
+  }> {
+    if (operationId === undefined)
+      throw new DaemonError("internal_error", "Queue restore operation ID is missing");
+    const managed = this.managed(sessionId);
+    const prior = managed.events.find(
+      (event) => event.type === "queue.restored" && event.operationId === operationId,
+    );
+    if (prior?.type === "queue.restored") {
+      return this.restoredQueueResult(
+        managed,
+        prior.payload.items,
+        interrupt,
+        acceptedTargetOperationId,
+      );
+    }
+
+    const pending = new Map<EventId, RestoredQueueItem>();
+    for (const event of managed.events) {
+      if (event.type === "queue.enqueued") {
+        reinsertQueueItem(
+          pending,
+          event.id,
+          {
+            queueItemId: event.id,
+            content: event.payload.content,
+            priority: event.payload.priority,
+            source: "queue",
+          },
+          event.payload.priority,
+        );
+      } else if (event.type === "queue.requeued") {
+        const item = pending.get(event.payload.queueItemId);
+        if (item !== undefined)
+          reinsertQueueItem(
+            pending,
+            event.payload.queueItemId,
+            { ...item, priority: event.payload.priority },
+            event.payload.priority,
+          );
+      } else if (event.type === "queue.started") {
+        pending.delete(event.payload.queueItemId);
+      } else if (event.type === "queue.restored") {
+        for (const item of event.payload.items) {
+          if (item.queueItemId !== undefined) pending.delete(item.queueItemId);
+        }
+      }
+    }
+    const live = managed.queue
+      .map((item) => pending.get(item.queueItemId))
+      .filter((item): item is RestoredQueueItem => item !== undefined);
+    const liveIds = new Set(live.flatMap((item) => item.queueItemId ?? []));
+    const transient = managed.session.queuedMessages();
+    const items: RestoredQueueItem[] = [
+      ...transient.steering.map((content) => ({
+        content,
+        priority: "front" as const,
+        source: "steer" as const,
+      })),
+      ...transient.followUp.map((content) => ({
+        content,
+        priority: "back" as const,
+        source: "follow_up" as const,
+      })),
+      ...live,
+      ...[...pending.values()].filter(
+        (item) => item.queueItemId !== undefined && !liveIds.has(item.queueItemId),
+      ),
+    ];
+    if (new TextEncoder().encode(JSON.stringify(items)).byteLength > MAX_WIRE_MESSAGE_BYTES / 2) {
+      throw new DaemonError("content_too_large", "Queued prompts are too large to restore safely");
+    }
+
+    if (managed.queueMutationActive)
+      throw new DaemonError("operation_active", "Another queue mutation owns this session");
+    managed.queueMutationActive = true;
+    try {
+      await managed.session.recordQueueEvent(operationId, "queue.restored", { items });
+      managed.queue.splice(0);
+      managed.session.clearQueuedMessages();
+      const interruption = interrupt
+        ? this.interrupt(sessionId, acceptedTargetOperationId)
+        : { interrupted: false as const };
+      return { items, ...interruption };
+    } finally {
+      managed.queueMutationActive = false;
+      this.startQueueDrain(managed);
+    }
+  }
+
+  private restoredQueueResult(
+    managed: ManagedSession,
+    items: readonly RestoredQueueItem[],
+    interrupt: boolean,
+    acceptedTargetOperationId?: OperationId,
+  ): {
+    items: readonly RestoredQueueItem[];
+    interrupted: boolean;
+    operationId?: OperationId;
+  } {
+    const interruption = interrupt
+      ? this.interrupt(managed.session.log.sessionId, acceptedTargetOperationId)
+      : { interrupted: false as const };
+    return { items, ...interruption };
   }
 
   steer(sessionId: unknown, content: readonly UserContent[]): Promise<{ queued: true }> {
@@ -1691,24 +1879,32 @@ export class SessionManager {
   ): Promise<{ queued: true }> {
     const managed = this.managed(sessionId);
     const queued = managed.queuedInputs.then(async () => {
+      if (managed.queueMutationActive)
+        throw new DaemonError("operation_active", "Another queue mutation owns this session");
+      managed.queueMutationActive = true;
       try {
-        for (const item of content) {
-          if (item.type === "blob") {
-            await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+        try {
+          for (const item of content) {
+            if (item.type === "blob") {
+              await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+            }
           }
+        } catch (error) {
+          if (error instanceof BlobStoreError) {
+            throw new DaemonError(error.code, error.message, { cause: error });
+          }
+          throw error;
         }
-      } catch (error) {
-        if (error instanceof BlobStoreError) {
-          throw new DaemonError(error.code, error.message, { cause: error });
+        this.assertRunning();
+        if (managed.activeTurn?.kind !== "turn" || managed.rebuilding) {
+          throw new DaemonError("operation_inactive", `No active model turn can receive ${mode}`);
         }
-        throw error;
+        managed.session[mode](content);
+        return { queued: true as const };
+      } finally {
+        managed.queueMutationActive = false;
+        this.startQueueDrain(managed);
       }
-      this.assertRunning();
-      if (managed.activeTurn?.kind !== "turn" || managed.rebuilding) {
-        throw new DaemonError("operation_inactive", `No active model turn can receive ${mode}`);
-      }
-      managed.session[mode](content);
-      return { queued: true as const };
     });
     managed.queuedInputs = queued.then(
       () => undefined,
@@ -1800,6 +1996,7 @@ export class SessionManager {
       this.stopping ||
       managed.disposing ||
       managed.queueDraining ||
+      managed.queueMutationActive ||
       managed.interruptDelivery !== undefined
     )
       return;
@@ -1850,7 +2047,7 @@ export class SessionManager {
     const pending = new Map<EventId, OperationId>();
     for (const event of managed.events) {
       if (event.type === "queue.enqueued" && event.operationId !== undefined) {
-        pending.set(event.id, event.operationId);
+        reinsertQueueItem(pending, event.id, event.operationId, event.payload.priority);
       } else if (event.type === "queue.started" || event.type === "queue.paused") {
         pending.delete(event.payload.queueItemId);
       } else if (event.type === "queue.requeued") {
@@ -1858,7 +2055,12 @@ export class SessionManager {
           (candidate) =>
             candidate.type === "queue.enqueued" && candidate.id === event.payload.queueItemId,
         );
-        if (queued?.operationId !== undefined) pending.set(queued.id, queued.operationId);
+        if (queued?.operationId !== undefined)
+          reinsertQueueItem(pending, queued.id, queued.operationId, event.payload.priority);
+      } else if (event.type === "queue.restored") {
+        for (const item of event.payload.items) {
+          if (item.queueItemId !== undefined) pending.delete(item.queueItemId);
+        }
       }
     }
     for (const [queueItemId, operationId] of pending) {

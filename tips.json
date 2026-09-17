@@ -1,3 +1,7 @@
 [
-  "Paste a screenshot with Ctrl+V. Axl inserts a temp-file path; submit to attach the image, or delete the path to omit it."
+  "Paste a screenshot with Ctrl+V. Axl inserts a temp-file path; submit to attach the image, or delete the path to omit it.",
+  "In Axl web, press Ctrl+L or Command+L to open model selection. If no session is open, Axl starts a staged session first.",
+  "In the web composer, press Shift+Tab to cycle the selected model's supported reasoning levels.",
+  "In Axl web, use Ctrl+K or Command+K for commands, Ctrl+F or Command+F for transcript search, and Alt+Up to restore queued prompts.",
+  "Run /web in the TUI to open the current daemon-owned session in your browser."
 ]

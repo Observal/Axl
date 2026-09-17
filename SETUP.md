@@ -170,7 +170,7 @@ The profile is fixed for the session and survives daemon restart. Exec sessions 
 ```bash
 axl --no-web-fetch
 axl --no-web-search
-axl --no-web
+axl --no-web-tools
 ```
 
 `web_search` uses DuckDuckGo's keyless Instant Answer endpoint by default. For ranked Brave Search results, export `BRAVE_SEARCH_API_KEY`. `web_fetch` accepts only public HTTP and HTTPS destinations and rejects private, loopback, link-local, and reserved addresses.

@@ -316,6 +316,12 @@ export class SessionView {
         return [dim(`· running queued prompt ${event.payload.queueItemId}`)];
       case "queue.paused":
         return [dim(`· queued prompt paused · use re-queue to run ${event.payload.queueItemId}`)];
+      case "queue.restored":
+        return [
+          dim(
+            `· restored ${event.payload.items.length} queued prompt${event.payload.items.length === 1 ? "" : "s"} to an attached client`,
+          ),
+        ];
       case "user.shell":
         return renderShellPassthrough({
           command: event.payload.command,

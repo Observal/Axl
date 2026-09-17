@@ -29,6 +29,8 @@ test("--help and --version do not require credentials", () => {
   assert.match(help.stdout, /-r, --resume/);
   assert.match(help.stdout, /--profile/);
   assert.match(help.stdout, /--no-web-search/);
+  assert.match(help.stdout, /--no-web-tools/);
+  assert.doesNotMatch(help.stdout, /\s--no-web\s/u);
   assert.match(help.stdout, /axl print/);
   assert.match(help.stdout, /axl json/);
   assert.match(help.stdout, /axl rpc/);

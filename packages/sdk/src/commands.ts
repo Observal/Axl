@@ -5,7 +5,12 @@ import {
   type CommandDescriptor,
   type CommandListResult,
   type EventId,
+  type ModelRequestSettings,
   parseCommandListResult,
+  parseModelRequestSettings,
+  type ProviderAuthenticationStatus,
+  type ProviderCatalogRefreshResult,
+  type SessionConfiguration,
   type SessionForkResult,
   type SessionId,
   THINKING_LEVELS,
@@ -18,6 +23,7 @@ export interface PresentationCommand {
   readonly id: string;
   readonly name: string;
   readonly aliases?: readonly string[];
+  readonly extensionId?: string;
   readonly description: string;
   readonly argument?: { readonly required: boolean; readonly hint?: string };
   readonly run: (argument?: string) => void | Promise<void>;
@@ -27,20 +33,47 @@ export interface EffectiveCommand extends CommandDescriptor {
   readonly source: "daemon" | "presentation";
 }
 
+export type PresentationCommandSource = () => readonly PresentationCommand[];
+
 export type CommandSurface =
   | "model"
   | "thinking"
   | "providers"
+  | "login"
+  | "logout"
+  | "request"
   | "resume"
   | "fork"
+  | "requeue"
   | "review"
+  | "attach"
   | "import"
   | "export"
   | "dispose"
   | "delete";
 
+export interface CommandInvocationOptions {
+  readonly signal?: AbortSignal;
+  readonly requestSettings?: ModelRequestSettings;
+}
+
 export type CommandOutcome =
   | { readonly state: "completed"; readonly command: string }
+  | {
+      readonly state: "session-configured";
+      readonly command: "model" | "thinking" | "request";
+      readonly update: Partial<SessionConfiguration>;
+    }
+  | {
+      readonly state: "provider-catalog-refreshed";
+      readonly command: "refresh";
+      readonly result: ProviderCatalogRefreshResult;
+    }
+  | {
+      readonly state: "provider-logged-out";
+      readonly command: "logout";
+      readonly result: ProviderAuthenticationStatus;
+    }
   | { readonly state: "focus"; readonly surface: CommandSurface; readonly argument?: string }
   | { readonly state: "open-session"; readonly session: SessionForkResult };
 
@@ -74,21 +107,32 @@ export function mergeCommandDirectory(
       argument: command.argument ?? { required: false },
       requiredCapabilities: [],
       availability: { state: "available" },
+      ...(command.extensionId === undefined ? {} : { extensionId: command.extensionId }),
     })),
   });
   for (const command of local.commands) {
     addNames(command.name, command.aliases);
     commands.push({ ...command, source: "presentation" });
   }
-  return commands;
+  return commands.sort((left, right) =>
+    left.name < right.name
+      ? -1
+      : left.name > right.name
+        ? 1
+        : left.id < right.id
+          ? -1
+          : left.id > right.id
+            ? 1
+            : 0,
+  );
 }
 
 export class CommandController {
   private catalog: CommandListResult = { generation: "unloaded", commands: [] };
   private readonly client: AxlClient;
-  private readonly presentation: readonly PresentationCommand[];
+  private readonly presentation: PresentationCommandSource;
 
-  constructor(client: AxlClient, presentation: readonly PresentationCommand[] = []) {
+  constructor(client: AxlClient, presentation: PresentationCommandSource = () => []) {
     this.client = client;
     this.presentation = presentation;
   }
@@ -98,7 +142,7 @@ export class CommandController {
   }
 
   get commands(): readonly EffectiveCommand[] {
-    return mergeCommandDirectory(this.catalog, this.presentation);
+    return mergeCommandDirectory(this.catalog, this.presentation());
   }
 
   async refresh(sessionId?: SessionId): Promise<readonly EffectiveCommand[]> {
@@ -125,7 +169,11 @@ export class CommandController {
     return this.commands.find((command) => command.name === name || command.aliases.includes(name));
   }
 
-  async invoke(input: string, sessionId?: SessionId): Promise<CommandOutcome> {
+  async invoke(
+    input: string,
+    sessionId?: SessionId,
+    options: CommandInvocationOptions = {},
+  ): Promise<CommandOutcome> {
     const text = input.trim();
     if (text.includes("\n") || text.includes("\r")) {
       throw new AxlClientError("invalid_command", "Invalid command syntax");
@@ -152,7 +200,7 @@ export class CommandController {
       );
     }
     if (command.source === "presentation") {
-      const handler = this.presentation.find((candidate) => candidate.id === command.id);
+      const handler = this.presentation().find((candidate) => candidate.id === command.id);
       if (handler === undefined) {
         throw new AxlClientError("unsupported_command", `Command /${command.name} has no handler`);
       }
@@ -170,12 +218,15 @@ export class CommandController {
         if (separator <= 0 || separator === argument.length - 1) {
           throw new AxlClientError("invalid_command_argument", "Use /model provider/model");
         }
-        await this.client.request("session.configure", {
-          sessionId: sessionId as SessionId,
+        const update = {
           providerId: argument.slice(0, separator),
           modelId: argument.slice(separator + 1),
+        };
+        await this.client.request("session.configure", {
+          sessionId: sessionId as SessionId,
+          ...update,
         });
-        return { state: "completed", command: command.name };
+        return { state: "session-configured", command: "model", update };
       }
       case "thinking": {
         if (!argument) return { state: "focus", surface: "thinking" };
@@ -185,16 +236,18 @@ export class CommandController {
             `Thinking level must be ${THINKING_LEVELS.join(", ")}`,
           );
         }
+        const update = { thinkingLevel: argument as ThinkingLevel };
         await this.client.request("session.configure", {
           sessionId: sessionId as SessionId,
-          thinkingLevel: argument as ThinkingLevel,
+          ...update,
         });
-        return { state: "completed", command: command.name };
+        return { state: "session-configured", command: "thinking", update };
       }
       case "providers":
+      case "login":
         return {
           state: "focus",
-          surface: "providers",
+          surface: command.name,
           ...(argument === undefined ? {} : { argument }),
         };
       case "resume":
@@ -214,11 +267,30 @@ export class CommandController {
             fromEventId: argument as EventId,
           }),
         };
+      case "requeue":
+        if (!argument) return { state: "focus", surface: "requeue" };
+        await this.client.request("session.queue.requeue", {
+          sessionId: sessionId as SessionId,
+          queueItemId: argument as EventId,
+          priority: "back",
+        });
+        return { state: "completed", command: command.name };
+      case "attach":
+        return {
+          state: "focus",
+          surface: "attach",
+          ...(argument === undefined ? {} : { argument }),
+        };
       case "review":
-        if (argument !== undefined && argument !== "working" && argument !== "last-turn") {
+        if (
+          argument !== undefined &&
+          argument !== "working" &&
+          argument !== "last-turn" &&
+          argument !== "off"
+        ) {
           throw new AxlClientError(
             "invalid_command_argument",
-            "Use /review working or /review last-turn",
+            "Use /review working, /review last-turn, or /review off",
           );
         }
         return {
@@ -227,11 +299,56 @@ export class CommandController {
           ...(argument === undefined ? {} : { argument }),
         };
       case "refresh":
-        await this.client.refreshProviderCatalogs(argument ? { providerId: argument } : {});
-        return { state: "completed", command: command.name };
+        return {
+          state: "provider-catalog-refreshed",
+          command: "refresh",
+          result: await this.client.refreshProviderCatalogs(
+            argument ? { providerId: argument } : {},
+            options,
+          ),
+        };
       case "logout":
-        await this.client.logoutProvider({ providerId: argument as string });
-        return { state: "completed", command: command.name };
+        if (!argument) return { state: "focus", surface: "logout" };
+        return {
+          state: "provider-logged-out",
+          command: "logout",
+          result: await this.client.logoutProvider({ providerId: argument }, options),
+        };
+      case "request": {
+        if (!argument) return { state: "focus", surface: "request" };
+        if (options.requestSettings === undefined) {
+          throw new AxlClientError(
+            "command_unavailable",
+            "Request settings are unavailable for this runtime",
+          );
+        }
+        const [field, value, extra] = argument.split(/\s+/u);
+        if (
+          extra !== undefined ||
+          value === undefined ||
+          (field !== "output" && field !== "idle")
+        ) {
+          throw new AxlClientError(
+            "invalid_command_argument",
+            "Use /request output <tokens|model> or /request idle <milliseconds|disabled>",
+          );
+        }
+        const requestSettings = parseModelRequestSettings({
+          ...options.requestSettings,
+          ...(field === "output"
+            ? { maxOutputTokens: value === "model" ? null : Number(value) }
+            : { httpIdleTimeoutMs: value === "disabled" ? 0 : Number(value) }),
+        });
+        await this.client.request("session.configure", {
+          sessionId: sessionId as SessionId,
+          requestSettings,
+        });
+        return {
+          state: "session-configured",
+          command: "request",
+          update: { requestSettings },
+        };
+      }
       case "reload":
         if (argument) throw new AxlClientError("invalid_command_argument", "Use /reload");
         await this.client.request("session.reload", { sessionId: sessionId as SessionId });
@@ -258,6 +375,11 @@ export class CommandController {
       }
       case "import":
       case "export":
+        return {
+          state: "focus",
+          surface: command.name,
+          ...(argument === undefined ? {} : { argument }),
+        };
       case "dispose":
       case "delete":
         if (argument) {

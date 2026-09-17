@@ -82,7 +82,7 @@ When automatically opening a browser, `axl web` places the launch token in the U
 3. sends it in the body of a same-origin `POST /auth/exchange`
 4. clears the in-memory value
 
-Normal terminal output prints the token-free origin. A token-bearing manual command is shown only when explicitly requested.
+Normal terminal output prints the token-free origin. A token-bearing launch URL is printed only when explicitly requested with `axl web --print-url`, for hosts where the gateway cannot open a browser itself.
 
 ## Browser credential
 
@@ -124,13 +124,15 @@ The gateway does not trust headers returned by Vite. It applies its own security
 All responses use explicit content types and these headers:
 
 ```text
-Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src http: https:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 Cache-Control: no-store
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Resource-Policy: same-origin
 ```
+
+`frame-src` exists only for the browser pane, which embeds `http` and `https` pages inside the client. The gateway itself still refuses to be framed. Framed pages run under their own origin in a sandboxed `iframe` with `no-referrer`, so the random gateway path never reaches them, and they cannot script the Axl origin. Sites that send `X-Frame-Options` or `frame-ancestors` restrictions stay blank; the client offers to open them in a new tab. Nothing is proxied through the gateway.
 
 Production HTML has no inline script or style. Development changes only what Vite hot reload requires at the same gateway origin. It does not use wildcard source or origin rules.
 

@@ -32,6 +32,15 @@ const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
     requiredCapabilities: ["provider.list"],
   },
   {
+    id: "core.login",
+    name: "login",
+    aliases: [],
+    description: "authenticate a provider",
+    context: "global",
+    argument: { required: false, hint: "provider" },
+    requiredCapabilities: ["provider.list", "provider.auth.login"],
+  },
+  {
     id: "core.refresh",
     name: "refresh",
     aliases: [],
@@ -46,7 +55,7 @@ const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
     aliases: [],
     description: "remove stored provider authentication",
     context: "global",
-    argument: { required: true, hint: "provider" },
+    argument: { required: false, hint: "provider" },
     requiredCapabilities: ["provider.auth.logout"],
   },
   {
@@ -66,6 +75,24 @@ const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
     context: "session",
     argument: { required: false, hint: "instructions" },
     requiredCapabilities: ["session.compact"],
+  },
+  {
+    id: "core.request",
+    name: "request",
+    aliases: [],
+    description: "show or configure model request limits",
+    context: "session",
+    argument: { required: false, hint: "output <tokens|model> | idle <ms|disabled>" },
+    requiredCapabilities: ["session.configure"],
+  },
+  {
+    id: "core.requeue",
+    name: "requeue",
+    aliases: [],
+    description: "re-queue a paused prompt",
+    context: "session",
+    argument: { required: false, hint: "queue item" },
+    requiredCapabilities: ["session.queue.requeue"],
   },
   {
     id: "core.resume",
@@ -148,6 +175,20 @@ const BUILT_INS: readonly Omit<CommandDescriptor, "availability">[] = [
     argument: { required: false, hint: "working | last-turn" },
     requiredCapabilities: ["session.workspace.status", "session.workspace.diff"],
   },
+  {
+    id: "core.attach",
+    name: "attach",
+    aliases: [],
+    description: "attach an image to the next prompt",
+    context: "session",
+    argument: { required: false },
+    requiredCapabilities: [
+      "session.blob.start",
+      "session.blob.chunk",
+      "session.blob.commit",
+      "session.blob.abort",
+    ],
+  },
 ];
 
 export function commandCatalog(
@@ -155,7 +196,7 @@ export function commandCatalog(
   sessionId?: SessionId,
 ): CommandListResult {
   return {
-    generation: "builtin-2",
+    generation: "builtin-3",
     commands: BUILT_INS.filter((command) =>
       command.requiredCapabilities.every((capability) => capabilities.has(capability)),
     ).map((command) => ({

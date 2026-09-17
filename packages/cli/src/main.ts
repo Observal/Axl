@@ -22,6 +22,7 @@ import {
   type ModelRequestSettings,
   type ProviderLoginMethod,
   parseModelRequestSettings,
+  type SessionId,
   type SessionProfile,
   type ThinkingLevel,
 } from "@axl/protocol";
@@ -35,9 +36,15 @@ import {
   loginProviderFromTrustedHost,
   startLocalDaemon,
 } from "@axl/runtime";
-import { type AxlClient, AxlClientError, subscribeSession } from "@axl/sdk";
+import {
+  type AxlClient,
+  AxlClientError,
+  subscribeSession,
+  type TrustedProviderHost,
+} from "@axl/sdk";
 import { connectUnixClient, createUnixDaemonHost } from "@axl/sdk/unix";
 
+import { launchBrowser } from "./browser-launch.ts";
 import { inspectLegacyDaemon, type LegacyDaemonStatus, stopLegacyDaemon } from "./legacy-daemon.ts";
 import { createTerminalProviderLoginAdapter } from "./provider-auth-ui.ts";
 import { providerErrorMessage, runProviderCommand, usageLine } from "./provider-cli.ts";
@@ -47,7 +54,7 @@ const AXL_VERSION = process.env.AXL_BUILD_VERSION ?? "0.0.0-dev";
 const WEB_ASSET_RELATIVE_PATH = process.env.AXL_WEB_ASSET_PATH ?? "../../web/dist";
 
 const HELP = `Usage: axl [session-id] [options]
-       axl web [session-id] [--no-open]
+       axl web [session-id] [--no-open] [--print-url]
        axl providers [provider-id]
        axl models [provider-id]
        axl login <provider-id> [api_key|oauth]
@@ -78,8 +85,8 @@ Options:
   -r, --resume       Open the all-session resume picker
   --image <digest>   Use a locally available digest-pinned OCI image
   --unsafe           Disable operating-system isolation
-  --web               Enable web_fetch and web_search (default)
-  --no-web            Disable web_fetch and web_search
+  --web-tools         Enable web_fetch and web_search (default)
+  --no-web-tools      Disable web_fetch and web_search
   --web-fetch         Enable web_fetch
   --no-web-fetch      Disable web_fetch
   --web-search        Enable web_search
@@ -89,6 +96,8 @@ Options:
   --interrupt        Authorize cancellation for daemon stop/restart
   --yes              Confirm disconnecting other daemon clients
   --force            Force a previously requested shutdown (daemon stop --yes)
+  --no-open          Do not open a browser for axl web
+  --print-url        Print the one-use axl web launch URL for manual opening
   --help             Show this help
   --version          Show the installed version
 `;
@@ -138,6 +147,7 @@ interface CliArguments {
   unsafe: boolean;
   resume: boolean;
   noOpen: boolean;
+  printUrl: boolean;
   showHelp: boolean;
   showVersion: boolean;
 }
@@ -153,6 +163,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     unsafe: false,
     resume: false,
     noOpen: false,
+    printUrl: false,
     raw: false,
     confirmPrefix: false,
     showHelp: false,
@@ -200,6 +211,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
       break;
     }
     if (argument === "--no-open") parsed.noOpen = true;
+    else if (argument === "--print-url") parsed.printUrl = true;
     else if (argument === "--interrupt") parsed.interrupt = true;
     else if (argument === "--yes") parsed.yes = true;
     else if (argument === "--force") parsed.force = true;
@@ -229,10 +241,10 @@ function parseArguments(argv: readonly string[]): CliArguments {
         throw new Error(`Unknown profile ${profile}; expected standard or exec`);
       }
       parsed.profile = profile;
-    } else if (argument === "--web") {
+    } else if (argument === "--web-tools") {
       parsed.webFetch = true;
       parsed.webSearch = true;
-    } else if (argument === "--no-web") {
+    } else if (argument === "--no-web-tools") {
       parsed.webFetch = false;
       parsed.webSearch = false;
     } else if (argument === "--web-fetch") parsed.webFetch = true;
@@ -328,6 +340,7 @@ function parseArguments(argv: readonly string[]): CliArguments {
     throw new Error(`${parsed.command} does not accept a session ID`);
   }
   if (parsed.noOpen && parsed.command !== "web") throw new Error("--no-open requires axl web");
+  if (parsed.printUrl && parsed.command !== "web") throw new Error("--print-url requires axl web");
   if (parsed.command === "session-export" && !parsed.raw) {
     throw new Error("session export requires --raw");
   }
@@ -1054,6 +1067,32 @@ async function main(): Promise<void> {
     sandbox: cli.sandbox,
     ...(cli.image === undefined ? {} : { image: cli.image }),
   };
+  const webGateways = new Set<{ readonly close: () => Promise<void> }>();
+  const openWebForTarget =
+    (target: LocalDaemonTarget) =>
+    async (
+      sessionId: SessionId,
+      cwd: string,
+      providerHost: TrustedProviderHost,
+    ): Promise<string> => {
+      const { startWebGateway } = await import("./web-gateway.ts");
+      const gateway = await startWebGateway({
+        socketPath: target.socketPath,
+        stateDirectory: target.stateDirectory,
+        cwd,
+        assetDirectory: resolve(dirname(fileURLToPath(import.meta.url)), WEB_ASSET_RELATIVE_PATH),
+        packageVersion: AXL_VERSION,
+        providerHost,
+      });
+      try {
+        await launchBrowser(`${gateway.launchUrl}&session=${encodeURIComponent(sessionId)}`);
+      } catch (error) {
+        await gateway.close();
+        throw error;
+      }
+      webGateways.add(gateway);
+      return gateway.origin;
+    };
   const client = await connectTarget(currentTarget);
   timing.mark("daemon connect");
   if (cli.daemonAction === "restart") {
@@ -1087,19 +1126,23 @@ async function main(): Promise<void> {
         : {}),
     });
     process.stdout.write(`Axl web: ${gateway.origin}\n`);
+    const launchUrl =
+      cli.sessionId === undefined
+        ? gateway.launchUrl
+        : `${gateway.launchUrl}&session=${encodeURIComponent(cli.sessionId)}`;
+    if (cli.printUrl) {
+      // Explicitly requested token-bearing URL: one use, expires in 60 seconds.
+      process.stdout.write(`Open within 60 seconds (one use): ${launchUrl}\n`);
+    }
     if (!cli.noOpen) {
-      const launchUrl =
-        cli.sessionId === undefined
-          ? gateway.launchUrl
-          : `${gateway.launchUrl}&session=${encodeURIComponent(cli.sessionId)}`;
-      const browser =
-        process.platform === "darwin"
-          ? { file: "open", args: [launchUrl] }
-          : process.platform === "win32"
-            ? { file: "rundll32", args: ["url.dll,FileProtocolHandler", launchUrl] }
-            : { file: "xdg-open", args: [launchUrl] };
-      const child = spawn(browser.file, browser.args, { detached: true, stdio: "ignore" });
-      child.unref();
+      try {
+        await launchBrowser(launchUrl);
+      } catch (cause) {
+        await gateway.close();
+        throw new Error(
+          `Could not open the authenticated web client automatically: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
     }
     const stop = (): void => {
       void gateway.close().finally(() => process.exit(0));
@@ -1165,6 +1208,7 @@ async function main(): Promise<void> {
       client: await connectTarget(target),
       reconnectClient: () => connectTarget(target),
       daemonHost: createUnixDaemonHost(target.socketPath),
+      openWeb: openWebForTarget(target),
     };
   };
 
@@ -1226,6 +1270,7 @@ async function main(): Promise<void> {
     ],
     clearStartupLine: startupIndicator,
     reconnectClient: () => connectTarget(currentTarget),
+    openWeb: openWebForTarget(currentTarget),
     loginProvider: (providerId, method, signal, presentation) =>
       loginFromThisHost(providerId, method, signal, presentation),
     onPreferenceChange: persistSettings,
@@ -1238,7 +1283,9 @@ async function main(): Promise<void> {
     webSearch: active.webSearch,
     ...(cli.sessionId === undefined ? {} : { sessionId: cli.sessionId }),
     onExit: () => {
-      void settingsWrite.finally(() => process.exit(0));
+      void Promise.allSettled([...webGateways].map((gateway) => gateway.close())).finally(() =>
+        settingsWrite.finally(() => process.exit(0)),
+      );
     },
   });
   timing.mark("first paint");

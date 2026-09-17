@@ -37,7 +37,7 @@ The branch now contains the first complete local-session slice:
 - The composer loads a cached daemon provider directory and configures provider-qualified model and thinking choices. A live `/reload` boundary invalidates that cache.
 - Reusable theme, syntax, diff, and React conversation presentation lives in `packages/ui`.
 - The SDK exhaustively classifies canonical events for presentation, and immutable projections expose compacted-event membership to every renderer.
-- Ordinary session creation works. Staged Chat/Code creation, the remaining shared-command migration, paused-item requeue, presence presentation, and several hardening tests remain.
+- Ordinary and staged Chat/Code creation, shared-command routing, paused-item requeue, queue restoration, browser presence, SDK-owned provider/configuration state, model/provider UX, and profile-aware Search/Fetch configuration work. Alt+Up restores pending input to the composer. Escape closes overlays first, then restores pending input while interrupting active work. Several hardening tests remain.
 
 The previous PR #386 implementation was discarded when this branch was reset to `upstream/main`. Its tests and findings remain design evidence only.
 
@@ -47,11 +47,7 @@ The visual foundation, ordinary local conversation path, provider authentication
 
 Active remaining work:
 
-1. Finish replacing the TUI static shared-command dispatcher with the SDK controller and remove duplicated browser command routing.
-2. Add explicit paused-item requeue controls and browser presence presentation.
-3. Add staged Chat/Code creation, including explicit workspace and tool-profile semantics.
-4. Move the provider directory and remaining configuration sequencing into reusable SDK controllers.
-5. Complete the unchecked security, cross-client, capability, and accessibility verification gates below.
+1. Complete the unchecked security, cross-client, capability, and accessibility verification gates below.
 
 Deferred work is labeled in place. It includes extension-driven command invalidation, `axl web --dev`, IndexedDB cursor persistence, localization, long-session React measurement, and pre-stable CLI flag renames.
 
@@ -77,14 +73,14 @@ The normal local chat path is available. These items close the remaining gap bet
 
 1. [x] Implement issue #389's capability-filtered daemon command catalog without adding a generic built-in `command.invoke` path.
 2. [x] Add the reusable SDK command controller that validates, merges, searches, and maps catalog entries to existing typed RPCs or focused workflows.
-3. [ ] Finish replacing the TUI static shared-command dispatcher with the SDK controller. Daemon-backed shared metadata and refresh are implemented; trusted-host and remaining workflow commands still need migration.
+3. [x] Replace the TUI static shared-command dispatcher with the SDK controller. Shared commands use daemon metadata and typed SDK outcomes; TUI presentation and trusted-host commands use the dynamic client directory.
 4. [x] Add the web command palette and slash discovery UI. It searches the effective daemon directory, explains unavailable commands, collects bounded arguments, and opens focused interfaces without duplicating command metadata.
 5. [ ] **Deferred:** add dynamic catalog invalidation when daemon extension registration exists. Connection, reconnection, session replacement, explicit palette opening, and configuration changes already refresh the current static catalog.
 
 ### Prompt delivery
 
 6. [x] Add draft-safe steer and follow-up submission through the shared SDK delivery workflow.
-7. [ ] Finish daemon-owned queue controls. SDK queue-next, queue-last, automatic late-steer fallback, and paused outcomes are implemented; explicit paused-item requeue remains.
+7. [x] Finish daemon-owned queue controls with queue-next, queue-last, automatic late-steer fallback, paused outcomes, focused paused-item requeue, restore-all, and clear-and-interrupt behavior.
 8. [x] Add atomic interrupt-and-deliver. It uses `session.interruptAndDeliver` and is never simulated with Stop followed by Send.
 9. [x] Preserve drafts on rejection or uncertain transport outcomes and present accepted, completed, queued, paused, interrupted, failed, and uncertain states accurately.
 
@@ -124,7 +120,7 @@ The normal local chat path is available. These items close the remaining gap bet
 - [x] `axl web <session-id>` opens that session in the browser without launching the TUI.
 - [x] `axl web --no-open` starts the gateway and prints the safe token-free origin.
 - [ ] **Deferred:** `axl web --dev` uses the explicit same-origin development proxy.
-- [ ] **Before stable release:** rename the ambiguous model-tool flags `--web` and `--no-web` to `--web-tools` and `--no-web-tools`. Keep `--web-search` and `--web-fetch` explicit.
+- [x] Rename the ambiguous model-tool flags `--web` and `--no-web` to `--web-tools` and `--no-web-tools`. Keep `--web-search` and `--web-fetch` explicit.
 - [x] Make command parsing distinguish the `web` subcommand from session IDs before any daemon or TUI startup work.
 - [x] Keep gateway shutdown distinct from browser detach, operation interrupt, session disposal, and daemon shutdown.
 
@@ -166,7 +162,7 @@ The web client is a static single-page application. It has no server-side render
 - [x] Keep browser preferences independent of the gateway's random origin where persistence across launches is required.
 - [ ] **Deferred:** add an IndexedDB cursor-store adapter. Cursor-store failure must remain visible and fall back to a fresh snapshot.
 - [x] Avoid a service worker initially. Entry documents use `no-store`; hashed assets may be immutable.
-- [ ] Add tracked tests for the fake environment adapter so presentation behavior is not verified only by ignored local preview fixtures.
+- [x] Add a tracked fake environment fixture and run the browser behavior smoke suite against it.
 
 ## Trusted local gateway
 
@@ -181,7 +177,7 @@ The web client is a static single-page application. It has no server-side render
 - [x] Require cookie, exact origin, exact host, and random process path for each WebSocket upgrade.
 - [x] Keep browser credentials out of JavaScript, URLs, persistent storage, and logs.
 - [x] Apply CSP, frame denial, nosniff, no-referrer, no-store, and cross-origin isolation headers.
-- [ ] Finish gateway bounds. Request bodies, WebSocket frames, assembled daemon messages, message rate, buffered output, artifact size, and attachment count are bounded; HTTP handshake/request timeouts and remaining queue bounds still need explicit coverage.
+- [x] Finish gateway bounds. Request bodies, HTTP handshake and request timeouts, WebSocket frames, assembled daemon messages, rolling rate and burst, buffered bytes and message counts, artifact size, and attachment count are bounded.
 - [x] Reject binary frames and disable compression.
 - [x] Evict a slow browser attachment without blocking another attachment.
 - [x] Open one independent daemon connection per browser attachment.
@@ -205,7 +201,7 @@ Do not recreate separate hardcoded TUI and browser command tables.
 - [x] Record command effects through the canonical events emitted by their typed operations rather than a generic invocation event.
 - [x] Let clients merge honest presentation-only commands into the shared directory.
 - [x] Keep terminal-only mechanics local to the TUI and define browser-native semantics where a command is shared.
-- [ ] Delete duplicated browser command routing after the remaining migration.
+- [x] Route browser slash execution through the SDK command controller while keeping focused browser rendering local.
 
 This is a protocol and ownership change and requires architecture review before implementation.
 
@@ -215,13 +211,13 @@ This is a protocol and ownership change and requires architecture review before 
 
 - [x] Add command discovery, execution, explicit refresh, and typed outcome projection.
 - [ ] Add event-driven command-catalog invalidation when daemon extension registration exists.
-- [ ] Move the provider directory into the SDK with observable loading, ready, partial-failure, refresh, auth-change, reconnect, and disposal states. The current web-owned directory preserves partial results and supports explicit refresh.
-- [ ] Add staged new-session intent shared by direct controls and slash commands.
-- [ ] Add session-configuration mutation ordering, optimistic intent, effective values, and field-scoped failures.
+- [x] Move the provider directory into the SDK with observable loading, ready, partial-failure, refresh, auth-change, reconnect, and disposal states.
+- [x] Add staged new-session intent shared by direct controls and slash commands.
+- [x] Add session-configuration mutation ordering, pending intent, effective values, and field-scoped failures.
 - [x] Add attachment upload, abort, retry, and retrieval helpers over blob RPCs.
 - [x] Add high-level steer, follow-up, interrupt, and interrupt-and-deliver methods with draft-safe semantics.
 - [x] Keep direct shell's explicit uncertain-outcome behavior.
-- [ ] Move remaining reusable provider and configuration behavior out of the React shell.
+- [x] Move remaining reusable provider and configuration behavior out of the React shell.
 - [x] Keep SDK caches disposable and daemon state authoritative.
 
 ## Staged new-session composition
@@ -237,39 +233,41 @@ request settings
 web tool configuration
 ```
 
-- [ ] Chat creation requires no workspace and sends no model-visible tools.
-- [ ] Code creation requires an explicit resolved workspace.
-- [ ] Direct controls and slash commands update the same staged object.
-- [ ] Submit staged intent atomically through `session.create`.
-- [ ] Preserve daemon defaults for fields the user did not explicitly select.
-- [ ] Render a running session's exact profile as identity rather than a lossy Chat/Code toggle.
-- [ ] Never display `minimal` or `exec` as mutable `standard` Code.
-- [ ] Keep workspace navigation absent from Chat.
+- [x] Chat creation requires no workspace choice and sends no model-visible tools.
+- [x] Code creation requires an explicit workspace resolved by the daemon.
+- [x] Direct controls and slash commands update the same staged object.
+- [x] Submit staged intent atomically through `session.create`.
+- [x] Preserve daemon defaults for fields the user did not explicitly select.
+- [x] Render a running session's exact profile as identity rather than a lossy Chat/Code toggle.
+- [x] Never display `minimal` or `exec` as mutable `standard` Code.
+- [x] Keep workspace navigation absent from Chat.
+- [x] Refine the staged-session entry UI with a prominent compact Chat/Code choice, a clear linear setup sequence, restrained translucent layering, keyboard access, profile honesty, and one atomic create action.
 
 ## Model and thinking selection
 
 - [x] Use provider-qualified `{ providerId, modelId }` identity throughout.
 - [x] Load one provider/model directory for the active daemon generation.
-- [ ] Share one focused picker between `/model`, composer controls, and new-session creation. The composer picker is implemented.
-- [ ] Group searchable model rows by provider.
+- [x] Share one focused picker between `/model`, composer controls, and new-session creation.
+- [x] Group searchable model rows by provider.
 - [x] Show provider-local errors without erasing usable providers.
-- [ ] Disable unavailable models and explain why. Unavailable models are currently omitted.
+- [x] Disable unavailable models and explain why.
 - [x] Reject ambiguous bare model IDs.
 - [x] Derive thinking choices from the selected model's supported levels.
 - [x] Preserve the daemon thinking default until the user explicitly changes it.
-- [ ] Stage model and thinking choices before creation and configure them after creation.
+- [x] Stage model and thinking choices before creation and submit them atomically.
+- [x] Match Pi's model and reasoning shortcuts with `Ctrl/⌘+L` and composer-focused `Shift+Tab`. `Ctrl/⌘+L` opens staged model selection when no session exists or the new-session dialog is active. Document the browser keymap in Settings, `tips.json`, and the architecture specification.
 - [x] Show effective clamped thinking values.
 - [x] Keep model and thinking controls out of generic Web settings.
 
 ## Honest Search and Fetch controls
 
-- [ ] Render controls only when the selected profile can expose those tools.
-- [ ] Never render them in Chat.
-- [ ] Label them as configuration, not immediate tool actions.
-- [ ] Show explicit enabled and disabled state derived from canonical effective configuration.
-- [ ] Show runtime rebuild progress and field-scoped failure.
+- [x] Render controls only when the selected profile can expose those tools.
+- [x] Never render them in Chat.
+- [x] Label them as configuration, not immediate tool actions.
+- [x] Show explicit enabled and disabled state derived from canonical effective configuration.
+- [x] Show runtime rebuild progress and field-scoped failure.
 - [x] Remove fake Plan and Web buttons that only open Settings.
-- [ ] Add deterministic browser coverage for enabling, disabling, invocation, tool-card rendering, and results.
+- [x] Add deterministic browser coverage for enabling, disabling, typed configuration mapping, tool-card rendering, and results.
 
 ## Active-turn input semantics
 
@@ -289,7 +287,7 @@ Also:
 
 ## Slash-command coverage
 
-The browser command interface must use the shared live command directory.
+The browser must support every daemon and SDK command whose capabilities it requests. Presentation command names may differ by client; browser-native controls such as `Ctrl+K` do not require a duplicate `/commands` alias. The table below remains a browser product backlog, not a cross-client name-parity requirement.
 
 | Command | Browser requirement |
 | --- | --- |
@@ -326,7 +324,7 @@ The browser command interface must use the shared live command directory.
 | `/hotkeys` | Help generated from the actual browser keymap. |
 | `/help` | Complete command and shortcut directory. |
 | `/detach` | Detach this browser attachment only. |
-| `/web` | Display current local browser attachment information without starting another loop. |
+| `/web` | TUI trusted-host action that starts an authenticated local gateway and opens the current daemon-owned session without starting another agent loop. |
 | `/request` | Edit output-token and HTTP idle limits. |
 | `/quit` | Trusted-host shutdown flow or explicit detach wording, never silent conflation. |
 
@@ -357,7 +355,8 @@ The browser should support every capability granted to its connection.
 - [x] `session.follow_up`
 - [x] `session.interrupt_deliver`
 - [x] `session.queue.enqueue`
-- [ ] `session.queue.requeue`
+- [x] `session.queue.requeue`
+- [x] `session.queue.restore`
 - [x] `session.interrupt`
 - [x] `session.dispose`
 
@@ -370,7 +369,7 @@ The browser should support every capability granted to its connection.
 - [x] `session.interaction.respond` for explicit MCP interactions, not routine sandboxed tool approval
 - [x] `session.subscribe`
 - [x] `session.activity`
-- [ ] `session.presence`
+- [x] `session.presence`
 
 ### Blobs and workspace
 
@@ -397,9 +396,9 @@ Do not request a capability before its interaction, error behavior, and security
 
 ## Provider management
 
-- [ ] Add `/providers` with provider, authentication, catalog, region, enabled, and model availability state. The web provider status surface covers authentication, catalog, enabled state, and model counts; shared command routing and region detail remain.
+- [x] Add provider region detail. The `/providers` route and web provider status surface cover authentication, catalog, enabled state, model counts, and available region metadata.
 - [x] Refresh inventory after login, logout, catalog refresh, settings changes, and reconnect.
-- [ ] Add per-provider catalog-refresh cancellation. Web already shows bounded refresh progress, results, and retry; trusted-host login has correlated cancellation.
+- [x] Add per-provider catalog-refresh cancellation with visible progress and an explicit Cancel action.
 - [x] Preserve usable provider groups when one provider fails.
 - [x] Present errors beside the owning provider.
 - [x] Acquire credentials only through an injected trusted-process-host interaction.
@@ -432,8 +431,8 @@ Do not request a capability before its interaction, error behavior, and security
 - [x] Expose browser-owned layout and change-review preferences through a focused Web settings surface.
 - [x] Refresh session catalog metadata after another client changes it.
 - [ ] **Deferred until a second locale:** replace hardcoded English copy with a typed localization owner.
-- [ ] Show errors inside the dialog or picker that initiated the action.
-- [ ] Keep disabled features absent from menus, empty states, prompts, and background work.
+- [x] Show errors inside the dialog or picker that initiated the action.
+- [x] Keep disabled features absent from menus, empty states, prompts, and background work.
 - [ ] **Blocked on an approved source and license:** replace visual components with Linear UI Kit only if that migration is still desired.
 
 ## Original implementation order
@@ -461,26 +460,26 @@ This sequence is historical planning context, not a completion checklist. Curren
 
 - [x] `packages/web` has no runtime dependency on kernel, daemon, runtime, AI, sandbox, or TUI packages.
 - [x] React consumes the public SDK projector instead of reducing canonical events.
-- [ ] The same browser behavior suite passes through fake and loopback gateway environments.
-- [ ] Missing capabilities remove or disable controls with an explicit reason.
+- [x] The same browser behavior suite passes through fake and loopback gateway environments.
+- [x] Missing capabilities remove or disable controls with an explicit reason.
 - [x] Detaching the browser never interrupts daemon-owned work.
 
 ### Behavior
 
-- [ ] TUI and browser converge on one session under simultaneous use.
+- [x] TUI and browser converge on one session under simultaneous use.
 - [x] Reconnect neither loses nor duplicates canonical events through SDK cursor and snapshot replacement semantics.
 - [x] Session switching cannot display state from the prior session.
-- [ ] Chat has no workspace or tool interface.
-- [ ] Code requires an explicit workspace.
+- [x] Chat has no workspace or tool interface.
+- [x] Code requires an explicit workspace.
 - [x] Model identity remains provider-qualified.
 - [x] Thinking choices match model support.
 - [x] Active-turn delivery modes remain distinct.
 - [x] Ordinary failed prompt sends preserve drafts and show visible errors. Other delivery modes remain.
-- [ ] Attachments survive upload, reload, retrieval, and second-client projection.
+- [x] Attachments survive upload, reload, retrieval, and second-client projection.
 
 ### Security and packaging
 
-- [ ] Gateway security acceptance tests in `docs/architecture/web-gateway-security.md` pass.
+- [ ] Gateway security acceptance tests in `docs/architecture/web-gateway-security.md` pass. Production gateway cases pass; the development-origin case remains deferred with `axl web --dev`.
 - [x] Production assets fail closed when missing, altered, or incompatible.
 - [ ] Development mode keeps one authenticated browser origin.
 - [x] The installed package works without the repository, Vite, or pnpm.
@@ -489,7 +488,7 @@ This sequence is historical planning context, not a completion checklist. Curren
 
 ### Accessibility and presentation
 
-- [ ] Session navigation, tabs, dialogs, menus, composer, interrupt, and reconnect are keyboard-operable.
+- [x] Session navigation, tabs, dialogs, menus, composer, interrupt, and reconnect are keyboard-operable.
 - [x] Focus restoration and Escape behavior are deterministic for Web settings, provider status, transcript search, and the mobile session drawer.
 - [x] Connection and action outcomes use accessible status regions.
 - [x] Reduced motion and no-color-only meaning are supported.

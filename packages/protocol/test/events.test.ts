@@ -34,6 +34,16 @@ const validPayloads = {
   "queue.requeued": { queueItemId: eventId, priority: "front" },
   "queue.started": { queueItemId: eventId },
   "queue.paused": { queueItemId: eventId, reason: "daemon_restart" },
+  "queue.restored": {
+    items: [
+      {
+        queueItemId: eventId,
+        content: [{ type: "text", text: "later" }],
+        priority: "back",
+        source: "queue",
+      },
+    ],
+  },
   "interrupt.requested": {
     state: "queued",
     content: [{ type: "text", text: "replacement" }],

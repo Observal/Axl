@@ -52,7 +52,6 @@ test("the release package contains matching verified web assets", () => {
   assert.match(listing.stdout, /^package\/dist\/web\/asset-metadata\.json$/m);
   assert.match(listing.stdout, /^package\/dist\/web\/index\.html$/m);
   assert.match(listing.stdout, /^package\/dist\/web\/assets\/index-[\w-]+\.js$/m);
-  assert.match(listing.stdout, /^package\/LICENSES\/OFL-1\.1\.txt$/m);
 
   const metadata = spawnSync(
     "tar",

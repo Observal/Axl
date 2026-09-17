@@ -7,6 +7,7 @@ import type { Component, CursorPlacement } from "./render.ts";
 export interface Overlay {
   render(width: number): string[];
   handleKey(data: string): void;
+  paste?(text: string): void;
   cursor?(): CursorPlacement | undefined;
   dispose?(): void;
 }
@@ -48,6 +49,13 @@ export class OverlayStack implements Component {
 
   handleInput(data: string): void {
     this.active?.handleKey(data);
+  }
+
+  paste(text: string): boolean {
+    const overlay = this.active;
+    if (overlay?.paste === undefined) return false;
+    overlay.paste(text);
+    return true;
   }
 
   cursorPlacement(): CursorPlacement | undefined {

@@ -128,6 +128,12 @@ export class ProviderLoginOverlay implements ProviderLoginPresentation {
     return this.picker?.cursor() ?? this.position;
   }
 
+  paste(text: string): void {
+    if (!this.pending || this.picker) return;
+    this.value += sanitizeTerminalText(text).slice(0, Math.max(0, 16_384 - this.value.length));
+    this.options.refresh();
+  }
+
   handleKey(data: string): void {
     if (this.picker) {
       this.picker.handleKey(data);

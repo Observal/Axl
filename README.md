@@ -200,7 +200,7 @@ axl --cwd ~/code/project        # choose the workspace
 axl --profile exec              # expose only sandboxed Bash
 axl --no-web-fetch              # disable one web tool
 axl --no-web-search
-axl --no-web                    # disable both web tools
+axl --no-web-tools              # disable both web tools
 axl doctor                      # inspect local sandbox support
 axl daemon                      # run the daemon in the foreground
 axl print "describe this repo"  # print one headless response

@@ -51,6 +51,16 @@ const eventPayloads = {
   "queue.requeued": { queueItemId, priority: "front" },
   "queue.started": { queueItemId },
   "queue.paused": { queueItemId, reason: "daemon_restart" },
+  "queue.restored": {
+    items: [
+      {
+        queueItemId,
+        content: [{ type: "text", text: "restore me" }],
+        priority: "back",
+        source: "queue",
+      },
+    ],
+  },
   "interrupt.requested": {
     state: "queued",
     content: [{ type: "text", text: "replacement" }],
@@ -216,6 +226,7 @@ const params = {
     priority: "back",
   },
   "session.queue.requeue": { sessionId, queueItemId: eventId, priority: "front" },
+  "session.queue.restore": { sessionId, interrupt: true },
   "session.shell": { sessionId, operationId, command: "pwd", excluded: false },
   "session.interrupt": { sessionId },
   "session.reload": { sessionId },
@@ -395,6 +406,18 @@ const results = {
   "session.compact": { eventId },
   "session.queue.enqueue": { queueItemId: eventId, state: "queued" },
   "session.queue.requeue": { queueItemId: eventId, state: "queued" },
+  "session.queue.restore": {
+    items: [
+      {
+        queueItemId: eventId,
+        content: [{ type: "text", text: "restore me" }],
+        priority: "back",
+        source: "queue",
+      },
+    ],
+    interrupted: true,
+    operationId,
+  },
   "session.shell": { operationId, isError: false, resultEventId: eventId },
   "session.interrupt": { interrupted: true, operationId },
   "session.reload": { boundaryEventIds: [eventId] },

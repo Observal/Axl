@@ -53,8 +53,8 @@ function UsageDetails({ usage, attribution, endedAt }: { readonly usage: Usage; 
   const elapsedMs = attribution?.startedAt === undefined ? undefined : Math.max(1, endedAt - attribution.startedAt);
   const throughput = elapsedMs === undefined || usage.outputTokens === 0 ? undefined : `${((usage.outputTokens * 1000) / elapsedMs).toFixed(1)} tok/s`;
   return <details className="response-usage">
-    <summary><span>{identity}</span>{attribution?.thinking && <><i>·</i><span>{attribution.thinking}</span></>}<i>·</i><span>{usage.costUsd === undefined ? "Cost unavailable" : `$${usage.costUsd.toFixed(4)}`}</span></summary>
-    <dl><div><dt>Input</dt><dd>{compactNumber(usage.inputTokens)}</dd></div><div><dt>Output</dt><dd>{compactNumber(usage.outputTokens)}</dd></div><div><dt>Cache read</dt><dd>{compactNumber(usage.cacheReadTokens)}</dd></div><div><dt>Cache hit</dt><dd>{cacheHit}</dd></div><div><dt>Speed</dt><dd>{throughput ?? "Unknown"}</dd></div><div><dt>Reasoning</dt><dd>{usage.reasoningTokens === undefined ? "Unknown" : compactNumber(usage.reasoningTokens)}</dd></div><div><dt>Cost</dt><dd>{usage.costUsd === undefined ? "Unknown" : `$${usage.costUsd.toFixed(4)}`}</dd></div></dl>
+    <summary><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" /></svg><span>Response details</span></summary>
+    <dl><div><dt>Model</dt><dd>{identity}</dd></div>{attribution?.thinking && <div><dt>Effort</dt><dd>{attribution.thinking}</dd></div>}<div><dt>Input</dt><dd>{compactNumber(usage.inputTokens)}</dd></div><div><dt>Output</dt><dd>{compactNumber(usage.outputTokens)}</dd></div><div><dt>Cache read</dt><dd>{compactNumber(usage.cacheReadTokens)}</dd></div><div><dt>Cache hit</dt><dd>{cacheHit}</dd></div><div><dt>Speed</dt><dd>{throughput ?? "Unknown"}</dd></div><div><dt>Reasoning</dt><dd>{usage.reasoningTokens === undefined ? "Unknown" : compactNumber(usage.reasoningTokens)}</dd></div><div><dt>Cost</dt><dd>{usage.costUsd === undefined ? "Cost unavailable" : `$${usage.costUsd.toFixed(4)}`}</dd></div></dl>
   </details>;
 }
 
@@ -296,6 +296,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     case "queue.requeued":
     case "queue.started":
     case "queue.paused":
+    case "queue.restored":
     case "interrupt.updated":
     case "tool.result":
     case "config.request":

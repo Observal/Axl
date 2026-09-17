@@ -54,7 +54,8 @@ function frame(document: readonly TranscriptRow[]) {
 test("decodes Linux and Kitty fullscreen navigation variants", () => {
   assert.equal(fullscreenAction("\x1b[5;1:1~"), "page-up");
   assert.equal(fullscreenAction("\x1b[6;2:1~"), "half-page-down");
-  assert.equal(fullscreenAction("\x1b[1;3:1A"), "line-up");
+  assert.equal(fullscreenAction("\x1b[1;3:1A"), undefined);
+  assert.equal(fullscreenAction("\x1b[1;3:1B"), "line-down");
   assert.equal(fullscreenAction("\x1b[1;6:1B"), "next-prompt");
   assert.equal(fullscreenAction("\x1b[1;1:1H"), "top");
   assert.equal(fullscreenAction("\x1b[1;1:1F"), "bottom");

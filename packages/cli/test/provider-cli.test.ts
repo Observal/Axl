@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
+// SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -133,26 +134,22 @@ test("trusted terminal adapter masks and cancels prompt answers without retainin
   assert.equal(input.isRaw, false);
 });
 
-test("browser launch failures remain visible", () => {
+test("browser launch failures remain visible", async () => {
   let output = "";
-  let unrefCalled = false;
-  openAuthorizationUrl(
+  await openAuthorizationUrl(
     validatedAuthorizationUrl("https://example.com/login"),
     {
       write: (value) => {
         output += value;
       },
     },
-    () => ({
-      once: (_event, listener) => listener(new Error("launcher unavailable\nretry manually")),
-      unref: () => {
-        unrefCalled = true;
-      },
-    }),
+    {
+      spawn: (_command, handlers) =>
+        handlers.error(new Error("launcher unavailable\nretry manually")),
+    },
   );
   assert.match(output, /Could not open the authorization URL automatically/);
   assert.match(output, /launcher unavailable retry manually/);
-  assert.equal(unrefCalled, true);
 });
 
 test("authorization URLs are restricted and usage remains explicit", () => {

@@ -83,7 +83,7 @@ export function fullscreenAction(data: string): FullscreenAction | undefined {
   if (arrow !== null) {
     const down = arrow[2] === "B";
     const modifier = Number(arrow[1]);
-    if (modifier === 3) return down ? "line-down" : "line-up";
+    if (modifier === 3 && down) return "line-down";
     if (modifier === 6) return down ? "next-prompt" : "previous-prompt";
   }
   // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal Home begins with Escape

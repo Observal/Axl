@@ -30,7 +30,7 @@ test("inline login accepts blank text, masks secrets, and places the cursor afte
   overlay.handleKey("\r");
   assert.equal(await domain, "");
   const secret = overlay.prompt({ message: "API key", mask: true });
-  overlay.handleKey("obviously-fake-secret");
+  overlay.paste("obviously-fake-secret");
   const rows = overlay.render(30);
   assert.doesNotMatch(rows.join("\n"), /obviously-fake-secret/);
   assert.match(rows.join("\n"), /\*{21}/);

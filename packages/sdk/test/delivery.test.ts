@@ -4,7 +4,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AxlClientError, deliverPrompt, parseSessionId, type AxlClient } from "../src/index.ts";
+import {
+  type AxlClient,
+  AxlClientError,
+  deliverPrompt,
+  parseSessionId,
+  restoreQueuedPrompts,
+} from "../src/index.ts";
 
 const sessionId = parseSessionId("00000000-0000-4000-8000-000000000001");
 const content = [{ type: "text" as const, text: "Continue with tests" }];
@@ -41,6 +47,23 @@ test("prompt delivery maps prompt, follow-up, interrupt, and queue modes", async
     "session.interruptAndDeliver",
     "session.queue.enqueue",
   ]);
+});
+
+test("queue restoration preserves typed content and interrupt intent", async () => {
+  const requests: unknown[] = [];
+  const result = {
+    items: [{ content, priority: "front" as const, source: "steer" as const }],
+    interrupted: true,
+  };
+  const client = {
+    async request(_method: string, params: unknown) {
+      requests.push(params);
+      return result;
+    },
+  } as unknown as AxlClient;
+
+  assert.deepEqual(await restoreQueuedPrompts(client, sessionId, true), result);
+  assert.deepEqual(requests, [{ sessionId, interrupt: true }]);
 });
 
 test("prompt delivery safely queues a late steer", async () => {

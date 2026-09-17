@@ -10,7 +10,7 @@ Use `axl -r` or `axl --resume` to open the all-placement session picker. Native,
 
 Use `axl doctor` to inspect native, Podman, and Docker enforcement. Select local OCI execution with `--sandbox podman|docker --image <digest-pinned-reference>`. The CLI keeps each engine and image on a separate daemon socket and rejects attachment when the requested sandbox identity differs.
 
-Web fetch and search are enabled by default. Use `--no-web-fetch`, `--no-web-search`, or `--no-web` to remove them from a new session's tool roster.
+Web fetch and search are enabled by default. Use `--no-web-fetch`, `--no-web-search`, or `--no-web-tools` to remove them from a new session's tool roster.
 
 New sessions default to the selected model's output maximum and a five-minute model HTTP idle timeout. Use `--max-output-tokens <n|model>` and `--http-idle-timeout <milliseconds>` to change those defaults. Zero disables the idle timeout. Existing sessions retain their canonical settings and can be changed through `/request`.
 

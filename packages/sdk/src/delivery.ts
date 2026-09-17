@@ -5,6 +5,7 @@ import type {
   AssistantStopReason,
   EventId,
   OperationId,
+  QueueRestoreResult,
   SessionId,
   UserContent,
 } from "@axl/protocol";
@@ -40,6 +41,14 @@ function uncertain(error: unknown): boolean {
     error instanceof AxlClientError &&
     ["disconnected", "connection_error", "reconnect_failed", "write_failed"].includes(error.code)
   );
+}
+
+export async function restoreQueuedPrompts(
+  client: AxlClient,
+  sessionId: SessionId,
+  interrupt = false,
+): Promise<QueueRestoreResult> {
+  return client.request("session.queue.restore", { sessionId, interrupt });
 }
 
 export async function deliverPrompt(

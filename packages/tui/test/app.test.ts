@@ -33,7 +33,7 @@ import type {
   Usage,
 } from "@axl/protocol";
 import { DEFAULT_MODEL_REQUEST_SETTINGS } from "@axl/protocol";
-import { subscribeSession } from "@axl/sdk";
+import { AxlClientError, subscribeSession, type TrustedProviderHost } from "@axl/sdk";
 import { connectUnixClient, createUnixDaemonHost } from "@axl/sdk/unix";
 
 import { AxlApp, saveClipboardImage, stripAnsi } from "../src/index.ts";
@@ -478,6 +478,61 @@ test("initial resume opens the all-session picker without creating a throwaway s
   });
   assert.equal(after.sessions.length, 1);
   listingClient.close();
+  app.stop();
+});
+
+test("resume hides the active session to avoid replaying its transcript", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const seed = await connectUnixClient(socketPath);
+  const target = await seed.request("session.create", { cwd: directory });
+  seed.close();
+
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    listResumeSessions: async () => [
+      {
+        sessionId: target.sessionId,
+        cwd: directory,
+        createdAt: 1,
+        updatedAt: 1,
+        userMessageCount: 0,
+        runtime: target.runtime,
+        attachmentCount: 0,
+        resumeKey: target.sessionId,
+        title: "available session",
+        placementLabel: "SANDBOXED · native",
+        unsafe: false,
+      },
+      {
+        sessionId: app.sessionId,
+        cwd: directory,
+        createdAt: 2,
+        updatedAt: 2,
+        userMessageCount: 1,
+        runtime: { state: "idle" },
+        attachmentCount: 1,
+        resumeKey: app.sessionId,
+        title: "active session duplicate",
+        placementLabel: "SANDBOXED · native",
+        unsafe: false,
+      },
+    ],
+  });
+
+  input.write("/resume\r");
+  await until(() => text().includes("Resume Session (Current Folder)"), "resume selector");
+  const rendered = stripAnsi(text());
+  assert.match(rendered, /available session/);
+  assert.doesNotMatch(rendered, /active session duplicate/);
+
+  input.write("\r");
+  await until(() => app.sessionId === target.sessionId, "inactive session resume");
   app.stop();
 });
 
@@ -1175,7 +1230,7 @@ test("Escape interrupts a running or admitted operation", async (context) => {
   app.stop();
 });
 
-test("an idle Escape result is visible and is not polled", async (context) => {
+test("an idle queue restore result is visible and is not polled", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
   const { output, text } = captureOutput();
@@ -1183,13 +1238,17 @@ test("an idle Escape result is visible and is not polled", async (context) => {
   const rpc = context.mock.method(client, "request");
   const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
   context.after(() => app.stop());
-  const before = rpc.mock.calls.filter((call) => call.arguments[0] === "session.interrupt").length;
+  const before = rpc.mock.calls.filter(
+    (call) => call.arguments[0] === "session.queue.restore",
+  ).length;
 
-  await (app as unknown as { interrupt(): Promise<void> }).interrupt();
+  await (
+    app as unknown as { restoreQueuedInputs(interrupt: boolean): Promise<void> }
+  ).restoreQueuedInputs(false);
 
-  await until(() => text().includes("no active operation to interrupt"), "interrupt notice");
+  await until(() => text().includes("no queued prompts"), "queue restore notice");
   assert.equal(
-    rpc.mock.calls.filter((call) => call.arguments[0] === "session.interrupt").length,
+    rpc.mock.calls.filter((call) => call.arguments[0] === "session.queue.restore").length,
     before + 1,
   );
 });
@@ -1322,6 +1381,35 @@ test("terminal extensions cannot replace encoded safety shortcuts", async (conte
   );
 });
 
+test("terminal extensions cannot replace daemon commands", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const extension: TerminalExtension = {
+    manifest: {
+      id: "test.command-collision",
+      name: "Command collision",
+      capabilities: ["terminal.commands"],
+    },
+    activate(api) {
+      api.registerCommand({
+        name: "reload",
+        description: "Replace the daemon command",
+        run: () => undefined,
+      });
+    },
+  };
+  await assert.rejects(
+    AxlApp.start({
+      client: await connectUnixClient(socketPath),
+      input: new PassThrough(),
+      output: captureOutput().output,
+      cwd: directory,
+      color: false,
+      extensions: [extension],
+    }),
+    /Command name collision: \/reload/,
+  );
+});
+
 test("terminal extensions contribute UI and reload without leaking owned resources", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
@@ -1392,11 +1480,116 @@ test("terminal extensions contribute UI and reload without leaking owned resourc
   await until(() => cleanups === 4, "extension shutdown cleanup");
 });
 
+test("every TUI command has an explicit owner", async (context) => {
+  const ownership = {
+    daemon: [
+      "!",
+      "!!",
+      "clone",
+      "compact",
+      "delete",
+      "dispose",
+      "logout",
+      "refresh",
+      "reload",
+      "rename",
+    ],
+    "sdk-workflow": [
+      "attach",
+      "detach",
+      "export",
+      "fork",
+      "import",
+      "login",
+      "model",
+      "providers",
+      "request",
+      "resume",
+      "review",
+      "requeue",
+      "thinking",
+    ],
+    "trusted-host": ["edit", "quit", "web"],
+    presentation: [
+      "commands",
+      "details",
+      "developer",
+      "favorite",
+      "fullscreen",
+      "help",
+      "history",
+      "hotkeys",
+      "regular",
+      "settings",
+      "stash",
+      "status",
+      "theme",
+      "usage",
+      "vim",
+    ],
+  } as const;
+  const expected = Object.values(ownership)
+    .flat()
+    .filter((command) => command !== "!" && command !== "!!")
+    .sort();
+  assert.equal(new Set(Object.values(ownership).flat()).size, expected.length + 2);
+
+  const providerManagement: ProviderManagementService = {
+    list: () => Promise.resolve({ providers: [] }),
+    refresh: () => Promise.resolve({ providers: [] }),
+    authenticationStatus: () => Promise.resolve({ providers: [] }),
+    login: ({ providerId }) => Promise.resolve({ providerId, phase: "authenticated" as const }),
+    logout: ({ providerId }) => Promise.resolve({ providerId, phase: "logged_out" as const }),
+  };
+  const { socketPath, directory } = await startStack(
+    context,
+    port,
+    () => new ToolRegistry(),
+    undefined,
+    undefined,
+    providerManagement,
+  );
+  const client = await connectUnixClient(socketPath);
+  const input = new PassThrough();
+  const { output } = captureOutput();
+  const app = await AxlApp.start({ client, input, output, cwd: directory, color: false });
+  const available = (
+    app as unknown as {
+      availableCommands(): readonly { readonly name: string }[];
+    }
+  )
+    .availableCommands()
+    .map((command) => command.name.slice(1))
+    .sort();
+  assert.deepEqual(available, expected);
+  assert.deepEqual(
+    (
+      app as unknown as {
+        availableHotkeys(): readonly { readonly key: string }[];
+      }
+    )
+      .availableHotkeys()
+      .map((hotkey) => hotkey.key)
+      .filter((key) => key.startsWith("!"))
+      .map((key) => key.slice(0, -"command".length)),
+    ["!", "!!"],
+  );
+
+  const daemonCommands = (await client.listCommands()).commands.map((command) => command.name);
+  const daemonOwned = new Set<string>([...ownership.daemon, ...ownership["sdk-workflow"]]);
+  assert.deepEqual(
+    daemonCommands.filter((command) => !daemonOwned.has(command)),
+    [],
+  );
+  app.stop();
+});
+
 test("command discovery, history, autocomplete, and external editing behave", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const edited: string[] = [];
+  const openedWebSessions: string[] = [];
   const app = await AxlApp.start({
     client: await connectUnixClient(socketPath),
     input,
@@ -1408,7 +1601,15 @@ test("command discovery, history, autocomplete, and external editing behave", as
       edited.push(content);
       return `${content} from editor`;
     },
+    openWeb: async (sessionId) => {
+      openedWebSessions.push(sessionId);
+      return "http://127.0.0.1:1234";
+    },
   });
+
+  input.write("/web\r");
+  await until(() => text().includes("opened http://127.0.0.1:1234"), "browser launch");
+  assert.deepEqual(openedWebSessions, [app.sessionId]);
 
   input.write("draft\x07");
   await until(() => text().includes("external editor closed"), "external editor");
@@ -1427,8 +1628,9 @@ test("command discovery, history, autocomplete, and external editing behave", as
   assert.match(text(), /select a model/);
   input.write("\x15/model g\t");
   await until(() => text().includes("/model gpt-5"), "argument completion");
+  const commandFrames = (text().match(/Commands/g) ?? []).length;
   input.write("\x15/commands\r");
-  await until(() => text().includes("Commands"), "command palette");
+  await until(() => (text().match(/Commands/g) ?? []).length > commandFrames, "command palette");
   input.write("detach");
   await until(() => text().includes("/detach"), "detach command search");
   app.stop();
@@ -1526,7 +1728,7 @@ test("bang commands run through daemon shell authority", async (context) => {
   app.stop();
 });
 
-test("Escape interrupts shell passthrough and preserves queued prompts", async (context) => {
+test("Escape interrupts shell passthrough and restores queued prompts", async (context) => {
   let shellAborted = false;
   const prompts: string[] = [];
   const recordingPort: ModelPort = {
@@ -1574,20 +1776,32 @@ test("Escape interrupts shell passthrough and preserves queued prompts", async (
   await until(() => text().includes("queued follow-up"), "queued shell follow-up");
   input.write("\x1b[27u");
   await until(() => shellAborted, "shell interruption");
-  await until(() => prompts.length === 1, "queued prompt delivery");
-  assert.deepEqual(prompts, ["keep this prompt"]);
+  await until(() => text().includes("restored 1 queued prompt"), "queued prompt restoration");
+  assert.deepEqual(prompts, []);
+  assert.match(text(), /keep this prompt/);
   app.stop();
 });
 
-test("editing, /quit, and busy notices behave", async (context) => {
+test("editing and /quit recover from a stale shutdown status", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
   const { output, text } = captureOutput();
+  const host = createUnixDaemonHost(socketPath);
+  let shutdownAttempts = 0;
   let exited = false;
 
   await AxlApp.start({
     client: await connectUnixClient(socketPath),
-    daemonHost: createUnixDaemonHost(socketPath),
+    daemonHost: {
+      status: (shutdownContext) => host.status(shutdownContext),
+      shutdown: (status, options) => {
+        shutdownAttempts += 1;
+        if (shutdownAttempts === 1)
+          return Promise.reject(new AxlClientError("state_changed", "Daemon state changed"));
+        return host.shutdown(status, options);
+      },
+      force: (instanceId) => host.force(instanceId),
+    },
     input,
     output,
     cwd: directory,
@@ -1602,6 +1816,7 @@ test("editing, /quit, and busy notices behave", async (context) => {
 
   input.write("/quit\r");
   await until(() => exited, "quit");
+  assert.equal(shutdownAttempts, 2);
 });
 
 test("Ctrl+Z suspends and resumes without detaching the session", async (context) => {
@@ -1876,7 +2091,7 @@ test("/model opens a selector and switches the model live", async (context) => {
   app.stop();
 });
 
-test("provider commands group models, show status, mutate auth, and cancel refresh", async (context) => {
+test("provider commands and /web use trusted TUI login and cancel refresh", async (context) => {
   const calls: string[] = [];
   let blockRefresh = false;
   let refreshCancelled = false;
@@ -1975,6 +2190,7 @@ test("provider commands group models, show status, mutate auth, and cancel refre
   const input = new PassThrough();
   const { output, text } = captureOutput();
   const preferences: Array<Record<string, unknown>> = [];
+  let webProviderHost: TrustedProviderHost | undefined;
   const app = await AxlApp.start({
     client: await connectUnixClient(socketPath),
     input,
@@ -1983,6 +2199,11 @@ test("provider commands group models, show status, mutate auth, and cancel refre
     color: false,
     currentProvider: "alpha",
     currentModel: "shared-model",
+    readClipboard: () => Promise.resolve("runtime-login-secret"),
+    openWeb: async (_sessionId, _cwd, providerHost) => {
+      webProviderHost = providerHost;
+      return "http://127.0.0.1:1234";
+    },
     loginProvider: async (providerId, method, _signal, presentation) => {
       calls.push(`host-login:${providerId}:${method}`);
       assert.equal(
@@ -2001,6 +2222,22 @@ test("provider commands group models, show status, mutate auth, and cancel refre
     onPreferenceChange: (update) => {
       preferences.push(update);
     },
+  });
+
+  input.write("/web\r");
+  await until(() => webProviderHost !== undefined, "browser provider host");
+  assert.ok(webProviderHost);
+  const webLogin = webProviderHost.loginProvider({ providerId: "beta", method: "api_key" });
+  await until(() => text().includes("Enterprise domain (blank for default)"), "web login prompt");
+  input.write("\r");
+  await until(() => text().includes("Provider secret"), "web secret prompt");
+  input.write("\x16");
+  await until(() => text().includes("********************"), "web pasted secret");
+  input.write("\r");
+  assert.deepEqual(await webLogin, {
+    providerId: "beta",
+    phase: "authenticated",
+    method: "api_key",
   });
 
   input.write("/model\r");
@@ -2033,7 +2270,9 @@ test("provider commands group models, show status, mutate auth, and cancel refre
   );
   input.write("\r");
   await until(() => text().includes("Provider secret"), "secret prompt");
-  input.write("runtime-login-secret\r");
+  input.write("\x16");
+  await until(() => text().includes("********************"), "pasted secret");
+  input.write("\r");
   await until(() => calls.includes("host-login:beta:api_key"), "provider login");
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(calls.includes("login:beta:api_key"), false);
@@ -2555,7 +2794,7 @@ test("Escape cancels compaction without replacing context", async (context) => {
   input.write("/compact\r");
   await until(() => summarizing && text().includes("Compacting context"), "summary started");
   input.write("\x1b");
-  await until(() => text().includes("Compaction cancelled"), "compaction cancellation");
+  await until(() => text().includes("interrupted"), "compaction cancellation");
   assert.equal(subscription.projector.overview.lastCompaction, undefined);
   assert.doesNotMatch(text(), /Request failed/);
 });
@@ -2654,7 +2893,7 @@ test("Ctrl+C clears while busy, double Ctrl+C quits, and empty Ctrl+D quits", as
   }
 });
 
-test("confirmed shared quit does not make the other TUI relaunch the daemon", async (context) => {
+test("double Ctrl+C confirms shared quit without another prompt", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
   const first = captureOutput();
@@ -2686,10 +2925,9 @@ test("confirmed shared quit does not make the other TUI relaunch the daemon", as
     },
   });
   context.after(() => observer.stop());
-  input.write("/quit\r");
-  await until(() => first.text().includes("Shut down shared daemon?"), "shared shutdown preview");
-  input.write("y");
-  await until(() => exited, "confirmed shutdown");
+  input.write("\x03\x03");
+  await until(() => exited, "shortcut-confirmed shutdown");
+  assert.doesNotMatch(first.text(), /Shut down shared daemon\?/);
   await until(() => second.text().includes("daemon shut down"), "observer shutdown notice");
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(reconnects, 0);

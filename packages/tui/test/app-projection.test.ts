@@ -125,6 +125,16 @@ function commandList() {
         requiredCapabilities: ["session.configure"],
         availability: { state: "available" },
       },
+      {
+        id: "core.review",
+        name: "review",
+        aliases: [],
+        description: "review workspace changes",
+        context: "session",
+        argument: { required: false, hint: "working | last-turn" },
+        requiredCapabilities: ["session.workspace.status", "session.workspace.diff"],
+        availability: { state: "available" },
+      },
     ],
   } as const;
 }
@@ -384,7 +394,7 @@ test("slash completion arrows select and execute the highlighted command", async
     color: false,
   });
 
-  input.write("/");
+  input.write("/t");
   input.write("\x1b[B");
   input.write("\r");
   await new Promise((resolve) => setTimeout(resolve, 0));

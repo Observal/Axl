@@ -5,6 +5,7 @@ import {
   AxlClient,
   parseProviderAuthenticationStatus,
   parseRpcResult,
+  parseSessionId,
   type SessionId,
   type SessionOpenResult,
   type TrustedProviderHost,
@@ -12,14 +13,28 @@ import {
 } from "@axl/sdk";
 import { BrowserWebSocketTransportFactory } from "@axl/sdk/browser";
 
+import { type PaneId, parsePaneIds } from "./panes.ts";
+
+export const SIDEBAR_WIDTH_RANGE = Object.freeze({ min: 200, max: 420 });
+export const DOCK_WIDTH_RANGE = Object.freeze({ min: 380, max: 1200 });
+
 export interface WebPreferences {
   readonly sidebarWidth: number;
-  readonly changesWidth: number;
+  /** Width of the right-hand pane dock. */
+  readonly dockWidth: number;
   readonly sidebarCollapsed: boolean;
   readonly changesView: "files" | "all";
+  /** Open dock panes in tiling order. */
+  readonly panes: readonly PaneId[];
 }
 
-export type WebHostCapability = "provider.auth.login";
+export type WebHostCapability = "project.folder.validate" | "provider.auth.login";
+
+export type ProjectFolderValidation =
+  | { readonly valid: true; readonly path: string }
+  | { readonly valid: false; readonly error: string };
+
+const WEB_HOST_CAPABILITIES = ["project.folder.validate", "provider.auth.login"] as const;
 
 export const WEB_REQUESTED_CAPABILITIES = Object.freeze(
   WIRE_CAPABILITIES.filter((capability) => capability !== "provider.auth.login"),
@@ -32,11 +47,29 @@ export interface WebBootstrap {
   readonly hostCapabilities: readonly WebHostCapability[];
 }
 
-function fragment(): { readonly token?: string; readonly sessionId?: string } {
+export function browserSessionPath(href: string, sessionId?: SessionId): string {
+  const url = new URL(href);
+  if (sessionId === undefined) url.searchParams.delete("session");
+  else url.searchParams.set("session", sessionId);
+  return `${url.pathname}${url.search}`;
+}
+
+export function retainBrowserSession(sessionId?: SessionId): void {
+  history.replaceState(null, "", browserSessionPath(location.href, sessionId));
+}
+
+function fragment(): { readonly token?: string; readonly sessionId?: SessionId } {
   const values = new URLSearchParams(location.hash.slice(1));
   const token = values.get("token") ?? undefined;
-  const sessionId = values.get("session") ?? undefined;
-  history.replaceState(null, "", `${location.pathname}${location.search}`);
+  const requestedSession =
+    values.get("session") ?? new URLSearchParams(location.search).get("session");
+  let sessionId: SessionId | undefined;
+  try {
+    if (requestedSession !== null) sessionId = parseSessionId(requestedSession);
+  } catch {
+    sessionId = undefined;
+  }
+  retainBrowserSession(sessionId);
   return {
     ...(token === undefined ? {} : { token }),
     ...(sessionId === undefined ? {} : { sessionId }),
@@ -56,16 +89,28 @@ export function parseWebPreferences(value: unknown): WebPreferences {
   const preferences = value as Record<string, unknown>;
   if (
     !Number.isInteger(preferences.sidebarWidth) ||
-    Number(preferences.sidebarWidth) < 200 ||
-    Number(preferences.sidebarWidth) > 420 ||
-    !Number.isInteger(preferences.changesWidth) ||
-    Number(preferences.changesWidth) < 420 ||
-    Number(preferences.changesWidth) > 900 ||
+    Number(preferences.sidebarWidth) < SIDEBAR_WIDTH_RANGE.min ||
+    Number(preferences.sidebarWidth) > SIDEBAR_WIDTH_RANGE.max ||
+    !Number.isInteger(preferences.dockWidth) ||
+    Number(preferences.dockWidth) < DOCK_WIDTH_RANGE.min ||
+    Number(preferences.dockWidth) > DOCK_WIDTH_RANGE.max ||
     typeof preferences.sidebarCollapsed !== "boolean" ||
     (preferences.changesView !== "files" && preferences.changesView !== "all")
   )
     throw new Error("Invalid web preferences");
-  return value as WebPreferences;
+  let panes: readonly PaneId[];
+  try {
+    panes = parsePaneIds(preferences.panes);
+  } catch (cause) {
+    throw new Error("Invalid web preferences", { cause });
+  }
+  return {
+    sidebarWidth: preferences.sidebarWidth as number,
+    dockWidth: preferences.dockWidth as number,
+    sidebarCollapsed: preferences.sidebarCollapsed,
+    changesView: preferences.changesView,
+    panes,
+  };
 }
 
 export function parseBootstrap(value: unknown): WebBootstrap {
@@ -76,7 +121,9 @@ export function parseBootstrap(value: unknown): WebBootstrap {
     typeof record.cwd !== "string" ||
     typeof record.webSocketPath !== "string" ||
     !Array.isArray(record.hostCapabilities) ||
-    record.hostCapabilities.some((capability) => capability !== "provider.auth.login") ||
+    record.hostCapabilities.some(
+      (capability) => !(WEB_HOST_CAPABILITIES as readonly unknown[]).includes(capability),
+    ) ||
     new Set(record.hostCapabilities).size !== record.hostCapabilities.length
   )
     throw new Error("Invalid web bootstrap response");
@@ -144,6 +191,37 @@ export async function saveWebPreferences(preferences: WebPreferences): Promise<v
   });
 }
 
+export async function validateProjectFolder(
+  path: string,
+  signal?: AbortSignal,
+): Promise<ProjectFolderValidation> {
+  const value = await json<unknown>("host/project-folder/validate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ path }),
+    ...(signal === undefined ? {} : { signal }),
+  });
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("Invalid project folder validation response");
+  const result = value as Record<string, unknown>;
+  const keys = Object.keys(result).sort();
+  if (
+    keys.join(",") === "path,valid" &&
+    result.valid === true &&
+    typeof result.path === "string" &&
+    result.path !== ""
+  )
+    return { valid: true, path: result.path };
+  if (
+    keys.join(",") === "error,valid" &&
+    result.valid === false &&
+    typeof result.error === "string" &&
+    result.error !== ""
+  )
+    return { valid: false, error: result.error };
+  throw new Error("Invalid project folder validation response");
+}
+
 export async function exportSessionArtifact(sessionId: SessionId): Promise<Blob> {
   const response = await fetch("artifact/export", {
     method: "POST",
@@ -195,8 +273,6 @@ export async function connectWebEnvironment(): Promise<{
   return {
     client,
     bootstrap,
-    ...(selected.sessionId === undefined
-      ? {}
-      : { selectedSessionId: selected.sessionId as SessionId }),
+    ...(selected.sessionId === undefined ? {} : { selectedSessionId: selected.sessionId }),
   };
 }

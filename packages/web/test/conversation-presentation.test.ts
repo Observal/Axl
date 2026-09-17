@@ -178,6 +178,11 @@ test("renders message actions, attachments, delivery, truncation, and usage stat
   assert.match(html, /312 KB total/);
   assert.match(html, /Load complete output/);
   assert.match(html, /Response incomplete/);
+  assert.match(html, /Response details/);
+  const usageSummary =
+    /<summary><svg[^>]*>.*?<\/svg><span>Response details<\/span><\/summary>/u.exec(html)?.[0];
+  assert.ok(usageSummary);
+  assert.doesNotMatch(usageSummary, /anthropic|\$0\.0124/);
   assert.match(html, /anthropic \/ claude-sonnet-4-6/);
   assert.match(html, /Cost unavailable/);
   assert.match(html, /\$0\.0124/);

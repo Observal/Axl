@@ -27,6 +27,7 @@ test("decodes characters, controls, and CSI sequences", () => {
   assert.deepEqual(decodeKeys("\x1b[13;2~"), [{ kind: "newline" }]);
   assert.deepEqual(decodeKeys("\x1b[13;3u"), [{ kind: "follow-up" }]);
   assert.deepEqual(decodeKeys("\x1b[13;5u"), [{ kind: "interrupt-deliver" }]);
+  assert.deepEqual(decodeKeys("\x1b[1;3A"), [{ kind: "dequeue" }]);
   assert.deepEqual(decodeKeys("\x01"), [{ kind: "ctrl", char: "a" }]);
   assert.deepEqual(decodeKeys("\x1b[1;2D"), [{ kind: "select-left" }]);
   assert.deepEqual(decodeKeys("\x1b[122;6u"), [{ kind: "redo" }]);

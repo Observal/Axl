@@ -139,10 +139,6 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
   copyFileSync(join(ROOT, "distribution", "npm", "README.md"), join(STAGE, "README.md"));
   copyFileSync(join(ROOT, "LICENSE"), join(STAGE, "LICENSE"));
   cpSync(join(ROOT, "LICENSES"), join(STAGE, "LICENSES"), { recursive: true });
-  copyFileSync(
-    join(ROOT, "packages", "ui", "node_modules", "@fontsource-variable", "inter", "LICENSE"),
-    join(STAGE, "LICENSES", "OFL-1.1.txt"),
-  );
   copyFileSync(join(ROOT, "NOTICE"), join(STAGE, "NOTICE"));
 
   const packed = JSON.parse(

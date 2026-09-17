@@ -604,7 +604,7 @@ test("expires incomplete snapshots and requires a replacement boundary", async (
   );
 });
 
-test("publishes bounded attachment presence and subscription membership", async (context) => {
+test("publishes bounded TUI and browser presence with subscription membership", async (context) => {
   const fixture = await startDaemon(context);
   const first = await connectUnixClient(fixture.socketPath, {
     identity: { kind: "tui", version: "1.0.0", instanceId: "presence-one" },
@@ -633,8 +633,8 @@ test("publishes bounded attachment presence and subscription membership", async 
   });
 
   const second = await connectUnixClient(fixture.socketPath, {
-    identity: { kind: "future_client", version: "2.0.0", instanceId: "presence-two" },
-    requestedCapabilities: ["session.presence"],
+    identity: { kind: "web", version: "2.0.0", instanceId: "presence-two" },
+    requestedCapabilities: ["session.subscribe", "session.presence"],
   });
   const secondPresence: Array<readonly { attachmentId: string; clientKind: string }[]> = [];
   second.onPresence((message) => secondPresence.push(message.attachments));
@@ -647,7 +647,7 @@ test("publishes bounded attachment presence and subscription membership", async 
       .at(-1)
       ?.map((attachment) => attachment.clientKind)
       .sort(),
-    ["future_client", "headless", "tui"],
+    ["headless", "tui", "web"],
   );
   assert.equal(unauthorizedPresence, 0);
 
@@ -658,6 +658,14 @@ test("publishes bounded attachment presence and subscription membership", async 
   await first.request("session.ack", {
     subscriptionId: subscribed.subscriptionId,
     cursor: boundaryCursor,
+  });
+  const browserSubscribed = await second.request("session.subscribe", {
+    sessionId: created.sessionId,
+  });
+  assert.ok(browserSubscribed.snapshot?.boundaryCursor);
+  await second.request("session.ack", {
+    subscriptionId: browserSubscribed.subscriptionId,
+    cursor: browserSubscribed.snapshot.boundaryCursor,
   });
   for (
     let attempt = 0;
@@ -672,8 +680,8 @@ test("publishes bounded attachment presence and subscription membership", async 
   assert.equal(
     firstPresence
       .at(-1)
-      ?.some((attachment) => attachment.subscribedSessionIds.includes(created.sessionId)),
-    true,
+      ?.filter((attachment) => attachment.subscribedSessionIds.includes(created.sessionId)).length,
+    2,
   );
 
   second.close();
@@ -1459,12 +1467,49 @@ test("uploads image blobs in chunks without persisting bytes in JSONL", async (c
     uploadId: started.uploadId,
   })) as { sha256: string; mediaType: string; sizeBytes: number; name: string };
   assert.equal(blob.mediaType, "image/png");
+  const observer = await connectUnixClient(socketPath);
+  const observerSubscription = await subscribeSession(observer, created.sessionId);
+  context.after(async () => {
+    await observerSubscription.close().catch(() => undefined);
+    observer.close();
+  });
   await client.request("session.send", {
     sessionId: created.sessionId,
     delivery: "prompt",
     content: [{ type: "blob", blob }],
   });
-  const range = (await client.request("session.blob.read", {
+  await waitFor(
+    () => observerSubscription.projector.state.records.length === 3,
+    "attachment projection in second client",
+  );
+  assert.deepEqual(
+    observerSubscription.projector.state.records
+      .filter((record) => record.kind === "event" && record.event.type === "user.message")
+      .flatMap((record) =>
+        record.kind === "event" && record.event.type === "user.message"
+          ? record.event.payload.content
+          : [],
+      ),
+    [{ type: "blob", blob }],
+  );
+  await observerSubscription.close();
+  observer.close();
+
+  const reloaded = await connectUnixClient(socketPath);
+  context.after(() => reloaded.close());
+  const reloadedSubscription = await subscribeSession(reloaded, created.sessionId);
+  context.after(() => reloadedSubscription.close());
+  assert.deepEqual(
+    reloadedSubscription.projector.state.records
+      .filter((record) => record.kind === "event" && record.event.type === "user.message")
+      .flatMap((record) =>
+        record.kind === "event" && record.event.type === "user.message"
+          ? record.event.payload.content
+          : [],
+      ),
+    [{ type: "blob", blob }],
+  );
+  const range = (await reloaded.request("session.blob.read", {
     sessionId: created.sessionId,
     sha256: blob.sha256,
     offset: 0,
@@ -2249,6 +2294,28 @@ test("lists, forks, clones, and resumes sessions", async (context) => {
   const resumedClone = await subscribeAll(resumedClient, cloned.sessionId);
   assert.equal(resumedFork.events[0]?.type, "session.created");
   assert.equal(resumedClone.events[0]?.type, "session.created");
+});
+
+test("session summaries truncate oversized prompts on UTF-8 boundaries", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const prefix = "a".repeat(4094);
+  await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: `${prefix}🙂tail` }],
+  });
+
+  const listed = await client.request("session.list", {
+    scope: "all_local",
+    order: "recent",
+    pageSize: 50,
+  });
+  assert.equal(listed.sessions[0]?.firstUserMessage, prefix);
+  assert.equal(listed.sessions[0]?.lastUserMessage, prefix);
+  assert.equal(Buffer.byteLength(listed.sessions[0]?.lastUserMessage ?? ""), 4094);
 });
 
 test("pages and filters daemon-owned session summaries", async (context) => {
@@ -3066,6 +3133,139 @@ test("daemon-owned queued prompts are canonical and execute in priority order", 
   assert.deepEqual(forkSubscription.projector.state.queue, []);
 });
 
+test("queue restore atomically returns pending input and interrupts active work", async (context) => {
+  const paused = pausedActivityPort();
+  const { socketPath, cwd } = await startDaemon(context, paused.port);
+  const client = await connectUnixClient(socketPath);
+  const observer = await connectUnixClient(socketPath, {
+    identity: { kind: "web", version: "0.0.0", instanceId: randomUUID() },
+  });
+  context.after(() => {
+    client.close();
+    observer.close();
+  });
+  const created = await client.request("session.create", { cwd });
+  const observed = await subscribeSession(observer, created.sessionId);
+  context.after(() => observed.close());
+  const active = client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "active" }],
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+  await client.request("session.steer", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "steer me" }],
+  });
+  const queued = await client.request("session.queue.enqueue", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "later" }],
+    priority: "back",
+  });
+
+  const restored = await client.request("session.queue.restore", {
+    sessionId: created.sessionId,
+    interrupt: true,
+  });
+  assert.equal(restored.interrupted, true);
+  assert.deepEqual(
+    restored.items.map((item) => [item.source, item.content]),
+    [
+      ["steer", [{ type: "text", text: "steer me" }]],
+      ["queue", [{ type: "text", text: "later" }]],
+    ],
+  );
+  paused.finish();
+  await active;
+  await waitFor(
+    () =>
+      observed.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status === "aborted",
+    "restored queue projection",
+  );
+});
+
+test("queue restore leaves queue and active work untouched when its event append fails", async (context) => {
+  let markStarted!: () => void;
+  let release!: () => void;
+  let aborted = false;
+  const started = new Promise<void>((resolvePromise) => {
+    markStarted = resolvePromise;
+  });
+  const pause = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
+  });
+  const model: ModelPort = {
+    stream(request) {
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        markStarted();
+        await new Promise<void>((resolvePromise) => {
+          request.signal?.addEventListener(
+            "abort",
+            () => {
+              aborted = true;
+              resolvePromise();
+            },
+            { once: true },
+          );
+          void pause.then(resolvePromise);
+        });
+        if (request.signal?.aborted) {
+          yield { type: "aborted" };
+          return;
+        }
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const { socketPath, cwd, dataDirectory } = await startDaemon(context, model);
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd });
+  const subscription = await subscribeSession(client, created.sessionId);
+  context.after(() => subscription.close());
+  const active = client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "active" }],
+  });
+  await started;
+  const queued = await client.request("session.queue.enqueue", {
+    sessionId: created.sessionId,
+    content: [{ type: "text", text: "keep queued" }],
+    priority: "back",
+  });
+  await waitFor(
+    () =>
+      subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status === "queued",
+    "queued prompt projection",
+  );
+  const logPath = join(dataDirectory, "sessions", `${created.sessionId}.jsonl`);
+  const backupPath = `${logPath}.writable`;
+  await rename(logPath, backupPath);
+  await mkdir(logPath);
+  try {
+    await assert.rejects(
+      client.request("session.queue.restore", {
+        sessionId: created.sessionId,
+        interrupt: true,
+      }),
+    );
+    assert.equal(aborted, false);
+    assert.equal(
+      subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status,
+      "queued",
+    );
+  } finally {
+    await rm(logPath, { recursive: true });
+    await rename(backupPath, logPath);
+    release();
+    await active;
+  }
+});
+
 test("queued prompts become paused after restart and require explicit re-queueing", async (context) => {
   const paused = pausedActivityPort();
   const fixture = await startDaemon(context, paused.port);
@@ -3099,14 +3299,36 @@ test("queued prompts become paused after restart and require explicit re-queuein
   await restarted.start();
   context.after(() => restarted.stop());
   const recovered = await connectUnixClient(fixture.socketPath);
-  context.after(() => recovered.close());
+  const observer = await connectUnixClient(fixture.socketPath, {
+    identity: { kind: "web", version: "0.0.0", instanceId: randomUUID() },
+  });
+  context.after(() => {
+    recovered.close();
+    observer.close();
+  });
   await recovered.request("session.resume", { sessionId: created.sessionId });
   const subscription = await subscribeSession(recovered, created.sessionId);
-  context.after(() => subscription.close());
+  const observedSubscription = await subscribeSession(observer, created.sessionId);
+  context.after(() => Promise.all([subscription.close(), observedSubscription.close()]));
   const pausedItem = subscription.projector.state.queue.find(
     (item) => item.queueItemId === queued.queueItemId,
   );
   assert.equal(pausedItem?.status, "paused");
+  assert.equal(
+    observedSubscription.projector.state.queue.find(
+      (item) => item.queueItemId === queued.queueItemId,
+    )?.status,
+    "paused",
+  );
+
+  const reconnected = await connectUnixClient(fixture.socketPath);
+  context.after(() => reconnected.close());
+  await subscription.reconnect(reconnected);
+  assert.equal(
+    subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+      ?.status,
+    "paused",
+  );
 
   await recovered.request("session.queue.requeue", {
     sessionId: created.sessionId,
@@ -3116,8 +3338,115 @@ test("queued prompts become paused after restart and require explicit re-queuein
   await waitFor(
     () =>
       subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
-        ?.status === "completed",
-    "re-queued prompt completion",
+        ?.status === "completed" &&
+      observedSubscription.projector.state.queue.find(
+        (item) => item.queueItemId === queued.queueItemId,
+      )?.status === "completed",
+    "cross-client re-queued prompt completion",
+  );
+  await assert.rejects(
+    recovered.request("session.queue.requeue", {
+      sessionId: created.sessionId,
+      queueItemId: queued.queueItemId,
+      priority: "back",
+    }),
+    (cause: unknown) =>
+      cause instanceof AxlClientError &&
+      cause.code === "queue_not_paused" &&
+      cause.message === "Only a paused queued prompt can be re-queued",
+  );
+  await assert.rejects(
+    recovered.request("session.queue.requeue", {
+      sessionId: created.sessionId,
+      queueItemId: parseEventId("00000000-0000-4000-8000-000000000999"),
+      priority: "back",
+    }),
+    (cause: unknown) => cause instanceof AxlClientError && cause.code === "unknown_queue_item",
+  );
+});
+
+test("restart recovery preserves later front and back queue ordering", async (context) => {
+  const initialBlock = pausedActivityPort();
+  const fixture = await startDaemon(context, initialBlock.port);
+  const client = await connectUnixClient(fixture.socketPath);
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const active = client
+    .request("session.send", {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "hold initial queue" }],
+    })
+    .catch(() => undefined);
+  await initialBlock.started;
+  const queued = [];
+  for (const text of ["first", "second", "third"]) {
+    queued.push(
+      await client.request("session.queue.enqueue", {
+        sessionId: created.sessionId,
+        content: [{ type: "text", text }],
+        priority: "back",
+      }),
+    );
+  }
+  const initialStop = fixture.daemon.stop();
+  initialBlock.finish();
+  await Promise.allSettled([active, initialStop]);
+  client.close();
+
+  const requeueBlock = pausedActivityPort();
+  const requeueDaemon = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({
+      model: requeueBlock.port,
+      tools: new ToolRegistry(),
+      system: "You are Axl.",
+    }),
+  });
+  await requeueDaemon.start();
+  const requeueClient = await connectUnixClient(fixture.socketPath);
+  await requeueClient.request("session.resume", { sessionId: created.sessionId });
+  const holding = requeueClient
+    .request("session.send", {
+      sessionId: created.sessionId,
+      delivery: "prompt",
+      content: [{ type: "text", text: "hold requeues" }],
+    })
+    .catch(() => undefined);
+  await requeueBlock.started;
+  for (const [index, priority] of [
+    [1, "front"],
+    [0, "back"],
+    [2, "front"],
+  ] as const) {
+    await requeueClient.request("session.queue.requeue", {
+      sessionId: created.sessionId,
+      queueItemId: queued[index]?.queueItemId ?? assert.fail("missing queued item"),
+      priority,
+    });
+  }
+  const requeueStop = requeueDaemon.stop();
+  requeueBlock.finish();
+  await Promise.allSettled([holding, requeueStop]);
+  requeueClient.close();
+
+  const recoveredDaemon = new AxlDaemon({
+    socketPath: fixture.socketPath,
+    dataDirectory: fixture.dataDirectory,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry(), system: "You are Axl." }),
+  });
+  await recoveredDaemon.start();
+  context.after(() => recoveredDaemon.stop());
+  const recovered = await connectUnixClient(fixture.socketPath);
+  context.after(() => recovered.close());
+  await recovered.request("session.resume", { sessionId: created.sessionId });
+  const restored = await recovered.request("session.queue.restore", {
+    sessionId: created.sessionId,
+    interrupt: false,
+  });
+  assert.deepEqual(
+    restored.items.map((item) => item.content.find((part) => part.type === "text")?.text),
+    ["third", "second", "first"],
   );
 });
 

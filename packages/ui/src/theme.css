@@ -1,25 +1,74 @@
 /* SPDX-FileCopyrightText: 2026 Hari Srinivasan */
 /* SPDX-License-Identifier: Apache-2.0 */
 
-@import "@fontsource-variable/inter";
-@import "@fontsource-variable/inter/wght-italic.css";
-
-:root {
+:root,
+:root[data-theme="dark"] {
   color-scheme: dark;
-  font-family: "Inter Variable", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: "SF Pro Text", "Segoe UI Variable", "Helvetica Neue", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+  font-family: var(--font-sans);
   font-synthesis: none;
-  color: #f0f0f2;
-  background: #101011;
-  --bg: #101011;
-  --sidebar: #09090a;
-  --panel: #17171a;
-  --raised: #202024;
-  --selected: #242428;
-  --line: #29292e;
-  --line-soft: #202024;
-  --text: #f0f0f2;
-  --muted: #96969d;
-  --subtle: #626268;
-  --accent: #6267c8;
-  --green: #2fc779;
+  color: #f4f4f5;
+  background: #111113;
+  --bg: #111113;
+  --sidebar: #151517;
+  --panel: #19191c;
+  --raised: #202023;
+  --selected: #29292e;
+  --line: #303036;
+  --line-soft: #252529;
+  --text: #f4f4f5;
+  --text-soft: #dedee3;
+  --muted: #a1a1aa;
+  --subtle: #90909a;
+  --accent: #6d70c9;
+  --accent-strong: #a6a8eb;
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --focus: color-mix(in srgb, var(--accent) 55%, transparent);
+  --green: #43b77b;
+  --amber: #d6b25e;
+  --red: #e4848c;
+  --surface-hover: #1b1b1e;
+  --surface-active: #232327;
+  --hover: var(--surface-hover);
+  --code-bg: #0e0e10;
+  --input-bg: #131315;
+  --glass: rgba(25, 25, 28, 0.88);
+  --scrim: rgba(4, 4, 6, 0.66);
+  --shadow: rgba(0, 0, 0, 0.42);
+  --r-sm: 5px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --fast: 140ms;
+  --medium: 220ms;
+  --dock-motion: 360ms;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: #202126;
+  background: #f7f7f8;
+  --bg: #f7f7f8;
+  --sidebar: #f1f1f3;
+  --panel: #ffffff;
+  --raised: #f5f5f6;
+  --selected: #e9e9ed;
+  --line: #d5d5db;
+  --line-soft: #e5e5e9;
+  --text: #202126;
+  --text-soft: #34353b;
+  --muted: #60616a;
+  --subtle: #63646d;
+  --accent: #575bb6;
+  --accent-strong: #4f53a9;
+  --green: #188653;
+  --surface-hover: #eaeaec;
+  --surface-active: #e2e2e7;
+  --code-bg: #f1f1f3;
+  --input-bg: #ffffff;
+  --glass: rgba(255, 255, 255, 0.9);
+  --scrim: rgba(29, 30, 36, 0.3);
+  --shadow: rgba(37, 38, 45, 0.16);
 }

@@ -373,6 +373,12 @@ export class ConversationProjector {
       case "queue.paused":
         this.updateQueueItem(event.payload.queueItemId, { status: "paused" });
         break;
+      case "queue.restored":
+        for (const item of event.payload.items) {
+          if (item.queueItemId !== undefined)
+            this.updateQueueItem(item.queueItemId, { status: "aborted" });
+        }
+        break;
       case "interrupt.requested":
         if (event.operationId === undefined) {
           throw new ProjectionError(

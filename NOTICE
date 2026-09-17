@@ -13,8 +13,6 @@ Axl uses Marked 18.0.11 as an external dependency for Markdown tokenization. It 
 
 Axl uses highlight.js 11.12.0 as an external dependency for syntax highlighting. It is distributed under its own BSD-3-Clause license.
 
-Axl bundles Inter 5.3.0 through Fontsource. Inter is Copyright 2016 The Inter Project Authors and is distributed under the SIL Open Font License 1.1.
-
 Axl uses grok-mermaid 0.2.2 as an external dependency for Unicode Mermaid rendering. It is distributed under its own Apache-2.0 license.
 
 Axl's generated model catalog includes factual metadata derived from models.dev, retrieved from https://models.dev/api.json. Models.dev is Copyright 2025 models.dev contributors and is distributed under the MIT license.

@@ -17,20 +17,15 @@ import type {
   BlobReference,
   CanonicalEvent,
   InteractionAction,
+  RestoredQueueItem,
   SessionProfile,
   ThinkingLevel,
   UserContent,
 } from "./events.ts";
 import { parseBlobReference, parseEvent, parseUserContent } from "./events.ts";
+import { type ModelRequestSettings, parseModelRequestSettings } from "./model-request.ts";
 import {
   isProviderRpcErrorCode,
-  parseProviderAuthenticationStatus,
-  parseProviderAuthenticationStatusResult,
-  parseProviderCatalogRefreshResult,
-  parseProviderIdParam,
-  parseProviderListResult,
-  parseProviderLoginMethod,
-  parseProviderRpcErrorDetails,
   type ProviderAuthenticationStatusParams,
   type ProviderAuthenticationStatusResult,
   type ProviderCatalogRefreshParams,
@@ -41,9 +36,14 @@ import {
   type ProviderLoginResult,
   type ProviderLogoutParams,
   type ProviderLogoutResult,
+  parseProviderAuthenticationStatus,
+  parseProviderAuthenticationStatusResult,
+  parseProviderCatalogRefreshResult,
+  parseProviderIdParam,
+  parseProviderListResult,
+  parseProviderLoginMethod,
+  parseProviderRpcErrorDetails,
 } from "./provider-management.ts";
-
-import { type ModelRequestSettings, parseModelRequestSettings } from "./model-request.ts";
 
 export const MAX_HISTORY_PAGE_EVENTS = 5_000;
 export const MAX_WIRE_MESSAGE_BYTES = 1024 * 1024;
@@ -646,6 +646,7 @@ export const WIRE_CAPABILITIES = [
   "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
+  "session.queue.restore",
   "session.shell",
   "session.interrupt",
   "session.reload",
@@ -733,6 +734,12 @@ export interface CommandListParams {
 export interface CommandListResult {
   readonly generation: string;
   readonly commands: readonly CommandDescriptor[];
+}
+
+export interface QueueRestoreResult {
+  readonly items: readonly RestoredQueueItem[];
+  readonly interrupted: boolean;
+  readonly operationId?: OperationId;
 }
 
 export interface RpcMethodMap {
@@ -876,6 +883,10 @@ export interface RpcMethodMap {
     };
     readonly result: { readonly queueItemId: EventId; readonly state: "queued" };
   };
+  readonly "session.queue.restore": {
+    readonly params: { readonly sessionId: SessionId; readonly interrupt: boolean };
+    readonly result: QueueRestoreResult;
+  };
   readonly "session.shell": {
     readonly params: {
       readonly sessionId: SessionId;
@@ -999,6 +1010,7 @@ export const RETRYABLE_MUTATION_METHODS = [
   "session.interruptAndDeliver",
   "session.queue.enqueue",
   "session.queue.requeue",
+  "session.queue.restore",
   "session.interrupt",
   "session.reload",
   "session.configure",
@@ -1878,6 +1890,20 @@ export function parseWireRequest(value: unknown): WireRequest {
       },
     };
   }
+  if (method === "session.queue.restore") {
+    exact(params, "request.params", ["sessionId", "interrupt"]);
+    if (typeof params.interrupt !== "boolean") {
+      throw new ProtocolValidationError("request.params.interrupt", "must be a boolean");
+    }
+    return {
+      ...base,
+      method,
+      params: {
+        sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
+        interrupt: params.interrupt,
+      },
+    };
+  }
   if (method === "session.shell") {
     exact(params, "request.params", ["sessionId", "operationId", "command", "excluded"]);
     if (typeof params.excluded !== "boolean") {
@@ -2653,6 +2679,42 @@ export function parseRpcResult<Method extends RpcMethod>(
       queueItemId: parseEventId(result.queueItemId, `${path}.queueItemId`),
       state: result.state,
     };
+  } else if (method === "session.queue.restore") {
+    const result = object(value, path);
+    exact(result, path, ["items", "interrupted", "operationId"]);
+    if (typeof result.interrupted !== "boolean") {
+      throw new ProtocolValidationError(`${path}.interrupted`, "must be a boolean");
+    }
+    parsed = {
+      items: (() => {
+        if (!Array.isArray(result.items)) {
+          throw new ProtocolValidationError(`${path}.items`, "must be an array");
+        }
+        return result.items.map((value, index) => {
+          const itemPath = `${path}.items[${index}]`;
+          const item = object(value, itemPath);
+          exact(item, itemPath, ["queueItemId", "content", "priority", "source"]);
+          if (item.priority !== "front" && item.priority !== "back") {
+            throw new ProtocolValidationError(`${itemPath}.priority`, "must be front or back");
+          }
+          if (item.source !== "queue" && item.source !== "steer" && item.source !== "follow_up") {
+            throw new ProtocolValidationError(`${itemPath}.source`, "is not a valid queue source");
+          }
+          return {
+            ...(item.queueItemId === undefined
+              ? {}
+              : { queueItemId: parseEventId(item.queueItemId, `${itemPath}.queueItemId`) }),
+            content: parseUserContent(item.content, `${itemPath}.content`),
+            priority: item.priority,
+            source: item.source,
+          };
+        });
+      })(),
+      interrupted: result.interrupted,
+      ...(result.operationId === undefined
+        ? {}
+        : { operationId: parseOperationId(result.operationId, `${path}.operationId`) }),
+    };
   } else if (method === "session.shell") {
     const result = object(value, path);
     exact(result, path, ["operationId", "isError", "resultEventId"]);
@@ -2894,6 +2956,7 @@ export const RPC_METHODS = [
   "session.compact",
   "session.queue.enqueue",
   "session.queue.requeue",
+  "session.queue.restore",
   "session.shell",
   "session.interrupt",
   "session.reload",
@@ -3123,6 +3186,7 @@ export const RPC_METHOD_ERROR_CODES = {
     ...MUTATION_ERRORS,
     "content_too_large",
   ],
+  "session.queue.restore": [...SESSION_BASE_ERRORS, ...MUTATION_ERRORS, "content_too_large"],
   "session.shell": [
     ...SESSION_BASE_ERRORS,
     "operation_active",

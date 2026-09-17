@@ -25,6 +25,7 @@ export const EVENT_PRESENTATION_SURFACES = Object.freeze({
   "queue.requeued": "transcript",
   "queue.started": "transcript",
   "queue.paused": "transcript",
+  "queue.restored": "transcript",
   "interrupt.requested": "transcript",
   "interrupt.updated": "paired",
   "user.shell": "transcript",

@@ -55,6 +55,12 @@ export type ThinkingContent = { readonly type: "thinking"; readonly text: string
 export type BlobContent = { readonly type: "blob"; readonly blob: BlobReference };
 export type UserContent = TextContent | BlobContent;
 export type AssistantContent = TextContent | ThinkingContent | BlobContent;
+export type RestoredQueueItem = {
+  readonly queueItemId?: EventId;
+  readonly content: readonly UserContent[];
+  readonly priority: "front" | "back";
+  readonly source: "queue" | "steer" | "follow_up";
+};
 
 export type Usage = {
   readonly inputTokens: number;
@@ -83,6 +89,7 @@ export type EventPayloadMap = {
   "queue.requeued": { readonly queueItemId: EventId; readonly priority: "front" | "back" };
   "queue.started": { readonly queueItemId: EventId };
   "queue.paused": { readonly queueItemId: EventId; readonly reason: "daemon_restart" };
+  "queue.restored": { readonly items: readonly RestoredQueueItem[] };
   "interrupt.requested": {
     readonly state: "queued";
     readonly content: readonly UserContent[];
@@ -399,6 +406,19 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     exact(payload, path, ["queueItemId", "reason"]);
     parseEventId(payload.queueItemId, `${path}.queueItemId`);
     choice(payload.reason, `${path}.reason`, ["daemon_restart"]);
+    return payload;
+  },
+  "queue.restored": (payload, path) => {
+    exact(payload, path, ["items"]);
+    for (const [index, value] of array(payload.items, `${path}.items`).entries()) {
+      const itemPath = `${path}.items[${index}]`;
+      const item = object(value, itemPath);
+      exact(item, itemPath, ["content", "priority", "source"], ["queueItemId"]);
+      if (item.queueItemId !== undefined) parseEventId(item.queueItemId, `${itemPath}.queueItemId`);
+      validateContent(item.content, `${itemPath}.content`, false);
+      choice(item.priority, `${itemPath}.priority`, ["front", "back"]);
+      choice(item.source, `${itemPath}.source`, ["queue", "steer", "follow_up"]);
+    }
     return payload;
   },
   "interrupt.requested": (payload, path) => {

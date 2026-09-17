@@ -179,6 +179,18 @@ Git runs without a shell, with structured arguments, a sanitized environment, di
 
 Workspace and repository generations detect stale views, replacement, and deletion.
 
+## Pane dock
+
+The browser client tiles optional panes in a dock beside the conversation, in the manner of a tiling window manager. Panes keep one fixed top-to-bottom order: browser, files, changes, terminal. Each pane can be opened, closed, resized against its neighbour, or zoomed to fill the dock. The open-pane list and dock width persist through the gateway preference endpoint; tile weights are session-local.
+
+Panes render existing daemon capabilities and add no authority:
+
+- **Files** and **Changes** use the bounded `session.workspace.*` RPCs described above.
+- **Terminal** is a projection of `user.shell` events plus an input that submits `session.shell` through the SDK. It is not a PTY. Output stays in the canonical log and appears in the transcript as well; the pane offers the same include or exclude choice as `!` and `!!` in the composer.
+- **Browser** frames `http`/`https` URLs inside a sandboxed `iframe` with `no-referrer`. Sites that refuse embedding stay blank and can be opened in a new tab; nothing is proxied through the gateway.
+
+Each pane is available only when the daemon grants the capabilities it renders.
+
 ## Shared conversation projection
 
 The framework-neutral projector belongs in `packages/sdk`.
@@ -218,6 +230,29 @@ Session rename is a canonical event. Clone creates an independent daemon session
 The daemon publishes capability-filtered session-catalog invalidations after list-visible metadata and runtime changes. Web clients coalesce those notifications and fetch a new typed session list so another attached TUI, web client, or SDK consumer can rename, create, dispose, or delete a session without leaving stale browser navigation.
 
 Switching sessions replaces the conversation snapshot and clears all prior Explorer, Changes, branch, file, diff, queue, interaction, cursor, and status state before loading the selected session's recorded `cwd`.
+
+## Browser keyboard controls
+
+The browser preserves Pi's model and reasoning shortcuts where browser semantics permit them. It also documents the complete active keymap in **Settings → Keyboard shortcuts**.
+
+| Shortcut | Browser action |
+| --- | --- |
+| `Ctrl+K` or `⌘K` | Open the command palette. |
+| `Ctrl+L` or `⌘L` | Open the searchable, provider-grouped model picker. With no active session, open staged session creation at model selection. |
+| `Shift+Tab` | Cycle the selected model's supported reasoning levels while the composer is focused. Normal reverse tab navigation remains available outside the composer. |
+| `Ctrl+F` or `⌘F` | Search the active transcript. |
+| `Alt+Up` | Restore all pending prompts to the initiating editor. |
+| `Escape` | Close the top browser overlay first. With no overlay, restore pending prompts and interrupt active work. |
+| `Enter` | Send while idle or steer during active work. |
+| `Alt+Enter` | Queue a follow-up. |
+| `Ctrl+Enter` or `⌘Enter` | Interrupt active work and atomically deliver the replacement prompt. |
+| `Shift+Enter` | Insert a newline. |
+
+`/model` opens the same picker as `Ctrl+L`. `/thinking` opens its reasoning section. New Chat and Code sessions use the same picker before their single atomic `session.create` request.
+
+## Web tool configuration
+
+Search and Fetch controls appear only for the `standard` Code profile. Chat, minimal, and exec profiles omit them because those profiles cannot expose the tools. Staged Code creation preserves the daemon default until the user explicitly selects Enabled or Disabled. Active-session controls display only canonical `config.tools` state, submit one typed `session.configure` field, show runtime rebuild progress, and retain failures beside the originating field.
 
 ## Web assets
 

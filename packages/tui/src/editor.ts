@@ -12,7 +12,7 @@ export type EditorKey =
       readonly kind: "select-left" | "select-right" | "select-word-left" | "select-word-right";
     }
   | { readonly kind: "backspace" | "delete" }
-  | { readonly kind: "enter" | "newline" | "follow-up" | "interrupt-deliver" | "redo" }
+  | { readonly kind: "enter" | "newline" | "follow-up" | "interrupt-deliver" | "dequeue" | "redo" }
   | { readonly kind: "tab" | "shift-tab" | "escape" }
   | { readonly kind: "paste-start" | "paste-end" }
   | { readonly kind: "ctrl" | "alt"; readonly char: string }
@@ -84,8 +84,9 @@ export function decodeOneKey(data: string, index: number): { key: EditorKey; nex
       const next = index + sequence.length;
       const modifier = Number(argument.split(";").at(-1) ?? 1);
       const shift = modifier === 2 || modifier === 4 || modifier === 6 || modifier === 8;
+      const alt = modifier === 3 || modifier === 4 || modifier === 7 || modifier === 8;
       const ctrl = modifier === 5 || modifier === 6 || modifier === 7 || modifier === 8;
-      if (final === "A") return { key: { kind: "up" }, next };
+      if (final === "A") return { key: { kind: alt ? "dequeue" : "up" }, next };
       if (final === "B") return { key: { kind: "down" }, next };
       if (final === "C") {
         return {

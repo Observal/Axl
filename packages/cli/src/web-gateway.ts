@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createConnection, type Socket } from "node:net";
 import { extname, join, resolve, sep } from "node:path";
@@ -15,6 +15,7 @@ import {
   parseProviderIdParam,
   parseProviderLoginMethod,
   parseSessionId,
+  parseWireRequest,
   type SessionOpenResult,
   WIRE_PROTOCOL_VERSION,
 } from "@axl/protocol";
@@ -25,7 +26,7 @@ import { type WebSocket, WebSocketServer } from "ws";
 const SECURITY_HEADERS = {
   "cache-control": "no-store",
   "content-security-policy":
-    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; frame-src http: https:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-resource-policy": "same-origin",
   "referrer-policy": "no-referrer",
@@ -50,23 +51,51 @@ export interface WebGatewayOptions {
   readonly providerHost?: TrustedProviderHost;
   readonly launchToken?: Buffer;
   readonly pathToken?: Buffer;
+  /** Test seams may shorten, but never widen, the fixed 60-second attachment idle limit. */
+  readonly webSocketIdleTimeoutMs?: number;
 }
+
+const WEB_PANE_IDS = ["browser", "files", "changes", "terminal"] as const;
+type WebPaneId = (typeof WEB_PANE_IDS)[number];
 
 export interface WebPreferences {
   readonly sidebarWidth: number;
-  readonly changesWidth: number;
+  readonly dockWidth: number;
   readonly sidebarCollapsed: boolean;
   readonly changesView: "files" | "all";
+  readonly panes: readonly WebPaneId[];
 }
 
 const MAX_WEB_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MAX_WORKSPACE_REVIEW_DIFFS = 100;
 
 const DEFAULT_WEB_PREFERENCES: WebPreferences = {
   sidebarWidth: 264,
-  changesWidth: 680,
+  dockWidth: 680,
   sidebarCollapsed: false,
   changesView: "files",
+  panes: ["browser", "files"],
 };
+
+function isWorkspaceDiffRequest(text: string): boolean {
+  try {
+    return parseWireRequest(JSON.parse(text)).method === "session.workspace.diff";
+  } catch {
+    return false;
+  }
+}
+
+function parsePaneIds(value: unknown): readonly WebPaneId[] {
+  if (!Array.isArray(value) || value.length > WEB_PANE_IDS.length)
+    throw new Error("Web preferences are invalid");
+  const seen = new Set<WebPaneId>();
+  for (const pane of value) {
+    if (!(WEB_PANE_IDS as readonly unknown[]).includes(pane) || seen.has(pane as WebPaneId))
+      throw new Error("Web preferences are invalid");
+    seen.add(pane as WebPaneId);
+  }
+  return WEB_PANE_IDS.filter((pane) => seen.has(pane));
+}
 
 function parsePreferences(value: unknown): WebPreferences {
   if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -74,19 +103,26 @@ function parsePreferences(value: unknown): WebPreferences {
   const record = value as Record<string, unknown>;
   if (
     Object.keys(record).some(
-      (key) => !["sidebarWidth", "changesWidth", "sidebarCollapsed", "changesView"].includes(key),
+      (key) =>
+        !["sidebarWidth", "dockWidth", "sidebarCollapsed", "changesView", "panes"].includes(key),
     ) ||
     !Number.isInteger(record.sidebarWidth) ||
     Number(record.sidebarWidth) < 200 ||
     Number(record.sidebarWidth) > 420 ||
-    !Number.isInteger(record.changesWidth) ||
-    Number(record.changesWidth) < 420 ||
-    Number(record.changesWidth) > 900 ||
+    !Number.isInteger(record.dockWidth) ||
+    Number(record.dockWidth) < 380 ||
+    Number(record.dockWidth) > 1200 ||
     typeof record.sidebarCollapsed !== "boolean" ||
     (record.changesView !== "files" && record.changesView !== "all")
   )
     throw new Error("Web preferences are invalid");
-  return record as unknown as WebPreferences;
+  return {
+    sidebarWidth: record.sidebarWidth as number,
+    dockWidth: record.dockWidth as number,
+    sidebarCollapsed: record.sidebarCollapsed,
+    changesView: record.changesView,
+    panes: parsePaneIds(record.panes),
+  };
 }
 
 export interface WebGateway {
@@ -301,6 +337,22 @@ function providerLoginCancellation(bytes: Buffer): string {
   return providerLoginRequestId(request.requestId);
 }
 
+function projectFolderRequest(bytes: Buffer): string {
+  const value = JSON.parse(bytes.toString("utf8")) as unknown;
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new Error("Invalid project folder request");
+  const request = value as Record<string, unknown>;
+  if (
+    Object.keys(request).length !== 1 ||
+    typeof request.path !== "string" ||
+    request.path.length === 0 ||
+    request.path.length > 4096 ||
+    request.path.includes("\0")
+  )
+    throw new Error("Invalid project folder request");
+  return request.path;
+}
+
 function send(
   response: ServerResponse,
   status: number,
@@ -386,18 +438,31 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
   const launchToken = options.launchToken ?? randomBytes(32);
   const pathToken = options.pathToken ?? randomBytes(16);
   const browserCredential = randomBytes(32);
+  const webSocketIdleTimeoutMs = Math.min(options.webSocketIdleTimeoutMs ?? 60_000, 60_000);
+  if (!Number.isSafeInteger(webSocketIdleTimeoutMs) || webSocketIdleTimeoutMs < 1)
+    throw new Error("WebSocket idle timeout must be a positive integer");
   const prefix = `/a/${pathToken.toString("base64url")}/`;
   const cookieName = "axl_web";
   let launchAvailable = true;
   const launchExpiresAt = Date.now() + 60_000;
   const credentialExpiresAt = Date.now() + 12 * 60 * 60 * 1_000;
   const preferencesPath = join(options.stateDirectory, "web-preferences.json");
-  let preferences = await readFile(preferencesPath, "utf8")
-    .then((text) => parsePreferences(JSON.parse(text)))
-    .catch((error: NodeJS.ErrnoException) => {
+  let preferences = await readFile(preferencesPath, "utf8").then(
+    (text) => {
+      try {
+        return parsePreferences(JSON.parse(text));
+      } catch (cause) {
+        throw new Error(
+          `Stored web preferences at ${preferencesPath} are invalid; delete the file to reset them`,
+          { cause },
+        );
+      }
+    },
+    (error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return DEFAULT_WEB_PREFERENCES;
       throw error;
-    });
+    },
+  );
   let preferenceWrites = Promise.resolve();
   let providerLogin:
     | { readonly requestId: string; readonly controller: AbortController }
@@ -432,6 +497,8 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
   const validOrigin = (request: IncomingMessage): boolean =>
     request.headers.host === expectedHost && request.headers.origin === expectedOrigin;
   const server = createServer(async (request, response) => {
+    request.once("end", () => request.socket.setTimeout(0));
+    response.once("finish", () => request.socket.setTimeout(5_000));
     let relative = "";
     try {
       if (
@@ -472,8 +539,44 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
             cwd: options.cwd,
             webSocketPath: `${prefix}ws`,
             preferences,
-            hostCapabilities: options.providerHost === undefined ? [] : ["provider.auth.login"],
+            hostCapabilities: [
+              "project.folder.validate",
+              ...(options.providerHost === undefined ? [] : ["provider.auth.login"]),
+            ],
           }),
+          "application/json; charset=utf-8",
+        );
+      }
+      if (request.method === "POST" && relative === "host/project-folder/validate") {
+        if (!validOrigin(request) || !authorized(request))
+          return send(response, 401, "Authentication required");
+        const requested = projectFolderRequest(await requestBody(request, 8192));
+        let canonical: string;
+        try {
+          canonical = await realpath(resolve(options.cwd, requested));
+          if (!(await stat(canonical)).isDirectory()) {
+            return send(
+              response,
+              200,
+              JSON.stringify({ valid: false, error: "Choose a folder, not a file" }),
+              "application/json; charset=utf-8",
+            );
+          }
+        } catch {
+          return send(
+            response,
+            200,
+            JSON.stringify({
+              valid: false,
+              error: "Project folder does not exist or cannot be accessed",
+            }),
+            "application/json; charset=utf-8",
+          );
+        }
+        return send(
+          response,
+          200,
+          JSON.stringify({ valid: true, path: canonical }),
           "application/json; charset=utf-8",
         );
       }
@@ -608,11 +711,15 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
     }
   });
 
+  server.headersTimeout = 5_000;
+  server.requestTimeout = 5_000;
   server.on("connection", (socket) => {
+    socket.setTimeout(5_000, () => socket.destroy());
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
   });
   server.on("upgrade", (request, socket, head) => {
+    (socket as Socket).setTimeout(0);
     if (
       request.url !== `${prefix}ws` ||
       !validOrigin(request) ||
@@ -633,22 +740,51 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
     let buffer = "";
     const decoder = new StringDecoder("utf8");
     let messages = 0;
-    let windowStarted = Date.now();
+    let workspaceDiffs = 0;
+    let burstTokens = 20;
+    let lastMessageAt = performance.now();
+    let windowStarted = performance.now();
+    let pendingMessages = 0;
+    let pendingBytes = 0;
+    let idleTimer = setTimeout(
+      () => webSocket.close(1008, "Heartbeat timeout"),
+      webSocketIdleTimeoutMs,
+    );
+    const resetIdleTimer = (): void => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(
+        () => webSocket.close(1008, "Heartbeat timeout"),
+        webSocketIdleTimeoutMs,
+      );
+    };
     const close = (): void => {
+      clearTimeout(idleTimer);
       webSockets.delete(webSocket);
       daemon.destroy();
       if (webSocket.readyState < 2) webSocket.close(1000, "Attachment closed");
     };
     webSocket.on("message", (data, binary) => {
-      if (binary || Buffer.byteLength(data.toString()) > MAX_WIRE_MESSAGE_BYTES)
+      resetIdleTimer();
+      const text = data.toString();
+      if (binary || Buffer.byteLength(text) > MAX_WIRE_MESSAGE_BYTES)
         return webSocket.close(1009, "Text message limit exceeded");
-      const now = Date.now();
+      const now = performance.now();
       if (now - windowStarted > 10_000) {
         windowStarted = now;
         messages = 0;
+        workspaceDiffs = 0;
       }
-      if (++messages > 100) return webSocket.close(1008, "Rate limit exceeded");
-      daemon.write(data.toString());
+      if (isWorkspaceDiffRequest(text)) {
+        if (++workspaceDiffs > MAX_WORKSPACE_REVIEW_DIFFS)
+          return webSocket.close(1008, "Rate limit exceeded");
+      } else {
+        burstTokens = Math.min(20, burstTokens + ((now - lastMessageAt) * 10) / 1_000);
+        lastMessageAt = now;
+        if (++messages > 100 || burstTokens < 1)
+          return webSocket.close(1008, "Rate limit exceeded");
+        burstTokens -= 1;
+      }
+      daemon.write(text);
     });
     daemon.on("data", (chunk) => {
       buffer += decoder.write(chunk);
@@ -658,12 +794,19 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
+        const lineBytes = Buffer.byteLength(line);
         if (
-          Buffer.byteLength(line) > MAX_WIRE_MESSAGE_BYTES ||
-          webSocket.bufferedAmount > 4 * 1024 * 1024
+          lineBytes > MAX_WIRE_MESSAGE_BYTES ||
+          pendingMessages >= 1_024 ||
+          pendingBytes + lineBytes > 4 * 1024 * 1024
         )
           return webSocket.close(1009, "Attachment is too slow");
-        webSocket.send(line);
+        pendingMessages += 1;
+        pendingBytes += lineBytes;
+        webSocket.send(line, () => {
+          pendingMessages -= 1;
+          pendingBytes -= lineBytes;
+        });
       }
     });
     daemon.once("error", () => webSocket.close(1011, "Daemon connection failed"));

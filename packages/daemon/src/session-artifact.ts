@@ -265,6 +265,17 @@ function remapEvents(
       event.type === "queue.paused"
     ) {
       payload.queueItemId = remapReference(eventIds, payload.queueItemId, "queue item");
+    } else if (event.type === "queue.restored") {
+      if (!Array.isArray(payload.items)) throw invalidArtifact("Queue references are invalid");
+      payload.items = payload.items.map((value) => {
+        if (typeof value !== "object" || value === null || Array.isArray(value)) {
+          throw invalidArtifact("Queue restore item is invalid");
+        }
+        const item = value as Record<string, JsonValue>;
+        return item.queueItemId === undefined
+          ? item
+          : { ...item, queueItemId: remapReference(eventIds, item.queueItemId, "queue item") };
+      });
     } else if (event.type === "context.compacted") {
       if (!Array.isArray(payload.replacedEventIds)) {
         throw invalidArtifact("Compaction references are invalid");

@@ -4,14 +4,6 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-
-import {
-  AxlClient,
-  AxlClientError,
-  type AxlTransport,
-  ProviderClientError,
-  type AxlTransportFactory,
-} from "../src/index.ts";
 import {
   type CapabilityId,
   EVENT_FORMAT_VERSION,
@@ -21,6 +13,13 @@ import {
   WIRE_CAPABILITIES,
   WIRE_PROTOCOL_VERSION,
 } from "@axl/protocol";
+import {
+  AxlClient,
+  AxlClientError,
+  type AxlTransport,
+  type AxlTransportFactory,
+  ProviderClientError,
+} from "../src/index.ts";
 
 class FakeTransport implements AxlTransport {
   messages: unknown[] = [];
@@ -124,6 +123,24 @@ async function connect(
   assert.ok(transport);
   return { client, transport };
 }
+
+test("rejects missing capabilities before dispatch", async () => {
+  const { client, transport } = await connect(new Factory([["session.list"]]));
+  await assert.rejects(
+    client.request("session.interrupt", {
+      sessionId: parseSessionId("123e4567-e89b-42d3-a456-426614174000"),
+    }),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "unsupported_capability" &&
+      error.message.includes("session.interrupt"),
+  );
+  assert.deepEqual(
+    transport.messages.map((message) => (message as { method: string }).method),
+    ["connection.initialize"],
+  );
+  client.close();
+});
 
 test("initializes exactly once and creates keys only for retryable mutations", async () => {
   const { client, transport } = await connect();

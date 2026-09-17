@@ -3,7 +3,7 @@
 
 import { renderDialog } from "./dialog.ts";
 import { decodeOneKey } from "./editor.ts";
-import type { CursorPlacement } from "./render.ts";
+import { type CursorPlacement, sanitizeTerminalText } from "./render.ts";
 import type { Palette } from "./transcript.ts";
 
 export interface LoginDialogField {
@@ -88,6 +88,13 @@ export class LoginDialog {
     if (this.verifying) return undefined;
     const field = this.fields[this.active] as FieldState;
     return { row: 5, column: 4 + field.value.length };
+  }
+
+  paste(text: string): void {
+    if (this.verifying) return;
+    const field = this.fields[this.active] as FieldState;
+    field.value += sanitizeTerminalText(text).slice(0, Math.max(0, 16_384 - field.value.length));
+    this.options.refresh();
   }
 
   handleKey(data: string): void {
