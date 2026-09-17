@@ -297,6 +297,7 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
       }
       const operation = derivedId(envelope.operationId, 0x47);
       const logical = uuidBytes(envelope.logicalMessageId);
+      const acknowledgement = derivedId(envelope.logicalMessageId, 0x48);
       try {
         await accept.call(
           this.options.endpoint,
@@ -305,6 +306,7 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
           BigInt(envelope.hostedGrantGeneration),
           envelope.ciphertext,
         );
+        await this.options.endpoint.acknowledgeOutbox(acknowledgement, logical);
         return {
           authenticatedPeerId: this.options.daemonDeviceId,
           plaintext: new Uint8Array(),
@@ -313,13 +315,17 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
       } finally {
         operation.fill(0);
         logical.fill(0);
+        acknowledgement.fill(0);
       }
     }
     if (envelope.messageClass === "commit") {
       const operation = derivedId(envelope.operationId, 0x45);
-      const readyLogical = derivedId(envelope.logicalMessageId, 0x46);
+      const readyLogical = uuidBytes(envelope.operationId);
+      const proposalOperation = uuidBytes(envelope.logicalMessageId);
+      const proposalAcknowledgement = derivedId(envelope.logicalMessageId, 0x46);
       try {
         await this.applyUpdateCommit(opaqueEnvelope, uuidText(operation), uuidText(readyLogical));
+        await this.options.endpoint.acknowledgeOutbox(proposalAcknowledgement, proposalOperation);
         return {
           authenticatedPeerId: this.options.daemonDeviceId,
           plaintext: new Uint8Array(),
@@ -328,6 +334,8 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
       } finally {
         operation.fill(0);
         readyLogical.fill(0);
+        proposalOperation.fill(0);
+        proposalAcknowledgement.fill(0);
       }
     }
     if (envelope.messageClass !== "application_delivery") {

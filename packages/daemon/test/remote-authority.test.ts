@@ -181,6 +181,7 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
   const epochLogical = parseOperationId("44444444-4444-4444-8444-444444444444");
   const accepted: string[] = [];
   const acknowledgements: Uint8Array[] = [];
+  const outboxAcknowledgements: Uint8Array[] = [];
   const endpoint: NativeDaemonE2eeEndpoint = {
     async prepareApplication() {
       throw new Error("not used");
@@ -218,8 +219,14 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
         ciphertext: Uint8Array.of(10),
       };
     },
-    async acknowledgeOutbox() {
-      throw new Error("not used");
+    async acknowledgeOutbox(_operationId, targetOperationId) {
+      outboxAcknowledgements.push(targetOperationId.slice());
+      return {
+        operationId: targetOperationId,
+        logicalMessageId: targetOperationId,
+        messageClass: "commit",
+        ciphertext: new Uint8Array(),
+      };
     },
     async acknowledgeReceive(operationId) {
       acknowledgements.push(operationId.slice());
@@ -266,6 +273,9 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
   });
   assert.deepEqual(accepted, ["proposal", "commit", "epoch_ready", "confirmation"]);
   assert.equal(acknowledgements.length, 2);
+  assert.deepEqual(outboxAcknowledgements, [
+    Uint8Array.from(Buffer.from(epochLogical.replaceAll("-", ""), "hex")),
+  ]);
   assert.equal(sent.length, 2);
   assert.equal(parseRemoteE2eeEnvelope(sent[1] ?? new Uint8Array()).messageClass, "resync_control");
 });
