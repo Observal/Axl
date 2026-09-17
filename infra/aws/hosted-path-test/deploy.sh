@@ -17,6 +17,7 @@ fi
 
 account="$(aws sts get-caller-identity --profile "$profile" --query Account --output text)"
 state_bucket="axl-terraform-state-${account}-${region}"
+lock_table="axl-terraform-locks-${region}"
 
 if ! aws s3api head-bucket --profile "$profile" --bucket "$state_bucket" >/dev/null 2>&1; then
   aws s3api create-bucket \
@@ -38,6 +39,19 @@ if ! aws s3api head-bucket --profile "$profile" --bucket "$state_bucket" >/dev/n
     --profile "$profile" \
     --bucket "$state_bucket" \
     --versioning-configuration Status=Enabled
+fi
+
+if ! aws dynamodb describe-table \
+  --profile "$profile" --region "$region" --table-name "$lock_table" >/dev/null 2>&1; then
+  aws dynamodb create-table \
+    --profile "$profile" \
+    --region "$region" \
+    --table-name "$lock_table" \
+    --billing-mode PAY_PER_REQUEST \
+    --attribute-definitions AttributeName=LockID,AttributeType=S \
+    --key-schema AttributeName=LockID,KeyType=HASH >/dev/null
+  aws dynamodb wait table-exists \
+    --profile "$profile" --region "$region" --table-name "$lock_table"
 fi
 
 if ! aws secretsmanager describe-secret \
@@ -74,7 +88,7 @@ terraform -chdir="$stack" init -reconfigure \
   -backend-config="bucket=$state_bucket" \
   -backend-config="key=hosted-path/deployment-test.tfstate" \
   -backend-config="region=$region" \
-  -backend-config="use_lockfile=true"
+  -backend-config="dynamodb_table=$lock_table"
 terraform -chdir="$stack" apply -auto-approve \
   -target=aws_ecr_repository.control_plane \
   -target=aws_ecr_repository.relay \
