@@ -29,6 +29,8 @@ import {
   witnessBytesEqual,
 } from "@axl/protocol";
 
+import { HostedWitnessClient } from "../../../packages/sdk/src/witness.ts";
+
 import {
   type CanonicalWitnessReceipt,
   createControlPlaneHandler,
@@ -1107,6 +1109,78 @@ test("serves the bounded authenticated binary witness route", async (context) =>
     body: Buffer.from(register(endpoint)),
   });
   assert.equal(unauthorized.status, 401);
+});
+
+test("local three-replica gateway completes the SDK witness continuation", async (context) => {
+  const endpoint = endpointFixture();
+  const service = await harness();
+  const request = register(endpoint);
+  const tickets = new RelayTicketService({
+    store: new InMemoryRelayTicketStore(),
+    authorizer: {
+      async currentGeneration() {
+        return undefined;
+      },
+    },
+    proofVerifier: {
+      async verify() {
+        return false;
+      },
+    },
+    relayUrl: "wss://relay.invalid/v1/connect",
+  });
+  const server = createServer(
+    createControlPlaneHandler({
+      tickets,
+      witness: service.gateway,
+      publicAuthentication: {
+        async authenticate(candidate) {
+          return candidate.headers.authorization === "Bearer local-witness"
+            ? principal(endpoint)
+            : undefined;
+        },
+      },
+      internalAuthentication: {
+        async authenticate() {
+          return false;
+        },
+      },
+    }),
+  );
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  context.after(() => server.close());
+  const address = server.address();
+  assert(address !== null && typeof address !== "string");
+  const operationId = parseWitnessRequest(request).operationId;
+  const exactResult = new TextEncoder().encode("locally witnessed result");
+  let continuationCalls = 0;
+  const client = new HostedWitnessClient({
+    controlPlaneOrigin: `http://127.0.0.1:${address.port}`,
+    allowInsecureLoopbackForTests: true,
+    authenticationHeaders: async () => ({ authorization: "Bearer local-witness" }),
+  });
+  const result = await client.complete({
+    operationId,
+    witnessRequest: request,
+    requestHash: createHash("sha384").update(request).digest(),
+    status: "pending_quorum",
+    async continueWitness(receivedOperationId, certificate) {
+      continuationCalls += 1;
+      assert.deepEqual(receivedOperationId, operationId);
+      assert.equal(
+        parseAndVerifyWitnessCertificate(request, certificate, service.trust),
+        "registered",
+      );
+      return exactResult.slice();
+    },
+  });
+  assert.deepEqual(result, exactResult);
+  assert.equal(continuationCalls, 1);
+  assert.deepEqual(
+    service.signers.map((signer) => signer.calls),
+    [1, 1, 1],
+  );
 });
 
 test("rejects credential replacement, wrong fingerprint, and endpoint signature changes", async () => {

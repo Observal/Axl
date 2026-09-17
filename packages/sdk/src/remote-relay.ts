@@ -714,6 +714,8 @@ export class RemoteRelayConnection {
 export interface AuthenticatedRemotePayload {
   readonly authenticatedPeerId: DeviceId;
   readonly plaintext: Uint8Array;
+  /** Commits receive acknowledgement after the authenticated payload has been accepted locally. */
+  readonly acknowledge?: () => Promise<void>;
 }
 
 export interface RemotePayloadOpener {
@@ -927,6 +929,7 @@ export class RemoteHostedDelivery {
       this.publish({ requestId: message.requestId, state: "failed" });
     }
     for (const listener of this.messageListeners) listener(message);
+    await opened.acknowledge?.();
   }
 
   private publish(update: RemoteDeliveryUpdate): void {
