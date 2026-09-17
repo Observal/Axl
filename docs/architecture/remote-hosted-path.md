@@ -15,7 +15,7 @@ The deterministic fake E2EE adapter remains under protocol test support for tran
 
 A durable outbox record stores a stable opaque crypto-session identifier. It never stores a relay route. The SDK resolves the currently advertised daemon route immediately before each transport attempt. A reconnect therefore changes the transport attempt ID and route while retaining byte-identical prepared ciphertext, request ID, and daemon idempotency key.
 
-The crypto-session identifier is an integration seam, not an OpenMLS state format. Person 1 owns the final destination identity contract and the transaction that advances cryptographic state and inserts immutable ciphertext. The current `OpaqueOutboxStore` remains fake-E2EE scaffolding and must not be treated as the production OpenMLS transaction.
+The crypto-session identifier is an integration seam, not an OpenMLS state format. The native endpoint owns the transaction that advances cryptographic state and inserts immutable ciphertext. `NativeEndpointOutbox` projects those records into relay attempts and recovers them after restart. `OpaqueOutboxStore` remains test scaffolding only.
 
 ## SDK delivery boundary
 
@@ -53,9 +53,9 @@ The selected endpoint direction is revision 1 of the Axl-private `axl-e2ee-mls-p
 
 This document defines no OpenMLS fields, algorithms, validation rules, storage representation, or transaction implementation. The approved [OpenMLS RFC](remote-e2ee-openmls.md) owns those decisions. Session 40 supplies the transport-independent core and prepared-envelope transaction. Session 50 supplies mandatory browser/WASM persistence and cross-platform fixtures before real E2EE integration can enable remote web.
 
-## Authority audit gate
+## Authority audit
 
-The authority store does not yet emit a complete security-audit stream. Before real E2EE or ordinary-session access is enabled, a reviewed daemon-owned audit sink must durably record bounded events for:
+The authority store now atomically persists a bounded audit sequence with its authority state. It records:
 
 - local device registration
 - local scope narrowing
@@ -63,7 +63,7 @@ The authority store does not yet emit a complete security-audit stream. Before r
 - local and hosted revocation
 - failed authorization by stable reason code
 
-Audit records may contain installation/device identifiers, generations, scope names, timestamps, and reason codes. They must not contain credentials, relay tickets, possession proofs, ciphertext, key material, plaintext request bodies, prompts, or sensitive parameters. Audit persistence and authority mutation ordering must be defined before implementation; this checkpoint does not add a non-atomic best-effort sink.
+Audit records may contain installation/device identifiers, generations, scope names, timestamps, and reason codes. They must not contain credentials, relay tickets, possession proofs, ciphertext, key material, plaintext request bodies, prompts, or sensitive parameters. Audit entries and authority mutations share one durable replacement. Denied authorization is persisted before the failure is returned. The store fails closed when its bounded audit capacity is exhausted.
 
 ## Remaining gates
 
@@ -72,6 +72,5 @@ Before production remote control:
 - Person 1 must provide the reviewed OpenMLS prepared-envelope transaction and browser/WASM persistence strategy.
 - MLS application, Update, commit, and epoch-ready delivery classes need an ordered priority contract.
 - Production identity, datastore, workload authentication, quotas, deployment, and TLS termination must be selected.
-- The authority audit gate above must be implemented.
 - Permission lifecycle, action-digest binding, policy generations, and race resolution must be implemented and reviewed.
 - Ordinary-session remote exposure must receive an explicit enablement review.
