@@ -15,10 +15,11 @@ import {
   type RemoteDeviceScope,
 } from "@axl/protocol";
 
-const AUTHORITY_FORMAT_VERSION = 1 as const;
+const AUTHORITY_FORMAT_VERSION = 2 as const;
 const AUTHORITY_FILE_NAME = "remote-authority.json";
 const MAX_REMOTE_AUTHORITY_BYTES = 1024 * 1024;
 const MAX_REMOTE_DEVICES = 256;
+const MAX_AUTHORITY_AUDIT_EVENTS = 4_096;
 
 interface GrantState {
   readonly generation: number;
@@ -33,10 +34,32 @@ interface DeviceAuthorityRecord {
   readonly hosted?: GrantState;
 }
 
+export type RemoteAuthorityAuditCode =
+  | "device_registered"
+  | "local_grant_narrowed"
+  | "hosted_grant_narrowed"
+  | "local_device_revoked"
+  | "hosted_device_revoked"
+  | "authorization_denied";
+
+type RemoteAuthorityAuditDraft = Omit<RemoteAuthorityAuditEvent, "sequence">;
+
+export interface RemoteAuthorityAuditEvent {
+  readonly sequence: number;
+  readonly occurredAt: number;
+  readonly code: RemoteAuthorityAuditCode;
+  readonly actorDeviceId: DeviceId;
+  readonly localGeneration?: number;
+  readonly hostedGeneration?: number;
+  readonly scope?: RemoteDeviceScope;
+  readonly reason?: RemoteAuthorityErrorCode;
+}
+
 interface PersistedAuthorityState {
   readonly version: typeof AUTHORITY_FORMAT_VERSION;
   readonly installationId: InstallationId;
   readonly devices: readonly DeviceAuthorityRecord[];
+  readonly audit: readonly RemoteAuthorityAuditEvent[];
 }
 
 export interface RemoteDeviceAuthoritySnapshot {
@@ -76,6 +99,19 @@ export type RemoteAuthorityErrorCode =
   | "device_identity_mismatch"
   | "remote_method_forbidden"
   | "unsafe_remote_forbidden";
+
+const REMOTE_AUTHORITY_ERROR_CODES: readonly RemoteAuthorityErrorCode[] = [
+  "unknown_device",
+  "device_revoked",
+  "hosted_grant_missing",
+  "scope_forbidden",
+  "grant_conflict",
+  "stale_grant_generation",
+  "device_limit_reached",
+  "device_identity_mismatch",
+  "remote_method_forbidden",
+  "unsafe_remote_forbidden",
+];
 
 export class RemoteAuthorityError extends Error {
   readonly code: RemoteAuthorityErrorCode;
@@ -134,17 +170,76 @@ function parseGrant(value: unknown, path: string): GrantState {
     scopes: parseRemoteDeviceScopes(grant.scopes, `${path}.scopes`),
     ...(grant.revokedAt === undefined
       ? {}
-      : { revokedAt: nonNegativeInteger(grant.revokedAt, `${path}.revokedAt`) }),
+      : {
+          revokedAt: nonNegativeInteger(grant.revokedAt, `${path}.revokedAt`),
+        }),
+  };
+}
+
+function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEvent {
+  const path = `remote authority.audit[${index}]`;
+  const event = object(value, path);
+  exact(
+    event,
+    path,
+    ["sequence", "occurredAt", "code", "actorDeviceId"],
+    ["localGeneration", "hostedGeneration", "scope", "reason"],
+  );
+  const codes: readonly RemoteAuthorityAuditCode[] = [
+    "device_registered",
+    "local_grant_narrowed",
+    "hosted_grant_narrowed",
+    "local_device_revoked",
+    "hosted_device_revoked",
+    "authorization_denied",
+  ];
+  if (typeof event.code !== "string" || !codes.includes(event.code as RemoteAuthorityAuditCode)) {
+    throw new Error(`${path}.code is invalid`);
+  }
+  const scopes =
+    event.scope === undefined
+      ? undefined
+      : parseRemoteDeviceScopes([event.scope], `${path}.scope`)[0];
+  const reason = event.reason;
+  if (
+    reason !== undefined &&
+    (typeof reason !== "string" ||
+      !REMOTE_AUTHORITY_ERROR_CODES.includes(reason as RemoteAuthorityErrorCode))
+  ) {
+    throw new Error(`${path}.reason is invalid`);
+  }
+  return {
+    sequence: positiveInteger(event.sequence, `${path}.sequence`),
+    occurredAt: nonNegativeInteger(event.occurredAt, `${path}.occurredAt`),
+    code: event.code as RemoteAuthorityAuditCode,
+    actorDeviceId: parseDeviceId(event.actorDeviceId, `${path}.actorDeviceId`),
+    ...(event.localGeneration === undefined
+      ? {}
+      : {
+          localGeneration: positiveInteger(event.localGeneration, `${path}.localGeneration`),
+        }),
+    ...(event.hostedGeneration === undefined
+      ? {}
+      : {
+          hostedGeneration: positiveInteger(event.hostedGeneration, `${path}.hostedGeneration`),
+        }),
+    ...(scopes === undefined ? {} : { scope: scopes }),
+    ...(reason === undefined ? {} : { reason: reason as RemoteAuthorityErrorCode }),
   };
 }
 
 function parseAuthorityState(value: unknown): PersistedAuthorityState {
   const state = object(value, "remote authority");
-  exact(state, "remote authority", ["version", "installationId", "devices"]);
+  exact(state, "remote authority", ["version", "installationId", "devices", "audit"]);
   if (state.version !== AUTHORITY_FORMAT_VERSION) {
     throw new Error(`remote authority.version must be ${AUTHORITY_FORMAT_VERSION}`);
   }
   if (!Array.isArray(state.devices)) throw new Error("remote authority.devices must be an array");
+  if (!Array.isArray(state.audit) || state.audit.length > MAX_AUTHORITY_AUDIT_EVENTS) {
+    throw new Error(
+      `remote authority.audit must contain at most ${MAX_AUTHORITY_AUDIT_EVENTS} entries`,
+    );
+  }
   if (state.devices.length > MAX_REMOTE_DEVICES) {
     throw new Error(`remote authority.devices must not exceed ${MAX_REMOTE_DEVICES} entries`);
   }
@@ -165,10 +260,15 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
         : { hosted: parseGrant(device.hosted, `${path}.hosted`) }),
     };
   });
+  const audit = state.audit.map(parseAuditEvent);
+  for (const [index, event] of audit.entries()) {
+    if (event.sequence !== index + 1) throw new Error("remote authority.audit sequence is invalid");
+  }
   return {
     version: AUTHORITY_FORMAT_VERSION,
     installationId: parseInstallationId(state.installationId, "remote authority.installationId"),
     devices,
+    audit,
   };
 }
 
@@ -257,6 +357,7 @@ export class RemoteDeviceAuthorityStore {
   readonly path: string;
   readonly installationId: InstallationId;
   private devices: Map<DeviceId, DeviceAuthorityRecord>;
+  private audit: RemoteAuthorityAuditEvent[];
   private readonly revocationListeners = new Set<(deviceId: DeviceId) => void>();
   private tail: Promise<void> = Promise.resolve();
 
@@ -264,6 +365,7 @@ export class RemoteDeviceAuthorityStore {
     this.path = path;
     this.installationId = state.installationId;
     this.devices = new Map(state.devices.map((record) => [record.deviceId, record]));
+    this.audit = [...state.audit];
   }
 
   static async open(
@@ -277,6 +379,7 @@ export class RemoteDeviceAuthorityStore {
         version: AUTHORITY_FORMAT_VERSION,
         installationId,
         devices: [],
+        audit: [],
       };
       await writeAtomic(path, initial);
       return new RemoteDeviceAuthorityStore(path, initial);
@@ -293,6 +396,10 @@ export class RemoteDeviceAuthorityStore {
       throw new Error("Remote authority installation identity does not match this daemon");
     }
     return new RemoteDeviceAuthorityStore(path, state);
+  }
+
+  auditEntries(): readonly RemoteAuthorityAuditEvent[] {
+    return this.audit.map((event) => ({ ...event }));
   }
 
   snapshot(deviceId: DeviceId): RemoteDeviceAuthoritySnapshot | undefined {
@@ -316,63 +423,92 @@ export class RemoteDeviceAuthorityStore {
     scopes: readonly RemoteDeviceScope[],
     now = Date.now(),
   ): Promise<RemoteDeviceAuthoritySnapshot> {
-    return this.mutate((devices) => {
-      const normalizedScopes = canonicalScopes(scopes);
-      const existing = devices.get(deviceId);
-      if (existing === undefined && devices.size >= MAX_REMOTE_DEVICES) {
-        throw new RemoteAuthorityError("device_limit_reached", "Device limit has been reached");
-      }
-      if (existing !== undefined) {
-        if (
-          existing.local.revokedAt !== undefined ||
-          !sameScopes(existing.local.scopes, normalizedScopes)
-        ) {
-          throw new RemoteAuthorityError(
-            "grant_conflict",
-            "Device identity is already bound to another local grant",
-          );
+    const occurredAt = nonNegativeInteger(now, "now");
+    return this.mutate(
+      (devices) => {
+        const normalizedScopes = canonicalScopes(scopes);
+        const existing = devices.get(deviceId);
+        if (existing === undefined && devices.size >= MAX_REMOTE_DEVICES) {
+          throw new RemoteAuthorityError("device_limit_reached", "Device limit has been reached");
         }
+        if (existing !== undefined) {
+          if (
+            existing.local.revokedAt !== undefined ||
+            !sameScopes(existing.local.scopes, normalizedScopes)
+          ) {
+            throw new RemoteAuthorityError(
+              "grant_conflict",
+              "Device identity is already bound to another local grant",
+            );
+          }
+          return devices;
+        }
+        devices.set(deviceId, {
+          deviceId,
+          createdAt: occurredAt,
+          local: { generation: 1, scopes: normalizedScopes },
+        });
         return devices;
-      }
-      devices.set(deviceId, {
-        deviceId,
-        createdAt: nonNegativeInteger(now, "now"),
-        local: { generation: 1, scopes: normalizedScopes },
-      });
-      return devices;
-    }).then(() => this.requiredSnapshot(deviceId));
+      },
+      (before, after) => {
+        const record = after.get(deviceId);
+        return before.has(deviceId) || record === undefined
+          ? undefined
+          : {
+              occurredAt,
+              code: "device_registered",
+              actorDeviceId: deviceId,
+              localGeneration: record.local.generation,
+            };
+      },
+    ).then(() => this.requiredSnapshot(deviceId));
   }
 
   narrowLocalGrant(
     deviceId: DeviceId,
     scopes: readonly RemoteDeviceScope[],
   ): Promise<RemoteDeviceAuthoritySnapshot> {
-    return this.mutate((devices) => {
-      const record = devices.get(deviceId);
-      if (record === undefined) {
-        throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
-      }
-      if (record.local.revokedAt !== undefined) {
-        throw new RemoteAuthorityError("device_revoked", "Device is revoked");
-      }
-      const normalizedScopes = canonicalScopes(scopes);
-      const currentScopes = new Set(record.local.scopes);
-      if (normalizedScopes.some((scope) => !currentScopes.has(scope))) {
-        throw new RemoteAuthorityError(
-          "grant_conflict",
-          "A local grant update may only narrow current scopes",
-        );
-      }
-      if (sameScopes(record.local.scopes, normalizedScopes)) return devices;
-      devices.set(deviceId, {
-        ...record,
-        local: {
-          generation: nextGeneration(record.local.generation),
-          scopes: normalizedScopes,
-        },
-      });
-      return devices;
-    }).then(() => this.requiredSnapshot(deviceId));
+    const occurredAt = Date.now();
+    return this.mutate(
+      (devices) => {
+        const record = devices.get(deviceId);
+        if (record === undefined) {
+          throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
+        }
+        if (record.local.revokedAt !== undefined) {
+          throw new RemoteAuthorityError("device_revoked", "Device is revoked");
+        }
+        const normalizedScopes = canonicalScopes(scopes);
+        const currentScopes = new Set(record.local.scopes);
+        if (normalizedScopes.some((scope) => !currentScopes.has(scope))) {
+          throw new RemoteAuthorityError(
+            "grant_conflict",
+            "A local grant update may only narrow current scopes",
+          );
+        }
+        if (sameScopes(record.local.scopes, normalizedScopes)) return devices;
+        devices.set(deviceId, {
+          ...record,
+          local: {
+            generation: nextGeneration(record.local.generation),
+            scopes: normalizedScopes,
+          },
+        });
+        return devices;
+      },
+      (before, after) => {
+        const previous = before.get(deviceId);
+        const record = after.get(deviceId);
+        return previous === record || record === undefined
+          ? undefined
+          : {
+              occurredAt,
+              code: "local_grant_narrowed",
+              actorDeviceId: deviceId,
+              localGeneration: record.local.generation,
+            };
+      },
+    ).then(() => this.requiredSnapshot(deviceId));
   }
 
   onDeviceRevoked(listener: (deviceId: DeviceId) => void): () => void {
@@ -386,50 +522,68 @@ export class RemoteDeviceAuthorityStore {
     scopes: readonly RemoteDeviceScope[],
     revokedAt?: number,
   ): Promise<RemoteDeviceAuthoritySnapshot> {
-    return this.mutate((devices) => {
-      const record = devices.get(deviceId);
-      if (record === undefined) {
-        throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
-      }
-      const normalizedGeneration = positiveInteger(generation, "generation");
-      const normalizedScopes = canonicalScopes(scopes);
-      const normalizedRevokedAt =
-        revokedAt === undefined ? undefined : nonNegativeInteger(revokedAt, "revokedAt");
-      const hosted = record.hosted;
-      if (hosted !== undefined && normalizedGeneration < hosted.generation) {
-        throw new RemoteAuthorityError(
-          "stale_grant_generation",
-          "Hosted grant generation is stale",
-        );
-      }
-      if (hosted?.revokedAt !== undefined && normalizedRevokedAt === undefined) {
-        throw new RemoteAuthorityError(
-          "grant_conflict",
-          "Revoked device identity cannot be restored",
-        );
-      }
-      if (hosted !== undefined && normalizedGeneration === hosted.generation) {
-        if (
-          !sameScopes(hosted.scopes, normalizedScopes) ||
-          hosted.revokedAt !== normalizedRevokedAt
-        ) {
+    const occurredAt = Date.now();
+    return this.mutate(
+      (devices) => {
+        const record = devices.get(deviceId);
+        if (record === undefined) {
+          throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
+        }
+        const normalizedGeneration = positiveInteger(generation, "generation");
+        const normalizedScopes = canonicalScopes(scopes);
+        const normalizedRevokedAt =
+          revokedAt === undefined ? undefined : nonNegativeInteger(revokedAt, "revokedAt");
+        const hosted = record.hosted;
+        if (hosted !== undefined && normalizedGeneration < hosted.generation) {
           throw new RemoteAuthorityError(
-            "grant_conflict",
-            "Hosted grant generation is bound to another value",
+            "stale_grant_generation",
+            "Hosted grant generation is stale",
           );
         }
+        if (hosted?.revokedAt !== undefined && normalizedRevokedAt === undefined) {
+          throw new RemoteAuthorityError(
+            "grant_conflict",
+            "Revoked device identity cannot be restored",
+          );
+        }
+        if (hosted !== undefined && normalizedGeneration === hosted.generation) {
+          if (
+            !sameScopes(hosted.scopes, normalizedScopes) ||
+            hosted.revokedAt !== normalizedRevokedAt
+          ) {
+            throw new RemoteAuthorityError(
+              "grant_conflict",
+              "Hosted grant generation is bound to another value",
+            );
+          }
+          return devices;
+        }
+        devices.set(deviceId, {
+          ...record,
+          hosted: {
+            generation: normalizedGeneration,
+            scopes: normalizedScopes,
+            ...(normalizedRevokedAt === undefined ? {} : { revokedAt: normalizedRevokedAt }),
+          },
+        });
         return devices;
-      }
-      devices.set(deviceId, {
-        ...record,
-        hosted: {
-          generation: normalizedGeneration,
-          scopes: normalizedScopes,
-          ...(normalizedRevokedAt === undefined ? {} : { revokedAt: normalizedRevokedAt }),
-        },
-      });
-      return devices;
-    }).then(() => {
+      },
+      (before, after) => {
+        const previous = before.get(deviceId)?.hosted;
+        const record = after.get(deviceId);
+        return previous === record?.hosted || record?.hosted === undefined
+          ? undefined
+          : {
+              occurredAt,
+              code:
+                record.hosted.revokedAt === undefined
+                  ? "hosted_grant_narrowed"
+                  : "hosted_device_revoked",
+              actorDeviceId: deviceId,
+              hostedGeneration: record.hosted.generation,
+            };
+      },
+    ).then(() => {
       const snapshot = this.requiredSnapshot(deviceId);
       if (snapshot.hostedRevoked) this.publishRevocation(deviceId);
       return snapshot;
@@ -437,22 +591,37 @@ export class RemoteDeviceAuthorityStore {
   }
 
   revokeLocalDevice(deviceId: DeviceId, now = Date.now()): Promise<RemoteDeviceAuthoritySnapshot> {
-    return this.mutate((devices) => {
-      const record = devices.get(deviceId);
-      if (record === undefined) {
-        throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
-      }
-      if (record.local.revokedAt !== undefined) return devices;
-      devices.set(deviceId, {
-        ...record,
-        local: {
-          generation: nextGeneration(record.local.generation),
-          scopes: record.local.scopes,
-          revokedAt: nonNegativeInteger(now, "now"),
-        },
-      });
-      return devices;
-    }).then(() => {
+    const occurredAt = nonNegativeInteger(now, "now");
+    return this.mutate(
+      (devices) => {
+        const record = devices.get(deviceId);
+        if (record === undefined) {
+          throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
+        }
+        if (record.local.revokedAt !== undefined) return devices;
+        devices.set(deviceId, {
+          ...record,
+          local: {
+            generation: nextGeneration(record.local.generation),
+            scopes: record.local.scopes,
+            revokedAt: occurredAt,
+          },
+        });
+        return devices;
+      },
+      (before, after) => {
+        const previous = before.get(deviceId);
+        const record = after.get(deviceId);
+        return previous === record || record === undefined
+          ? undefined
+          : {
+              occurredAt,
+              code: "local_device_revoked",
+              actorDeviceId: deviceId,
+              localGeneration: record.local.generation,
+            };
+      },
+    ).then(() => {
       const snapshot = this.requiredSnapshot(deviceId);
       this.publishRevocation(deviceId);
       return snapshot;
@@ -483,13 +652,49 @@ export class RemoteDeviceAuthorityStore {
     };
   }
 
+  authorizeAudited(
+    deviceId: DeviceId,
+    requiredScope: RemoteDeviceScope,
+  ): Promise<RemoteAuthorizationContext> {
+    return this.serialize(async () => {
+      try {
+        return this.authorize(deviceId, requiredScope);
+      } catch (cause) {
+        if (cause instanceof RemoteAuthorityError) {
+          await this.appendAuditLocked({
+            occurredAt: Date.now(),
+            code: "authorization_denied",
+            actorDeviceId: deviceId,
+            scope: requiredScope,
+            reason: cause.code,
+          });
+        }
+        throw cause;
+      }
+    });
+  }
+
   runAuthorizedUntilAccepted<Result>(
     deviceId: DeviceId,
     requiredScope: RemoteDeviceScope,
     start: (context: RemoteAuthorizationContext) => StartedAuthorizedOperation<Result>,
   ): Promise<Result> {
     const admitted = this.serialize(async () => {
-      const context = this.authorize(deviceId, requiredScope);
+      let context: RemoteAuthorizationContext;
+      try {
+        context = this.authorize(deviceId, requiredScope);
+      } catch (cause) {
+        if (cause instanceof RemoteAuthorityError) {
+          await this.appendAuditLocked({
+            occurredAt: Date.now(),
+            code: "authorization_denied",
+            actorDeviceId: deviceId,
+            scope: requiredScope,
+            reason: cause.code,
+          });
+        }
+        throw cause;
+      }
       const operation = start(context);
       void operation.completion.catch(() => undefined);
       await operation.acceptance;
@@ -508,23 +713,54 @@ export class RemoteDeviceAuthorityStore {
     return snapshot;
   }
 
+  private async appendAuditLocked(event: RemoteAuthorityAuditDraft): Promise<void> {
+    if (this.audit.length >= MAX_AUTHORITY_AUDIT_EVENTS) {
+      throw new Error("Remote authority audit capacity has been reached");
+    }
+    const audit = [...this.audit, { ...event, sequence: this.audit.length + 1 }];
+    await writeAtomic(this.path, {
+      version: AUTHORITY_FORMAT_VERSION,
+      installationId: this.installationId,
+      devices: [...this.devices.values()].sort((left, right) =>
+        left.deviceId.localeCompare(right.deviceId),
+      ),
+      audit,
+    });
+    this.audit = audit;
+  }
+
   private mutate(
     operation: (
       devices: Map<DeviceId, DeviceAuthorityRecord>,
     ) => Map<DeviceId, DeviceAuthorityRecord>,
+    auditEvent?: (
+      before: ReadonlyMap<DeviceId, DeviceAuthorityRecord>,
+      after: ReadonlyMap<DeviceId, DeviceAuthorityRecord>,
+    ) => RemoteAuthorityAuditDraft | undefined,
   ): Promise<void> {
     return this.serialize(async () => {
-      const candidate = new Map(this.devices);
+      const before = this.devices;
+      const candidate = new Map(before);
       const next = operation(candidate);
+      const event = auditEvent?.(before, next);
+      if (event !== undefined && this.audit.length >= MAX_AUTHORITY_AUDIT_EVENTS) {
+        throw new Error("Remote authority audit capacity has been reached");
+      }
+      const audit =
+        event === undefined
+          ? this.audit
+          : [...this.audit, { ...event, sequence: this.audit.length + 1 }];
       const state: PersistedAuthorityState = {
         version: AUTHORITY_FORMAT_VERSION,
         installationId: this.installationId,
         devices: [...next.values()].sort((left, right) =>
           left.deviceId.localeCompare(right.deviceId),
         ),
+        audit,
       };
       await writeAtomic(this.path, state);
       this.devices = next;
+      this.audit = audit;
     });
   }
 

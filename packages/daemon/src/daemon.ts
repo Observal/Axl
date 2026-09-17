@@ -137,7 +137,10 @@ interface ConnectionSubscription {
   readonly snapshotEvents: readonly CanonicalEvent[];
   readonly pageCursors: Map<string, number>;
   readonly pageResults: Map<string, SnapshotPage>;
-  readonly bufferedEvents: Array<{ readonly event: CanonicalEvent; readonly position: number }>;
+  readonly bufferedEvents: Array<{
+    readonly event: CanonicalEvent;
+    readonly position: number;
+  }>;
   readonly bufferedActivity: SessionActivityFrame[];
   unsubscribe: () => void;
   nextPosition: number;
@@ -320,7 +323,11 @@ export class AxlDaemon {
         } catch (error) {
           if (error instanceof DaemonError && error.code === "cancelled") {
             return {
-              error: { code: error.code, message: error.message, retryable: false },
+              error: {
+                code: error.code,
+                message: error.message,
+                retryable: false,
+              },
             };
           }
           throw error;
@@ -387,7 +394,11 @@ export class AxlDaemon {
       initialized: true,
       control: false,
       attachmentId: randomUUID(),
-      client: { kind: "remote", version: "internal", instanceId: options.deviceId },
+      client: {
+        kind: "remote",
+        version: "internal",
+        instanceId: options.deviceId,
+      },
       connectedAt: Date.now(),
       lastSeenAt: Date.now(),
       grantedCapabilities: new Set(this.capabilities),
@@ -1055,7 +1066,11 @@ export class AxlDaemon {
       });
       normalized = {
         ...request,
-        params: { ...request.params, cwd, profile: request.params.profile ?? "standard" },
+        params: {
+          ...request.params,
+          cwd,
+          profile: request.params.profile ?? "standard",
+        },
       };
     } else if (request.method === "session.import") {
       const cwd = await realpath(request.params.cwd).catch((cause: unknown) => {
@@ -1079,7 +1094,12 @@ export class AxlDaemon {
       normalized = { ...request, params: { ...request.params, cwd } };
     }
     if (!isRetryableMutationMethod(normalized.method)) {
-      remoteAuthority?.store.authorize(remoteAuthority.deviceId, remoteAuthority.scope);
+      if (remoteAuthority !== undefined) {
+        await remoteAuthority.store.authorizeAudited(
+          remoteAuthority.deviceId,
+          remoteAuthority.scope,
+        );
+      }
       return this.dispatch(normalized, send, state, undefined, signal);
     }
     const idempotencyKey = normalized.idempotencyKey;
@@ -1447,10 +1467,11 @@ export class AxlDaemon {
       : parseOperationId(acceptance.operationId, "operationId");
   }
 
-  private creationReservation(
-    acceptance: CommandAcceptance | undefined,
-  ):
-    | { readonly sessionId: SessionId; readonly operationId: ReturnType<typeof parseOperationId> }
+  private creationReservation(acceptance: CommandAcceptance | undefined):
+    | {
+        readonly sessionId: SessionId;
+        readonly operationId: ReturnType<typeof parseOperationId>;
+      }
     | undefined {
     if (acceptance?.intendedSessionId === undefined) return undefined;
     return {
@@ -1462,7 +1483,10 @@ export class AxlDaemon {
   private async listSessions(
     state: ConnectionState,
     params: SessionListParams,
-  ): Promise<{ readonly sessions: readonly SessionSummary[]; readonly nextPageCursor?: string }> {
+  ): Promise<{
+    readonly sessions: readonly SessionSummary[];
+    readonly nextPageCursor?: string;
+  }> {
     const queryKey = JSON.stringify({
       scope: params.scope,
       ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
@@ -1512,7 +1536,11 @@ export class AxlDaemon {
     const nextOffset = offset + pageSessions.length;
     if (nextOffset >= sessions.length) return { sessions: pageSessions };
     const nextPageCursor = randomUUID();
-    state.sessionListPages.set(nextPageCursor, { queryKey, sessions, offset: nextOffset });
+    state.sessionListPages.set(nextPageCursor, {
+      queryKey,
+      sessions,
+      offset: nextOffset,
+    });
     if (state.sessionListPages.size > 1_000) {
       const oldest = state.sessionListPages.keys().next().value;
       if (oldest !== undefined) state.sessionListPages.delete(oldest);
@@ -1940,7 +1968,10 @@ export class AxlDaemon {
     this.sessionCatalogGeneration += 1;
     for (const state of this.connectionStates) {
       if (state.initialized && state.grantedCapabilities.has("session.list")) {
-        state.send({ kind: "sessions_changed", generation: this.sessionCatalogGeneration });
+        state.send({
+          kind: "sessions_changed",
+          generation: this.sessionCatalogGeneration,
+        });
       }
     }
   }
