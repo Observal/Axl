@@ -54,8 +54,10 @@ witness integration, artifact isolation, and runtime evidence pass. Target-gated
 Secret Service session respectively, but neither is wired into Node or any production endpoint
 constructor and neither has an enabled support row. Linux requires an unlocked graphical login
 session and a selected GNOME Keyring or KWallet 6 service; unknown and headless environments fail
-closed. Windows secure storage, Android Keystore, generated mobile SDKs, and mobile applications
-remain later work.
+closed. A target-gated Windows store uses nested machine- then user-scope DPAPI and SID-restricted
+files, and the native persistence helpers reject reparse paths and replace prior no-op ACL and
+directory-flush behavior. It remains unwired and unsupported. Android Keystore, generated mobile
+SDKs, and mobile applications remain later work.
 
 Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
 upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim
