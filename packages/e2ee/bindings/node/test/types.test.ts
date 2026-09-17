@@ -7,6 +7,7 @@ import type {
   DaemonEndpoint,
   DeviceEndpoint,
   NativeOutbox,
+  NativePendingWitness,
   NativePlaintext,
   PairState,
   Publication,
@@ -20,6 +21,9 @@ const codes = [
   "secure_store_locked",
   "secure_store_unavailable",
   "rollback_anchor_unavailable",
+  "witness_operation_conflict",
+  "witness_receipt_invalid",
+  "witness_unavailable",
 ] as const satisfies readonly AxlE2eeErrorCode[];
 const acceptsBigint = (_value: bigint): void => {};
 const inspectTypes = (
@@ -27,12 +31,14 @@ const inspectTypes = (
   daemon: DaemonEndpoint,
   device: DeviceEndpoint,
   outbox: NativeOutbox,
+  pendingWitness: NativePendingWitness,
   plaintext: NativePlaintext,
   publication: Publication,
   state: PairState,
 ): void => {
   acceptsBigint(outbox.epoch);
   acceptsBigint(plaintext.epoch);
+  void pendingWitness.continueWitness(pendingWitness.operationId, new Uint8Array());
   if ("expiresAtMs" in publication) acceptsBigint(publication.expiresAtMs);
   void [info, daemon, device, publication, state, codes];
 };

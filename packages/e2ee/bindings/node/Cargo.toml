@@ -14,7 +14,7 @@ build = "build.rs"
 crate-type = ["cdylib"]
 
 [features]
-test-fixtures = []
+test-fixtures = ["axl-e2ee/node-test-fixtures"]
 
 [dependencies]
 axl-e2ee = { path = "../.." }

@@ -79,6 +79,41 @@ test("checked-in pairing fixtures are consumed and bounds precede decoding", asy
   await assert.rejects(production.inspectPairingClaim(Buffer.alloc(17321)), { code: "bound_exceeded" });
 });
 
+test("native witness continuation binds operation, certificate, and exact committed output", async () => {
+  const fixtures = new URL("../../../fixtures/v1/", import.meta.url);
+  const request = readFileSync(new URL("witness-advance-v1.bin", fixtures));
+  const certificate = readFileSync(new URL("witness-quorum-v1.bin", fixtures));
+  const exact = Buffer.from("exact committed output");
+  const pending = fixture.testWitnessPending(request, exact);
+  assert.equal(pending.status, "pending_quorum");
+  assert.deepEqual(pending.witnessRequest, request);
+  assert.deepEqual(pending.requestHash, createHash("sha384").update(request).digest());
+  const wrongOperation = Buffer.from(pending.operationId);
+  wrongOperation[0] ^= 1;
+  await assert.rejects(pending.continueWitness(wrongOperation, certificate), {
+    code: "witness_operation_conflict",
+  });
+  const copiedCertificate = Buffer.from(certificate);
+  const completion = pending.continueWitness(pending.operationId, copiedCertificate);
+  copiedCertificate.fill(0);
+  assert.deepEqual(await completion, exact);
+  assert.equal(pending.status, "committed");
+  assert.deepEqual(await pending.continueWitness(pending.operationId, certificate), exact);
+
+  const recovered = fixture.testWitnessPending(request, exact);
+  assert.deepEqual(recovered.witnessRequest, request);
+  await assert.rejects(recovered.continueWitness(recovered.operationId, Buffer.alloc(32)), {
+    code: "witness_receipt_invalid",
+  });
+  await assert.rejects(
+    recovered.continueWitness(recovered.operationId, Buffer.alloc(3 * 1024 + 1)),
+    { code: "bound_exceeded" },
+  );
+  assert.deepEqual(await recovered.continueWitness(recovered.operationId, certificate), exact);
+  pending.close();
+  recovered.close();
+});
+
 test("fresh lifecycle preserves barriers, exact retries, copied input, and close semantics", async () => {
   const pair = await activatedPair(30);
   try {
