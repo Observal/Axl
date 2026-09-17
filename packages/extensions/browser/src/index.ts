@@ -15,6 +15,11 @@ export {
   makeBrowserTypeTool,
   makeBrowserScrollTool,
   makeBrowserReadTool,
+  makeBrowserBackTool,
+  makeBrowserForwardTool,
+  makeBrowserWaitTool,
+  makeBrowserEvalTool,
+  makeBrowserSelectTool,
   BROWSER_PROMPT_SECTION,
   type BrowserToolsOptions,
 } from "./tools.ts";

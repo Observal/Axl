@@ -263,6 +263,128 @@ export function makeBrowserReadTool(options: BrowserToolsOptions): KernelTool {
   };
 }
 
+const MAX_EVAL_CHARACTERS = 40_000;
+const MAX_WAIT_MS = 30_000;
+const DEFAULT_WAIT_MS = 10_000;
+
+export function makeBrowserBackTool(options: BrowserToolsOptions): KernelTool {
+  return {
+    name: "browser_back",
+    description: "Navigate back one entry in the browser history. Returns the updated page state.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
+      rejectUnknownFields(input, "browser_back", []);
+      const state = await options.session.back(signal);
+      return pageResult(state);
+    },
+  };
+}
+
+export function makeBrowserForwardTool(options: BrowserToolsOptions): KernelTool {
+  return {
+    name: "browser_forward",
+    description: "Navigate forward one entry in the browser history. Returns the updated page state.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
+      rejectUnknownFields(input, "browser_forward", []);
+      const state = await options.session.forward(signal);
+      return pageResult(state);
+    },
+  };
+}
+
+export function makeBrowserWaitTool(options: BrowserToolsOptions): KernelTool {
+  return {
+    name: "browser_wait",
+    description:
+      "Wait for an element matching a CSS selector to become visible before continuing. Useful for pages that load content after the initial load.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector to wait for" },
+        timeoutMs: { type: "integer", description: "Maximum time to wait in milliseconds (default 10000)" },
+      },
+      required: ["selector"],
+      additionalProperties: false,
+    },
+    async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
+      rejectUnknownFields(input, "browser_wait", ["selector", "timeoutMs"]);
+      const selector = requiredString(input, "browser_wait", "selector");
+      const timeoutMs = Math.min(
+        optionalPositiveInteger(input, "browser_wait", "timeoutMs") ?? DEFAULT_WAIT_MS,
+        MAX_WAIT_MS,
+      );
+      const state = await options.session.waitForSelector(selector, timeoutMs, signal);
+      return pageResult(state);
+    },
+  };
+}
+
+export function makeBrowserEvalTool(options: BrowserToolsOptions): KernelTool {
+  return {
+    name: "browser_eval",
+    description:
+      "Evaluate a JavaScript expression in the current page and return its JSON-serializable result. Use for extracting structured data the other tools cannot reach.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        expression: { type: "string", description: "JavaScript expression to evaluate in the page" },
+      },
+      required: ["expression"],
+      additionalProperties: false,
+    },
+    async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
+      rejectUnknownFields(input, "browser_eval", ["expression"]);
+      const expression = requiredString(input, "browser_eval", "expression");
+      const result = await options.session.evaluate(expression, signal);
+      let serialized: string;
+      try {
+        serialized = result === undefined ? "undefined" : JSON.stringify(result, null, 2);
+      } catch {
+        serialized = String(result);
+      }
+      if (serialized === undefined) serialized = "undefined";
+      const truncated = serialized.length > MAX_EVAL_CHARACTERS;
+      const shown = serialized.slice(0, MAX_EVAL_CHARACTERS);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `[browser eval result]\n${shown}${
+              truncated ? `\n[truncated at ${MAX_EVAL_CHARACTERS} characters]` : ""
+            }`,
+          },
+        ],
+        isError: false,
+        details: { truncated },
+      };
+    },
+  };
+}
+
+export function makeBrowserSelectTool(options: BrowserToolsOptions): KernelTool {
+  return {
+    name: "browser_select",
+    description: "Choose an option by its value in a <select> dropdown element.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "CSS selector of the <select> element" },
+        value: { type: "string", description: "Value of the option to select" },
+      },
+      required: ["selector", "value"],
+      additionalProperties: false,
+    },
+    async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
+      rejectUnknownFields(input, "browser_select", ["selector", "value"]);
+      const selector = requiredString(input, "browser_select", "selector");
+      const value = requiredString(input, "browser_select", "value");
+      const state = await options.session.selectOption(selector, value, signal);
+      return pageResult(state);
+    },
+  };
+}
+
 export function makeBrowserTools(options: BrowserToolsOptions): readonly KernelTool[] {
   return [
     makeBrowserNavigateTool(options),
@@ -271,5 +393,10 @@ export function makeBrowserTools(options: BrowserToolsOptions): readonly KernelT
     makeBrowserTypeTool(options),
     makeBrowserScrollTool(options),
     makeBrowserReadTool(options),
+    makeBrowserBackTool(options),
+    makeBrowserForwardTool(options),
+    makeBrowserWaitTool(options),
+    makeBrowserEvalTool(options),
+    makeBrowserSelectTool(options),
   ];
 }

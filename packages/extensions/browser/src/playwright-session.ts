@@ -126,6 +126,42 @@ export async function createPlaywrightSession(
         .then((value) => (typeof value === "string" ? value : ""));
     },
 
+    async back(signal: AbortSignal): Promise<PageState> {
+      throwIfAborted(signal);
+      const response = await page.goBack({ waitUntil: "domcontentloaded" });
+      if (response === null) throw new Error("browser: no earlier page in history");
+      return pageState(page);
+    },
+
+    async forward(signal: AbortSignal): Promise<PageState> {
+      throwIfAborted(signal);
+      const response = await page.goForward({ waitUntil: "domcontentloaded" });
+      if (response === null) throw new Error("browser: no later page in history");
+      return pageState(page);
+    },
+
+    async waitForSelector(
+      selector: string,
+      timeoutMs: number,
+      signal: AbortSignal,
+    ): Promise<PageState> {
+      throwIfAborted(signal);
+      await page.locator(selector).first().waitFor({ state: "visible", timeout: timeoutMs });
+      return pageState(page);
+    },
+
+    async evaluate(expression: string, signal: AbortSignal): Promise<unknown> {
+      throwIfAborted(signal);
+      // Playwright serializes the result as JSON; non-serializable values throw.
+      return page.evaluate(expression);
+    },
+
+    async selectOption(selector: string, value: string, signal: AbortSignal): Promise<PageState> {
+      throwIfAborted(signal);
+      await page.selectOption(selector, value, { timeout: ACTION_TIMEOUT_MS });
+      return pageState(page);
+    },
+
     async close(): Promise<void> {
       await context.close().catch(() => {});
     },

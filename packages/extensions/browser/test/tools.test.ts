@@ -11,13 +11,18 @@ import type { JsonObject } from "@axl/protocol";
 import { ToolInputError } from "@axl/kernel";
 
 import {
+  makeBrowserBackTool,
   makeBrowserClickTool,
+  makeBrowserEvalTool,
+  makeBrowserForwardTool,
   makeBrowserNavigateTool,
   makeBrowserReadTool,
   makeBrowserScreenshotTool,
   makeBrowserScrollTool,
+  makeBrowserSelectTool,
   makeBrowserTools,
   makeBrowserTypeTool,
+  makeBrowserWaitTool,
 } from "../src/tools.ts";
 import type { BrowserSession, PageState } from "../src/session.ts";
 
@@ -45,6 +50,11 @@ function fakeSession(overrides: Partial<BrowserSession> = {}): BrowserSession {
     type: async () => page,
     scroll: async () => page,
     readPage: async () => "Full page text content for testing.",
+    back: async () => page,
+    forward: async () => page,
+    waitForSelector: async () => page,
+    evaluate: async () => ({ ok: true }),
+    selectOption: async () => page,
     close: async () => {},
     ...overrides,
   };
@@ -291,9 +301,116 @@ test("browser_read without selector reads full page", async () => {
   assert.equal(readSelector, undefined);
 });
 
-test("makeBrowserTools creates all six tools", () => {
+test("browser_back returns updated page state", async () => {
+  let called = false;
+  const session = fakeSession({
+    back: async () => {
+      called = true;
+      return fakePage({ excerpt: "Went back" });
+    },
+  });
+  const result = await makeBrowserBackTool({ session }).execute({}, noSignal);
+  assert.equal(result.isError, false);
+  assert.match(text(result), /Went back/);
+  assert.equal(called, true);
+});
+
+test("browser_back rejects unknown fields", async () => {
+  await assert.rejects(
+    makeBrowserBackTool({ session: fakeSession() }).execute({ steps: 2 }, noSignal),
+    ToolInputError,
+  );
+});
+
+test("browser_forward returns updated page state", async () => {
+  const session = fakeSession({ forward: async () => fakePage({ excerpt: "Went forward" }) });
+  const result = await makeBrowserForwardTool({ session }).execute({}, noSignal);
+  assert.match(text(result), /Went forward/);
+});
+
+test("browser_wait validates selector and waits", async () => {
+  let waited: { selector: string; timeoutMs: number } | undefined;
+  const session = fakeSession({
+    waitForSelector: async (selector, timeoutMs) => {
+      waited = { selector, timeoutMs };
+      return fakePage({ excerpt: "Appeared" });
+    },
+  });
+  const tool = makeBrowserWaitTool({ session });
+  const result = await tool.execute({ selector: "#loaded" }, noSignal);
+  assert.match(text(result), /Appeared/);
+  assert.deepEqual(waited, { selector: "#loaded", timeoutMs: 10_000 });
+});
+
+test("browser_wait clamps timeout and honors custom value", async () => {
+  let timeout: number | undefined;
+  const session = fakeSession({
+    waitForSelector: async (_s, timeoutMs) => {
+      timeout = timeoutMs;
+      return fakePage();
+    },
+  });
+  const tool = makeBrowserWaitTool({ session });
+  await tool.execute({ selector: "#x", timeoutMs: 3000 }, noSignal);
+  assert.equal(timeout, 3000);
+  await tool.execute({ selector: "#x", timeoutMs: 999_999 }, noSignal);
+  assert.equal(timeout, 30_000);
+});
+
+test("browser_wait rejects missing selector", async () => {
+  await assert.rejects(
+    makeBrowserWaitTool({ session: fakeSession() }).execute({}, noSignal),
+    ToolInputError,
+  );
+});
+
+test("browser_eval returns serialized result", async () => {
+  const session = fakeSession({ evaluate: async () => ({ count: 42, items: ["a", "b"] }) });
+  const result = await makeBrowserEvalTool({ session }).execute(
+    { expression: "({count: 42})" },
+    noSignal,
+  );
+  assert.equal(result.isError, false);
+  assert.match(text(result), /"count": 42/);
+  assert.match(text(result), /browser eval result/);
+});
+
+test("browser_eval handles undefined result", async () => {
+  const session = fakeSession({ evaluate: async () => undefined });
+  const result = await makeBrowserEvalTool({ session }).execute({ expression: "void 0" }, noSignal);
+  assert.match(text(result), /undefined/);
+});
+
+test("browser_eval rejects missing expression", async () => {
+  await assert.rejects(
+    makeBrowserEvalTool({ session: fakeSession() }).execute({}, noSignal),
+    ToolInputError,
+  );
+});
+
+test("browser_select validates fields and selects", async () => {
+  let selected: { selector: string; value: string } | undefined;
+  const session = fakeSession({
+    selectOption: async (selector, value) => {
+      selected = { selector, value };
+      return fakePage({ excerpt: "Selected" });
+    },
+  });
+  const tool = makeBrowserSelectTool({ session });
+  const result = await tool.execute({ selector: "#country", value: "US" }, noSignal);
+  assert.match(text(result), /Selected/);
+  assert.deepEqual(selected, { selector: "#country", value: "US" });
+});
+
+test("browser_select rejects missing fields", async () => {
+  const tool = makeBrowserSelectTool({ session: fakeSession() });
+  await assert.rejects(tool.execute({ selector: "#x" }, noSignal), ToolInputError);
+  await assert.rejects(tool.execute({ value: "y" }, noSignal), ToolInputError);
+});
+
+test("makeBrowserTools creates all eleven tools", () => {
   const tools = makeBrowserTools({ session: fakeSession() });
-  assert.equal(tools.length, 6);
+  assert.equal(tools.length, 11);
   const names = tools.map((t) => t.name);
   assert.deepEqual(names, [
     "browser_navigate",
@@ -302,6 +419,11 @@ test("makeBrowserTools creates all six tools", () => {
     "browser_type",
     "browser_scroll",
     "browser_read",
+    "browser_back",
+    "browser_forward",
+    "browser_wait",
+    "browser_eval",
+    "browser_select",
   ]);
 });
 

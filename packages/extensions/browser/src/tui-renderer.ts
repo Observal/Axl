@@ -25,8 +25,48 @@ export const browserTerminalExtension: TerminalExtension = {
     api.registerToolRenderer("browser_type", renderType);
     api.registerToolRenderer("browser_scroll", renderScroll);
     api.registerToolRenderer("browser_read", renderRead);
+    api.registerToolRenderer("browser_back", renderBack);
+    api.registerToolRenderer("browser_forward", renderForward);
+    api.registerToolRenderer("browser_wait", renderWait);
+    api.registerToolRenderer("browser_eval", renderEval);
+    api.registerToolRenderer("browser_select", renderSelect);
   },
 };
+
+function renderBack(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
+  if (input.status === "running" || input.status === "pending") return { label: "Going back" };
+  if (input.status === "succeeded") return { label: "Went back", hideWhenSuccessfulInFocus: true };
+  return { label: "Go back" };
+}
+
+function renderForward(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
+  if (input.status === "running" || input.status === "pending") return { label: "Going forward" };
+  if (input.status === "succeeded") return { label: "Went forward", hideWhenSuccessfulInFocus: true };
+  return { label: "Go forward" };
+}
+
+function renderWait(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
+  const selector = (input.arguments as Record<string, unknown>).selector;
+  const target = typeof selector === "string" ? selector : "element";
+  if (input.status === "running" || input.status === "pending") return { label: `Waiting for ${target}` };
+  if (input.status === "succeeded") return { label: `Found ${target}`, hideWhenSuccessfulInFocus: true };
+  return { label: `Wait for ${target}` };
+}
+
+function renderEval(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
+  if (input.status === "running" || input.status === "pending") return { label: "Evaluating script" };
+  if (input.status === "succeeded") return { label: "Evaluated script", hideWhenSuccessfulInFocus: false };
+  return { label: "Evaluate script" };
+}
+
+function renderSelect(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
+  const args = input.arguments as Record<string, unknown>;
+  const target = typeof args.selector === "string" ? args.selector : "dropdown";
+  const value = typeof args.value === "string" ? args.value : "";
+  if (input.status === "running" || input.status === "pending") return { label: `Selecting in ${target}` };
+  if (input.status === "succeeded") return { label: `Selected "${value}" in ${target}`, hideWhenSuccessfulInFocus: true };
+  return { label: `Select in ${target}` };
+}
 
 function renderNavigate(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
   const url = (input.arguments as Record<string, unknown>).url;
