@@ -70,6 +70,9 @@ cpSync(
   mode === "production" ? join(packageRoot, "worker/index.js") : join(packageRoot, "test/worker.js"),
   join(staging, "worker/index.js"),
 );
+if (mode === "production") {
+  cpSync(join(packageRoot, "worker/storage.js"), join(staging, "worker/storage.js"));
+}
 if (mode === "test") {
   cpSync(join(packageRoot, "test/browser-storage.js"), join(staging, "worker/browser-storage.js"));
 }
@@ -111,6 +114,7 @@ const artifactFiles = [
   { kind: "glue", path: `wasm/${wasmName}.js` },
   { kind: "wasm", path: `wasm/${wasmName}_bg.wasm` },
   { kind: "worker", path: "worker/index.js" },
+  ...(mode === "production" ? [{ kind: "worker-storage", path: "worker/storage.js" }] : []),
 ];
 const artifacts = artifactFiles.map((entry) => ({
   ...entry,

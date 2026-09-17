@@ -11,17 +11,33 @@ export class AxlE2eeError extends Error {
 }
 
 export const ERROR_CODES = Object.freeze([
+  "already_exists",
   "artifact_integrity_failed",
   "bound_exceeded",
   "clock_rollback",
+  "conflict",
+  "corrupt_state",
   "endpoint_closed",
   "expired",
   "identity_mismatch",
   "internal_error",
   "invalid_argument",
+  "key_record_missing",
+  "lifecycle_busy",
+  "not_found",
   "profile_mismatch",
   "rollback_anchor_unavailable",
   "secure_random_unavailable",
+  "state_loss",
+  "storage_unavailable",
+  "strict_durability_unavailable",
+  "witness_auth_failed",
+  "witness_conflict",
+  "witness_invalid_expected",
+  "witness_operation_conflict",
+  "witness_receipt_invalid",
+  "witness_registration_conflict",
+  "witness_unavailable",
 ]);
 
 const bounds = Object.freeze({ invitation: 2048, claim: 17320 });

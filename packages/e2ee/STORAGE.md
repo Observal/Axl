@@ -125,11 +125,13 @@ only committed state. The internal pending mutation is not part of the public pl
 not a reusable transaction handle. Suspension, freezing, restoration, and termination behavior
 must be verified separately in every supported browser.
 
-Session 50.5 implements this sequence in the separate browser test artifact with real IndexedDB,
-Web Locks, WebCrypto, and dedicated workers. Its versioned stores, wrapped-DEK lifecycle, recovery
-rules, fault evidence, and browser limitations are documented in
-[`BROWSER_STORAGE.md`](BROWSER_STORAGE.md). Test-only persistence constructors and rollback evidence
-are excluded from the production WASM, JavaScript exports, declarations, and tarball.
+The production worker now includes the storage-only portion of this sequence: one lifetime Web
+Lock, one versioned IndexedDB database, a non-extractable AES-KW key, wrapped state keys, distinct
+AES-GCM envelopes, one strict generation-compare transaction, exact pending requests, and matching
+certificate continuation. It remains unreachable from the page protocol until private WASM
+finalization and production trust are available. Session 50.5 retains broader browser fault evidence
+in the separate test artifact. Test-only persistence constructors and rollback evidence are excluded
+from the production WASM, JavaScript exports, declarations, and tarball.
 
 This equivalence does not relax rollback detection. IndexedDB, persistent-storage permission,
 WebAuthn counters, and a non-extractable WebCrypto key do not supply an independent monotonic anchor.
@@ -166,10 +168,11 @@ produces one initial-registration authorization. Preparation consumes it. Restar
 unavailability, resend, accepted-operation recovery, conflict, revocation, and quarantine hold no
 mutation authority.
 
-The current native and browser test adapters still use their pre-production injected anchor paths.
-The shared witness state machine does not make those constructors production-ready. Focused later
-changes must wire this format into each platform transaction and remove every legacy test anchor
-from production artifacts before enabling endpoint creation.
+The native and browser test adapters still use their pre-production injected anchor paths. The
+production browser store accepts only a worker-private certificate verifier and is not constructed
+by the page protocol. The shared witness state machine and storage foundation do not make endpoint
+constructors production-ready. Private WASM finalization, production trust, hosted transport, and
+required runtime evidence remain mandatory before enablement.
 
 ## Session 50.2 pairing records
 

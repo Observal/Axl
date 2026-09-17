@@ -3,7 +3,8 @@
 
 # Browser E2EE storage feasibility protocol
 
-Status: Session 50.5 test-artifact implementation. Production browser pairing remains disabled.
+Status: production persistence foundation plus Session 50.5 test artifact. Production browser
+pairing remains disabled.
 
 ## Scope and security gate
 
@@ -12,10 +13,13 @@ IndexedDB, Web Locks, WebCrypto, and dedicated workers. It exercises real OpenML
 and written back to an authenticated committed snapshot. The implementation adds no browser storage
 library, lock library, cryptography library, or test database mock.
 
-The production artifact does not export this adapter or its test anchor and does not contain its
-persistence worker. Production `createDaemonEndpoint`, `openDaemonEndpoint`,
-`createDeviceEndpoint`, and `openDeviceEndpoint` continue to return
-`rollback_anchor_unavailable`.
+The production artifact does not export the test adapter or its test anchor. It now includes a
+worker-private production store with Web Lock ownership, strict IndexedDB commits, a non-extractable
+AES-KW wrapping key, wrapped state keys, distinct AES-GCM envelopes, exact witness requests, and
+certificate continuation. No page protocol operation constructs that store. Production
+`createDaemonEndpoint`, `openDaemonEndpoint`, `createDeviceEndpoint`, and `openDeviceEndpoint`
+continue to return `rollback_anchor_unavailable` until private WASM finalization, pinned production
+replica trust, hosted transport, and the full runtime matrix are complete.
 
 This implementation is feasibility evidence, not production rollback protection. IndexedDB,
 WebCrypto non-extractability, persistent-storage permission, and WebAuthn counters are not an
