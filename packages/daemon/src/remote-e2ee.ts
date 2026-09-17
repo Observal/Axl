@@ -69,6 +69,7 @@ export interface NativeDaemonE2eeEndpoint {
   acceptEpochReady?(
     operationId: Uint8Array,
     logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
   ): Promise<NativeEpochReadyAcceptance>;
   acknowledgeOutbox(
@@ -302,7 +303,13 @@ export class WindowsRemoteE2eeBridge {
     if (accept === undefined) throw new Error("Native endpoint does not support epoch readiness");
     const logical = idBytes(envelope.logicalMessageId);
     try {
-      await accept.call(this.options.endpoint, incomingOperation, logical, envelope.ciphertext);
+      await accept.call(
+        this.options.endpoint,
+        incomingOperation,
+        logical,
+        BigInt(envelope.hostedGrantGeneration),
+        envelope.ciphertext,
+      );
       const acknowledgement = derivedId(
         "axl-e2ee-epoch-ready-receive-ack-v1",
         envelope.operationId,
