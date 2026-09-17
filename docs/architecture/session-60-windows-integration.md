@@ -45,9 +45,10 @@ three distinct signing keys and stores.
 ## Windows artifact path
 
 The Node build and integrity loader recognize `win32-x64-msvc` and `win32-arm64-msvc`. Windows test
-artifacts use the real nested DPAPI envelope-key store for the current non-built-in test account and
-an explicitly test-only rollback anchor. CI executes the full Node binding suite on Windows x64 and
-cross-compiles both MSVC architectures.
+artifacts can use the real nested DPAPI envelope-key store under an explicitly selected non-built-in
+account by setting `AXL_RUN_WINDOWS_DPAPI_TESTS=1`; ordinary hosted CI identities use test storage
+rather than weakening the account policy. CI executes the full Node binding suite on Windows x64,
+runs the Windows record and identity-policy model, and cross-compiles both MSVC architectures.
 
 Production endpoint constructors and `productionStorageReady` remain disabled. The test anchor is
 not present in production artifacts. Production enablement requires configured witness trust,

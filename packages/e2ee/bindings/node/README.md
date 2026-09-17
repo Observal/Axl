@@ -12,9 +12,10 @@ operation, verifies the pinned unanimous trust set in Rust, and returns only the
 output after native storage barriers are complete. Recovery construction is test-feature-only.
 Production endpoint constructors still fail closed because production replica trust and hosted
 witness transport are not enabled. The build and integrity loader support Windows MSVC x64 and
-ARM64 artifacts in addition to the existing macOS and glibc Linux targets. On Windows, the test
-artifact exercises the real DPAPI envelope-key store under the current non-built-in account while
-retaining an explicitly test-only rollback anchor. Test constructors and the test binary are
+ARM64 artifacts in addition to the existing macOS and glibc Linux targets. The Windows test artifact can
+exercise the real DPAPI envelope-key store under an explicitly selected non-built-in account by
+setting `AXL_RUN_WINDOWS_DPAPI_TESTS=1`; ordinary hosted CI accounts continue to use test storage
+rather than silently weakening the DPAPI identity policy. Test constructors and the test binary are
 excluded from production package staging.
 
 Every accepted JavaScript byte input is length-checked and copied before native asynchronous work
