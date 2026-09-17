@@ -14,6 +14,9 @@ docs/screenshots/
 .env
 .env.*
 !.env.example
+.terraform/
+*.tfstate
+*.tfstate.*
 
 # These product plans belong in the repository even when a global ignore file hides them.
 !CODE_STRUCTURE.md

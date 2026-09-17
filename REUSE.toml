@@ -77,6 +77,7 @@ path = [
   "services/control-plane/tsconfig.json",
   "services/relay/.tool-versions",
   "services/relay/mix.lock",
+  "infra/aws/hosted-path-test/.terraform.lock.hcl",
 ]
 SPDX-FileCopyrightText = "2026 Lokesh"
 SPDX-License-Identifier = "Apache-2.0"
