@@ -169,6 +169,7 @@ jobs:
         if: needs.changes.outputs.e2ee == 'true'
       - name: Install target
         if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
         run: rustup target add ${{ matrix.target }}
       - name: Compile target-gated storage and tests
         if: needs.changes.outputs.e2ee == 'true'
