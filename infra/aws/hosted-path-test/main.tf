@@ -250,7 +250,8 @@ resource "aws_cloudfront_distribution" "main" {
 
   viewer_certificate {
     cloudfront_default_certificate = true
-    minimum_protocol_version       = "TLSv1.2_2021"
+    # CloudFront ignores this field for its default certificate and reports TLSv1.
+    minimum_protocol_version = "TLSv1"
   }
 }
 
