@@ -216,6 +216,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tls_codec",
+ "windows-sys",
  "zbus",
 ]
 

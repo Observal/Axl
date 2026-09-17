@@ -741,22 +741,24 @@ Playwright WebKit is not Safari evidence. A test anchor in a separate artifact i
 
 The current source can select redb for Windows at compile time because `redb` is enabled for every non-WASM target. That is not Windows support.
 
-Current blockers are:
+The target-gated implementation now replaces the non-Unix no-op permission and directory-sync
+helpers on Windows. It applies and verifies a protected current-SID DACL, opens paths with reparse
+points exposed, rejects reparse and UNC or device forms, compares final handle paths, uses
+write-through creation and replacement, and calls `FlushFileBuffers` for file and directory
+publication. The DPAPI store protects each authenticated record first with machine scope and then
+with user scope, always forbids UI, separates prepared and active files, verifies deletion, rejects
+built-in service identities, and requires an expected daemon SID.
 
-- `sync_parent_directory` is a no-op on non-Unix systems. Marker creation, marker removal, and lifecycle publication therefore lack a demonstrated Windows directory-durability barrier.
-- `restrict_directory` and `restrict_file` are no-ops on non-Unix systems. The database, marker, and lifecycle lock receive no Axl-owned Windows ACL hardening.
-- `File::try_lock` is portable in the Rust API, but its Windows sharing, abrupt-process-exit, antivirus, and installer interactions have not been tested for this lifecycle protocol.
-- `is_symlink` and path canonicalization do not constitute a reviewed defense against every Windows reparse point, junction, mount point, UNC form, path prefix, case alias, and handle-swap race.
-- redb 4.2.0 contains a Windows file backend and uses file synchronization for immediate durability, but Axl has no Windows crash, reboot, torn-write, antivirus, VSS restore, NTFS, or ReFS evidence.
-- The Node loader recognizes only macOS and glibc Linux. Windows returns `unsupported_platform` before loading an addon.
-- The build script expects `.dylib` or `.so`; it does not stage an MSVC `.dll` as a `.node` artifact.
-- There is no Windows artifact manifest row, CI builder, Authenticode signing, installer selection, ARM64 runner, or fresh-install smoke test.
-- There is no DPAPI implementation, service-account profile policy, SID-bound ACL, or nested user-and-machine record.
-- The current tests do not exercise Windows reboot and power-loss boundaries.
+Remaining blockers are runtime and packaging evidence: `File::try_lock` sharing and abrupt-exit
+behavior; antivirus, VSS, NTFS, and ReFS behavior; dedicated non-roaming account provisioning and
+profile loading; redb crash, reboot, and torn-write recovery; native Node addon build and load;
+Authenticode signing; installer selection, repair, and removal; and native x64 and ARM64 execution.
+The Node loader still returns `unsupported_platform`, and no production factory constructs the
+store. Passing the current cross-compilation checks does not establish support.
 
-A Windows PR must replace the no-op filesystem helpers with handle-based Windows implementations. It must reject reparse-point traversal, apply and verify owner/SID ACLs, use write-through and `FlushFileBuffers` where required by the lifecycle protocol, and redesign any directory-publication step that cannot make a defensible durability claim. Passing a cross-compile check is not enough.
-
-Until all Windows evidence passes, both MSVC architectures must keep the stable loader outcome `unsupported_platform`. A partially installed secure store may instead return `secure_store_unavailable`, but it must never open production state.
+Until all Windows evidence passes, both MSVC architectures must keep the stable loader outcome
+`unsupported_platform`. A partially installed secure store may instead return
+`secure_store_unavailable`, but it must never open production state.
 
 ## Dependency evaluation
 

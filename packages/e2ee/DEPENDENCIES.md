@@ -294,6 +294,34 @@ fallback. Headless Linux and unknown implementations remain unsupported. The Nod
 construct this store and both Linux support rows remain disabled pending real GNOME Keyring and
 KWallet version, login, lock, restart, crash, installer, glibc x64, and glibc arm64 evidence.
 
+## Production storage: Windows DPAPI
+
+The Windows-only store adds this exact declaration:
+
+```toml
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Threading"] }
+```
+
+`windows-sys` 0.61.2 and `windows-link` 0.2.1 were already present in the E2EE lock. This declaration
+adds no package, checksum, build script, procedural macro, native library, development dependency,
+or downloaded tool. `windows-sys` has crates.io checksum
+`ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc`, license
+MIT OR Apache-2.0, and source commit `32c3144490c016fe496a0aed769bce60987a2e9d`.
+`windows-link` 0.2.1 has checksum
+`f0805222e57f7521d6a62e36fa9163bc891acd422f971205e6fbbf078b7d9b7c` and license
+MIT OR Apache-2.0. The E2EE lock changes only the `axl-e2ee` dependency edge and has SHA-256
+`97baca6640f5c1760d12749cbab2baee01bc25d452dd13e6dbf1624caf87c606`.
+
+The selected Win32 APIs cover DPAPI, process-token SID lookup, security descriptor conversion and
+verification, file and directory handles, reparse metadata, final handle paths, write-through
+replacement, and `FlushFileBuffers`. The store applies machine-scope DPAPI before user-scope DPAPI,
+forbids UI in both directions, binds the protected plaintext to the expected daemon SID, session,
+key, context hash, lifecycle, format, and platform, and reports `hardware_backing = false`. Built-in
+service identities are rejected. The production factory and loader remain disabled until a dedicated
+non-roaming account and the complete x64 and ARM64 runtime, filesystem, addon, signing, and installer
+matrices pass.
+
 ## Maintenance exception
 
 | Field | Value |

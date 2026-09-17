@@ -165,7 +165,7 @@ Headless Linux and unknown service implementations remain unsupported.
 Candidate declaration:
 
 ```toml
-windows-sys = { version = "=0.61.2", default-features = false, features = [/* exact APIs only */] }
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Threading"] }
 ```
 
 Select features only after listing every API needed for nested DPAPI, memory release, SID and ACL

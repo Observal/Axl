@@ -297,6 +297,15 @@ Headless sessions, root, unexpected runtime directories or bus addresses, unknow
 executables, owner changes, duplicate records, and missing services fail closed. The implementation
 reports `hardware_backing = false` and is not wired into Node.
 
+On Windows, `windows_dpapi::WindowsDpapiEnvelopeKeyStore` authenticates the record to an expected
+non-built-in daemon SID, protects it first with machine-scope DPAPI and then with user-scope DPAPI,
+and always sets `CRYPTPROTECT_UI_FORBIDDEN`. Prepared and active records are separate SID-ACL files.
+Writes use write-through handles, `FlushFileBuffers`, replacement with `MOVEFILE_WRITE_THROUGH`, and
+parent-directory flushing. Deletion is verified before output can proceed. Windows path helpers open
+paths as handles, reject reparse points and UNC or device forms, compare final handle paths, and
+apply and verify a protected owner-only DACL. The production factory remains absent until the
+installer provisions and verifies the dedicated non-roaming identity policy.
+
 The injected `RollbackAnchor` keeps monotonic state outside the database snapshot domain. Both
 dependencies must report availability or the adapter fails closed.
 
@@ -313,9 +322,10 @@ that they supply an independent rollback anchor. The macOS Keychain store is imp
 unwired and unsupported pending the required signed, unsigned, lock, login, backup, installer,
 arm64, and native x64 runtime evidence. The Linux Secret Service store is also unwired and
 unsupported pending named GNOME Keyring and KWallet 6 runtime, login, lock, owner-change, restart,
-crash, installer, glibc arm64, and glibc x64 evidence. Headless Linux remains unsupported. Windows
-storage, Android Keystore, generated mobile SDKs, and production mobile applications remain later
-work.
+crash, installer, glibc arm64, and glibc x64 evidence. Headless Linux remains unsupported. The
+Windows implementation is unwired and both Windows rows remain unsupported pending native runtime,
+ACL, reparse, NTFS/ReFS, reboot, restore, addon, signing, and installer evidence on x64 and ARM64.
+Android Keystore, generated mobile SDKs, and production mobile applications remain later work.
 
 The monotonic anchor detects a database older than the last anchored commit. The peer epoch
 authenticator detects a divergent epoch once authenticated peer evidence is available. Rollback of
