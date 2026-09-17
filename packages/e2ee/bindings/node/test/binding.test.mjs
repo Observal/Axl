@@ -51,7 +51,16 @@ async function activatedPair(seed = 20) {
     "reserved",
   );
   const welcome = await daemon.createWelcome(operation(6), reservationId);
-  assert.equal(await device.join(operation(7), welcome), "joined");
+  assert.equal(
+    await device.joinPublishedWelcome(
+      operation(7),
+      welcome.bytes,
+      welcome.claimHash,
+      createHash("sha384").update(welcome.bytes).digest(),
+      welcome.expiresAtMs,
+    ),
+    "joined",
+  );
   const activation = await device.prepareActivation(operation(8), operation(9));
   assert.rejects(
     device.prepareApplication(

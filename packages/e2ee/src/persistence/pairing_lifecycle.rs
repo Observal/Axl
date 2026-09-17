@@ -2342,6 +2342,99 @@ impl DurablePreJoinDevice {
         Ok(PreJoinLifecycle::Joined)
     }
 
+    pub fn join_published_welcome(
+        &mut self,
+        operation_id: Id,
+        welcome_bytes: &[u8],
+        claim_hash: [u8; 48],
+        welcome_hash: [u8; 48],
+        expires_at_ms: u64,
+    ) -> Result<PreJoinLifecycle, PersistenceError> {
+        if sha384(welcome_bytes).map_err(map_pairing_error)? != welcome_hash {
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        let fingerprint = operation_fingerprint_parts(
+            OP_JOIN_WELCOME,
+            &[
+                welcome_bytes,
+                &claim_hash,
+                &welcome_hash,
+                &expires_at_ms.to_be_bytes(),
+            ],
+        )?;
+        let mut transaction = begin_current(&self.store)?;
+        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
+            transaction.rollback()?;
+            return match existing {
+                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_JOINED => {
+                    Ok(PreJoinLifecycle::Joined)
+                }
+                _ => Err(PersistenceError::Conflict),
+            };
+        }
+        let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
+        let now = checked_pairing_now(&self.store, record.last_now_ms)?;
+        if now >= expires_at_ms
+            || expires_at_ms.saturating_sub(now) > 10 * 60 * 1_000
+            || !matches!(
+                record.state,
+                PreJoinLifecycle::PreJoin | PreJoinLifecycle::Expired
+            )
+            || sha384(&record.claim).map_err(map_pairing_error)? != claim_hash
+        {
+            transaction.rollback()?;
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        let invitation =
+            PairingInvitation::decode(&record.invitation).map_err(map_pairing_error)?;
+        let mut phone = super::load_phone(
+            &transaction.provider,
+            Arc::clone(&self.store.clock),
+            transaction.accepted_ids.clone(),
+        )?;
+        self.store
+            .faults
+            .check(FaultPoint::BeforeOpenMlsStateWrites)?;
+        let context = phone.join_published_welcome(
+            welcome_bytes,
+            record.crypto_session_id,
+            invitation.daemon_credential().identity().clone(),
+            Arc::clone(&self.store.clock),
+        )?;
+        if record.forbidden_group_id == Some(context.group_id) {
+            transaction.rollback()?;
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        {
+            let endpoint = phone.endpoint.as_mut().ok_or(PersistenceError::Corrupt)?;
+            endpoint.last_wall_time_ms = now;
+            record.state = PreJoinLifecycle::Joined;
+            record.pair_lifecycle = Some(PairLifecycle::AwaitingActivation);
+            record.last_now_ms = now;
+            record.group_id = Some(context.group_id);
+            record.welcome = Some(welcome_bytes.to_vec());
+            record.welcome_expires_at_ms = Some(expires_at_ms);
+            endpoint
+                .provider
+                .insert_internal(DEVICE_PREJOIN_KEY.to_vec(), encode_device_record(&record)?);
+        }
+        let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
+        super::persist_phone_metadata(&phone, &endpoint.provider, Some(&context), 0);
+        transaction.replace_provider_values(endpoint.provider.storage_values())?;
+        transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
+        transaction.stage_operation(super::CommittedOperation::Pairing(
+            PairingOperationRecord {
+                operation_id,
+                crypto_session_id: self.store.crypto_session_id,
+                kind: OP_JOIN_WELCOME,
+                outcome: OUTCOME_JOINED,
+                artifact_hash: claim_hash,
+            },
+        ))?;
+        transaction.commit_operation()?;
+        Ok(PreJoinLifecycle::Joined)
+    }
+
     pub fn prepare_activation(
         &mut self,
         operation_id: Id,

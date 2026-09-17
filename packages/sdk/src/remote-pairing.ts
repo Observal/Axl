@@ -23,6 +23,7 @@ export interface HostedPairingClientOptions {
   readonly origin: string;
   readonly authorization: () => Promise<string>;
   readonly fetch?: typeof fetch;
+  readonly allowInsecureLoopbackForTests?: boolean;
 }
 
 export class HostedPairingError extends Error {
@@ -37,9 +38,17 @@ export class HostedPairingError extends Error {
   }
 }
 
-function endpoint(origin: string, path: string): URL {
+function endpoint(origin: string, path: string, allowInsecureLoopbackForTests = false): URL {
   const base = new URL(origin);
-  if (base.protocol !== "https:" || base.username !== "" || base.password !== "") {
+  const insecureLoopback =
+    allowInsecureLoopbackForTests &&
+    base.protocol === "http:" &&
+    (base.hostname === "127.0.0.1" || base.hostname === "[::1]");
+  if (
+    (base.protocol !== "https:" && !insecureLoopback) ||
+    base.username !== "" ||
+    base.password !== ""
+  ) {
     throw new TypeError("Pairing origin must be an HTTPS origin without user information");
   }
   return new URL(path, `${base.origin}/`);
@@ -59,7 +68,7 @@ export class HostedPairingClient {
   readonly #options: HostedPairingClientOptions;
 
   constructor(options: HostedPairingClientOptions) {
-    endpoint(options.origin, "/");
+    endpoint(options.origin, "/", options.allowInsecureLoopbackForTests);
     this.#options = options;
   }
 
@@ -129,11 +138,14 @@ export class HostedPairingClient {
     if (token.length === 0 || token.length > 16 * 1024) {
       throw new HostedPairingError("unauthorized", "Pairing authorization is unavailable");
     }
-    const response = await (this.#options.fetch ?? fetch)(endpoint(this.#options.origin, path), {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    const response = await (this.#options.fetch ?? fetch)(
+      endpoint(this.#options.origin, path, this.#options.allowInsecureLoopbackForTests),
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
     const bytes = new Uint8Array(await response.arrayBuffer());
     if (bytes.byteLength > MAX_RESPONSE_BYTES) {
       throw new HostedPairingError("invalid_response", "Pairing response exceeds its bound");
