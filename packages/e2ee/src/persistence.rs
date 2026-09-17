@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
 //! Native durable storage for the endpoint E2EE core.
@@ -33,6 +34,9 @@ use crate::{
     TransactionalProvider,
 };
 
+#[cfg(target_os = "linux")]
+#[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
+pub(crate) mod linux_secret_service;
 #[cfg(target_os = "macos")]
 #[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
 pub(crate) mod macos_keychain;
