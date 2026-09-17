@@ -35,6 +35,7 @@ const packed = JSON.parse(
 const paths = packed.files.map((entry) => entry.path);
 assert(paths.includes("wasm/axl_e2ee_browser_bg.wasm"));
 assert(paths.includes("worker/index.js"));
+assert(paths.includes("worker/storage.js"));
 assert(!paths.some((path) => /fixture|test/iu.test(path)), "production tarball contains test material");
 const tarball = join(root, "dist/package", packed.filename);
 const installRoot = mkdtempSync(join(tmpdir(), "axl-e2ee-browser-package-"));

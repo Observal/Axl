@@ -259,10 +259,12 @@ request nonce, signing input, state branch, or key-lifecycle result.
 
 ### Current production boundary
 
-The production browser package currently exports metadata, secure-randomness validation, pairing
-inspection, close, and fail-closed endpoint constructors. Its worker does not contain IndexedDB
-persistence or endpoint mutations. The production package checks intentionally reject those test
-symbols and paths.
+The production browser package exports metadata, secure-randomness validation, pairing inspection,
+close, and fail-closed endpoint constructors. Its dedicated worker now packages a private IndexedDB,
+Web Lock, and WebCrypto persistence foundation plus the Rust unanimous-certificate verifier. No page
+protocol operation constructs the store, and endpoint mutations remain disabled pending private
+WASM transition finalization, production trust, hosted transport, and complete runtime evidence.
+Production package checks reject test symbols, anchors, controls, and paths.
 
 ### Reusable test evidence
 

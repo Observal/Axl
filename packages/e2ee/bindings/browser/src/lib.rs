@@ -16,7 +16,13 @@ use axl_e2ee::{
         run_openmls_negative_cases,
     },
 };
-use axl_e2ee::{PROFILE_ID, PROFILE_REVISION};
+use axl_e2ee::{
+    PROFILE_ID, PROFILE_REVISION,
+    witness::{
+        QuorumCertificate, ReplicaKey, ReplicaTrust, ReplicaTrustSet, WitnessError, WitnessRequest,
+        WitnessRequestKind, WitnessResult,
+    },
+};
 use wasm_bindgen::prelude::*;
 
 const ERROR_PREFIX: &str = "AXL_E2EE:";
@@ -48,6 +54,26 @@ fn map_core(value: Error) -> JsValue {
         CompetingCommit => "conflict",
         Crypto(_) => "internal_error",
         _ => "invalid_argument",
+    })
+}
+
+fn map_witness(value: WitnessError) -> JsValue {
+    use WitnessError::*;
+    error(match value {
+        BoundExceeded => "bound_exceeded",
+        CredentialMismatch => "witness_auth_failed",
+        OperationConflict | OperationMismatch => "witness_operation_conflict",
+        RegistrationConflict => "witness_registration_conflict",
+        InvalidExpected | StaleExpected => "witness_invalid_expected",
+        Revoked | Forked | Quarantined => "witness_conflict",
+        FreshWitnessRequired | PendingOperation | NoPendingOperation | OutputBlocked => {
+            "witness_unavailable"
+        }
+        Malformed | NonCanonical | ProfileMismatch | LineageMismatch | RoleMismatch
+        | GenerationMismatch | CounterMismatch | CommitmentMismatch | PredecessorMismatch
+        | RequestHashMismatch | RevocationMismatch | InvalidSignature | InvalidQuorum
+        | DuplicateReplica | InvalidTrustSet | UnpinnedKey | MixedReceipts | UnexpectedResult
+        | CorruptState | Crypto => "witness_receipt_invalid",
     })
 }
 
@@ -86,6 +112,87 @@ pub fn get_binding_info_json() -> String {
     format!(
         "{{\"abiVersion\":1,\"profileId\":\"{PROFILE_ID}\",\"profileRevision\":{PROFILE_REVISION},\"productionStorageReady\":false,\"workerRequired\":true}}"
     )
+}
+
+/// Worker-private verifier configured from exactly three build-pinned replica keys. It has no
+/// loader or page-protocol constructor.
+#[wasm_bindgen]
+pub struct BrowserWitnessVerifier {
+    trust: ReplicaTrustSet,
+}
+
+#[wasm_bindgen]
+impl BrowserWitnessVerifier {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        mut replica_ids: Vec<u8>,
+        mut key_ids: Vec<u8>,
+        mut public_keys: Vec<u8>,
+    ) -> Result<BrowserWitnessVerifier, JsValue> {
+        let result = (|| {
+            if replica_ids.len() != 3 * 16 || key_ids.len() != 3 * 16 || public_keys.len() != 3 * 32
+            {
+                return Err(error("invalid_argument"));
+            }
+            let mut replicas = Vec::with_capacity(3);
+            for index in 0..3 {
+                let replica_id = replica_ids[index * 16..(index + 1) * 16]
+                    .try_into()
+                    .map_err(|_| error("invalid_argument"))?;
+                let key_id = key_ids[index * 16..(index + 1) * 16]
+                    .try_into()
+                    .map_err(|_| error("invalid_argument"))?;
+                let public_key = public_keys[index * 32..(index + 1) * 32]
+                    .try_into()
+                    .map_err(|_| error("invalid_argument"))?;
+                let key = ReplicaKey::new(key_id, public_key).map_err(map_witness)?;
+                replicas.push(ReplicaTrust::new(replica_id, vec![key]).map_err(map_witness)?);
+            }
+            Ok(BrowserWitnessVerifier {
+                trust: ReplicaTrustSet::new(replicas).map_err(map_witness)?,
+            })
+        })();
+        replica_ids.fill(0);
+        key_ids.fill(0);
+        public_keys.fill(0);
+        result
+    }
+
+    pub fn verify(
+        &self,
+        mut request_bytes: Vec<u8>,
+        mut certificate_bytes: Vec<u8>,
+    ) -> Result<(), JsValue> {
+        let result = (|| {
+            let request = WitnessRequest::decode(&request_bytes).map_err(map_witness)?;
+            let certificate = QuorumCertificate::decode(&certificate_bytes).map_err(map_witness)?;
+            let actual = certificate
+                .verify(&request, &self.trust)
+                .map_err(map_witness)?;
+            let expected = match request.kind() {
+                WitnessRequestKind::Register => WitnessResult::Registered,
+                WitnessRequestKind::Advance => WitnessResult::Advanced,
+                WitnessRequestKind::Read => WitnessResult::Head,
+            };
+            if actual != expected {
+                return Err(map_witness(match actual {
+                    WitnessResult::OperationConflict => WitnessError::OperationConflict,
+                    WitnessResult::RegistrationConflict => WitnessError::RegistrationConflict,
+                    WitnessResult::Revoked => WitnessError::Revoked,
+                    WitnessResult::Forked
+                    | WitnessResult::ConflictingSuccessor
+                    | WitnessResult::HistoricalFork => WitnessError::Forked,
+                    WitnessResult::StaleExpected => WitnessError::StaleExpected,
+                    WitnessResult::InvalidExpected => WitnessError::InvalidExpected,
+                    _ => WitnessError::UnexpectedResult,
+                }));
+            }
+            Ok(())
+        })();
+        request_bytes.fill(0);
+        certificate_bytes.fill(0);
+        result
+    }
 }
 
 #[wasm_bindgen]

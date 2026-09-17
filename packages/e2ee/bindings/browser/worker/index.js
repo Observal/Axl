@@ -1,12 +1,19 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
+import { ProductionBrowserStore } from "./storage.js";
 import initializeWasm, {
+  BrowserWitnessVerifier,
   get_binding_info_json as bindingInfoJson,
   inspect_pairing_claim as inspectClaim,
   inspect_pairing_invitation as inspectInvitation,
   secure_random_check as secureRandomCheck,
 } from "../wasm/axl_e2ee_browser.js";
+
+// The store is constructed only by the still-disabled production endpoint path. Keeping the class
+// reference in this worker prevents page code from receiving storage or key authority.
+void ProductionBrowserStore;
+void BrowserWitnessVerifier;
 
 const BYTE_OPERATIONS = Object.freeze({
   inspect_invitation: 2048,
