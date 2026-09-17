@@ -13,6 +13,10 @@ defmodule AxlRelay.Router do
   def init(options), do: options
 
   @impl true
+  def call(%{method: "GET", path_info: ["healthz"]} = connection, _options) do
+    json(connection, 200, %{"status" => "ok", "mode" => "deployment-test"})
+  end
+
   def call(%{method: "GET", path_info: ["v1", "connect"]} = connection, options) do
     connection
     |> WebSockAdapter.upgrade(
