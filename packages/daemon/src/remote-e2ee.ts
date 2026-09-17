@@ -17,9 +17,9 @@ import {
   type ServerMessage,
 } from "@axl/protocol";
 
-import {
-  type AuthenticatedRemoteAttachment,
-  type AuthenticatedRemoteRequestResult,
+import type {
+  AuthenticatedRemoteAttachment,
+  AuthenticatedRemoteRequestResult,
   AxlDaemon,
 } from "./daemon.ts";
 import type { RemoteDeviceAuthorityStore } from "./remote-authority.ts";
