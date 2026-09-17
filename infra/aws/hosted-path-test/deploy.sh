@@ -97,6 +97,7 @@ terraform -chdir="$stack" apply -auto-approve \
 registry="${account}.dkr.ecr.${region}.amazonaws.com"
 aws ecr get-login-password --profile "$profile" --region "$region" |
   docker login --username AWS --password-stdin "$registry" >/dev/null
+trap 'docker logout "$registry" >/dev/null 2>&1 || true' EXIT
 
 control_image="${registry}/axl-hosted-test-control-plane:${image_tag}"
 relay_image="${registry}/axl-hosted-test-relay:${image_tag}"
