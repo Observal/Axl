@@ -1,0 +1,55 @@
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Hosted-path deployment-test evidence
+
+Date: 2026-09-17
+
+This is deployment-test evidence only. It is not production release evidence and does not enable
+`productionStorageReady`.
+
+## Environment
+
+- AWS account: `897545289576`
+- Region: Hyderabad (`ap-south-2`)
+- Terraform state: encrypted, versioned S3 backend with DynamoDB locking
+- Compute: one ECS/Fargate control-plane task and one ECS/Fargate relay task
+- Edge transport: CloudFront HTTPS/WSS endpoint using its default certificate; a custom-domain TLS policy remains a production gate
+- Origin: Application Load Balancer restricted to the CloudFront origin-facing managed prefix list
+- State: DynamoDB on-demand table with server-side encryption, TTL, and point-in-time recovery
+- Secrets: AWS Secrets Manager, injected through the ECS task execution role
+- Images: immutable ECR tags derived from the source commit
+- Logs: CloudWatch log groups with 14-day retention
+
+## Deployed endpoint
+
+- Control plane: `https://d4z52xxwwvaep.cloudfront.net`
+- Relay: `wss://d4z52xxwwvaep.cloudfront.net/v1/connect`
+
+## Verified behavior
+
+The deployment script waited for both ECS services to become stable and then exercised the public
+CloudFront endpoint. The smoke test verified:
+
+1. HTTPS health response;
+2. authenticated claim publication;
+3. atomic claim reservation;
+4. exact Welcome publication and retrieval;
+5. Welcome acknowledgement;
+6. one-use relay-ticket issuance and consumption;
+7. WebSocket admission; and
+8. byte-identical opaque payload delivery from a device route to a daemon route.
+
+The latest successful smoke-test result was:
+
+```json
+{"region":"ap-south-2","controlPlane":"healthy","pairing":"passed","relay":"opaque-delivery-passed"}
+```
+
+## Deliberate limitations
+
+The deployed services reject any environment mode other than `deployment-test`. Authentication and
+possession proof use randomly generated test credentials stored in Secrets Manager. Witness replicas
+are not deployed. The daemon is not connected to this environment. Production identity, independent
+witness failure domains, workload authentication, signed Windows artifacts, installer evidence, and
+independent security review remain release gates.
