@@ -13,10 +13,7 @@ import {
   parseTransportAttemptId,
 } from "@axl/protocol";
 
-import {
-  NativeEndpointOutbox,
-  type NativeDurableOutboxRecord,
-} from "../src/remote-outbox.ts";
+import { NativeEndpointOutbox, type NativeDurableOutboxRecord } from "../src/remote-outbox.ts";
 
 function bytes(value: string): Uint8Array {
   return Uint8Array.from(Buffer.from(value.replaceAll("-", ""), "hex"));
@@ -24,13 +21,9 @@ function bytes(value: string): Uint8Array {
 
 const requestId = parseRemoteRequestId("44444444-4444-4444-8444-444444444444");
 const operationId = parseOperationId("55555555-5555-4555-8555-555555555555");
-const cryptoSessionId = parseCryptoSessionId(
-  "33333333-3333-4333-8333-333333333333",
-);
+const cryptoSessionId = parseCryptoSessionId("33333333-3333-4333-8333-333333333333");
 const routeId = parseRouteId("66666666-6666-4666-8666-666666666666");
-const attemptId = parseTransportAttemptId(
-  "77777777-7777-4777-8777-777777777777",
-);
+const attemptId = parseTransportAttemptId("77777777-7777-4777-8777-777777777777");
 
 function nativeRecord(): NativeDurableOutboxRecord {
   const logical = bytes(requestId);
@@ -73,9 +66,7 @@ test("native endpoint outbox recovers exact committed bytes and acknowledges in 
   assert.equal(recovered.length, 1);
   assert.equal(recovered[0]?.requestId, requestId);
   assert.equal(recovered[0]?.idempotencyKey, operationId);
-  const envelope = parseRemoteE2eeEnvelope(
-    recovered[0]?.opaqueEnvelope ?? new Uint8Array(),
-  );
+  const envelope = parseRemoteE2eeEnvelope(recovered[0]?.opaqueEnvelope ?? new Uint8Array());
   assert.equal(envelope.hostedGrantGeneration, 7);
   assert.deepEqual(envelope.ciphertext, Uint8Array.of(1, 2, 3));
 

@@ -35,9 +35,7 @@ export interface OpaqueOutboxTransaction<Result> {
 export interface OpaqueOutboxStore {
   transact<Result>(
     requestId: RequestId,
-    operation: (
-      current: OpaqueOutboxRecord | undefined,
-    ) => OpaqueOutboxTransaction<Result>,
+    operation: (current: OpaqueOutboxRecord | undefined) => OpaqueOutboxTransaction<Result>,
   ): Promise<Result>;
   list(): Promise<readonly OpaqueOutboxRecord[]>;
 }
@@ -68,16 +66,10 @@ export class OpaqueOutboxError extends Error {
 }
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return (
-    left.byteLength === right.byteLength &&
-    left.every((byte, index) => byte === right[index])
-  );
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
 }
 
-function sameRecord(
-  left: OpaqueOutboxRecord,
-  right: OpaqueOutboxRecord,
-): boolean {
+function sameRecord(left: OpaqueOutboxRecord, right: OpaqueOutboxRecord): boolean {
   return (
     left.requestId === right.requestId &&
     left.idempotencyKey === right.idempotencyKey &&
@@ -106,10 +98,7 @@ export class OpaqueOutbox implements RemoteOutbox {
   enqueue(value: OpaqueOutboxRecord): Promise<void> {
     const record = parseOpaqueOutboxRecord(value);
     if (record.state !== "queued_local") {
-      throw new OpaqueOutboxError(
-        "outbox_conflict",
-        "A new outbox record must be queued locally",
-      );
+      throw new OpaqueOutboxError("outbox_conflict", "A new outbox record must be queued locally");
     }
     return this.store.transact(record.requestId, (current) => {
       if (current !== undefined && !sameRecord(current, record)) {
@@ -125,16 +114,10 @@ export class OpaqueOutbox implements RemoteOutbox {
   async beginAttempt(requestId: RequestId): Promise<OpaqueTransportAttempt> {
     const prepared = await this.store.transact(requestId, (current) => {
       if (current === undefined) {
-        throw new OpaqueOutboxError(
-          "unknown_request",
-          "Outbox request does not exist",
-        );
+        throw new OpaqueOutboxError("unknown_request", "Outbox request does not exist");
       }
       if (current.state === "daemon_accepted") {
-        throw new OpaqueOutboxError(
-          "outbox_conflict",
-          "Accepted request must not be resent",
-        );
+        throw new OpaqueOutboxError("outbox_conflict", "Accepted request must not be resent");
       }
       const record = parseOpaqueOutboxRecord({ ...current, state: "sending" });
       return {
@@ -147,9 +130,7 @@ export class OpaqueOutbox implements RemoteOutbox {
         },
       };
     });
-    const destinationRouteId = await this.routes.resolve(
-      prepared.destinationCryptoSessionId,
-    );
+    const destinationRouteId = await this.routes.resolve(prepared.destinationCryptoSessionId);
     return {
       attemptId: prepared.attemptId,
       requestId: prepared.requestId,
@@ -161,10 +142,7 @@ export class OpaqueOutbox implements RemoteOutbox {
   markQueued(requestId: RequestId): Promise<void> {
     return this.store.transact(requestId, (current) => {
       if (current === undefined) {
-        throw new OpaqueOutboxError(
-          "unknown_request",
-          "Outbox request does not exist",
-        );
+        throw new OpaqueOutboxError("unknown_request", "Outbox request does not exist");
       }
       if (current.state === "daemon_accepted") {
         return { record: current, result: undefined };
@@ -179,10 +157,7 @@ export class OpaqueOutbox implements RemoteOutbox {
   markDaemonAccepted(requestId: RequestId): Promise<void> {
     return this.store.transact(requestId, (current) => {
       if (current === undefined) {
-        throw new OpaqueOutboxError(
-          "unknown_request",
-          "Outbox request does not exist",
-        );
+        throw new OpaqueOutboxError("unknown_request", "Outbox request does not exist");
       }
       return {
         record: parseOpaqueOutboxRecord({
@@ -213,8 +188,7 @@ export class OpaqueOutbox implements RemoteOutbox {
         if (record.state !== "sending") continue;
         await this.store.transact(record.requestId, (current) => {
           if (current === undefined) return { result: undefined };
-          if (current.state !== "sending")
-            return { record: current, result: undefined };
+          if (current.state !== "sending") return { record: current, result: undefined };
           return {
             record: parseOpaqueOutboxRecord({
               ...current,
@@ -235,8 +209,7 @@ export class OpaqueOutbox implements RemoteOutbox {
           .map((record) => parseOpaqueOutboxRecord(record))
           .sort(
             (left, right) =>
-              left.createdAt - right.createdAt ||
-              left.requestId.localeCompare(right.requestId),
+              left.createdAt - right.createdAt || left.requestId.localeCompare(right.requestId),
           ),
       );
   }
@@ -261,27 +234,20 @@ export interface NativeDurableOutboxEndpoint {
 }
 
 function uuidText(bytes: Uint8Array): string {
-  if (bytes.byteLength !== 16)
-    throw new TypeError("Native outbox identity must contain 16 bytes");
-  const encoded = [...bytes]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  if (bytes.byteLength !== 16) throw new TypeError("Native outbox identity must contain 16 bytes");
+  const encoded = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${encoded.slice(0, 8)}-${encoded.slice(8, 12)}-${encoded.slice(12, 16)}-${encoded.slice(16, 20)}-${encoded.slice(20)}`;
 }
 
 function requestIdFor(record: NativeDurableOutboxRecord): RequestId {
   const bytes = record.logicalMessageId.slice();
-  if (record.messageClass === "application_request")
-    bytes[0] = (bytes[0] ?? 0) ^ 0x41;
+  if (record.messageClass === "application_request") bytes[0] = (bytes[0] ?? 0) ^ 0x41;
   return parseRemoteRequestId(uuidText(bytes));
 }
 
 function nativeEnvelope(record: NativeDurableOutboxRecord): Uint8Array {
   const hostedGrantGeneration = Number(record.hostedGrantGeneration);
-  if (
-    !Number.isSafeInteger(hostedGrantGeneration) ||
-    hostedGrantGeneration <= 0
-  ) {
+  if (!Number.isSafeInteger(hostedGrantGeneration) || hostedGrantGeneration <= 0) {
     throw new OpaqueOutboxError(
       "outbox_conflict",
       "Native outbox record has no valid hosted grant generation",
@@ -322,10 +288,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
     const record = (await this.#endpoint.pendingOutbox()).find(
       (candidate) => requestIdFor(candidate) === expected.requestId,
     );
-    if (
-      record === undefined ||
-      !sameBytes(nativeEnvelope(record), expected.opaqueEnvelope)
-    ) {
+    if (record === undefined || !sameBytes(nativeEnvelope(record), expected.opaqueEnvelope)) {
       throw new OpaqueOutboxError(
         "outbox_conflict",
         "Prepared bytes are not present in the native durable outbox",
@@ -336,10 +299,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
   async beginAttempt(requestId: RequestId): Promise<OpaqueTransportAttempt> {
     const record = await this.#required(requestId);
     if (this.#accepted.has(requestId)) {
-      throw new OpaqueOutboxError(
-        "outbox_conflict",
-        "Accepted request must not be resent",
-      );
+      throw new OpaqueOutboxError("outbox_conflict", "Accepted request must not be resent");
     }
     this.#sending.add(requestId);
     return {
@@ -369,9 +329,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
 
   async removeAccepted(requestId: RequestId): Promise<void> {
     if (!this.#accepted.delete(requestId)) {
-      const exists = (await this.list()).some(
-        (record) => record.requestId === requestId,
-      );
+      const exists = (await this.list()).some((record) => record.requestId === requestId);
       if (exists) {
         throw new OpaqueOutboxError(
           "not_daemon_accepted",
@@ -392,9 +350,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
       return parseOpaqueOutboxRecord({
         requestId,
         idempotencyKey: parseIdempotencyKey(uuidText(record.operationId)),
-        destinationCryptoSessionId: parseCryptoSessionId(
-          uuidText(record.cryptoSessionId),
-        ),
+        destinationCryptoSessionId: parseCryptoSessionId(uuidText(record.cryptoSessionId)),
         opaqueEnvelope: nativeEnvelope(record),
         createdAt: 0,
         state: this.#sending.has(requestId) ? "sending" : "queued_local",
@@ -407,10 +363,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
       (candidate) => requestIdFor(candidate) === requestId,
     );
     if (record === undefined) {
-      throw new OpaqueOutboxError(
-        "unknown_request",
-        "Native outbox request does not exist",
-      );
+      throw new OpaqueOutboxError("unknown_request", "Native outbox request does not exist");
     }
     return record;
   }

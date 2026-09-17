@@ -104,7 +104,11 @@ export type Publication =
       readonly hash: OwnedBytes;
       readonly expiresAtMs: bigint;
     }
-  | { readonly tag: "pending"; readonly hash: OwnedBytes; readonly comparison: string }
+  | {
+      readonly tag: "pending";
+      readonly hash: OwnedBytes;
+      readonly comparison: string;
+    }
   | {
       readonly tag: "confirmed" | "reserved";
       readonly hash: OwnedBytes;
