@@ -16,13 +16,10 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.build.json --force",
-    "start:deployment-test": "node dist/deployment-test-runtime.js",
     "test": "pnpm --filter @axl/protocol build && node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@aws-sdk/client-dynamodb": "3.1134.0",
-    "@axl/protocol": "workspace:*",
-    "jose": "6.2.12"
+    "@axl/protocol": "workspace:*"
   }
 }

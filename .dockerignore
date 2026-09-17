@@ -10,6 +10,9 @@ node_modules
 **/_build
 **/deps
 **/.elixir_ls
+**/.terraform
+*.tfstate
+*.tfstate.*
 *.md
 !package.json
 !pnpm-workspace.yaml

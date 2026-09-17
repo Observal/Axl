@@ -101,7 +101,7 @@ trap 'docker logout "$registry" >/dev/null 2>&1 || true' EXIT
 
 control_image="${registry}/axl-hosted-test-control-plane:${image_tag}"
 relay_image="${registry}/axl-hosted-test-relay:${image_tag}"
-docker build --platform linux/amd64 -f "$root/services/control-plane/Dockerfile" -t "$control_image" "$root"
+docker build --platform linux/amd64 -f "$root/services/aws-control-plane/Dockerfile" -t "$control_image" "$root"
 docker build --platform linux/amd64 -f "$root/services/relay/Dockerfile" -t "$relay_image" "$root"
 docker push "$control_image"
 docker push "$relay_image"
