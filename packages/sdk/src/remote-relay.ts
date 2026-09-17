@@ -27,10 +27,7 @@ import {
   type TransportAttemptId,
 } from "@axl/protocol";
 
-import type {
-  RemoteOutbox,
-  TransportAttemptIdFactory,
-} from "./remote-outbox.ts";
+import type { RemoteOutbox, TransportAttemptIdFactory } from "./remote-outbox.ts";
 
 const MAX_ADMISSION_BYTES = 4_096;
 const DEFAULT_ROUTE_WAIT_MS = 10_000;
@@ -47,10 +44,7 @@ export interface RelayTicketProvider {
 export interface RelayPossessionProofProvider {
   create(
     ticket: IssueRelayTicketResult,
-  ): Promise<{
-    readonly connectionNonce: string;
-    readonly possessionProof: Uint8Array;
-  }>;
+  ): Promise<{ readonly connectionNonce: string; readonly possessionProof: Uint8Array }>;
 }
 
 export interface RemoteFetchResponse {
@@ -71,34 +65,20 @@ export type RemoteFetch = (
 export interface HttpRelayTicketProviderOptions {
   readonly controlPlaneOrigin: string;
   readonly request: IssueRelayTicketRequest;
-  readonly authenticationHeaders: () => Promise<
-    Readonly<Record<string, string>>
-  >;
+  readonly authenticationHeaders: () => Promise<Readonly<Record<string, string>>>;
   readonly proof: RelayPossessionProofProvider;
   readonly fetch?: RemoteFetch;
   /** Test-only escape hatch. Production control-plane traffic must use HTTPS. */
   readonly allowInsecureLoopbackForTests?: boolean;
 }
 
-function validatedControlPlaneOrigin(
-  options: HttpRelayTicketProviderOptions,
-): string {
+function validatedControlPlaneOrigin(options: HttpRelayTicketProviderOptions): string {
   const url = new URL(options.controlPlaneOrigin);
-  if (
-    url.username !== "" ||
-    url.password !== "" ||
-    url.search !== "" ||
-    url.hash !== ""
-  ) {
-    throw new TypeError(
-      "Control-plane origin must not contain credentials, query, or fragment",
-    );
+  if (url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== "") {
+    throw new TypeError("Control-plane origin must not contain credentials, query, or fragment");
   }
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]";
-  if (
-    url.protocol !== "https:" &&
-    !(options.allowInsecureLoopbackForTests === true && loopback)
-  ) {
+  if (url.protocol !== "https:" && !(options.allowInsecureLoopbackForTests === true && loopback)) {
     throw new TypeError("Control-plane origin must use HTTPS");
   }
   return url.origin;
@@ -115,10 +95,8 @@ export class HttpRelayTicketProvider implements RelayTicketProvider {
     this.options = options;
     this.ticketRequest = parseIssueRelayTicketRequest(options.request);
     this.origin = validatedControlPlaneOrigin(options);
-    const fetcher =
-      options.fetch ?? (globalThis as { fetch?: RemoteFetch }).fetch;
-    if (fetcher === undefined)
-      throw new TypeError("A fetch implementation is required");
+    const fetcher = options.fetch ?? (globalThis as { fetch?: RemoteFetch }).fetch;
+    if (fetcher === undefined) throw new TypeError("A fetch implementation is required");
     this.request = fetcher;
   }
 
@@ -137,9 +115,7 @@ export class HttpRelayTicketProvider implements RelayTicketProvider {
     }
     const ticket = parseIssueRelayTicketResult(await response.json());
     const proof = await this.options.proof.create(ticket);
-    const nonceBytes = new TextEncoder().encode(
-      proof.connectionNonce,
-    ).byteLength;
+    const nonceBytes = new TextEncoder().encode(proof.connectionNonce).byteLength;
     if (
       nonceBytes === 0 ||
       nonceBytes > 256 ||
@@ -147,10 +123,7 @@ export class HttpRelayTicketProvider implements RelayTicketProvider {
       proof.possessionProof.byteLength === 0 ||
       proof.possessionProof.byteLength > 1_024
     ) {
-      throw new RemoteRelayError(
-        "invalid_admission",
-        "Possession proof is outside relay bounds",
-      );
+      throw new RemoteRelayError("invalid_admission", "Possession proof is outside relay bounds");
     }
     return { ...ticket, ...proof };
   }
@@ -188,14 +161,8 @@ export interface RemoteWebSocket {
   readonly readyState: number;
   send(data: Uint8Array): void;
   close(code?: number, reason?: string): void;
-  addEventListener(
-    type: RemoteWebSocketEvent["type"],
-    listener: RemoteWebSocketListener,
-  ): void;
-  removeEventListener(
-    type: RemoteWebSocketEvent["type"],
-    listener: RemoteWebSocketListener,
-  ): void;
+  addEventListener(type: RemoteWebSocketEvent["type"], listener: RemoteWebSocketListener): void;
+  removeEventListener(type: RemoteWebSocketEvent["type"], listener: RemoteWebSocketListener): void;
 }
 
 export interface RemoteWebSocketFactory {
@@ -204,11 +171,9 @@ export interface RemoteWebSocketFactory {
 
 export class GlobalRemoteWebSocketFactory implements RemoteWebSocketFactory {
   connect(url: string): RemoteWebSocket {
-    const Constructor = (
-      globalThis as { WebSocket?: new (url: string) => RemoteWebSocket }
-    ).WebSocket;
-    if (Constructor === undefined)
-      throw new TypeError("A WebSocket implementation is required");
+    const Constructor = (globalThis as { WebSocket?: new (url: string) => RemoteWebSocket })
+      .WebSocket;
+    if (Constructor === undefined) throw new TypeError("A WebSocket implementation is required");
     return new Constructor(url);
   }
 }
@@ -269,14 +234,11 @@ export class RemoteRelayError extends Error {
 }
 
 function positiveInteger(value: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0)
-    throw new TypeError(`${name} must be positive`);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be positive`);
   return value;
 }
 
-function reconnectPolicy(
-  value: Partial<RemoteReconnectPolicy> = {},
-): RemoteReconnectPolicy {
+function reconnectPolicy(value: Partial<RemoteReconnectPolicy> = {}): RemoteReconnectPolicy {
   const policy = { ...DEFAULT_RECONNECT_POLICY, ...value };
   positiveInteger(policy.maximumAttempts, "maximumAttempts");
   positiveInteger(policy.initialDelayMs, "initialDelayMs");
@@ -284,21 +246,14 @@ function reconnectPolicy(
   if (policy.maximumDelayMs < policy.initialDelayMs) {
     throw new TypeError("maximumDelayMs must cover initialDelayMs");
   }
-  if (
-    !Number.isFinite(policy.jitterRatio) ||
-    policy.jitterRatio < 0 ||
-    policy.jitterRatio > 1
-  ) {
+  if (!Number.isFinite(policy.jitterRatio) || policy.jitterRatio < 0 || policy.jitterRatio > 1) {
     throw new TypeError("jitterRatio must be from zero through one");
   }
   return policy;
 }
 
 function rejectOversizedMessage(): never {
-  throw new RemoteRelayError(
-    "frame_too_large",
-    "Relay message exceeds the negotiated frame limit",
-  );
+  throw new RemoteRelayError("frame_too_large", "Relay message exceeds the negotiated frame limit");
 }
 
 function boundedBytes(bytes: Uint8Array, maximumBytes: number): Uint8Array {
@@ -306,10 +261,7 @@ function boundedBytes(bytes: Uint8Array, maximumBytes: number): Uint8Array {
   return bytes;
 }
 
-async function messageBytes(
-  value: unknown,
-  maximumBytes: number,
-): Promise<Uint8Array> {
+async function messageBytes(value: unknown, maximumBytes: number): Promise<Uint8Array> {
   if (value instanceof Uint8Array) return boundedBytes(value, maximumBytes);
   if (value instanceof ArrayBuffer) {
     if (value.byteLength > maximumBytes) rejectOversizedMessage();
@@ -317,27 +269,17 @@ async function messageBytes(
   }
   if (ArrayBuffer.isView(value)) {
     if (value.byteLength > maximumBytes) rejectOversizedMessage();
-    return new Uint8Array(
-      value.buffer,
-      value.byteOffset,
-      value.byteLength,
-    ).slice();
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice();
   }
   if (typeof Blob !== "undefined" && value instanceof Blob) {
     if (value.size > maximumBytes) rejectOversizedMessage();
-    return boundedBytes(
-      new Uint8Array(await value.arrayBuffer()),
-      maximumBytes,
-    );
+    return boundedBytes(new Uint8Array(await value.arrayBuffer()), maximumBytes);
   }
   if (typeof value === "string") {
     if (value.length > maximumBytes) rejectOversizedMessage();
     return boundedBytes(new TextEncoder().encode(value), maximumBytes);
   }
-  throw new RemoteRelayError(
-    "bad_relay_message",
-    "Relay message is not supported binary data",
-  );
+  throw new RemoteRelayError("bad_relay_message", "Relay message is not supported binary data");
 }
 
 function isRelayFrame(bytes: Uint8Array): boolean {
@@ -360,10 +302,7 @@ function admissionBytes(credential: RelayAdmissionCredential): Uint8Array {
     }),
   );
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_ADMISSION_BYTES) {
-    throw new RemoteRelayError(
-      "invalid_admission",
-      "Relay admission message exceeds its bound",
-    );
+    throw new RemoteRelayError("invalid_admission", "Relay admission message exceeds its bound");
   }
   return bytes;
 }
@@ -382,21 +321,11 @@ export class RemoteRelayConnection {
   private readonly routeWaitMs: number;
   private readonly random: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
-  private readonly receiptListeners = new Set<
-    (receipt: RelayReceipt) => void
-  >();
-  private readonly failureListeners = new Set<
-    (failure: RelayFailure) => void
-  >();
-  private readonly deliveryListeners = new Set<
-    (delivery: RelayDelivery) => void
-  >();
-  private readonly routeListeners = new Set<
-    (peers: readonly RelayPeerRoute[]) => void
-  >();
-  private readonly stateListeners = new Set<
-    (state: RemoteRelayConnectionState) => void
-  >();
+  private readonly receiptListeners = new Set<(receipt: RelayReceipt) => void>();
+  private readonly failureListeners = new Set<(failure: RelayFailure) => void>();
+  private readonly deliveryListeners = new Set<(delivery: RelayDelivery) => void>();
+  private readonly routeListeners = new Set<(peers: readonly RelayPeerRoute[]) => void>();
+  private readonly stateListeners = new Set<(state: RemoteRelayConnectionState) => void>();
   private readonly routeWaiters = new Set<RouteWaiter>();
   private socket: RemoteWebSocket | undefined;
   private sourceRoute: RelayPeerRoute | undefined;
@@ -413,15 +342,11 @@ export class RemoteRelayConnection {
     this.options = options;
     this.sockets = options.sockets ?? new GlobalRemoteWebSocketFactory();
     this.policy = reconnectPolicy(options.reconnect);
-    this.routeWaitMs = positiveInteger(
-      options.routeWaitMs ?? DEFAULT_ROUTE_WAIT_MS,
-      "routeWaitMs",
-    );
+    this.routeWaitMs = positiveInteger(options.routeWaitMs ?? DEFAULT_ROUTE_WAIT_MS, "routeWaitMs");
     this.random = options.random ?? Math.random;
     this.sleep =
       options.sleep ??
-      ((milliseconds) =>
-        new Promise((resolve) => setTimeout(resolve, milliseconds)));
+      ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
   }
 
   get state(): RemoteRelayConnectionState {
@@ -502,20 +427,14 @@ export class RemoteRelayConnection {
     }
     const current = this.daemonRoute();
     if (current !== undefined) return current;
-    if (this.stopped)
-      throw new RemoteRelayError("connection_closed", "Relay is not running");
+    if (this.stopped) throw new RemoteRelayError("connection_closed", "Relay is not running");
     return new Promise<RouteId>((resolve, reject) => {
       const waiter: RouteWaiter = {
         resolve,
         reject,
         timer: setTimeout(() => {
           this.routeWaiters.delete(waiter);
-          reject(
-            new RemoteRelayError(
-              "daemon_offline",
-              "Daemon route is unavailable",
-            ),
-          );
+          reject(new RemoteRelayError("daemon_offline", "Daemon route is unavailable"));
         }, this.routeWaitMs),
       };
       this.routeWaiters.add(waiter);
@@ -528,22 +447,12 @@ export class RemoteRelayConnection {
     payload: Uint8Array,
   ): void {
     const socket = this.socket;
-    if (
-      this.currentState !== "connected" ||
-      socket === undefined ||
-      socket.readyState !== 1
-    ) {
-      throw new RemoteRelayError(
-        "connection_closed",
-        "Relay connection is not connected",
-      );
+    if (this.currentState !== "connected" || socket === undefined || socket.readyState !== 1) {
+      throw new RemoteRelayError("connection_closed", "Relay connection is not connected");
     }
     const maximumBytes = this.activeMaxFrameBytes;
     if (maximumBytes === undefined) {
-      throw new RemoteRelayError(
-        "connection_closed",
-        "Relay connection has no active limits",
-      );
+      throw new RemoteRelayError("connection_closed", "Relay connection has no active limits");
     }
     const frame = encodeRelayBinaryFrame({
       transportVersion: REMOTE_TRANSPORT_VERSION,
@@ -584,13 +493,9 @@ export class RemoteRelayConnection {
     if (!this.lifecycleIsActive(lifecycleGeneration)) return;
     this.stopped = true;
     this.setState("disconnected");
-    throw new RemoteRelayError(
-      "connection_failed",
-      "Relay reconnect attempts were exhausted",
-      {
-        cause: latest,
-      },
-    );
+    throw new RemoteRelayError("connection_failed", "Relay reconnect attempts were exhausted", {
+      cause: latest,
+    });
   }
 
   private lifecycleIsActive(generation: number): boolean {
@@ -601,10 +506,7 @@ export class RemoteRelayConnection {
     const credential = await this.options.tickets.acquire();
     if (!this.lifecycleIsActive(lifecycleGeneration)) return;
     if (credential.expiresAt <= Date.now()) {
-      throw new RemoteRelayError(
-        "invalid_admission",
-        "Relay ticket is already expired",
-      );
+      throw new RemoteRelayError("invalid_admission", "Relay ticket is already expired");
     }
     const generation = ++this.generation;
     const socket = this.sockets.connect(credential.relayUrl);
@@ -623,12 +525,7 @@ export class RemoteRelayConnection {
       const timer = setTimeout(
         () => {
           socket.close(1008, "route_snapshot_timeout");
-          finish(
-            new RemoteRelayError(
-              "connection_failed",
-              "Relay route snapshot timed out",
-            ),
-          );
+          finish(new RemoteRelayError("connection_failed", "Relay route snapshot timed out"));
         },
         Math.min(this.routeWaitMs, credential.limits.idleTimeoutMs),
       );
@@ -644,32 +541,20 @@ export class RemoteRelayConnection {
           socket.send(admission);
         } catch (cause) {
           finish(
-            new RemoteRelayError(
-              "invalid_admission",
-              "Could not send relay admission",
-              { cause },
-            ),
+            new RemoteRelayError("invalid_admission", "Could not send relay admission", { cause }),
           );
         }
       };
       const message: RemoteWebSocketListener = (event) => {
         if (event.type !== "message") return;
-        void this.handleMessage(
-          event.data,
-          generation,
-          credential.limits.maxFrameBytes,
-        )
+        void this.handleMessage(event.data, generation, credential.limits.maxFrameBytes)
           .then((snapshot) => {
             if (snapshot) finish();
           })
           .catch((cause: unknown) => {
             socket.close(1008, "bad_relay_message");
             finish(
-              new RemoteRelayError(
-                "bad_relay_message",
-                "Relay sent an invalid message",
-                { cause },
-              ),
+              new RemoteRelayError("bad_relay_message", "Relay sent an invalid message", { cause }),
             );
           });
       };
@@ -683,9 +568,7 @@ export class RemoteRelayConnection {
         this.handleSocketClosed(generation, error);
       };
       const failed: RemoteWebSocketListener = () =>
-        finish(
-          new RemoteRelayError("connection_failed", "Relay WebSocket failed"),
-        );
+        finish(new RemoteRelayError("connection_failed", "Relay WebSocket failed"));
       socket.addEventListener("open", open);
       socket.addEventListener("message", message);
       socket.addEventListener("close", closed);
@@ -693,10 +576,7 @@ export class RemoteRelayConnection {
     });
     if (generation !== this.generation || this.stopped) {
       socket.close(1000, "stale_connection");
-      throw new RemoteRelayError(
-        "connection_closed",
-        "Relay connection became stale",
-      );
+      throw new RemoteRelayError("connection_closed", "Relay connection became stale");
     }
     this.activeMaxFrameBytes = credential.limits.maxFrameBytes;
     this.setState("connected");
@@ -713,17 +593,11 @@ export class RemoteRelayConnection {
     if (!isRelayFrame(bytes)) {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(
-          new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-        );
+        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
       } catch (cause) {
-        throw new RemoteRelayError(
-          "bad_relay_message",
-          "Relay discovery is invalid JSON",
-          {
-            cause,
-          },
-        );
+        throw new RemoteRelayError("bad_relay_message", "Relay discovery is invalid JSON", {
+          cause,
+        });
       }
       const discovery = parseRelayDiscoveryMessage(parsed);
       this.applyDiscovery(discovery);
@@ -737,10 +611,7 @@ export class RemoteRelayConnection {
     } else if ("sourceRouteId" in frame) {
       for (const listener of this.deliveryListeners) listener(frame);
     } else {
-      throw new RemoteRelayError(
-        "bad_relay_message",
-        "Relay sent a client-only frame",
-      );
+      throw new RemoteRelayError("bad_relay_message", "Relay sent a client-only frame");
     }
     return false;
   }
@@ -754,19 +625,14 @@ export class RemoteRelayConnection {
     this.clearRoutes();
   }
 
-  private applyDiscovery(
-    message: ReturnType<typeof parseRelayDiscoveryMessage>,
-  ): void {
+  private applyDiscovery(message: ReturnType<typeof parseRelayDiscoveryMessage>): void {
     if (message.type === "route_snapshot") {
       this.sourceRoute = message.sourceRoute;
       this.peers = new Map(message.peers.map((peer) => [peer.routeId, peer]));
     } else if (message.type === "route_available") {
       for (const peer of message.peers) {
         for (const [routeId, current] of this.peers) {
-          if (
-            current.role === peer.role &&
-            current.deviceId === peer.deviceId
-          ) {
+          if (current.role === peer.role && current.deviceId === peer.deviceId) {
             this.peers.delete(routeId);
           }
         }
@@ -815,12 +681,10 @@ export class RemoteRelayConnection {
     this.activeMaxFrameBytes = undefined;
     this.clearRoutes();
     this.rejectRouteWaiters(error);
-    if (!wasConnected || this.stopped || this.reconnecting !== undefined)
-      return;
-    const reconnecting = this.connectWithRetry(
-      "reconnecting",
-      this.lifecycleGeneration,
-    ).catch(() => undefined);
+    if (!wasConnected || this.stopped || this.reconnecting !== undefined) return;
+    const reconnecting = this.connectWithRetry("reconnecting", this.lifecycleGeneration).catch(
+      () => undefined,
+    );
     this.reconnecting = reconnecting;
     void reconnecting.finally(() => {
       if (this.reconnecting === reconnecting) this.reconnecting = undefined;
@@ -834,12 +698,9 @@ export class RemoteRelayConnection {
     );
     const random = this.random();
     if (!Number.isFinite(random) || random < 0 || random > 1) {
-      throw new TypeError(
-        "Reconnect random source must return a value from zero through one",
-      );
+      throw new TypeError("Reconnect random source must return a value from zero through one");
     }
-    const factor =
-      1 - this.policy.jitterRatio + 2 * this.policy.jitterRatio * random;
+    const factor = 1 - this.policy.jitterRatio + 2 * this.policy.jitterRatio * random;
     return Math.max(1, Math.round(unjittered * factor));
   }
 
@@ -880,12 +741,8 @@ export interface RemoteHostedDeliveryOptions {
 export class RemoteHostedDelivery {
   private readonly options: RemoteHostedDeliveryOptions;
   private readonly attempts = new Map<RelayReceipt["attemptId"], RequestId>();
-  private readonly deliveryListeners = new Set<
-    (update: RemoteDeliveryUpdate) => void
-  >();
-  private readonly messageListeners = new Set<
-    (message: RemoteDaemonMessage) => void
-  >();
+  private readonly deliveryListeners = new Set<(update: RemoteDeliveryUpdate) => void>();
+  private readonly messageListeners = new Set<(message: RemoteDaemonMessage) => void>();
   private readonly errorListeners = new Set<(error: Error) => void>();
   private flushTail: Promise<void> = Promise.resolve();
   private inboundTail: Promise<void> = Promise.resolve();
@@ -899,9 +756,7 @@ export class RemoteHostedDelivery {
         this.attempts.clear();
         void options.outbox
           .resetSendingAfterDisconnect()
-          .catch((cause: unknown) =>
-            this.reportError(cause, "Could not reset the remote outbox"),
-          );
+          .catch((cause: unknown) => this.reportError(cause, "Could not reset the remote outbox"));
       }
       if (state === "connected") {
         void this.flush().catch((cause: unknown) =>
@@ -927,19 +782,13 @@ export class RemoteHostedDelivery {
           const error =
             cause instanceof Error
               ? cause
-              : new RemoteRelayError(
-                  "bad_relay_message",
-                  "Remote delivery failed",
-                  { cause },
-                );
+              : new RemoteRelayError("bad_relay_message", "Remote delivery failed", { cause });
           for (const listener of this.errorListeners) listener(error);
         });
     });
   }
 
-  onDeliveryState(
-    listener: (update: RemoteDeliveryUpdate) => void,
-  ): () => void {
+  onDeliveryState(listener: (update: RemoteDeliveryUpdate) => void): () => void {
     this.deliveryListeners.add(listener);
     return () => this.deliveryListeners.delete(listener);
   }
@@ -990,9 +839,7 @@ export class RemoteHostedDelivery {
     destinationCryptoSessionId: CryptoSessionId,
     opaqueEnvelope: Uint8Array,
   ): Promise<TransportAttemptId> {
-    const destinationRouteId = await this.options.connection.resolve(
-      destinationCryptoSessionId,
-    );
+    const destinationRouteId = await this.options.connection.resolve(destinationCryptoSessionId);
     const attemptId = this.options.attemptIds.create();
     this.options.connection.send(destinationRouteId, attemptId, opaqueEnvelope);
     return attemptId;
@@ -1000,16 +847,13 @@ export class RemoteHostedDelivery {
 
   flush(): Promise<void> {
     const operation = this.flushTail.then(async () => {
-      if (!this.started || this.options.connection.state !== "connected")
-        return;
+      if (!this.started || this.options.connection.state !== "connected") return;
       const records = await this.options.outbox.list();
       let firstFailure: unknown;
       for (const record of records) {
         if (record.state !== "queued_local") continue;
         try {
-          const attempt = await this.options.outbox.beginAttempt(
-            record.requestId,
-          );
+          const attempt = await this.options.outbox.beginAttempt(record.requestId);
           this.attempts.set(attempt.attemptId, attempt.requestId);
           this.publish({
             requestId: attempt.requestId,
@@ -1038,8 +882,7 @@ export class RemoteHostedDelivery {
     if (requestId === undefined) return;
     this.publish({
       requestId,
-      state:
-        receipt.status === "admitted" ? "relay_admitted" : "relay_forwarded",
+      state: receipt.status === "admitted" ? "relay_admitted" : "relay_forwarded",
       attemptId: receipt.attemptId,
     });
     if (receipt.status === "forwarded") this.attempts.delete(receipt.attemptId);
@@ -1060,10 +903,7 @@ export class RemoteHostedDelivery {
 
   private async handleDelivery(delivery: RelayDelivery): Promise<void> {
     const opened = await this.options.opener.open(delivery.opaquePayload);
-    if (
-      parseDeviceId(opened.authenticatedPeerId) !==
-      this.options.expectedDaemonId
-    ) {
+    if (parseDeviceId(opened.authenticatedPeerId) !== this.options.expectedDaemonId) {
       throw new RemoteRelayError(
         "bad_relay_message",
         "Delivery is not authenticated to the daemon",
@@ -1074,10 +914,7 @@ export class RemoteHostedDelivery {
       const record = (await this.options.outbox.list()).find(
         (candidate) => candidate.requestId === message.requestId,
       );
-      if (
-        record === undefined ||
-        record.idempotencyKey !== message.idempotencyKey
-      ) {
+      if (record === undefined || record.idempotencyKey !== message.idempotencyKey) {
         throw new RemoteRelayError(
           "bad_relay_message",
           "Daemon acceptance does not match the prepared request",
