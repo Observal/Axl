@@ -33,6 +33,9 @@ use crate::{
     TransactionalProvider,
 };
 
+#[cfg(target_os = "macos")]
+#[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
+pub(crate) mod macos_keychain;
 mod pairing_lifecycle;
 pub use pairing_lifecycle::{
     ActivationAcceptance, ActivationOutcome, ClaimFailure, ClaimSubmission,
@@ -315,10 +318,16 @@ pub enum PersistenceError {
     InitializationIncomplete,
     Io,
     LifecycleBusy,
+    KeyRecordMissing,
     KeyUnavailable,
     NotFound,
     Quarantined,
     RetentionExceeded,
+    SecureStoreAccessDenied,
+    SecureStoreAmbiguous,
+    SecureStoreLocked,
+    SecureStoreUnavailable,
+    StateLoss,
     Storage,
     UnsupportedSchema,
     Core(CoreError),
@@ -770,10 +779,12 @@ impl NativeTransactionalProvider {
         let sealed = SealedState::decode(&blob)?;
         let aad = state_aad(self.crypto_session_id, generation, rollback_counter, epoch);
         self.envelope_keys
-            .reconcile_prepared(self.crypto_session_id, Some((sealed.key_id, aad.clone())))?;
+            .reconcile_prepared(self.crypto_session_id, Some((sealed.key_id, aad.clone())))
+            .map_err(map_current_key_error)?;
         let mut key = self
             .envelope_keys
-            .load(self.crypto_session_id, sealed.key_id, &aad)?;
+            .load(self.crypto_session_id, sealed.key_id, &aad)
+            .map_err(map_current_key_error)?;
         let crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
         let decrypted = crypto.crypto().aead_decrypt(
             AeadType::Aes256Gcm,
@@ -1005,7 +1016,8 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             let aad = state_aad(self.crypto_session_id, generation, rollback_counter, epoch);
             let mut key = self
                 .envelope_keys
-                .load(self.crypto_session_id, sealed.key_id, &aad)?;
+                .load(self.crypto_session_id, sealed.key_id, &aad)
+                .map_err(map_current_key_error)?;
             let crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
             let decrypted = crypto.crypto().aead_decrypt(
                 AeadType::Aes256Gcm,
@@ -1335,7 +1347,8 @@ impl NativeGroupTransaction<'_> {
             .check(FaultPoint::DuringCurrentKeyActivation)?;
         self.owner
             .envelope_keys
-            .activate(self.owner.crypto_session_id, key_id, &aad)?;
+            .activate(self.owner.crypto_session_id, key_id, &aad)
+            .map_err(map_current_key_error)?;
         if self
             .owner
             .faults
@@ -2749,6 +2762,13 @@ fn configure_transaction(write: &mut WriteTransaction) -> Result<(), Persistence
         .map_err(|_| PersistenceError::Storage)?;
     write.set_two_phase_commit(true);
     Ok(())
+}
+
+fn map_current_key_error(error: PersistenceError) -> PersistenceError {
+    match error {
+        PersistenceError::KeyRecordMissing => PersistenceError::StateLoss,
+        other => other,
+    }
 }
 
 fn require_dependencies(

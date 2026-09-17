@@ -109,6 +109,52 @@ Production endpoint creation and opening remain closed with `rollback_anchor_una
 production package contains no test-only randomness probe, in-memory endpoint capability,
 IndexedDB adapter, Web Locks code, persistence implementation, or rollback anchor.
 
+## Production storage: macOS Keychain
+
+The macOS-only envelope-key store adds this exact target-specific declaration:
+
+```toml
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "=0.10.1", default-features = false }
+security-framework = { version = "=3.7.0", default-features = false, features = ["OSX_10_15"] }
+security-framework-sys = { version = "=2.17.0", default-features = false, features = ["OSX_10_15"] }
+```
+
+`core-foundation` and `security-framework-sys` are direct declarations only because the
+`security-framework` 3.7.0 add builder does not expose every required policy dictionary field. They
+were already members of the approved six-package candidate closure and add no package or feature to
+the selected graph.
+
+The E2EE lock changed from SHA-256
+`a324986d4ff5a8178219c1836fb5ad9f28c8b49880e286f17927d6327738f0a0` to
+`71b54b75338347f4d465a0b11bcf207a40e554233db2e8a136f070220b107878`.
+The selected dependency closure has six normal package/version pairs and no build or development
+dependency edge:
+
+| Package | Crates.io SHA-256 | License |
+| --- | --- | --- |
+| `security-framework` 3.7.0 | `b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d` | MIT OR Apache-2.0 |
+| `security-framework-sys` 2.17.0 | `6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3` | MIT OR Apache-2.0 |
+| `core-foundation` 0.10.1 | `b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6` | MIT OR Apache-2.0 |
+| `core-foundation-sys` 0.8.7 | `773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b` | MIT OR Apache-2.0 |
+| `libc` 0.2.189 | `3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2` | MIT OR Apache-2.0 |
+| `bitflags` 2.13.2 | `3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06` | MIT OR Apache-2.0 |
+
+`libc` is the only package in this closure with a build script. It was already selected by the
+prior lock. This closure adds no procedural macro, downloaded executable, C or C++ build, package
+manager probe, or development dependency. It links the operating-system Security and
+CoreFoundation frameworks and requires macOS 10.15 or newer. The direct source is annotated tag
+`v3.7.0`, tag object `4efde9cf6495e2ac366a98134c1f98f9eced627b`, source commit
+`5f6e65114b77d5bc161d2b099cad09f2a67609d2` from
+`https://github.com/kornelski/rust-security-framework`.
+
+The implementation uses only the data-protection Keychain, disables synchronization and
+interactive authentication, applies `AccessibleWhenUnlockedThisDeviceOnly`, and reports
+`hardware_backing = false`. The Node binding does not construct this store, and production endpoint
+creation and opening remain fail-closed. Local unsigned Apple-Silicon execution reports the missing
+Keychain entitlement as access denied. Signed/notarized arm64, native Intel, lock/logout, backup,
+installer, and reboot evidence remains required before either macOS row can be enabled.
+
 ## Maintenance exception
 
 | Field | Value |
