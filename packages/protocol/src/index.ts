@@ -18,3 +18,4 @@ export * from "./remote-transport.ts";
 export * from "./user-question.ts";
 export * from "./version.ts";
 export * from "./wire.ts";
+export * from "./witness.ts";

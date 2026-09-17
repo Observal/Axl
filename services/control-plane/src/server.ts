@@ -1,15 +1,20 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
 import type { IncomingMessage, RequestListener, ServerResponse } from "node:http";
 
 import {
   encodeInternalConsumeRelayTicketResult,
-  parseInternalConsumeRelayTicketRequest,
   ProtocolValidationError,
+  parseInternalConsumeRelayTicketRequest,
+  WITNESS_HTTP_CONTENT_TYPE,
+  WITNESS_HTTP_PATH,
+  WITNESS_REQUEST_MAX_BYTES,
 } from "@axl/protocol";
 
-import { RelayTicketError, type AccountPrincipal, type RelayTicketService } from "./tickets.ts";
+import { type AccountPrincipal, RelayTicketError, type RelayTicketService } from "./tickets.ts";
+import { type WitnessGateway, WitnessServiceError } from "./witness.ts";
 
 const MAX_REQUEST_BYTES = 4_096;
 
@@ -25,6 +30,7 @@ export interface ControlPlaneHandlerOptions {
   readonly tickets: RelayTicketService;
   readonly publicAuthentication: PublicPrincipalAuthenticator;
   readonly internalAuthentication: InternalRelayAuthenticator;
+  readonly witness?: WitnessGateway;
 }
 
 class HttpRequestError extends Error {
@@ -37,14 +43,17 @@ class HttpRequestError extends Error {
   }
 }
 
-async function readBody(request: IncomingMessage): Promise<Uint8Array> {
+async function readBody(
+  request: IncomingMessage,
+  maximumBytes = MAX_REQUEST_BYTES,
+): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let size = 0;
   for await (const chunk of request) {
     const bytes =
       typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk);
     size += bytes.byteLength;
-    if (size > MAX_REQUEST_BYTES) throw new HttpRequestError(413, "Request body is too large");
+    if (size > maximumBytes) throw new HttpRequestError(413, "Request body is too large");
     chunks.push(bytes);
   }
   const body = new Uint8Array(size);
@@ -77,6 +86,10 @@ function respond(response: ServerResponse, status: number, body: unknown): void 
 }
 
 function respondError(response: ServerResponse, error: unknown): void {
+  if (error instanceof WitnessServiceError) {
+    respond(response, error.httpStatus, { error: { code: error.code, message: error.message } });
+    return;
+  }
   if (error instanceof RelayTicketError) {
     respond(response, error.httpStatus, { error: { code: error.code, message: error.message } });
     return;
@@ -118,6 +131,28 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         }
         const result = await options.tickets.issue(principal, parseJson(await readBody(request)));
         respond(response, 201, result);
+        return;
+      }
+      if (path === WITNESS_HTTP_PATH && options.witness !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        if (request.headers["content-type"] !== WITNESS_HTTP_CONTENT_TYPE) {
+          throw new HttpRequestError(415, "Witness request has an unsupported content type");
+        }
+        const certificate = await options.witness.submit(
+          principal,
+          await readBody(request, WITNESS_REQUEST_MAX_BYTES),
+        );
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-length": certificate.byteLength,
+          "content-type": WITNESS_HTTP_CONTENT_TYPE,
+          "x-content-type-options": "nosniff",
+        });
+        response.end(certificate);
         return;
       }
       if (path === "/internal/v1/relay/tickets/consume") {
