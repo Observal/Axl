@@ -214,6 +214,7 @@ pub struct OutboxRecord {
     pub(crate) logical_message_id: Id,
     pub(crate) class: MessageClass,
     pub(crate) epoch: u64,
+    pub(crate) hosted_generation: u64,
     pub(crate) profile_revision: u16,
     pub(crate) retry_state: RetryState,
     pub(crate) ciphertext: Vec<u8>,
@@ -226,6 +227,7 @@ struct OutboxRecordFields {
     logical_message_id: Id,
     class: MessageClass,
     epoch: u64,
+    hosted_generation: u64,
     profile_revision: u16,
     retry_state: RetryState,
     ciphertext: Vec<u8>,
@@ -240,6 +242,7 @@ impl OutboxRecord {
             logical_message_id: fields.logical_message_id,
             class: fields.class,
             epoch: fields.epoch,
+            hosted_generation: fields.hosted_generation,
             profile_revision: fields.profile_revision,
             retry_state: fields.retry_state,
             ciphertext: fields.ciphertext,
@@ -267,6 +270,10 @@ impl OutboxRecord {
         self.epoch
     }
 
+    pub fn hosted_generation(&self) -> u64 {
+        self.hosted_generation
+    }
+
     pub fn profile_revision(&self) -> u16 {
         self.profile_revision
     }
@@ -281,6 +288,16 @@ impl OutboxRecord {
 
     pub fn commit(&self) -> Option<&CommitMetadata> {
         self.commit.as_ref()
+    }
+}
+
+fn outbox_priority(class: MessageClass) -> u8 {
+    match class {
+        MessageClass::Commit | MessageClass::EpochReady => 0,
+        MessageClass::UpdateProposal
+        | MessageClass::PairActivation
+        | MessageClass::ResyncControl => 1,
+        MessageClass::ApplicationRequest | MessageClass::ApplicationDelivery => 2,
     }
 }
 
@@ -709,6 +726,36 @@ impl NativeTransactionalProvider {
                 Ok(record)
             })
             .transpose()
+    }
+
+    fn pending_outbox(&self) -> Result<Vec<OutboxRecord>, PersistenceError> {
+        let database = self.database_lock()?;
+        let read = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_read()
+            .map_err(map_transaction_error)?;
+        let table = read.open_table(OUTBOX).map_err(map_table_error)?;
+        let entries = table.iter().map_err(map_storage_error)?;
+        let mut records = Vec::new();
+        for entry in entries {
+            let (key, value) = entry.map_err(map_storage_error)?;
+            let record = decode_outbox(value.value())?;
+            if key.value() != record.operation_id
+                || record.crypto_session_id != self.crypto_session_id
+            {
+                return Err(PersistenceError::IdentityMismatch);
+            }
+            if record.retry_state == RetryState::Pending {
+                records.push(record);
+            }
+        }
+        records.sort_by(|left, right| {
+            outbox_priority(left.class)
+                .cmp(&outbox_priority(right.class))
+                .then_with(|| left.operation_id.cmp(&right.operation_id))
+        });
+        Ok(records)
     }
 
     fn initialize_schema(&self) -> Result<(), PersistenceError> {
@@ -1428,6 +1475,7 @@ impl GroupTransaction for NativeGroupTransaction<'_> {
                 logical_message_id: envelope.logical_message_id,
                 class: envelope.class,
                 epoch: envelope.epoch,
+                hosted_generation: envelope.hosted_generation,
                 profile_revision: PROFILE_REVISION,
                 retry_state: RetryState::Pending,
                 ciphertext: envelope.ciphertext.to_vec(),
@@ -1629,6 +1677,7 @@ impl DurableDaemon {
             logical_message_id: operation_id,
             class: MessageClass::PairActivation,
             epoch: daemon.endpoint.epoch()?,
+            hosted_generation: 0,
             profile_revision: PROFILE_REVISION,
             retry_state: RetryState::Pending,
             ciphertext: welcome.bytes.to_vec(),
@@ -1683,6 +1732,10 @@ impl DurableDaemon {
             MessageClass::ApplicationRequest,
             |daemon| daemon.receive_application(ciphertext, logical_message_id, hosted_generation),
         )
+    }
+
+    pub fn pending_outbox(&self) -> Result<Vec<OutboxRecord>, PersistenceError> {
+        self.store.pending_outbox()
     }
 
     pub fn receive_update_proposal(
@@ -1946,6 +1999,7 @@ impl DurablePhone {
             logical_message_id: operation_id,
             class: MessageClass::PairActivation,
             epoch: 0,
+            hosted_generation: 0,
             commit: None,
             ciphertext: package.bytes.to_vec().into_boxed_slice(),
         };
@@ -2094,6 +2148,10 @@ impl DurablePhone {
             acknowledgement_operation_id,
             outbox_operation_id,
         )
+    }
+
+    pub fn pending_outbox(&self) -> Result<Vec<OutboxRecord>, PersistenceError> {
+        self.store.pending_outbox()
     }
 
     pub fn prepare_self_update(
@@ -3268,6 +3326,7 @@ fn encode_outbox(record: &OutboxRecord) -> Result<Vec<u8>, PersistenceError> {
     out.extend_from_slice(&record.logical_message_id);
     out.push(record.class as u8);
     out.extend_from_slice(&record.epoch.to_be_bytes());
+    out.extend_from_slice(&record.hosted_generation.to_be_bytes());
     out.extend_from_slice(&record.profile_revision.to_be_bytes());
     out.push(record.retry_state as u8);
     put_bytes(&mut out, &record.ciphertext)?;
@@ -3293,6 +3352,7 @@ fn decode_outbox(bytes: &[u8]) -> Result<OutboxRecord, PersistenceError> {
         .try_into()
         .map_err(|_| PersistenceError::Corrupt)?;
     let epoch = cursor.u64()?;
+    let hosted_generation = cursor.u64()?;
     let profile_revision = cursor.u16()?;
     let retry_state = match cursor.u8()? {
         1 => RetryState::Pending,
@@ -3319,6 +3379,7 @@ fn decode_outbox(bytes: &[u8]) -> Result<OutboxRecord, PersistenceError> {
         logical_message_id,
         class,
         epoch,
+        hosted_generation,
         profile_revision,
         retry_state,
         ciphertext,

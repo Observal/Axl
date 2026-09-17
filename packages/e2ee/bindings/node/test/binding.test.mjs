@@ -123,6 +123,11 @@ test("fresh lifecycle preserves barriers, exact retries, copied input, and close
     const sent = await sendPromise;
     const duplicate = await pair.device.prepareApplication(operation(20), operation(21), 7n, Buffer.from("copied before async work"));
     assert.deepEqual(duplicate.ciphertext, sent.ciphertext);
+    const pendingBeforeAcknowledgement = await pair.device.pendingOutbox();
+    assert.deepEqual(
+      pendingBeforeAcknowledgement.map((record) => record.operationId),
+      [operation(8), operation(20)],
+    );
     await assert.rejects(pair.device.prepareApplication(operation(20), operation(21), 7n, Buffer.from("conflict")), { code: "conflict" });
     const received = await pair.daemon.receiveApplication(operation(22), sent.ciphertext, operation(21), 7n);
     assert.equal(received.plaintext.toString(), "copied before async work");
@@ -130,6 +135,10 @@ test("fresh lifecycle preserves barriers, exact retries, copied input, and close
     assert.equal(recovered.plaintext.toString(), "copied before async work");
     await assert.rejects(pair.daemon.receiveApplication(operation(70), sent.ciphertext, operation(21), 7n), { code: "replay_rejected" });
     assert.equal((await pair.device.acknowledgeOutbox(operation(71), operation(20))).retryState, "acknowledged");
+    assert.deepEqual(
+      (await pair.device.pendingOutbox()).map((record) => record.operationId),
+      [operation(8)],
+    );
     assert.equal(await pair.daemon.acknowledgeReceive(operation(72), operation(22)), "acknowledged");
 
     const delivered = await pair.daemon.prepareApplication(operation(73), operation(74), 7n, Buffer.from("return path"));

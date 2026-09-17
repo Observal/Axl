@@ -650,6 +650,10 @@ impl NativeOutbox {
         bigint(self.inner.epoch())
     }
     #[napi(getter)]
+    pub fn hosted_grant_generation(&self) -> BigInt {
+        bigint(self.inner.hosted_generation())
+    }
+    #[napi(getter)]
     pub fn profile_revision(&self) -> u32 {
         u32::from(self.inner.profile_revision())
     }
@@ -1299,6 +1303,16 @@ impl DaemonEndpoint {
         })
     }
     #[napi]
+    pub fn pending_outbox(&self) -> Result<AsyncTask<Work<Vec<NativeOutbox>>>> {
+        self.work(move |slot, _| {
+            daemon_mut(slot)?
+                .pending_outbox()
+                .map(|records| records.into_iter().map(outbox).collect())
+                .map_err(map_persistence)
+        })
+    }
+
+    #[napi]
     pub fn acknowledge_outbox(
         &self,
         operation_id: Buffer,
@@ -1638,6 +1652,16 @@ impl DeviceEndpoint {
             })
         })
     }
+    #[napi]
+    pub fn pending_outbox(&self) -> Result<AsyncTask<Work<Vec<NativeOutbox>>>> {
+        self.work(move |slot, _| {
+            device_mut(slot)?
+                .pending_outbox()
+                .map(|records| records.into_iter().map(outbox).collect())
+                .map_err(map_persistence)
+        })
+    }
+
     #[napi]
     pub fn acknowledge_outbox(
         &self,

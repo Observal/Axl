@@ -151,6 +151,7 @@ export interface NativeOutbox {
     | "pair_activation"
     | "resync_control";
   readonly epoch: bigint;
+  readonly hostedGrantGeneration: bigint;
   readonly profileRevision: 1;
   readonly retryState: "pending" | "acknowledged";
   readonly ciphertext: OwnedBytes;
@@ -254,6 +255,7 @@ export interface DaemonEndpoint {
   ): Promise<NativeOutbox>;
   reset(operationId: Uint8Array): Promise<StatusOutcome>;
   markRevoked(operationId: Uint8Array): Promise<StatusOutcome>;
+  pendingOutbox(): Promise<readonly NativeOutbox[]>;
   acknowledgeOutbox(operationId: Uint8Array, targetOperationId: Uint8Array): Promise<NativeOutbox>;
   acknowledgeReceive(
     operationId: Uint8Array,
@@ -308,6 +310,7 @@ export interface DeviceEndpoint {
     hostedGrantGeneration: bigint,
   ): Promise<"removed">;
   reset(operationId: Uint8Array): Promise<NativeRePairRequirement>;
+  pendingOutbox(): Promise<readonly NativeOutbox[]>;
   acknowledgeOutbox(operationId: Uint8Array, targetOperationId: Uint8Array): Promise<NativeOutbox>;
   acknowledgeReceive(
     operationId: Uint8Array,

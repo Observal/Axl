@@ -1328,6 +1328,10 @@ impl DurablePendingInvitation {
         )
     }
 
+    pub fn pending_outbox(&self) -> Result<Vec<super::OutboxRecord>, PersistenceError> {
+        self.store.pending_outbox()
+    }
+
     pub fn acknowledge_outbox(
         &mut self,
         acknowledgement_operation_id: Id,
@@ -2468,6 +2472,10 @@ impl DurablePreJoinDevice {
             logical_message_id,
             hosted_generation,
         )
+    }
+
+    pub fn pending_outbox(&self) -> Result<Vec<super::OutboxRecord>, PersistenceError> {
+        self.store.pending_outbox()
     }
 
     pub fn acknowledge_outbox(
