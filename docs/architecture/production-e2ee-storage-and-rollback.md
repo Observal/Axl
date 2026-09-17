@@ -194,10 +194,13 @@ Each DEK is a generic-password item with:
 - `kSecAttrAccessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly`;
 - `kSecAttrSynchronizable = false`;
 - an Axl-specific service name;
-- account and generic attributes binding the session, key ID, record version, lifecycle, and context hash; and
+- account and label attributes containing only the record version, session ID, key ID, and lifecycle;
+  and
 - keychain authentication UI disabled for daemon operations.
 
-The complete value is stored by Keychain Services. Axl does not place a second wrapped copy in its data directory.
+The SHA-384 authenticated-context hash is stored only inside the protected record value. It is not a
+public Keychain attribute. The complete value is stored by Keychain Services. Axl does not place a
+second wrapped copy in its data directory.
 
 #### Identity and lifecycle behavior
 

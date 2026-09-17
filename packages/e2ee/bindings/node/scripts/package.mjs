@@ -52,7 +52,15 @@ for (const path of sourcePaths) {
 }
 assertEqual(manifest.nativeSourceSha256, sourceHash.digest("hex"), "native source digest drift");
 const nativeBytes = readFileSync(join(staging, manifest.artifacts[0].path));
-for (const forbidden of ["testDaemonEndpoint", "testDeviceEndpoint", "TestKeys", "TestAnchor"]) {
+for (const forbidden of [
+  "testDaemonEndpoint",
+  "testDeviceEndpoint",
+  "TestKeys",
+  "TestAnchor",
+  "FakeKeychain",
+  "with_keychain",
+  "AXL_RUN_MACOS_KEYCHAIN_TESTS",
+]) {
   if (nativeBytes.includes(Buffer.from(forbidden))) throw new Error(`production binary contains test symbol ${forbidden}`);
 }
 const entries = readdirSync(staging, { recursive: true }).map(String);

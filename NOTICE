@@ -33,3 +33,7 @@ remain in Cargo source distributions and must be included in distributed package
 
 Axl's private Node endpoint binding uses napi-rs (`napi` 3.12.5, `napi-derive`
 3.6.6, and `napi-build` 2.4.2) as unmodified external dependencies under MIT.
+
+Axl's macOS envelope-key store uses `security-framework` 3.7.0 and its
+`security-framework-sys`, `core-foundation`, and `core-foundation-sys` dependencies as
+unmodified external dependencies under MIT OR Apache-2.0.
