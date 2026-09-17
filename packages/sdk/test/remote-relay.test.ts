@@ -6,9 +6,9 @@ import test from "node:test";
 
 import {
   DEFAULT_RELAY_LIMITS,
-  REMOTE_TRANSPORT_VERSION,
   encodeRelayBinaryFrame,
   encodeRemoteDaemonMessage,
+  type OpaqueOutboxRecord,
   parseCryptoSessionId,
   parseDeviceId,
   parseIdempotencyKey,
@@ -17,7 +17,7 @@ import {
   parseRemoteRequestId,
   parseRouteId,
   parseTransportAttemptId,
-  type OpaqueOutboxRecord,
+  REMOTE_TRANSPORT_VERSION,
   type RequestId,
 } from "@axl/protocol";
 
@@ -28,11 +28,11 @@ import {
 } from "../src/remote-outbox.ts";
 import {
   HttpRelayTicketProvider,
+  type RelayAdmissionCredential,
   RemoteHostedDelivery,
   RemoteRelayConnection,
-  RemoteRelayError,
-  type RelayAdmissionCredential,
   type RemoteRelayConnectionState,
+  RemoteRelayError,
   type RemoteWebSocket,
   type RemoteWebSocketEvent,
   type RemoteWebSocketFactory,
@@ -62,6 +62,7 @@ class FakeSocket implements RemoteWebSocket {
   binaryType = "";
   readyState = 0;
   readonly sent: Uint8Array[] = [];
+  closeCode: number | undefined;
   private readonly listeners = new Map<string, Set<Listener>>();
 
   send(data: Uint8Array): void {
@@ -71,6 +72,7 @@ class FakeSocket implements RemoteWebSocket {
 
   close(code = 1000, reason = ""): void {
     if (this.readyState === 3) return;
+    this.closeCode = code;
     this.readyState = 3;
     this.emit({ type: "close", code, reason });
   }
@@ -190,6 +192,39 @@ async function connect(
   await starting;
   return { connection, socket };
 }
+
+test("uses an application close code when the route snapshot times out", async () => {
+  class StrictFakeSocket extends FakeSocket {
+    override close(code = 1000, reason = ""): void {
+      if (code !== 1000 && (code < 3000 || code > 4999)) {
+        throw new DOMException("invalid code", "InvalidAccessError");
+      }
+      super.close(code, reason);
+    }
+  }
+  class OpeningSocketFactory extends FakeSocketFactory {
+    override connect(): RemoteWebSocket {
+      const socket = new StrictFakeSocket();
+      this.sockets.push(socket);
+      queueMicrotask(() => socket.open());
+      return socket;
+    }
+  }
+  const factory = new OpeningSocketFactory();
+  const connection = new RemoteRelayConnection({
+    tickets: { acquire: async () => credential() },
+    sockets: factory,
+    reconnect: { maximumAttempts: 1 },
+    routeWaitMs: 1,
+  });
+
+  await assert.rejects(connection.start(), (error: unknown) => {
+    assert.ok(error instanceof RemoteRelayError);
+    assert.equal(error.code, "connection_failed");
+    return true;
+  });
+  assert.equal(factory.sockets[0]?.closeCode, 4008);
+});
 
 test("acquires tickets in an authenticated body request and rejects insecure production origins", async () => {
   assert.throws(
