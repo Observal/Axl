@@ -74,14 +74,23 @@ const expected = ["AxlE2eeError", "ERROR_CODES", "createDaemonEndpoint", "create
 if (JSON.stringify(Object.keys(module).sort()) !== JSON.stringify(expected.sort())) throw new Error("production ESM export drift");
 const nativeExports = Object.keys((await import("node:module")).createRequire(import.meta.url)(join(staging, manifest.artifacts[0].path)));
 if (nativeExports.some((name) => name.startsWith("test"))) throw new Error("production native exports test API");
-const result = JSON.parse(execFileSync("npm", ["pack", "--json", "--ignore-scripts"], { cwd: staging, encoding: "utf8" }));
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const result = JSON.parse(
+  execFileSync(npm, ["pack", "--json", "--ignore-scripts"], {
+    cwd: staging,
+    encoding: "utf8",
+  }),
+);
 const files = result[0].files.map((entry) => entry.path);
 if (files.some((entry) => /test|fixture/i.test(entry)) || files.filter((entry) => entry.endsWith(".node")).length !== 1) throw new Error("production tarball contents are unsafe");
 const tarball = join(staging, result[0].filename);
 const installRoot = mkdtempSync(join(tmpdir(), "axl-e2ee-node-package-"));
 try {
   writeFileSync(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
-  execFileSync("npm", ["install", "--ignore-scripts", tarball], { cwd: installRoot, stdio: "pipe" });
+  execFileSync(npm, ["install", "--ignore-scripts", tarball], {
+    cwd: installRoot,
+    stdio: "pipe",
+  });
   const installed = await import(`${pathToFileURL(join(installRoot, "node_modules/@axl/e2ee-node/loader/index.js")).href}?packed=${Date.now()}`);
   assertEqual(JSON.stringify(Object.keys(installed).sort()), JSON.stringify(expected.sort()), "installed tarball export drift");
 } finally {
