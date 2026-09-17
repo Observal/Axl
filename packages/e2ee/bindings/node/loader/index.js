@@ -25,6 +25,8 @@ const target = (() => {
   if (process.platform === "darwin" && process.arch === "x64") return "darwin-x64";
   if (process.platform === "linux" && process.arch === "x64") return "linux-x64-gnu";
   if (process.platform === "linux" && process.arch === "arm64") return "linux-arm64-gnu";
+  if (process.platform === "win32" && process.arch === "x64") return "win32-x64-msvc";
+  if (process.platform === "win32" && process.arch === "arm64") return "win32-arm64-msvc";
   throw createError("unsupported_platform");
 })();
 

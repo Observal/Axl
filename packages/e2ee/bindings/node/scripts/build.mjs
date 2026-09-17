@@ -17,6 +17,8 @@ const target = (() => {
   if (process.platform === "darwin" && process.arch === "x64") return "darwin-x64";
   if (process.platform === "linux" && process.arch === "x64") return "linux-x64-gnu";
   if (process.platform === "linux" && process.arch === "arm64") return "linux-arm64-gnu";
+  if (process.platform === "win32" && process.arch === "x64") return "win32-x64-msvc";
+  if (process.platform === "win32" && process.arch === "arm64") return "win32-arm64-msvc";
   throw new Error(`unsupported build host: ${process.platform}-${process.arch}`);
 })();
 const targetDirectory = join(e2eeRoot, "target", `node-${mode}`);
@@ -26,7 +28,15 @@ mkdirSync(join(staging, "native"), { recursive: true });
 const cargoArguments = ["build", "--locked", "--release", "-p", "axl-e2ee-node", "--target-dir", targetDirectory];
 if (mode === "test") cargoArguments.push("--features", "test-fixtures");
 execFileSync("cargo", cargoArguments, { cwd: e2eeRoot, stdio: "inherit" });
-const library = join(targetDirectory, "release", process.platform === "darwin" ? "libaxl_e2ee_node.dylib" : "libaxl_e2ee_node.so");
+const library = join(
+  targetDirectory,
+  "release",
+  process.platform === "darwin"
+    ? "libaxl_e2ee_node.dylib"
+    : process.platform === "win32"
+      ? "axl_e2ee_node.dll"
+      : "libaxl_e2ee_node.so",
+);
 const artifactName = `axl-e2ee-node.${target}.node`;
 const artifactPath = join(staging, "native", artifactName);
 cpSync(library, artifactPath);
