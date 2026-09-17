@@ -74,9 +74,16 @@ const expected = ["AxlE2eeError", "ERROR_CODES", "createDaemonEndpoint", "create
 if (JSON.stringify(Object.keys(module).sort()) !== JSON.stringify(expected.sort())) throw new Error("production ESM export drift");
 const nativeExports = Object.keys((await import("node:module")).createRequire(import.meta.url)(join(staging, manifest.artifacts[0].path)));
 if (nativeExports.some((name) => name.startsWith("test"))) throw new Error("production native exports test API");
-const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+const npm = (arguments_, options) =>
+  process.platform === "win32"
+    ? execFileSync(
+        process.execPath,
+        [join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js"), ...arguments_],
+        options,
+      )
+    : execFileSync("npm", arguments_, options);
 const result = JSON.parse(
-  execFileSync(npm, ["pack", "--json", "--ignore-scripts"], {
+  npm(["pack", "--json", "--ignore-scripts"], {
     cwd: staging,
     encoding: "utf8",
   }),
@@ -87,7 +94,7 @@ const tarball = join(staging, result[0].filename);
 const installRoot = mkdtempSync(join(tmpdir(), "axl-e2ee-node-package-"));
 try {
   writeFileSync(join(installRoot, "package.json"), '{"private":true,"type":"module"}\n');
-  execFileSync(npm, ["install", "--ignore-scripts", tarball], {
+  npm(["install", "--ignore-scripts", tarball], {
     cwd: installRoot,
     stdio: "pipe",
   });
