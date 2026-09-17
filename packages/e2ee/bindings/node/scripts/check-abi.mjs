@@ -8,7 +8,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const target = process.platform === "darwin" ? `darwin-${process.arch}` : `linux-${process.arch}-gnu`;
+const target =
+  process.platform === "darwin"
+    ? `darwin-${process.arch}`
+    : process.platform === "win32"
+      ? `win32-${process.arch}-msvc`
+      : `linux-${process.arch}-gnu`;
 const productionRoot = join(root, "dist/package");
 const manifest = JSON.parse(readFileSync(join(productionRoot, "integrity.json"), "utf8"));
 const native = createRequire(import.meta.url)(join(productionRoot, manifest.artifacts[0].path));

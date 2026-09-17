@@ -10,9 +10,12 @@ a narrow witness continuation whose immutable getters return only the operation 
 request, request hash, and status. The continuation accepts a bounded certificate only for that
 operation, verifies the pinned unanimous trust set in Rust, and returns only the exact committed
 output after native storage barriers are complete. Recovery construction is test-feature-only.
-Production endpoint constructors still fail closed because target storage, production replica trust,
-and hosted witness transport are not enabled. Test constructors and the test binary are excluded
-from production package staging.
+Production endpoint constructors still fail closed because production replica trust and hosted
+witness transport are not enabled. The build and integrity loader support Windows MSVC x64 and
+ARM64 artifacts in addition to the existing macOS and glibc Linux targets. On Windows, the test
+artifact exercises the real DPAPI envelope-key store under the current non-built-in account while
+retaining an explicitly test-only rollback anchor. Test constructors and the test binary are
+excluded from production package staging.
 
 Every accepted JavaScript byte input is length-checked and copied before native asynchronous work
 is scheduled. Returned byte arrays are new Node-owned values containing the exact committed Rust

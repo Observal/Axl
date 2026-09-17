@@ -56,6 +56,8 @@ for (const forbidden of [
   "testDaemonEndpoint",
   "testDeviceEndpoint",
   "testWitnessPending",
+  "testWindowsDaemonEndpoint",
+  "testWindowsDeviceEndpoint",
   "test_pending_witness_operation",
   "TestKeys",
   "TestAnchor",
