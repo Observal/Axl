@@ -44,7 +44,12 @@ function replyPort(): ModelPort {
         yield {
           type: "completed",
           stopReason: "stop",
-          usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          usage: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+          },
         };
       })();
     },
@@ -64,7 +69,11 @@ async function startDaemon(
     dataDirectory,
     securityMode,
     sandboxProvider: "fixture",
-    runtime: () => ({ model: replyPort(), tools: new ToolRegistry(), system: "test" }),
+    runtime: () => ({
+      model: replyPort(),
+      tools: new ToolRegistry(),
+      system: "test",
+    }),
   });
   await daemon.start();
   context.after(() => daemon.stop());
@@ -196,6 +205,21 @@ test("intersects local and hosted grants without allowing hosted widening", asyn
     store.narrowLocalGrant(deviceId, ["observe", "steer"]),
     (error) => error instanceof RemoteAuthorityError && error.code === "grant_conflict",
   );
+  await assert.rejects(
+    store.authorizeAudited(deviceId, "steer"),
+    (error) => error instanceof RemoteAuthorityError && error.code === "scope_forbidden",
+  );
+  assert.deepEqual(
+    store.auditEntries().map((event) => [event.sequence, event.code]),
+    [
+      [1, "device_registered"],
+      [2, "hosted_grant_narrowed"],
+      [3, "local_grant_narrowed"],
+      [4, "authorization_denied"],
+    ],
+  );
+  const reopened = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  assert.deepEqual(reopened.auditEntries(), store.auditEntries());
 
   assert.equal((await stat(store.path)).mode & 0o777, 0o600);
 });
