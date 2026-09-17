@@ -98,8 +98,25 @@ try {
     cwd: installRoot,
     stdio: "pipe",
   });
-  const installed = await import(`${pathToFileURL(join(installRoot, "node_modules/@axl/e2ee-node/loader/index.js")).href}?packed=${Date.now()}`);
-  assertEqual(JSON.stringify(Object.keys(installed).sort()), JSON.stringify(expected.sort()), "installed tarball export drift");
+  const installedUrl = pathToFileURL(
+    join(installRoot, "node_modules/@axl/e2ee-node/loader/index.js"),
+  ).href;
+  const installedExports = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `const value = await import(${JSON.stringify(installedUrl)}); process.stdout.write(JSON.stringify(Object.keys(value).sort()));`,
+      ],
+      { cwd: installRoot, encoding: "utf8" },
+    ),
+  );
+  assertEqual(
+    JSON.stringify(installedExports),
+    JSON.stringify(expected.sort()),
+    "installed tarball export drift",
+  );
 } finally {
   rmSync(installRoot, { recursive: true, force: true });
 }
