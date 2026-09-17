@@ -4,6 +4,7 @@
 import {
   decodeRemoteDaemonMessage,
   encodeRemoteE2eeEnvelope,
+  parseAuthenticatedRemoteRequest,
   parseOperationId,
   parseRemoteE2eeEnvelope,
   type CryptoSessionId,
@@ -91,13 +92,33 @@ function requestBytes(value: unknown): Uint8Array {
   return bytes;
 }
 
-function framed(prepared: NativeCiphertext, hostedGrantGeneration: number): Uint8Array {
-  if (prepared.messageClass !== "application_request") {
-    throw new TypeError("Native endpoint returned the wrong message class");
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
+}
+
+function generation(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError("Hosted grant generation must be a positive safe integer");
+  }
+  return value;
+}
+
+function framed(
+  prepared: NativeCiphertext,
+  operationId: Uint8Array,
+  logicalMessageId: Uint8Array,
+  hostedGrantGeneration: number,
+): Uint8Array {
+  if (
+    prepared.messageClass !== "application_request" ||
+    !sameBytes(prepared.operationId, operationId) ||
+    !sameBytes(prepared.logicalMessageId, logicalMessageId)
+  ) {
+    throw new TypeError("Native endpoint returned mismatched envelope metadata");
   }
   return encodeRemoteE2eeEnvelope({
-    operationId: uuidText(prepared.operationId),
-    logicalMessageId: uuidText(prepared.logicalMessageId),
+    operationId: uuidText(operationId),
+    logicalMessageId: uuidText(logicalMessageId),
     messageClass: "application_request",
     hostedGrantGeneration,
     ciphertext: prepared.ciphertext,
@@ -124,24 +145,29 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     },
     hostedGrantGeneration: number,
   ): Promise<OpaqueOutboxRecord> {
-    if (request.deviceId !== this.options.localDeviceId) {
-      throw new TypeError("Remote request device does not match the E2EE endpoint");
+    const validated = parseAuthenticatedRemoteRequest(request);
+    if (
+      validated.deviceId !== this.options.localDeviceId ||
+      validated.idempotencyKey === undefined
+    ) {
+      throw new TypeError("Remote request does not match the E2EE endpoint");
     }
-    const logicalId = derivedId(request.requestId, 0x41);
-    const plaintext = requestBytes(request);
-    const operation = uuidBytes(request.idempotencyKey);
+    const grant = generation(hostedGrantGeneration);
+    const logicalId = derivedId(validated.requestId, 0x41);
+    const plaintext = requestBytes(validated);
+    const operation = uuidBytes(validated.idempotencyKey);
     try {
       const prepared = await this.options.endpoint.prepareApplication(
         operation,
         logicalId,
-        BigInt(hostedGrantGeneration),
+        BigInt(grant),
         plaintext,
       );
       return {
-        requestId: request.requestId,
-        idempotencyKey: request.idempotencyKey,
+        requestId: validated.requestId,
+        idempotencyKey: validated.idempotencyKey,
         destinationCryptoSessionId: this.options.destinationCryptoSessionId,
-        opaqueEnvelope: framed(prepared, hostedGrantGeneration),
+        opaqueEnvelope: framed(prepared, operation, logicalId, grant),
         createdAt: this.now(),
         state: "queued_local",
       };
@@ -161,20 +187,25 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     },
     hostedGrantGeneration: number,
   ): Promise<Uint8Array> {
-    if (request.deviceId !== this.options.localDeviceId) {
-      throw new TypeError("Remote request device does not match the E2EE endpoint");
+    const validated = parseAuthenticatedRemoteRequest(request);
+    if (
+      validated.deviceId !== this.options.localDeviceId ||
+      validated.idempotencyKey !== undefined
+    ) {
+      throw new TypeError("Remote request does not match the E2EE endpoint");
     }
-    const operation = uuidBytes(request.requestId);
-    const logicalId = derivedId(request.requestId, 0x42);
-    const plaintext = requestBytes(request);
+    const grant = generation(hostedGrantGeneration);
+    const operation = uuidBytes(validated.requestId);
+    const logicalId = derivedId(validated.requestId, 0x42);
+    const plaintext = requestBytes(validated);
     try {
       const prepared = await this.options.endpoint.prepareApplication(
         operation,
         logicalId,
-        BigInt(hostedGrantGeneration),
+        BigInt(grant),
         plaintext,
       );
-      return framed(prepared, hostedGrantGeneration);
+      return framed(prepared, operation, logicalId, grant);
     } finally {
       plaintext.fill(0);
       operation.fill(0);
@@ -189,29 +220,35 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     }
     const operation = uuidBytes(envelope.operationId);
     const logical = uuidBytes(envelope.logicalMessageId);
-    const opened = await this.options.endpoint.receiveApplication(
-      operation,
-      envelope.ciphertext,
-      logical,
-      BigInt(envelope.hostedGrantGeneration),
-    );
-    let acknowledged = false;
-    return {
-      authenticatedPeerId: this.options.daemonDeviceId,
-      plaintext: opened.plaintext,
-      acknowledge: async () => {
-        if (acknowledged) return;
-        const acknowledgement = derivedId(envelope.operationId, 0x43);
-        try {
-          await this.options.endpoint.acknowledgeReceive(acknowledgement, operation);
-          acknowledged = true;
-        } finally {
-          acknowledgement.fill(0);
-          operation.fill(0);
-          logical.fill(0);
-        }
-      },
-    };
+    try {
+      const opened = await this.options.endpoint.receiveApplication(
+        operation,
+        envelope.ciphertext,
+        logical,
+        BigInt(envelope.hostedGrantGeneration),
+      );
+      let acknowledged = false;
+      return {
+        authenticatedPeerId: this.options.daemonDeviceId,
+        plaintext: opened.plaintext,
+        acknowledge: async () => {
+          if (acknowledged) return;
+          const acknowledgement = derivedId(envelope.operationId, 0x43);
+          try {
+            await this.options.endpoint.acknowledgeReceive(acknowledgement, operation);
+            acknowledged = true;
+          } finally {
+            acknowledgement.fill(0);
+            operation.fill(0);
+            logical.fill(0);
+          }
+        },
+      };
+    } catch (cause) {
+      operation.fill(0);
+      logical.fill(0);
+      throw cause;
+    }
   }
 
   decode(plaintext: Uint8Array): RemoteDaemonMessage {

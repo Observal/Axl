@@ -158,6 +158,13 @@ export class WindowsRemoteE2eeBridge {
       if (envelope.messageClass !== "application_request") {
         throw new Error("Remote E2EE envelope is not an application request");
       }
+      const authority = this.options.authority.snapshot(this.options.deviceId);
+      if (
+        authority?.hostedGeneration !== envelope.hostedGrantGeneration ||
+        authority.effectiveScopes.length === 0
+      ) {
+        throw new Error("Remote hosted grant generation is stale or unavailable");
+      }
       this.currentRoute = sourceRouteId;
       incomingOperation = idBytes(envelope.operationId);
       const opened = await this.options.endpoint.receiveApplication(

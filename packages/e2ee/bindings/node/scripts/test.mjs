@@ -6,6 +6,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const repositoryRoot = resolve(packageRoot, "../../../..");
+const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+for (const workspace of ["@axl/protocol", "@axl/kernel", "@axl/sdk", "@axl/daemon"]) {
+  execFileSync(pnpm, ["--filter", workspace, "build"], {
+    cwd: repositoryRoot,
+    stdio: "inherit",
+  });
+}
 execFileSync(process.execPath, [join(packageRoot, "scripts/build.mjs"), "production"], { stdio: "inherit" });
 execFileSync(process.execPath, [join(packageRoot, "scripts/build.mjs"), "test"], { stdio: "inherit" });
 const target =
