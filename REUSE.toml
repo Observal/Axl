@@ -72,6 +72,9 @@ SPDX-License-Identifier = "Apache-2.0"
 path = [
   "packages/protocol/test/fixtures/internal-relay-api-v1.json",
   "packages/protocol/test/fixtures/remote-transport-v1.json",
+  "services/aws-control-plane/package.json",
+  "services/aws-control-plane/tsconfig.build.json",
+  "services/aws-control-plane/tsconfig.json",
   "services/control-plane/package.json",
   "services/control-plane/tsconfig.build.json",
   "services/control-plane/tsconfig.json",

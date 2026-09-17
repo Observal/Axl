@@ -295,17 +295,26 @@ importers:
         specifier: 8.2.2
         version: 8.2.2(@types/node@22.19.19)(esbuild@0.28.2)(yaml@2.8.3)
 
-  services/control-plane:
+  services/aws-control-plane:
     dependencies:
       '@aws-sdk/client-dynamodb':
         specifier: 3.1134.0
         version: 3.1134.0
+      '@axl/control-plane':
+        specifier: workspace:*
+        version: link:../control-plane
       '@axl/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       jose:
         specifier: 6.2.12
         version: 6.2.12
+
+  services/control-plane:
+    dependencies:
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
 
 packages:
 
@@ -1747,7 +1756,7 @@ snapshots:
 
   '@aws-sdk/credential-provider-login@3.972.77':
     dependencies:
-      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/core': 3.978.0
       '@aws-sdk/nested-clients': 3.997.44
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3
@@ -1867,7 +1876,7 @@ snapshots:
 
   '@aws-sdk/nested-clients@3.997.44':
     dependencies:
-      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/core': 3.978.0
       '@aws-sdk/signature-v4-multi-region': 3.996.46
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3
@@ -1896,7 +1905,7 @@ snapshots:
 
   '@aws-sdk/token-providers@3.1116.0':
     dependencies:
-      '@aws-sdk/core': 3.977.9
+      '@aws-sdk/core': 3.978.0
       '@aws-sdk/nested-clients': 3.997.44
       '@aws-sdk/types': 3.974.5
       '@smithy/core': 3.33.3

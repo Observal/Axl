@@ -55,7 +55,8 @@ axl/
     e2ee/              # proposed Rust endpoint-E2EE core; create only after its architecture gate
     extensions/        # first-party extensions, one package per feature (roadmap §2.9)
   services/
-    control-plane/     # separately deployable TypeScript hosted control plane
+    control-plane/     # dependency-light hosted control-plane contracts and state machines
+    aws-control-plane/ # AWS datastore, identity, and process-host assembly
     relay/             # separately deployable Elixir/OTP opaque WebSocket relay
   apps/
     android/           # Gradle project using the generated Kotlin SDK
@@ -74,6 +75,7 @@ These rules keep package ownership clear:
 - `packages/protocol` is the only source of wire-format truth. TypeScript definitions stay authoritative until a non-TypeScript presentation client creates a real need for generation. The Elixir relay implements only its narrow transport and internal-service framing against canonical byte and JSON fixtures; it is not a daemon-protocol client.
 - Apps use the public protocol SDK rather than package internals.
 - `services/control-plane` may depend on `packages/protocol`. It owns hosted account, installation, device, ticket, opaque OpenMLS KeyPackage and Welcome rendezvous, grant, upload-reservation, quota, and security-audit mutation. It never owns private E2EE state, decrypted Welcome contents, MLS group state, or application plaintext. Identity providers, persistent datastores, and production service authentication stay behind injected interfaces until approved.
+- `services/aws-control-plane` is a process-host adapter over the public control-plane interfaces. It owns AWS SDK, DynamoDB, OIDC, and deployment assembly concerns. It does not move hosted business logic or E2EE state out of `services/control-plane`.
 - `services/relay` consumes versioned language-neutral fixtures. It must not import TypeScript package internals, access the control-plane datastore, decrypt envelopes, interpret daemon RPC, persist canonical history, or store attachment bodies. It calls the authenticated control-plane admission API once per new connection and accepts authenticated revocation notifications.
 - The control plane and relay are separate deployables. They share no private implementation imports and communicate only through their versioned internal HTTP contract.
 - `packages/runtime` assembles providers, tools, extensions, sandboxing, and the authoritative daemon without importing a presentation client.

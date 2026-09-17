@@ -9,6 +9,16 @@ import {
   UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
 import {
+  type AccountPrincipal,
+  type PairingRendezvousRecord,
+  type PairingRendezvousStore,
+  type PairingRendezvousTransaction,
+  type PublicPrincipalAuthenticator,
+  RelayTicketError,
+  type RelayTicketRecord,
+  type RelayTicketStore,
+} from "@axl/control-plane";
+import {
   parseCryptoSessionId,
   parseDeviceId,
   parseInstallationId,
@@ -16,19 +26,6 @@ import {
   parseRouteId,
 } from "@axl/protocol";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-
-import type {
-  PairingRendezvousRecord,
-  PairingRendezvousStore,
-  PairingRendezvousTransaction,
-} from "./pairing.ts";
-import type { PublicPrincipalAuthenticator } from "./server.ts";
-import {
-  type AccountPrincipal,
-  RelayTicketError,
-  type RelayTicketRecord,
-  type RelayTicketStore,
-} from "./tickets.ts";
 
 const MAX_TOKEN_BYTES = 16 * 1024;
 

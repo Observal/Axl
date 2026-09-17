@@ -10,18 +10,18 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-
-import { parseDeviceId, parseInstallationId, type ConsumeRelayTicketRequest } from "@axl/protocol";
+import {
+  type AccountPrincipal,
+  createControlPlaneHandler,
+  InMemoryPairingRendezvousStore,
+  InMemoryRelayTicketStore,
+  PairingRendezvousService,
+  type RelayTicketRecord,
+  RelayTicketService,
+} from "@axl/control-plane";
+import { type ConsumeRelayTicketRequest, parseDeviceId, parseInstallationId } from "@axl/protocol";
 
 import { DynamoPairingRendezvousStore, DynamoRelayTicketStore } from "./aws.ts";
-import { InMemoryPairingRendezvousStore, PairingRendezvousService } from "./pairing.ts";
-import { createControlPlaneHandler } from "./server.ts";
-import {
-  InMemoryRelayTicketStore,
-  RelayTicketService,
-  type AccountPrincipal,
-  type RelayTicketRecord,
-} from "./tickets.ts";
 
 function required(name: string): string {
   const value = process.env[name];
