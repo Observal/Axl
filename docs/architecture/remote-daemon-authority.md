@@ -3,11 +3,11 @@
 
 # Remote daemon authority
 
-Status: approved infrastructure behind test-only fake E2EE
+Status: approved authority with real E2EE integration adapter; production startup disabled
 
 ## Scope
 
-This slice establishes durable installation-scoped device authority without enabling production network access in the daemon. `packages/daemon/src/remote-authority.ts` owns the local record and effective grant calculation. An internal authenticated attachment connects an explicitly allowlisted subset of existing RPCs to the same daemon dispatcher and command journal. The relay and control plane cannot widen daemon authority. A disposable hosted-path test now wires this attachment to the real relay through test-only fake E2EE; no production runtime starts that bridge.
+This slice establishes durable installation-scoped device authority without enabling production network access in the daemon. `packages/daemon/src/remote-authority.ts` owns the local record and effective grant calculation. An internal authenticated attachment connects an explicitly allowlisted subset of existing RPCs to the same daemon dispatcher and command journal. The relay and control plane cannot widen daemon authority. `packages/daemon/src/remote-e2ee.ts` now authenticates opaque delivery through an injected real endpoint before entering that attachment and encrypts daemon responses before relay delivery. Local tests compose it with the real OpenMLS Node binding; no production runtime starts that bridge.
 
 The processing contract remains:
 
@@ -66,9 +66,9 @@ Retryable mutations enter the existing daemon command journal while the authorit
 
 ## Current non-capabilities
 
-This module is not wired to the production runtime, CLI, or ordinary sessions. Outside the explicit disposable integration test, it does not:
+This module is not wired to the production runtime, CLI, or ordinary sessions. Outside explicit local integration tests, it does not:
 
-- authenticate cryptography
+- select or load a production cryptographic endpoint
 - define pairing or key storage
 - close a relay route through a production transport
 - implement permission interactions

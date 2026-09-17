@@ -3,13 +3,13 @@
 
 # Remote hosted-path checkpoint
 
-Status: test-only fake-E2EE integration
+Status: real E2EE integration adapters implemented with local test stores; production startup disabled
 
 ## Scope
 
-This checkpoint connects the real TypeScript control plane, Elixir relay, daemon remote-authority boundary, and TypeScript SDK in one disposable test. It proves transport and authorization behavior. It does not enable ordinary-session remote access or provide production cryptography, identity, storage, service credentials, deployment, or permission approval.
+This checkpoint connects the real TypeScript control plane, Elixir relay, daemon remote-authority boundary, and TypeScript SDK in disposable tests. The Session 60 Windows slice adds the canonical binary E2EE envelope, an SDK adapter for real native device endpoints, a daemon bridge for real native daemon endpoints, and an HTTPS witness continuation client. It proves the integration against real OpenMLS endpoints using test-only key and rollback stores and against a local unanimous three-replica witness gateway.
 
-The deterministic fake E2EE adapter remains under protocol test support. Production source consumes only opaque prepared envelopes and an injected authenticated opener.
+The deterministic fake E2EE adapter remains under protocol test support for transport fault tests. Production source now consumes only typed native endpoint interfaces and opaque committed envelopes. Production startup remains disabled until Windows release evidence and independently deployed witness infrastructure are approved.
 
 ## Stable destination and ephemeral routes
 
