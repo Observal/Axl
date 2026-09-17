@@ -149,6 +149,48 @@ jobs:
           uname -m
           cargo test --locked -p axl-e2ee macos_keychain -- --nocapture
 
+  e2ee-storage-cross:
+    name: E2EE storage compile (${{ matrix.target }})
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Install target
+        if: needs.changes.outputs.e2ee == 'true'
+        run: rustup target add ${{ matrix.target }}
+      - name: Compile target-gated storage and tests
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        run: cargo check --locked -p axl-e2ee --tests --target ${{ matrix.target }}
+
+  e2ee-windows-model:
+    name: E2EE Windows DPAPI model (x64)
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Run Windows record and identity-policy tests
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        run: cargo test --locked -p axl-e2ee windows_dpapi::tests
+
   e2ee-browser-tooling:
     name: E2EE browser tooling
     needs: changes
