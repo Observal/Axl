@@ -36,13 +36,18 @@ The SDK does not encrypt, decrypt, advance epochs, create prepared records, or c
 
 ## Disposable topology
 
-The explicit hosted-path integration test starts:
+The fake-crypto transport fault test remains for deterministic retry coverage. A second opt-in test
+uses real native OpenMLS endpoints for hosted pairing, application traffic, update proposals,
+commits, epoch-ready messages, and confirmations through the real relay.
+
+The hosted-path integration tests start:
 
 1. an in-process real control-plane HTTP server with deterministic injected identity, authorization, proof, clock, and ticket storage,
 2. a separately running real Elixir relay using its HTTP control-plane client,
 3. a real sandboxed daemon with durable remote authority and command journal,
 4. daemon and device relay WebSocket connections,
-5. test-only fake E2EE endpoints, and
+5. test-only fake E2EE endpoints for transport fault injection or real OpenMLS fixture endpoints,
+   and
 6. the real SDK outbox and delivery coordinator.
 
 It verifies ticket issuance and consumption, route discovery, fake authenticated opening, daemon authorization, durable command acceptance, response delivery, relay restart, changed-route retry with byte-identical ciphertext, cursor-based subscription resume, daemon restart, duplicate idempotency, revocation, and oversized-payload rejection. The test is opt-in outside the relay CI job because it requires the pinned Elixir toolchain.
