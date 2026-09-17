@@ -1606,6 +1606,28 @@ impl DeviceEndpoint {
         })
     }
     #[napi]
+    pub fn apply_received_update_commit(
+        &self,
+        operation_id: Buffer,
+        ciphertext: Buffer,
+        commit_logical_id: Buffer,
+        generation: BigInt,
+        ready_logical_id: Buffer,
+    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+        let op = id(operation_id.as_ref())?;
+        let bytes = copy_bounded(ciphertext.as_ref(), HANDSHAKE_MAX_BYTES, "bound_exceeded")?;
+        let logical = id(commit_logical_id.as_ref())?;
+        let generation = u64_from_bigint(&generation)?;
+        let ready = id(ready_logical_id.as_ref())?;
+        self.work(move |slot, _| {
+            Ok(outbox(
+                device_mut(slot)?
+                    .apply_received_update_commit(op, &bytes, logical, generation, ready)
+                    .map_err(map_persistence)?,
+            ))
+        })
+    }
+    #[napi]
     pub fn acknowledge_epoch_ready(
         &self,
         operation_id: Buffer,

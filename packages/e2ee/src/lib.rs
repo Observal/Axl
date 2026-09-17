@@ -1480,7 +1480,7 @@ impl Phone {
         bytes: &[u8],
         id: Id,
         generation: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<CommitMetadata, Error> {
         self.apply_commit_inner(bytes, id, generation, false)
     }
 
@@ -1490,7 +1490,7 @@ impl Phone {
         bytes: &[u8],
         id: Id,
         generation: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<CommitMetadata, Error> {
         self.apply_commit_inner(bytes, id, generation, true)
     }
 
@@ -1500,7 +1500,7 @@ impl Phone {
         id: Id,
         generation: u64,
         removal: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<CommitMetadata, Error> {
         let endpoint = self.endpoint_mut()?;
         endpoint.ensure_ready()?;
         let protocol = decode_protocol(bytes)?;
@@ -1547,12 +1547,29 @@ impl Phone {
         } else {
             validate_members(endpoint.group()?, &endpoint.peer, &endpoint.identity)?;
         }
+        let commit_id = provider
+            .crypto()
+            .hash(SUITE.hash_algorithm(), bytes)
+            .map_err(|_| Error::Crypto("commit hash failed"))?
+            .try_into()
+            .map_err(|_| Error::Crypto("unexpected commit hash length"))?;
         if let Err(error) = endpoint.mark_epoch_advanced(old_epoch) {
             endpoint.invalidate();
             return Err(error);
         }
+        let target_epoch = endpoint.group()?.epoch().as_u64();
+        let epoch_authenticator = endpoint
+            .group()?
+            .epoch_authenticator()
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Crypto("unexpected epoch authenticator length"))?;
         endpoint.transaction_pending = true;
-        Ok(())
+        Ok(CommitMetadata {
+            commit_id,
+            target_epoch,
+            epoch_authenticator,
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]

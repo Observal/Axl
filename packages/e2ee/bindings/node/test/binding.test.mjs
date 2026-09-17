@@ -300,9 +300,9 @@ test("fresh lifecycle preserves barriers, exact retries, copied input, and close
       ),
       { code: "conflict" },
     );
-    const ready = await pair.device.applyUpdateCommit(
+    const ready = await pair.device.applyReceivedUpdateCommit(
       operation(30),
-      commit,
+      commit.ciphertext,
       operation(27),
       7n,
       operation(31),

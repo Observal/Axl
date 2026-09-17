@@ -2572,14 +2572,51 @@ impl DurablePreJoinDevice {
         hosted_generation: u64,
         epoch_ready_logical_message_id: Id,
     ) -> Result<super::OutboxRecord, PersistenceError> {
-        let metadata = commit.commit.as_ref().ok_or(PersistenceError::Corrupt)?;
+        let expected = commit.commit.as_ref().ok_or(PersistenceError::Corrupt)?;
+        self.apply_update_commit_inner(
+            operation_id,
+            &commit.ciphertext,
+            commit_logical_message_id,
+            hosted_generation,
+            epoch_ready_logical_message_id,
+            Some(expected),
+        )
+    }
+
+    pub fn apply_received_update_commit(
+        &mut self,
+        operation_id: Id,
+        ciphertext: &[u8],
+        commit_logical_message_id: Id,
+        hosted_generation: u64,
+        epoch_ready_logical_message_id: Id,
+    ) -> Result<super::OutboxRecord, PersistenceError> {
+        self.apply_update_commit_inner(
+            operation_id,
+            ciphertext,
+            commit_logical_message_id,
+            hosted_generation,
+            epoch_ready_logical_message_id,
+            None,
+        )
+    }
+
+    fn apply_update_commit_inner(
+        &mut self,
+        operation_id: Id,
+        ciphertext: &[u8],
+        commit_logical_message_id: Id,
+        hosted_generation: u64,
+        epoch_ready_logical_message_id: Id,
+        expected: Option<&crate::CommitMetadata>,
+    ) -> Result<super::OutboxRecord, PersistenceError> {
         let fingerprint = operation_fingerprint_parts(
             OP_APPLY_COMMIT,
             &[
                 &commit_logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 &epoch_ready_logical_message_id,
-                &commit.ciphertext,
+                ciphertext,
             ],
         )?;
         let mut transaction = begin_current(&self.store)?;
@@ -2600,27 +2637,21 @@ impl DurablePreJoinDevice {
             Arc::clone(&self.store.clock),
             transaction.accepted_ids.clone(),
         )?;
-        phone.apply_commit(
-            &commit.ciphertext,
-            commit_logical_message_id,
-            hosted_generation,
-        )?;
-        let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
-        if endpoint.epoch()? != metadata.target_epoch
-            || endpoint.epoch_authenticator()?.as_slice() != metadata.epoch_authenticator
-        {
+        let metadata =
+            phone.apply_commit(ciphertext, commit_logical_message_id, hosted_generation)?;
+        if expected.is_some_and(|value| value != &metadata) {
             return Err(PersistenceError::IdentityMismatch);
         }
         phone.continue_pending_transaction()?;
         let payload = epoch_ready_payload(
             lifecycle.crypto_session_id,
             lifecycle.group_id.ok_or(PersistenceError::Corrupt)?,
-            metadata,
+            &metadata,
         );
         let envelope = phone.prepare_epoch_ready(epoch_ready_logical_message_id, &payload)?;
         let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
         lifecycle.pair_lifecycle = Some(PairLifecycle::WaitingForEpochReady);
-        lifecycle.pending_commit = Some(metadata.clone());
+        lifecycle.pending_commit = Some(metadata);
         endpoint.provider.insert_internal(
             DEVICE_PREJOIN_KEY.to_vec(),
             encode_device_record(&lifecycle)?,
