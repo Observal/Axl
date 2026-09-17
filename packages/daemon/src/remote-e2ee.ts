@@ -348,10 +348,6 @@ export class WindowsRemoteE2eeBridge {
         confirmationOperation.bytes.fill(0);
         confirmationLogical.bytes.fill(0);
       }
-      const acknowledgement = derivedId(
-        "axl-e2ee-epoch-ready-receive-ack-v1",
-        envelope.operationId,
-      );
       const commitAcknowledgement = derivedId(
         "axl-e2ee-commit-outbox-ack-v1",
         envelope.logicalMessageId,
@@ -359,9 +355,7 @@ export class WindowsRemoteE2eeBridge {
       const commitOperation = idBytes(envelope.logicalMessageId);
       try {
         await this.options.endpoint.acknowledgeOutbox(commitAcknowledgement.bytes, commitOperation);
-        await this.options.endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation);
       } finally {
-        acknowledgement.bytes.fill(0);
         commitAcknowledgement.bytes.fill(0);
         commitOperation.fill(0);
       }

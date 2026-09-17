@@ -13,10 +13,12 @@ import {
   parseCryptoSessionId,
   parseDeviceId,
   parseInstallationId,
+  parseOperationId,
+  parseRemoteE2eeEnvelope,
   parseRemoteRequestId,
   parseRouteId,
 } from "@axl/protocol";
-import { RemoteDeviceE2ee } from "@axl/sdk";
+import { NativeEndpointOutbox, RemoteDeviceE2ee } from "@axl/sdk";
 
 import * as fixture from "./fixture-loader.mjs";
 
@@ -138,6 +140,39 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
       assert.equal(response.method, "daemon.info");
     }
     await opened.acknowledge?.();
+
+    const updateOperation = parseOperationId("21212121-2121-7121-a121-212121212121");
+    const updateLogical = parseOperationId("22222222-2222-7222-a222-222222222222");
+    const proposal = await client.prepareUpdateProposal(updateOperation, updateLogical, 1);
+    const commitPromise = nextDelivery(waiters);
+    await bridge.receive({
+      sourceRouteId: parseRouteId("20202020-2020-7020-a020-202020202020"),
+      opaqueEnvelope: proposal,
+    });
+    const commitEnvelope = await commitPromise;
+    assert.equal(parseRemoteE2eeEnvelope(commitEnvelope).messageClass, "commit");
+    const appliedCommit = await client.open(commitEnvelope);
+    assert.equal(appliedCommit.controlOnly, true);
+
+    const nativeOutbox = new NativeEndpointOutbox(
+      pair.device,
+      { create: () => parseOperationId("23232323-2323-7323-a323-232323232323") },
+      { resolve: async () => parseRouteId("20202020-2020-7020-a020-202020202020") },
+    );
+    const epochReadyRecord = (await nativeOutbox.list()).find(
+      (record) => parseRemoteE2eeEnvelope(record.opaqueEnvelope).messageClass === "epoch_ready",
+    );
+    assert.ok(epochReadyRecord);
+    const confirmationPromise = nextDelivery(waiters);
+    await bridge.receive({
+      sourceRouteId: parseRouteId("20202020-2020-7020-a020-202020202020"),
+      opaqueEnvelope: epochReadyRecord.opaqueEnvelope,
+    });
+    const confirmationEnvelope = await confirmationPromise;
+    assert.equal(parseRemoteE2eeEnvelope(confirmationEnvelope).messageClass, "resync_control");
+    const confirmed = await client.open(confirmationEnvelope);
+    assert.equal(confirmed.controlOnly, true);
+    assert.equal(await pair.device.pairStatus(), "active");
   } finally {
     bridge.close();
     pair.device.close();

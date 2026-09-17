@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  type CryptoSessionId,
   encodeRemoteE2eeEnvelope,
+  type OpaqueOutboxRecord,
   parseCryptoSessionId,
   parseIdempotencyKey,
   parseOpaqueOutboxRecord,
   parseOperationId,
   parseRemoteRequestId,
-  type CryptoSessionId,
-  type OpaqueOutboxRecord,
-  type RequestId,
   type RemoteE2eeMessageClass,
+  type RequestId,
   type RouteId,
   type TransportAttemptId,
 } from "@axl/protocol";
@@ -344,7 +344,9 @@ export class NativeEndpointOutbox implements RemoteOutbox {
   }
 
   async list(): Promise<readonly OpaqueOutboxRecord[]> {
-    const records = await this.#endpoint.pendingOutbox();
+    const records = (await this.#endpoint.pendingOutbox()).filter(
+      (record) => record.hostedGrantGeneration > 0n,
+    );
     return records.map((record) => {
       const requestId = requestIdFor(record);
       return parseOpaqueOutboxRecord({

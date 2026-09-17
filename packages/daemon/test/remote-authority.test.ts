@@ -272,7 +272,7 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
     }),
   });
   assert.deepEqual(accepted, ["proposal", "commit", "epoch_ready", "confirmation"]);
-  assert.equal(acknowledgements.length, 2);
+  assert.equal(acknowledgements.length, 1);
   assert.deepEqual(outboxAcknowledgements, [
     Uint8Array.from(Buffer.from(epochLogical.replaceAll("-", ""), "hex")),
   ]);
