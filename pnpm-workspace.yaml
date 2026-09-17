@@ -11,3 +11,5 @@ packages:
   - apps/*
 allowBuilds:
   esbuild: false
+minimumReleaseAgeExclude:
+  - '@aws-sdk/client-dynamodb@3.1134.0'

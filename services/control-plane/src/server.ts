@@ -6,13 +6,21 @@ import type { IncomingMessage, RequestListener, ServerResponse } from "node:http
 
 import {
   encodeInternalConsumeRelayTicketResult,
+  encodePairingReservation,
+  encodePairingWelcomePublication,
   ProtocolValidationError,
+  parseAcknowledgePairingWelcomeRequest,
+  parseFetchPairingWelcomeRequest,
   parseInternalConsumeRelayTicketRequest,
+  parsePublishPairingClaimRequest,
+  parsePublishPairingWelcomeRequest,
+  parseReservePairingClaimRequest,
   WITNESS_HTTP_CONTENT_TYPE,
   WITNESS_HTTP_PATH,
   WITNESS_REQUEST_MAX_BYTES,
 } from "@axl/protocol";
 
+import { PairingRendezvousError, type PairingRendezvousService } from "./pairing.ts";
 import { type AccountPrincipal, RelayTicketError, type RelayTicketService } from "./tickets.ts";
 import { type WitnessGateway, WitnessServiceError } from "./witness.ts";
 
@@ -31,6 +39,7 @@ export interface ControlPlaneHandlerOptions {
   readonly publicAuthentication: PublicPrincipalAuthenticator;
   readonly internalAuthentication: InternalRelayAuthenticator;
   readonly witness?: WitnessGateway;
+  readonly pairing?: PairingRendezvousService;
 }
 
 class HttpRequestError extends Error {
@@ -86,26 +95,45 @@ function respond(response: ServerResponse, status: number, body: unknown): void 
 }
 
 function respondError(response: ServerResponse, error: unknown): void {
+  if (error instanceof PairingRendezvousError) {
+    respond(response, error.httpStatus, {
+      error: { code: error.code, message: error.message },
+    });
+    return;
+  }
   if (error instanceof WitnessServiceError) {
-    respond(response, error.httpStatus, { error: { code: error.code, message: error.message } });
+    respond(response, error.httpStatus, {
+      error: { code: error.code, message: error.message },
+    });
     return;
   }
   if (error instanceof RelayTicketError) {
-    respond(response, error.httpStatus, { error: { code: error.code, message: error.message } });
+    respond(response, error.httpStatus, {
+      error: { code: error.code, message: error.message },
+    });
     return;
   }
   if (error instanceof ProtocolValidationError) {
     respond(response, 400, {
-      error: { code: "bad_request", message: "Request validation failed", path: error.path },
+      error: {
+        code: "bad_request",
+        message: "Request validation failed",
+        path: error.path,
+      },
     });
     return;
   }
   if (error instanceof HttpRequestError) {
-    respond(response, error.status, { error: { code: "bad_request", message: error.message } });
+    respond(response, error.status, {
+      error: { code: "bad_request", message: error.message },
+    });
     return;
   }
   respond(response, 503, {
-    error: { code: "service_unavailable", message: "Control plane is unavailable" },
+    error: {
+      code: "service_unavailable",
+      message: "Control plane is unavailable",
+    },
   });
 }
 
@@ -131,6 +159,72 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         }
         const result = await options.tickets.issue(principal, parseJson(await readBody(request)));
         respond(response, 201, result);
+        return;
+      }
+      if (path === "/v1/e2ee/pairing/claims" && options.pairing !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        await options.pairing.publishClaim(
+          principal,
+          parsePublishPairingClaimRequest(parseJson(await readBody(request, 24 * 1024))),
+        );
+        respond(response, 201, { version: 1, accepted: true });
+        return;
+      }
+      if (path === "/v1/e2ee/pairing/claims/reserve" && options.pairing !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        const result = await options.pairing.reserveClaim(
+          principal,
+          parseReservePairingClaimRequest(parseJson(await readBody(request))),
+        );
+        respond(response, 200, encodePairingReservation(result));
+        return;
+      }
+      if (path === "/v1/e2ee/pairing/welcomes" && options.pairing !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        const result = await options.pairing.publishWelcome(
+          principal,
+          parsePublishPairingWelcomeRequest(parseJson(await readBody(request, 24 * 1024))),
+        );
+        respond(response, 201, encodePairingWelcomePublication(result));
+        return;
+      }
+      if (path === "/v1/e2ee/pairing/welcomes/fetch" && options.pairing !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        const result = await options.pairing.fetchWelcome(
+          principal,
+          parseFetchPairingWelcomeRequest(parseJson(await readBody(request))),
+        );
+        respond(response, 200, encodePairingWelcomePublication(result));
+        return;
+      }
+      if (path === "/v1/e2ee/pairing/welcomes/acknowledge" && options.pairing !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        await options.pairing.acknowledgeWelcome(
+          principal,
+          parseAcknowledgePairingWelcomeRequest(parseJson(await readBody(request))),
+        );
+        response.writeHead(204, { "cache-control": "no-store" });
+        response.end();
         return;
       }
       if (path === WITNESS_HTTP_PATH && options.witness !== undefined) {
