@@ -18,7 +18,9 @@ This is deployment-test evidence only. It is not production release evidence and
 - Origin: Application Load Balancer restricted to the CloudFront origin-facing managed prefix list
 - State: DynamoDB on-demand table with server-side encryption, TTL, and point-in-time recovery
 - Secrets: AWS Secrets Manager, injected through the ECS task execution role
-- Images: immutable ECR tags derived from the source commit
+- Images: immutable ECR tag `d6d6c1e9bd21`
+- Control-plane digest: `sha256:f185778a7904633399e7426b530628073629869e081f808a638f70bf63b7c7de`
+- Relay digest: `sha256:dbc2b0d871e1a996339071af3e35752726c471564b2a374487484d0220aeca27`
 - Logs: CloudWatch log groups with 14-day retention
 
 ## Deployed endpoint
