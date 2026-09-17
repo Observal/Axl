@@ -322,6 +322,7 @@ impl KeychainAccess for SecurityFrameworkKeychain {
 pub(crate) struct MacOsKeychainEnvelopeKeyStore {
     service: String,
     keychain: Arc<dyn KeychainAccess>,
+    operation_lock: Arc<std::sync::Mutex<()>>,
 }
 
 impl MacOsKeychainEnvelopeKeyStore {
@@ -331,6 +332,7 @@ impl MacOsKeychainEnvelopeKeyStore {
         Ok(Self {
             service: PRODUCTION_SERVICE.to_owned(),
             keychain: Arc::new(SecurityFrameworkKeychain),
+            operation_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -341,7 +343,11 @@ impl MacOsKeychainEnvelopeKeyStore {
 
     #[cfg(test)]
     fn with_keychain(service: String, keychain: Arc<dyn KeychainAccess>) -> Self {
-        Self { service, keychain }
+        Self {
+            service,
+            keychain,
+            operation_lock: Arc::new(std::sync::Mutex::new(())),
+        }
     }
 
     fn identities_for_session(
@@ -454,84 +460,14 @@ impl MacOsKeychainEnvelopeKeyStore {
         }
         Ok(())
     }
-}
 
-impl EnvelopeKeyStore for MacOsKeychainEnvelopeKeyStore {
-    fn available(&self) -> bool {
-        self.keychain.identity_available()
+    fn lock_operations(&self) -> Result<std::sync::MutexGuard<'_, ()>, PersistenceError> {
+        self.operation_lock
+            .lock()
+            .map_err(|_| PersistenceError::SecureStoreUnavailable)
     }
 
-    fn prepare(
-        &self,
-        crypto_session_id: Id,
-        key_id: Id,
-        data_key: &[u8; 32],
-        authenticated_context: &[u8],
-    ) -> Result<(), PersistenceError> {
-        let context_hash = context_hash(authenticated_context)?;
-        let record = KeyRecord {
-            crypto_session_id,
-            key_id,
-            context_hash,
-            lifecycle: Lifecycle::Prepared,
-            data_key: *data_key,
-        };
-        match self.records_for_key(crypto_session_id, key_id)?.as_slice() {
-            [] => {}
-            [(_, existing)] if existing == &record => return Ok(()),
-            [..] => return Err(PersistenceError::Conflict),
-        }
-        let identity = public_identity(crypto_session_id, key_id, Lifecycle::Prepared);
-        let mut value = record.encode();
-        let inserted = self.keychain.insert(&self.service, &identity, &value);
-        value.fill(0);
-        let outcome = inserted?;
-        let stored = self
-            .exact_record(
-                crypto_session_id,
-                key_id,
-                Lifecycle::Prepared,
-                (outcome == InsertOutcome::Inserted).then_some(context_hash),
-            )?
-            .ok_or(PersistenceError::KeyRecordMissing)?;
-        if stored != record {
-            return Err(if outcome == InsertOutcome::Duplicate {
-                PersistenceError::Conflict
-            } else {
-                PersistenceError::Corrupt
-            });
-        }
-        Ok(())
-    }
-
-    fn load(
-        &self,
-        crypto_session_id: Id,
-        key_id: Id,
-        authenticated_context: &[u8],
-    ) -> Result<[u8; 32], PersistenceError> {
-        let context_hash = context_hash(authenticated_context)?;
-        let records = self.records_for_key(crypto_session_id, key_id)?;
-        if records.is_empty() {
-            return Err(PersistenceError::KeyRecordMissing);
-        }
-        if records.len() != 1 {
-            return Err(PersistenceError::SecureStoreAmbiguous);
-        }
-        let (_, record) = records
-            .into_iter()
-            .next()
-            .ok_or(PersistenceError::KeyRecordMissing)?;
-        record.validate_binding(
-            crypto_session_id,
-            key_id,
-            Some(context_hash),
-            Lifecycle::Active,
-        )?;
-        Ok(record.data_key)
-    }
-
-    fn activate(
+    fn activate_inner(
         &self,
         crypto_session_id: Id,
         key_id: Id,
@@ -606,12 +542,101 @@ impl EnvelopeKeyStore for MacOsKeychainEnvelopeKeyStore {
         }
         Ok(())
     }
+}
+
+impl EnvelopeKeyStore for MacOsKeychainEnvelopeKeyStore {
+    fn available(&self) -> bool {
+        self.keychain.identity_available()
+    }
+
+    fn prepare(
+        &self,
+        crypto_session_id: Id,
+        key_id: Id,
+        data_key: &[u8; 32],
+        authenticated_context: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let _operation = self.lock_operations()?;
+        let context_hash = context_hash(authenticated_context)?;
+        let record = KeyRecord {
+            crypto_session_id,
+            key_id,
+            context_hash,
+            lifecycle: Lifecycle::Prepared,
+            data_key: *data_key,
+        };
+        match self.records_for_key(crypto_session_id, key_id)?.as_slice() {
+            [] => {}
+            [(_, existing)] if existing == &record => return Ok(()),
+            [..] => return Err(PersistenceError::Conflict),
+        }
+        let identity = public_identity(crypto_session_id, key_id, Lifecycle::Prepared);
+        let mut value = record.encode();
+        let inserted = self.keychain.insert(&self.service, &identity, &value);
+        value.fill(0);
+        let outcome = inserted?;
+        let stored = self
+            .exact_record(
+                crypto_session_id,
+                key_id,
+                Lifecycle::Prepared,
+                (outcome == InsertOutcome::Inserted).then_some(context_hash),
+            )?
+            .ok_or(PersistenceError::KeyRecordMissing)?;
+        if stored != record {
+            return Err(if outcome == InsertOutcome::Duplicate {
+                PersistenceError::Conflict
+            } else {
+                PersistenceError::Corrupt
+            });
+        }
+        Ok(())
+    }
+
+    fn load(
+        &self,
+        crypto_session_id: Id,
+        key_id: Id,
+        authenticated_context: &[u8],
+    ) -> Result<[u8; 32], PersistenceError> {
+        let _operation = self.lock_operations()?;
+        let context_hash = context_hash(authenticated_context)?;
+        let records = self.records_for_key(crypto_session_id, key_id)?;
+        if records.is_empty() {
+            return Err(PersistenceError::KeyRecordMissing);
+        }
+        if records.len() != 1 {
+            return Err(PersistenceError::SecureStoreAmbiguous);
+        }
+        let (_, record) = records
+            .into_iter()
+            .next()
+            .ok_or(PersistenceError::KeyRecordMissing)?;
+        record.validate_binding(
+            crypto_session_id,
+            key_id,
+            Some(context_hash),
+            Lifecycle::Active,
+        )?;
+        Ok(record.data_key)
+    }
+
+    fn activate(
+        &self,
+        crypto_session_id: Id,
+        key_id: Id,
+        authenticated_context: &[u8],
+    ) -> Result<(), PersistenceError> {
+        let _operation = self.lock_operations()?;
+        self.activate_inner(crypto_session_id, key_id, authenticated_context)
+    }
 
     fn reconcile_prepared(
         &self,
         crypto_session_id: Id,
         committed_current: Option<(Id, Vec<u8>)>,
     ) -> Result<(), PersistenceError> {
+        let _operation = self.lock_operations()?;
         let identities = self.identities_for_session(crypto_session_id)?;
         if let Some((current_key_id, context)) = committed_current.as_ref() {
             let context_hash = context_hash(context)?;
@@ -635,7 +660,7 @@ impl EnvelopeKeyStore for MacOsKeychainEnvelopeKeyStore {
                 .iter()
                 .any(|(_, record)| record.lifecycle == Lifecycle::Prepared)
             {
-                self.activate(crypto_session_id, *current_key_id, context)?;
+                self.activate_inner(crypto_session_id, *current_key_id, context)?;
             }
         }
         for (_, key_id, lifecycle) in identities {
@@ -650,6 +675,7 @@ impl EnvelopeKeyStore for MacOsKeychainEnvelopeKeyStore {
     }
 
     fn erase(&self, crypto_session_id: Id, key_id: Id) -> Result<(), PersistenceError> {
+        let _operation = self.lock_operations()?;
         let records = self.records_for_key(crypto_session_id, key_id)?;
         if records.len() > 1 {
             return Err(PersistenceError::SecureStoreAmbiguous);
@@ -665,6 +691,7 @@ impl EnvelopeKeyStore for MacOsKeychainEnvelopeKeyStore {
     }
 
     fn destroy_session(&self, crypto_session_id: Id) -> Result<(), PersistenceError> {
+        let _operation = self.lock_operations()?;
         let identities = self.identities_for_session(crypto_session_id)?;
         for (_, key_id, lifecycle) in identities {
             self.delete_and_verify(crypto_session_id, key_id, lifecycle)?;
