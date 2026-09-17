@@ -74,11 +74,14 @@ cargo audit --deny warnings
 cargo deny check
 ```
 
-The private Node-API binding lives in [`bindings/node`](bindings/node). Its production endpoint
-constructors are not wired to a secure store or rollback witness and therefore fail closed during
-endpoint creation or opening. The target-gated macOS store is not exported through JavaScript.
-Test-only storage is compiled into a separate local fixture artifact and is excluded from production
-packaging.
+The private Node-API binding lives in [`bindings/node`](bindings/node). Its native boundary owns a
+typed pending-witness continuation that exposes only the operation ID, exact request bytes, request
+hash, and bounded status. It copies and bounds certificates, enforces matching operation identity,
+verifies unanimous certificates in Rust, and releases only the exact committed output. Test-only
+recovery construction and storage are compiled into a separate local fixture artifact and excluded
+from production packaging. Production endpoint constructors remain unwired and fail closed until a
+selected target has complete secure-store, pinned production replica trust, hosted transport, and
+runtime evidence.
 
 The private browser binding lives in [`bindings/browser`](bindings/browser). It runs single-threaded
 WASM in a dedicated same-origin module worker, requires `crypto.getRandomValues()`, and packages no

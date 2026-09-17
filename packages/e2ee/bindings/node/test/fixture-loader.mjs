@@ -28,7 +28,7 @@ const targets = new WeakMap();
 function wrap(endpoint) {
   const proxy = new Proxy(endpoint, {
     get(target, property, receiver) {
-      const value = Reflect.get(target, property, receiver);
+      const value = Reflect.get(target, property, target);
       if (typeof value !== "function") return value;
       return (...args) => {
         try {
@@ -46,4 +46,5 @@ function wrap(endpoint) {
 export const testDaemonEndpoint = (...args) => wrap(native.testDaemonEndpoint(...args));
 export const testDeviceEndpoint = (...args) => wrap(native.testDeviceEndpoint(...args));
 export const testPanic = (endpoint) => Promise.resolve(native.testPanic(targets.get(endpoint))).catch((cause) => { throw mapError(cause); });
+export const testWitnessPending = (...args) => wrap(native.testWitnessPending(...args));
 export const nativeExports = Object.freeze(Object.keys(native).sort());

@@ -17,6 +17,7 @@ resolver = "2"
 [features]
 browser = ["openmls/js"]
 browser-test-fixtures = ["browser"]
+node-test-fixtures = []
 
 [dependencies]
 openmls = { version = "=0.9.0", default-features = false, features = ["draft-ietf-mls-pq-ciphersuites"] }

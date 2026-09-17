@@ -12,6 +12,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(feature = "test-fixtures")]
+use axl_e2ee::witness::{ReplicaKey, ReplicaTrust};
 use axl_e2ee::{
     APPLICATION_MAX_BYTES, ENVELOPE_MAX_BYTES, HANDSHAKE_MAX_BYTES, Id, Identity, PROFILE_ID,
     PROFILE_REVISION,
@@ -24,6 +26,10 @@ use axl_e2ee::{
         InvitationLifecycle, OutboxRecord, PairLifecycle, PersistenceError, PreJoinLifecycle,
         RePairRequirement, RemovalOutcome, ReservationOutcome, RetryState, RollbackAnchor,
         RollbackState, WelcomeOutcome, WelcomePublication,
+    },
+    witness::{
+        PendingWitnessOperation, PendingWitnessStatus, ReplicaTrustSet,
+        WITNESS_CERTIFICATE_MAX_BYTES, WitnessError,
     },
 };
 use napi::{
@@ -77,6 +83,13 @@ const ERROR_CODES: &[&str] = &[
     "state_loss",
     "storage_unavailable",
     "unsupported_platform",
+    "witness_auth_failed",
+    "witness_conflict",
+    "witness_invalid_expected",
+    "witness_operation_conflict",
+    "witness_receipt_invalid",
+    "witness_registration_conflict",
+    "witness_unavailable",
 ];
 
 #[napi(object)]
@@ -253,6 +266,98 @@ pub struct DeviceEndpoint {
     state: Arc<DeviceState>,
 }
 
+struct PendingWitnessState {
+    operation: PendingWitnessOperation,
+    trust: ReplicaTrustSet,
+}
+
+/// Native-owned continuation. JavaScript can transport only the immutable request and return a
+/// certificate for the same operation ID.
+#[napi]
+pub struct NativePendingWitness {
+    gate: Arc<HandleGate>,
+    state: Arc<Mutex<PendingWitnessState>>,
+}
+
+impl NativePendingWitness {
+    #[allow(dead_code)]
+    fn new(operation: PendingWitnessOperation, trust: ReplicaTrustSet) -> Self {
+        Self {
+            gate: HandleGate::new(),
+            state: Arc::new(Mutex::new(PendingWitnessState { operation, trust })),
+        }
+    }
+}
+
+#[napi]
+impl NativePendingWitness {
+    #[napi(getter)]
+    pub fn operation_id(&self) -> Result<Buffer> {
+        let state = self.state.lock().map_err(|_| error("internal_error"))?;
+        Ok(state.operation.operation_id().to_vec().into())
+    }
+
+    #[napi(getter)]
+    pub fn witness_request(&self) -> Result<Buffer> {
+        let state = self.state.lock().map_err(|_| error("internal_error"))?;
+        Ok(state.operation.witness_request().to_vec().into())
+    }
+
+    #[napi(getter)]
+    pub fn request_hash(&self) -> Result<Buffer> {
+        let state = self.state.lock().map_err(|_| error("internal_error"))?;
+        Ok(state.operation.request_hash().to_vec().into())
+    }
+
+    #[napi(getter)]
+    pub fn status(&self) -> Result<String> {
+        let state = self.state.lock().map_err(|_| error("internal_error"))?;
+        Ok(match state.operation.status() {
+            PendingWitnessStatus::AwaitingQuorum => "pending_quorum",
+            PendingWitnessStatus::Ready => "committed",
+        }
+        .into())
+    }
+
+    #[napi]
+    pub fn continue_witness(
+        &self,
+        operation_id: Buffer,
+        certificate: Buffer,
+    ) -> Result<AsyncTask<Work<Buffer>>> {
+        let operation_id = id(operation_id.as_ref())?;
+        let certificate = copy_bounded(
+            certificate.as_ref(),
+            WITNESS_CERTIFICATE_MAX_BYTES,
+            "bound_exceeded",
+        )?;
+        let lease = self.gate.acquire(false)?;
+        let state = Arc::clone(&self.state);
+        Ok(AsyncTask::new(Work::new(lease, move || {
+            let mut state = state.lock().map_err(|_| error("internal_error"))?;
+            if state.operation.operation_id() != operation_id {
+                return Err(error("witness_operation_conflict"));
+            }
+            let trust = state.trust.clone();
+            state
+                .operation
+                .confirm_quorum(&certificate, &trust)
+                .map_err(map_witness)?;
+            Ok(state
+                .operation
+                .committed_result()
+                .map_err(map_witness)?
+                .to_vec()
+                .into())
+        })))
+    }
+
+    #[napi]
+    pub fn close(&self) {
+        self.gate.close();
+    }
+}
+
 #[allow(dead_code)]
 fn config(
     root: String,
@@ -393,6 +498,52 @@ pub fn test_device_endpoint(
 #[napi]
 pub fn test_panic(endpoint: &DaemonEndpoint) -> Result<AsyncTask<Work<String>>> {
     endpoint.work(move |_, _| panic!("contained test panic"))
+}
+
+#[cfg(feature = "test-fixtures")]
+fn witness_fixture_trust() -> Result<ReplicaTrustSet> {
+    let public_keys = [
+        [
+            0x1e, 0xbe, 0x96, 0x8b, 0x69, 0xd6, 0x14, 0xf9, 0xe4, 0xcb, 0x0f, 0x44, 0xbf, 0xc3,
+            0x8c, 0x01, 0x0b, 0x35, 0x5c, 0x65, 0x2d, 0xc3, 0xc4, 0x79, 0x5f, 0x1b, 0x03, 0xcf,
+            0xf7, 0xf8, 0x6e, 0xab,
+        ],
+        [
+            0x48, 0x8d, 0xa5, 0xa0, 0xa4, 0xe3, 0x75, 0xf9, 0x4b, 0x45, 0xa0, 0x09, 0xf4, 0x57,
+            0x33, 0xb3, 0xff, 0x9d, 0x6b, 0x01, 0x83, 0x5b, 0x21, 0x19, 0x66, 0x6c, 0x39, 0xed,
+            0xfb, 0xe1, 0x3f, 0x60,
+        ],
+        [
+            0x03, 0xc8, 0xc9, 0xea, 0xf5, 0xef, 0x22, 0x9b, 0x40, 0xa1, 0x26, 0x5e, 0xfa, 0x46,
+            0x4b, 0x0a, 0xe0, 0x33, 0xfc, 0x1e, 0xea, 0xaf, 0x35, 0x6f, 0xb4, 0xdc, 0xf4, 0x1a,
+            0x2b, 0x48, 0x14, 0xaa,
+        ],
+    ];
+    let mut replicas = Vec::with_capacity(3);
+    for (index, public_key) in public_keys.into_iter().enumerate() {
+        let replica_byte = 0x14 + index as u8;
+        let key_byte = 0x1e + index as u8;
+        let key = ReplicaKey::new([key_byte; 16], public_key).map_err(map_witness)?;
+        replicas.push(ReplicaTrust::new([replica_byte; 16], vec![key]).map_err(map_witness)?);
+    }
+    ReplicaTrustSet::new(replicas).map_err(map_witness)
+}
+
+#[cfg(feature = "test-fixtures")]
+#[napi]
+pub fn test_witness_pending(request: Buffer, exact_result: Buffer) -> Result<NativePendingWitness> {
+    let request = copy_bounded(
+        request.as_ref(),
+        axl_e2ee::witness::WITNESS_REQUEST_MAX_BYTES,
+        "bound_exceeded",
+    )?;
+    let exact_result = copy_bounded(exact_result.as_ref(), 1024 * 1024, "bound_exceeded")?;
+    let operation = axl_e2ee::witness::test_pending_witness_operation(&request, &exact_result)
+        .map_err(map_witness)?;
+    Ok(NativePendingWitness::new(
+        operation,
+        witness_fixture_trust()?,
+    ))
 }
 
 #[napi(object)]
@@ -1558,6 +1709,26 @@ fn map_core(value: axl_e2ee::Error) -> napi::Error {
         _ => "invalid_argument",
     })
 }
+fn map_witness(value: WitnessError) -> napi::Error {
+    use WitnessError::*;
+    error(match value {
+        BoundExceeded => "bound_exceeded",
+        CredentialMismatch | InvalidSignature => "witness_auth_failed",
+        OperationConflict | OperationMismatch => "witness_operation_conflict",
+        RegistrationConflict => "witness_registration_conflict",
+        InvalidExpected | StaleExpected => "witness_invalid_expected",
+        Revoked | Forked | Quarantined => "witness_conflict",
+        FreshWitnessRequired | PendingOperation | NoPendingOperation | OutputBlocked => {
+            "witness_unavailable"
+        }
+        Malformed | NonCanonical | ProfileMismatch | LineageMismatch | RoleMismatch
+        | GenerationMismatch | CounterMismatch | CommitmentMismatch | PredecessorMismatch
+        | RequestHashMismatch | RevocationMismatch | InvalidQuorum | DuplicateReplica
+        | InvalidTrustSet | UnpinnedKey | MixedReceipts | UnexpectedResult | CorruptState
+        | Crypto => "witness_receipt_invalid",
+    })
+}
+
 fn map_persistence(value: PersistenceError) -> napi::Error {
     use PersistenceError::*;
     match value {

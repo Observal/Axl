@@ -5,10 +5,13 @@
 
 Private Node-API binding for revision 1 of `axl-e2ee-mls-pq-v1`.
 
-This package is not published and is not wired into the daemon or SDK. Its endpoint constructors
-are not wired to the target-gated macOS secure store or to a rollback witness, so production
-creation and opening fail closed. The macOS store is not exported through JavaScript. A separate
-local test artifact enables in-memory test stores. Test constructors and the test binary are excluded
+This package is not published and is not wired into the daemon or SDK. Its native boundary includes
+a narrow witness continuation whose immutable getters return only the operation ID, exact committed
+request, request hash, and status. The continuation accepts a bounded certificate only for that
+operation, verifies the pinned unanimous trust set in Rust, and returns only the exact committed
+output after native storage barriers are complete. Recovery construction is test-feature-only.
+Production endpoint constructors still fail closed because target storage, production replica trust,
+and hosted witness transport are not enabled. Test constructors and the test binary are excluded
 from production package staging.
 
 Every accepted JavaScript byte input is length-checked and copied before native asynchronous work

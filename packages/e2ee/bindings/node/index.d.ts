@@ -39,7 +39,14 @@ export type AxlE2eeErrorCode =
   | "stale_epoch"
   | "state_loss"
   | "storage_unavailable"
-  | "unsupported_platform";
+  | "unsupported_platform"
+  | "witness_auth_failed"
+  | "witness_conflict"
+  | "witness_invalid_expected"
+  | "witness_operation_conflict"
+  | "witness_receipt_invalid"
+  | "witness_registration_conflict"
+  | "witness_unavailable";
 
 export declare class AxlE2eeError extends Error {
   readonly code: AxlE2eeErrorCode;
@@ -123,6 +130,14 @@ export type Publication =
         | "rejected_signature"
         | "unavailable";
     };
+export interface NativePendingWitness {
+  readonly operationId: OwnedBytes;
+  readonly witnessRequest: OwnedBytes;
+  readonly requestHash: OwnedBytes;
+  readonly status: "pending_quorum" | "committed";
+  continueWitness(operationId: Uint8Array, certificate: Uint8Array): Promise<OwnedBytes>;
+  close(): void;
+}
 export interface NativeOutbox {
   readonly operationId: OwnedBytes;
   readonly cryptoSessionId: OwnedBytes;
