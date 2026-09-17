@@ -12,6 +12,7 @@ for (const workspace of ["@axl/protocol", "@axl/kernel", "@axl/sdk", "@axl/daemo
   execFileSync(pnpm, ["--filter", workspace, "build"], {
     cwd: repositoryRoot,
     stdio: "inherit",
+    shell: process.platform === "win32",
   });
 }
 execFileSync(process.execPath, [join(packageRoot, "scripts/build.mjs"), "production"], { stdio: "inherit" });
