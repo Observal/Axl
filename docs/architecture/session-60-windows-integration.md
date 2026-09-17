@@ -3,7 +3,7 @@
 
 # Session 60 Windows E2EE integration
 
-Status: local integration implemented; production deployment and enablement remain gated
+Status: local integration and Hyderabad deployment-test implemented; production enablement remains gated
 
 ## Scope
 
@@ -40,7 +40,9 @@ The daemon-side `WindowsRemoteE2eeBridge`:
 The SDK `HostedWitnessClient` sends byte-identical committed witness requests to the existing
 control-plane gateway over HTTPS, bounds the response, and gives the certificate back only to the
 matching native continuation. The local integration test uses the real three-replica gateway with
-three distinct signing keys and stores.
+three distinct signing keys and stores. The hosted deployment-test runs the control plane and opaque
+relay in AWS Hyderabad with DynamoDB-backed ticket and pairing state; it does not deploy witness
+replicas or enable production endpoints.
 
 ## Windows artifact path
 

@@ -2391,8 +2391,8 @@ The transport checkpoint was approved. The next integration slice remains disabl
 - [x] Permit removal only after authenticated daemon acceptance.
 - [x] Reset uncertain sending state to queued on reconnect without re-encryption.
 - [x] Prove the real control plane, relay, daemon authority, SDK, cursor resume, restart, duplicate, revocation, and overflow boundaries in one disposable fake-E2EE test.
-- [ ] Replace the standalone opaque-outbox transaction with Person 1's reviewed OpenMLS transaction that persists state advancement and exact ciphertext together.
-- [ ] Implement the reviewed bounded authority-audit sink described in [`docs/architecture/remote-hosted-path.md`](docs/architecture/remote-hosted-path.md).
+- [x] Replace production delivery ownership with the native OpenMLS outbox that persists state advancement and exact ciphertext together; retain the standalone opaque store only for transport tests.
+- [x] Implement the reviewed bounded authority-audit sink described in [`docs/architecture/remote-hosted-path.md`](docs/architecture/remote-hosted-path.md).
 
 #### Mobile clients
 
