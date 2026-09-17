@@ -9,17 +9,23 @@ import test, { type TestContext } from "node:test";
 
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
 import {
+  decodeRemoteDaemonMessage,
+  encodeRemoteE2eeEnvelope,
   type ModelStreamEvent,
   hashCanonicalRequest,
   parseDeviceId,
   parseInstallationId,
   parseOperationId,
+  parseRemoteE2eeEnvelope,
+  parseRemoteRequestId,
+  parseRouteId,
   parseSessionId,
 } from "@axl/protocol";
 
 import { DeterministicFakeRemoteCryptoAdapter } from "../../protocol/test/support/fake-remote-crypto.ts";
 import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
 import { AxlDaemon } from "../src/daemon.ts";
+import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
 import { RemoteAuthorityError, RemoteDeviceAuthorityStore } from "../src/remote-authority.ts";
 import { remoteRpcMethods, requiredRemoteScope } from "../src/remote-rpc.ts";
 
@@ -72,6 +78,87 @@ test("remote RPC scope mapping is explicit and excludes dangerous surfaces", () 
   assert.equal(requiredRemoteScope("session.interaction.respond"), undefined);
   assert.equal(requiredRemoteScope("provider.auth.login"), undefined);
   assert.ok(remoteRpcMethods().length > 0);
+});
+
+test("the Windows E2EE bridge authenticates before daemon authorization and seals responses", async (context) => {
+  const { daemon, dataDirectory } = await startDaemon(context);
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.registerLocalDevice(deviceId, ["observe"]);
+  await authority.applyHostedGrant(deviceId, 1, ["observe"]);
+  const requestId = parseRemoteRequestId("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  const operationId = parseOperationId("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+  const logicalMessageId = parseOperationId("ffffffff-ffff-4fff-8fff-ffffffffffff");
+  const plaintext = new TextEncoder().encode(
+    JSON.stringify({ deviceId, requestId, method: "daemon.info", params: {} }),
+  );
+  const received: Uint8Array[] = [];
+  const prepared: Uint8Array[] = [];
+  const endpoint: NativeDaemonE2eeEndpoint = {
+    async receiveApplication(receivedOperation, ciphertext, logicalId, generation) {
+      assert.deepEqual(
+        receivedOperation,
+        Uint8Array.from(Buffer.from(operationId.replaceAll("-", ""), "hex")),
+      );
+      assert.deepEqual(
+        logicalId,
+        Uint8Array.from(Buffer.from(logicalMessageId.replaceAll("-", ""), "hex")),
+      );
+      assert.equal(generation, 1n);
+      received.push(ciphertext.slice());
+      return { plaintext: plaintext.slice() };
+    },
+    async prepareApplication(_operation, _logical, generation, value) {
+      assert.equal(generation, 1n);
+      prepared.push(value.slice());
+      return {
+        operationId: _operation,
+        logicalMessageId: _logical,
+        messageClass: "application_delivery",
+        ciphertext: value.slice(),
+      };
+    },
+    async acknowledgeOutbox() {
+      throw new Error("not used");
+    },
+    async acknowledgeReceive() {
+      return "acknowledged";
+    },
+    close() {},
+  };
+  const sent: Uint8Array[] = [];
+  const bridge = new WindowsRemoteE2eeBridge({
+    daemon,
+    deviceId,
+    authority,
+    endpoint,
+    sender: {
+      send(_route, envelope) {
+        sent.push(envelope.slice());
+      },
+    },
+  });
+  context.after(() => bridge.close());
+  await bridge.receive({
+    sourceRouteId: parseRouteId("11111111-1111-4111-8111-111111111111"),
+    opaqueEnvelope: encodeRemoteE2eeEnvelope({
+      operationId,
+      logicalMessageId,
+      messageClass: "application_request",
+      hostedGrantGeneration: 1,
+      ciphertext: Uint8Array.of(1, 2, 3),
+    }),
+  });
+  assert.deepEqual(received, [Uint8Array.of(1, 2, 3)]);
+  assert.equal(sent.length, 1);
+  const responseEnvelope = parseRemoteE2eeEnvelope(sent[0] ?? new Uint8Array());
+  assert.equal(responseEnvelope.messageClass, "application_delivery");
+  const response = decodeRemoteDaemonMessage(responseEnvelope.ciphertext);
+  assert.equal(response.type, "daemon_result");
+  if (response.type === "daemon_result") {
+    assert.equal(response.requestId, requestId);
+    assert.equal(response.method, "daemon.info");
+  }
+  assert.equal(prepared.length, 1);
 });
 
 test("intersects local and hosted grants without allowing hosted widening", async () => {
