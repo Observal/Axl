@@ -48,8 +48,10 @@ detection, erasure boundary, and explicit exclusions. Session 50's approved plat
 [`../../docs/architecture/e2ee-platform-bindings.md`](../../docs/architecture/e2ee-platform-bindings.md).
 Browser transaction evidence remains required. The approved hosted witness protocol supplies the
 independent rollback anchor, but browser pairing stays disabled until its production persistence,
-witness integration, artifact isolation, and runtime evidence pass. Keychain, Android Keystore,
-generated mobile SDKs, and mobile applications remain later work.
+witness integration, artifact isolation, and runtime evidence pass. A target-gated macOS
+`EnvelopeKeyStore` now uses the data-protection Keychain, but it is not wired into Node or any
+production endpoint constructor and has no enabled support row. Linux and Windows secure stores,
+Android Keystore, generated mobile SDKs, and mobile applications remain later work.
 
 Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
 upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim
@@ -66,10 +68,11 @@ cargo audit --deny warnings
 cargo deny check
 ```
 
-The private Node-API binding lives in [`bindings/node`](bindings/node). Its production artifact
-contains no secure-store or rollback-anchor implementation and therefore fails closed during
-endpoint creation or opening. Test-only storage is compiled into a separate local fixture artifact
-and is excluded from production packaging.
+The private Node-API binding lives in [`bindings/node`](bindings/node). Its production endpoint
+constructors are not wired to a secure store or rollback witness and therefore fail closed during
+endpoint creation or opening. The target-gated macOS store is not exported through JavaScript.
+Test-only storage is compiled into a separate local fixture artifact and is excluded from production
+packaging.
 
 The private browser binding lives in [`bindings/browser`](bindings/browser). It runs single-threaded
 WASM in a dedicated same-origin module worker, requires `crypto.getRandomValues()`, and packages no

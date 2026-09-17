@@ -275,8 +275,15 @@ wrapping key. The injected `EnvelopeKeyStore` keeps wrapping records outside the
 domain and must support enumeration and reconciliation of inactive prepared records per crypto
 session. `load` rejects inactive records; `activate`, `erase`, reconciliation, and session destruction
 are idempotent. Session destruction is available only for explicit cleanup of an initializing
-database. The injected `RollbackAnchor` keeps monotonic state outside the database snapshot domain.
-Both dependencies must report availability or the adapter fails closed.
+database. On macOS, `macos_keychain::MacOsKeychainEnvelopeKeyStore` implements this contract with
+non-synchronizable, `AccessibleWhenUnlockedThisDeviceOnly` generic-password items in the
+data-protection Keychain. Its fixed secret record stores format and platform versions, session and
+key IDs, the SHA-384 authenticated-context hash, lifecycle, and the exact 32-byte DEK. Public
+service, account, and label attributes contain only the Axl service identifier plus format version,
+session ID, key ID, and lifecycle. It disables authentication UI, rejects root and processes outside
+the active console login, verifies deletion by an exact read, reports no hardware backing, and has
+no fallback. The injected `RollbackAnchor` keeps monotonic state outside the database snapshot
+domain. Both dependencies must report availability or the adapter fails closed.
 
 The implementation uses the pinned libcrux provider's CSPRNG and AES-256-GCM. It defines no KDF or
 new cryptographic primitive. A fresh 256-bit DEK protects each successor state image. AAD binds the
@@ -287,8 +294,11 @@ security properties of the future platform key implementation. This implementati
 forensic erasure from redb page reuse, file deletion, checkpointing, compaction, or filesystem
 operations. Filesystem snapshots, backups, crash dumps, storage-controller caches, and physical
 media are excluded. Session 50 evaluates browser WebCrypto and IndexedDB behavior without claiming
-that they supply an independent rollback anchor. Keychain, Android Keystore, generated mobile SDKs,
-and production mobile applications remain Phase 13 work.
+that they supply an independent rollback anchor. The macOS Keychain store is implemented but remains
+unwired and unsupported pending the required signed, unsigned, lock, login, backup, installer,
+arm64, and native x64 runtime evidence. Linux and
+Windows stores, Android Keystore, generated mobile SDKs, and production mobile applications remain
+later work.
 
 The monotonic anchor detects a database older than the last anchored commit. The peer epoch
 authenticator detects a divergent epoch once authenticated peer evidence is available. Rollback of

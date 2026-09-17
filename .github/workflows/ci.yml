@@ -120,6 +120,35 @@ jobs:
           cargo audit --deny warnings
           cargo deny check
 
+  e2ee-macos-keychain:
+    name: E2EE macOS Keychain (${{ matrix.target }})
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Run target-gated Keychain model and local runtime checks
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        env:
+          AXL_RUN_MACOS_KEYCHAIN_TESTS: '1'
+        run: |
+          sw_vers
+          uname -m
+          cargo test --locked -p axl-e2ee macos_keychain -- --nocapture
+
   e2ee-browser-tooling:
     name: E2EE browser tooling
     needs: changes

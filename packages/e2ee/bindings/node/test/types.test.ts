@@ -13,7 +13,11 @@ import type {
 } from "../index.js";
 
 const codes = [
+  "key_record_missing",
   "lifecycle_busy",
+  "secure_store_access_denied",
+  "secure_store_ambiguous",
+  "secure_store_locked",
   "secure_store_unavailable",
   "rollback_anchor_unavailable",
 ] as const satisfies readonly AxlE2eeErrorCode[];
