@@ -48,10 +48,27 @@ The latest successful smoke-test result was:
 {"region":"ap-south-2","controlPlane":"healthy","pairing":"passed","relay":"opaque-delivery-passed"}
 ```
 
+## Local daemon and device through the deployed relay
+
+RC commit `1c77c13` was tested with a local `AxlDaemon`, local durable native daemon and device
+OpenMLS endpoints, the real SDK delivery coordinator, and the deployed CloudFront relay endpoint.
+Credentials were read from Secrets Manager into process environment only and were not written to the
+repository or test output.
+
+The test acquired separate daemon and device tickets over HTTPS, admitted both local endpoints over
+WSS, delivered an MLS-encrypted `daemon.info` request and response, then completed an Update
+proposal, daemon commit, epoch-ready message, and MLS-protected confirmation. It also verified that
+the native outbox drained and that neither bridge reported an error. Two consecutive runs passed
+after correcting invalid client-originated WebSocket close codes exposed by the first retry run.
+
+The complete Node binding run reported 13 passed tests and no skips. The live relay case completed in
+approximately eight seconds on each successful run.
+
 ## Deliberate limitations
 
 The deployed services reject any environment mode other than `deployment-test`. Authentication and
 possession proof use randomly generated test credentials stored in Secrets Manager. Witness replicas
-are not deployed. The daemon is not connected to this environment. Production identity, independent
-witness failure domains, workload authentication, signed Windows artifacts, installer evidence, and
-independent security review remain release gates.
+are not deployed. No daemon is deployed as a hosted service; the daemon connection above was local,
+temporary, and used test-only native storage. Production identity, independent witness failure
+domains, workload authentication, signed Windows artifacts, installer evidence, and independent
+security review remain release gates.
