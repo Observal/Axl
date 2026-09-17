@@ -518,7 +518,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         configRequest: requestSettings,
         configThinking: thinking,
         configProfile: { profile },
-        configTools: { webFetch: active.webFetch, webSearch: active.webSearch, browser: active.browser },
+        configTools: {
+          webFetch: active.webFetch,
+          webSearch: active.webSearch,
+          browser: active.browser,
+        },
         ...(boundary === "config_change"
           ? {}
           : {

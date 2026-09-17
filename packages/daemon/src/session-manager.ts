@@ -1421,7 +1421,11 @@ export class SessionManager {
         : {}),
       ...(request?.type === "config.request" ? { requestSettings: request.payload } : {}),
       ...(tools?.type === "config.tools"
-        ? { webFetch: tools.payload.webFetch, webSearch: tools.payload.webSearch, browser: tools.payload.browser }
+        ? {
+            webFetch: tools.payload.webFetch,
+            webSearch: tools.payload.webSearch,
+            browser: tools.payload.browser,
+          }
         : {}),
       ...(profile?.type === "config.profile" ? { profile: profile.payload.profile } : {}),
       ...managed.selection,

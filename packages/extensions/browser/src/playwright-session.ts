@@ -32,10 +32,7 @@ export interface PlaywrightSessionOptions extends BrowserSessionOptions {
   readonly launchPolicy: BrowserLaunchPolicy;
   readonly playwrightModule?: {
     chromium: {
-      launchPersistentContext(
-        userDataDir: string,
-        options: unknown,
-      ): Promise<BrowserContext>;
+      launchPersistentContext(userDataDir: string, options: unknown): Promise<BrowserContext>;
     };
   };
 }
@@ -63,7 +60,9 @@ export async function createPlaywrightSession(
   const page: Page = await context.newPage();
 
   page.on("download", (download) => {
-    void download.saveAs(`${options.downloadDirectory}/${download.suggestedFilename()}`).catch(() => {});
+    void download
+      .saveAs(`${options.downloadDirectory}/${download.suggestedFilename()}`)
+      .catch(() => {});
   });
 
   const session: BrowserSession = {

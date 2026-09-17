@@ -41,21 +41,26 @@ function renderBack(input: TerminalToolRenderInput): TerminalToolRenderResult | 
 
 function renderForward(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
   if (input.status === "running" || input.status === "pending") return { label: "Going forward" };
-  if (input.status === "succeeded") return { label: "Went forward", hideWhenSuccessfulInFocus: true };
+  if (input.status === "succeeded")
+    return { label: "Went forward", hideWhenSuccessfulInFocus: true };
   return { label: "Go forward" };
 }
 
 function renderWait(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
   const selector = (input.arguments as Record<string, unknown>).selector;
   const target = typeof selector === "string" ? selector : "element";
-  if (input.status === "running" || input.status === "pending") return { label: `Waiting for ${target}` };
-  if (input.status === "succeeded") return { label: `Found ${target}`, hideWhenSuccessfulInFocus: true };
+  if (input.status === "running" || input.status === "pending")
+    return { label: `Waiting for ${target}` };
+  if (input.status === "succeeded")
+    return { label: `Found ${target}`, hideWhenSuccessfulInFocus: true };
   return { label: `Wait for ${target}` };
 }
 
 function renderEval(input: TerminalToolRenderInput): TerminalToolRenderResult | undefined {
-  if (input.status === "running" || input.status === "pending") return { label: "Evaluating script" };
-  if (input.status === "succeeded") return { label: "Evaluated script", hideWhenSuccessfulInFocus: false };
+  if (input.status === "running" || input.status === "pending")
+    return { label: "Evaluating script" };
+  if (input.status === "succeeded")
+    return { label: "Evaluated script", hideWhenSuccessfulInFocus: false };
   return { label: "Evaluate script" };
 }
 
@@ -63,8 +68,10 @@ function renderSelect(input: TerminalToolRenderInput): TerminalToolRenderResult 
   const args = input.arguments as Record<string, unknown>;
   const target = typeof args.selector === "string" ? args.selector : "dropdown";
   const value = typeof args.value === "string" ? args.value : "";
-  if (input.status === "running" || input.status === "pending") return { label: `Selecting in ${target}` };
-  if (input.status === "succeeded") return { label: `Selected "${value}" in ${target}`, hideWhenSuccessfulInFocus: true };
+  if (input.status === "running" || input.status === "pending")
+    return { label: `Selecting in ${target}` };
+  if (input.status === "succeeded")
+    return { label: `Selected "${value}" in ${target}`, hideWhenSuccessfulInFocus: true };
   return { label: `Select in ${target}` };
 }
 
@@ -95,7 +102,11 @@ function renderScreenshot(input: TerminalToolRenderInput): TerminalToolRenderRes
     const path = pathMatch?.[1];
     const bytes = bytesMatch?.[1];
     if (path !== undefined) {
-      return { label: `Screenshot saved to ${path}`, target: path, hideWhenSuccessfulInFocus: false };
+      return {
+        label: `Screenshot saved to ${path}`,
+        target: path,
+        hideWhenSuccessfulInFocus: false,
+      };
     }
     return {
       label: `Screenshot captured${bytes ? ` · ${bytes} bytes` : ""}`,

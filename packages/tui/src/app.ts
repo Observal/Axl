@@ -3336,7 +3336,11 @@ export class AxlApp {
           : this.browserEnabled;
     this.openPicker({
       title:
-        tool === "webFetch" ? "Web fetch tool" : tool === "webSearch" ? "Web search tool" : "Browser tool",
+        tool === "webFetch"
+          ? "Web fetch tool"
+          : tool === "webSearch"
+            ? "Web search tool"
+            : "Browser tool",
       items: [
         { value: "on", label: "On", description: "include the tool in model requests" },
         { value: "off", label: "Off", description: "remove all schema and prompt contribution" },

@@ -139,8 +139,14 @@ export function makeBrowserClickTool(options: BrowserToolsOptions): KernelTool {
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector of the element to click" },
-        x: { type: "integer", description: "Viewport X coordinate (use with y instead of selector)" },
-        y: { type: "integer", description: "Viewport Y coordinate (use with x instead of selector)" },
+        x: {
+          type: "integer",
+          description: "Viewport X coordinate (use with y instead of selector)",
+        },
+        y: {
+          type: "integer",
+          description: "Viewport Y coordinate (use with x instead of selector)",
+        },
       },
       additionalProperties: false,
     },
@@ -167,8 +173,7 @@ export function makeBrowserClickTool(options: BrowserToolsOptions): KernelTool {
 export function makeBrowserTypeTool(options: BrowserToolsOptions): KernelTool {
   return {
     name: "browser_type",
-    description:
-      "Type text into an element on the current page identified by CSS selector.",
+    description: "Type text into an element on the current page identified by CSS selector.",
     inputSchema: {
       type: "object",
       properties: {
@@ -221,8 +226,7 @@ export function makeBrowserScrollTool(options: BrowserToolsOptions): KernelTool 
 export function makeBrowserReadTool(options: BrowserToolsOptions): KernelTool {
   return {
     name: "browser_read",
-    description:
-      "Extract readable text content from the current page or a specific element.",
+    description: "Extract readable text content from the current page or a specific element.",
     inputSchema: {
       type: "object",
       properties: {
@@ -283,7 +287,8 @@ export function makeBrowserBackTool(options: BrowserToolsOptions): KernelTool {
 export function makeBrowserForwardTool(options: BrowserToolsOptions): KernelTool {
   return {
     name: "browser_forward",
-    description: "Navigate forward one entry in the browser history. Returns the updated page state.",
+    description:
+      "Navigate forward one entry in the browser history. Returns the updated page state.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
       rejectUnknownFields(input, "browser_forward", []);
@@ -302,7 +307,10 @@ export function makeBrowserWaitTool(options: BrowserToolsOptions): KernelTool {
       type: "object",
       properties: {
         selector: { type: "string", description: "CSS selector to wait for" },
-        timeoutMs: { type: "integer", description: "Maximum time to wait in milliseconds (default 10000)" },
+        timeoutMs: {
+          type: "integer",
+          description: "Maximum time to wait in milliseconds (default 10000)",
+        },
       },
       required: ["selector"],
       additionalProperties: false,
@@ -328,7 +336,10 @@ export function makeBrowserEvalTool(options: BrowserToolsOptions): KernelTool {
     inputSchema: {
       type: "object",
       properties: {
-        expression: { type: "string", description: "JavaScript expression to evaluate in the page" },
+        expression: {
+          type: "string",
+          description: "JavaScript expression to evaluate in the page",
+        },
       },
       required: ["expression"],
       additionalProperties: false,
