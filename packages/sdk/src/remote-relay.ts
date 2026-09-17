@@ -524,7 +524,7 @@ export class RemoteRelayConnection {
       };
       const timer = setTimeout(
         () => {
-          socket.close(1008, "route_snapshot_timeout");
+          socket.close(4008, "route_snapshot_timeout");
           finish(new RemoteRelayError("connection_failed", "Relay route snapshot timed out"));
         },
         Math.min(this.routeWaitMs, credential.limits.idleTimeoutMs),
@@ -552,7 +552,7 @@ export class RemoteRelayConnection {
             if (snapshot) finish();
           })
           .catch((cause: unknown) => {
-            socket.close(1008, "bad_relay_message");
+            socket.close(4003, "bad_relay_message");
             finish(
               new RemoteRelayError("bad_relay_message", "Relay sent an invalid message", { cause }),
             );
