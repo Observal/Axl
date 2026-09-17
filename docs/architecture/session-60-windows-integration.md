@@ -74,8 +74,10 @@ real device OpenMLS endpoint
 
 Witness integration composes the SDK HTTP client, control-plane HTTP handler, one gateway, three
 independent in-memory replica stores and journals, three signing keys, and the native continuation.
-The relay and witness deployment tests remain separate so local simulation cannot be mistaken for
-production failure-domain evidence.
+A separate opt-in cross-runtime test now drives real native pairing through the hosted rendezvous,
+then carries real OpenMLS application, Update, commit, epoch-ready, and confirmation ciphertext
+through the Elixir relay. The relay and witness deployment tests remain separate so local simulation
+cannot be mistaken for production failure-domain evidence.
 
 ## Remaining production gates
 
