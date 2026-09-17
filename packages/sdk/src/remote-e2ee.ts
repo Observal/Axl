@@ -2,16 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  decodeRemoteDaemonMessage,
-  encodeRemoteE2eeEnvelope,
-  parseAuthenticatedRemoteRequest,
-  parseOperationId,
-  parseRemoteE2eeEnvelope,
   type CryptoSessionId,
   type DeviceId,
+  decodeRemoteDaemonMessage,
+  encodeRemoteE2eeEnvelope,
   type IdempotencyKey,
   type OpaqueOutboxRecord,
   type OperationId,
+  parseAuthenticatedRemoteRequest,
+  parseOperationId,
+  parseRemoteE2eeEnvelope,
   type RemoteDaemonMessage,
   type RemoteE2eeEnvelope,
   type RequestId,
@@ -44,6 +44,18 @@ export interface NativeDeviceE2eeEndpoint {
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
   ): Promise<NativePlaintext>;
+  prepareReplacement?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+  ): Promise<NativeCiphertext>;
+  applyReceivedUpdateCommit?(
+    operationId: Uint8Array,
+    ciphertext: Uint8Array,
+    commitLogicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    epochReadyLogicalId: Uint8Array,
+  ): Promise<NativeCiphertext>;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
@@ -108,9 +120,10 @@ function framed(
   operationId: Uint8Array,
   logicalMessageId: Uint8Array,
   hostedGrantGeneration: number,
+  expectedClass: RemoteE2eeEnvelope["messageClass"] = "application_request",
 ): Uint8Array {
   if (
-    prepared.messageClass !== "application_request" ||
+    prepared.messageClass !== expectedClass ||
     !sameBytes(prepared.operationId, operationId) ||
     !sameBytes(prepared.logicalMessageId, logicalMessageId)
   ) {
@@ -119,7 +132,7 @@ function framed(
   return encodeRemoteE2eeEnvelope({
     operationId: uuidText(operationId),
     logicalMessageId: uuidText(logicalMessageId),
-    messageClass: "application_request",
+    messageClass: expectedClass,
     hostedGrantGeneration,
     ciphertext: prepared.ciphertext,
   });
@@ -210,6 +223,62 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
       plaintext.fill(0);
       operation.fill(0);
       logicalId.fill(0);
+    }
+  }
+
+  async prepareUpdateProposal(
+    operationId: OperationId,
+    logicalMessageId: OperationId,
+    hostedGrantGeneration: number,
+  ): Promise<Uint8Array> {
+    const prepare = this.options.endpoint.prepareReplacement;
+    if (prepare === undefined) throw new TypeError("Native endpoint does not support MLS updates");
+    const grant = generation(hostedGrantGeneration);
+    const operation = uuidBytes(operationId);
+    const logical = uuidBytes(logicalMessageId);
+    try {
+      const prepared = await prepare.call(this.options.endpoint, operation, logical, BigInt(grant));
+      return framed(prepared, operation, logical, grant, "update_proposal");
+    } finally {
+      operation.fill(0);
+      logical.fill(0);
+    }
+  }
+
+  async applyUpdateCommit(
+    opaqueEnvelope: Uint8Array,
+    operationId: OperationId,
+    epochReadyLogicalMessageId: OperationId,
+  ): Promise<Uint8Array> {
+    const apply = this.options.endpoint.applyReceivedUpdateCommit;
+    if (apply === undefined) throw new TypeError("Native endpoint does not support MLS updates");
+    const envelope = parseRemoteE2eeEnvelope(opaqueEnvelope);
+    if (envelope.messageClass !== "commit") {
+      throw new TypeError("Remote E2EE envelope is not an MLS commit");
+    }
+    const operation = uuidBytes(operationId);
+    const commitLogical = uuidBytes(envelope.logicalMessageId);
+    const readyLogical = uuidBytes(epochReadyLogicalMessageId);
+    try {
+      const prepared = await apply.call(
+        this.options.endpoint,
+        operation,
+        envelope.ciphertext,
+        commitLogical,
+        BigInt(envelope.hostedGrantGeneration),
+        readyLogical,
+      );
+      return framed(
+        prepared,
+        operation,
+        readyLogical,
+        envelope.hostedGrantGeneration,
+        "epoch_ready",
+      );
+    } finally {
+      operation.fill(0);
+      commitLogical.fill(0);
+      readyLogical.fill(0);
     }
   }
 

@@ -23,6 +23,10 @@ const cryptoSessionId = parseCryptoSessionId("33333333-3333-4333-8333-3333333333
 const requestId = parseRemoteRequestId("44444444-4444-4444-8444-444444444444");
 const idempotencyKey = parseIdempotencyKey("55555555-5555-4555-8555-555555555555");
 
+function uuidBytesForTest(value: string): Uint8Array {
+  return Uint8Array.from(Buffer.from(value.replaceAll("-", ""), "hex"));
+}
+
 function fixtureEndpoint() {
   const prepared: Uint8Array[] = [];
   const received: Uint8Array[] = [];
@@ -82,6 +86,78 @@ test("prepares immutable native ciphertext for durable relay delivery", async ()
   assert.equal(envelope.hostedGrantGeneration, 7);
   assert.equal(envelope.messageClass, "application_request");
   assert.deepEqual(envelope.ciphertext, fixture.prepared[0]);
+});
+
+test("prepares update proposals and applies daemon commits before epoch readiness", async () => {
+  const updateOperation = parseOperationId("66666666-6666-4666-8666-666666666666");
+  const updateLogical = parseOperationId("77777777-7777-4777-8777-777777777777");
+  const commitOperation = parseOperationId("88888888-8888-4888-8888-888888888888");
+  const commitLogical = parseOperationId("99999999-9999-4999-8999-999999999999");
+  const readyOperation = parseOperationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  const readyLogical = parseOperationId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+  const endpoint: NativeDeviceE2eeEndpoint = {
+    async prepareApplication() {
+      throw new Error("not used");
+    },
+    async receiveApplication() {
+      throw new Error("not used");
+    },
+    async prepareReplacement(operationId, logicalMessageId, generation) {
+      assert.equal(generation, 7n);
+      return {
+        operationId,
+        logicalMessageId,
+        messageClass: "update_proposal",
+        ciphertext: Uint8Array.of(7),
+      };
+    },
+    async applyReceivedUpdateCommit(
+      operationId,
+      ciphertext,
+      logicalMessageId,
+      generation,
+      readyLogicalMessageId,
+    ) {
+      assert.deepEqual(ciphertext, Uint8Array.of(8));
+      assert.deepEqual(logicalMessageId, uuidBytesForTest(commitLogical));
+      assert.equal(generation, 7n);
+      return {
+        operationId,
+        logicalMessageId: readyLogicalMessageId,
+        messageClass: "epoch_ready",
+        ciphertext: Uint8Array.of(9),
+      };
+    },
+    async acknowledgeOutbox() {
+      throw new Error("not used");
+    },
+    async acknowledgeReceive() {
+      return "acknowledged";
+    },
+  };
+  const adapter = new RemoteDeviceE2ee({
+    endpoint,
+    localDeviceId,
+    daemonDeviceId,
+    destinationCryptoSessionId: cryptoSessionId,
+  });
+  const proposal = parseRemoteE2eeEnvelope(
+    await adapter.prepareUpdateProposal(updateOperation, updateLogical, 7),
+  );
+  assert.equal(proposal.messageClass, "update_proposal");
+  assert.deepEqual(proposal.ciphertext, Uint8Array.of(7));
+  const commit = encodeRemoteE2eeEnvelope({
+    operationId: commitOperation,
+    logicalMessageId: commitLogical,
+    messageClass: "commit",
+    hostedGrantGeneration: 7,
+    ciphertext: Uint8Array.of(8),
+  });
+  const ready = parseRemoteE2eeEnvelope(
+    await adapter.applyUpdateCommit(commit, readyOperation, readyLogical),
+  );
+  assert.equal(ready.messageClass, "epoch_ready");
+  assert.deepEqual(ready.ciphertext, Uint8Array.of(9));
 });
 
 test("opens daemon delivery and acknowledges only after SDK acceptance", async () => {

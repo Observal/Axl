@@ -303,6 +303,13 @@ export interface DeviceEndpoint {
     hostedGrantGeneration: bigint,
     epochReadyLogicalId: Uint8Array,
   ): Promise<NativeOutbox>;
+  applyReceivedUpdateCommit(
+    operationId: Uint8Array,
+    ciphertext: Uint8Array,
+    commitLogicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    epochReadyLogicalId: Uint8Array,
+  ): Promise<NativeOutbox>;
   acknowledgeEpochReady(
     operationId: Uint8Array,
     acceptance: NativeEpochReadyAcceptance,
