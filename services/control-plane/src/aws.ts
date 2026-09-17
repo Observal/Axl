@@ -8,8 +8,6 @@ import {
   PutItemCommand,
   UpdateItemCommand,
 } from "@aws-sdk/client-dynamodb";
-import { createRemoteJWKSet, jwtVerify } from "jose";
-
 import {
   parseCryptoSessionId,
   parseDeviceId,
@@ -17,19 +15,20 @@ import {
   parseRelayLimits,
   parseRouteId,
 } from "@axl/protocol";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 import type {
   PairingRendezvousRecord,
   PairingRendezvousStore,
   PairingRendezvousTransaction,
 } from "./pairing.ts";
+import type { PublicPrincipalAuthenticator } from "./server.ts";
 import {
-  RelayTicketError,
   type AccountPrincipal,
+  RelayTicketError,
   type RelayTicketRecord,
   type RelayTicketStore,
 } from "./tickets.ts";
-import type { PublicPrincipalAuthenticator } from "./server.ts";
 
 const MAX_TOKEN_BYTES = 16 * 1024;
 
@@ -121,7 +120,8 @@ export class DynamoRelayTicketStore implements RelayTicketStore {
         TableName: this.#tableName,
         Key: { pk: { S: `ticket#${ticketDigest}` } },
         ConsistentRead: true,
-        ProjectionExpression: "record",
+        ProjectionExpression: "#record",
+        ExpressionAttributeNames: { "#record": "record" },
       }),
     );
     const serialized = result.Item?.record?.S;
@@ -154,7 +154,8 @@ export class DynamoRelayTicketStore implements RelayTicketStore {
           Key: { pk: { S: `ticket#${ticketDigest}` } },
           ConditionExpression:
             "attribute_exists(pk) AND attribute_not_exists(consumedAt) AND expiresAtMs > :now",
-          UpdateExpression: "SET consumedAt = :consumedAt, record = :record",
+          UpdateExpression: "SET consumedAt = :consumedAt, #record = :record",
+          ExpressionAttributeNames: { "#record": "record" },
           ExpressionAttributeValues: {
             ":now": { N: String(now) },
             ":consumedAt": { N: String(now) },
