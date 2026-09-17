@@ -13,7 +13,7 @@ import {
   parseTransportAttemptId,
 } from "@axl/protocol";
 
-import { NativeEndpointOutbox, type NativeDurableOutboxRecord } from "../src/remote-outbox.ts";
+import { type NativeDurableOutboxRecord, NativeEndpointOutbox } from "../src/remote-outbox.ts";
 
 function bytes(value: string): Uint8Array {
   return Uint8Array.from(Buffer.from(value.replaceAll("-", ""), "hex"));
@@ -70,7 +70,9 @@ test("native endpoint outbox recovers exact committed bytes and acknowledges in 
   assert.equal(envelope.hostedGrantGeneration, 7);
   assert.deepEqual(envelope.ciphertext, Uint8Array.of(1, 2, 3));
 
-  await adapter.enqueue(recovered[0]!);
+  const recoveredRecord = recovered[0];
+  assert.ok(recoveredRecord);
+  await adapter.enqueue(recoveredRecord);
   const attempt = await adapter.beginAttempt(requestId);
   assert.equal(attempt.destinationRouteId, routeId);
   assert.equal(attempt.attemptId, attemptId);
