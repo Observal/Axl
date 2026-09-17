@@ -107,7 +107,20 @@ importers:
         specifier: 1.63.0
         version: 1.63.0
 
-  packages/e2ee/bindings/node: {}
+  packages/e2ee/bindings/node:
+    devDependencies:
+      '@axl/daemon':
+        specifier: workspace:*
+        version: link:../../../daemon
+      '@axl/kernel':
+        specifier: workspace:*
+        version: link:../../../kernel
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../../../protocol
+      '@axl/sdk':
+        specifier: workspace:*
+        version: link:../../../sdk
 
   packages/extensions/api: {}
 
