@@ -249,11 +249,11 @@ pub fn run_openmls_lifecycle(now_ms: u64) -> Result<BrowserLifecycleEvidence, Er
     epoch_ready_plaintext.extend_from_slice(&commit_metadata.commit_id);
     epoch_ready_plaintext.extend_from_slice(&commit_metadata.target_epoch.to_be_bytes());
     epoch_ready_plaintext.extend_from_slice(&commit_metadata.epoch_authenticator);
-    let epoch_ready = device.prepare_epoch_ready(id(0x44), &epoch_ready_plaintext)?;
+    let epoch_ready = device.prepare_epoch_ready(id(0x44), 0, &epoch_ready_plaintext)?;
     let epoch_ready_bytes = epoch_ready.ciphertext().len();
     let epoch_ready_ciphertext = epoch_ready.ciphertext().to_vec();
     committed_phone(&mut device)?;
-    let received_ready = daemon.receive_epoch_ready(&epoch_ready_ciphertext, id(0x44))?;
+    let received_ready = daemon.receive_epoch_ready(&epoch_ready_ciphertext, id(0x44), 0)?;
     require(
         received_ready.plaintext() == epoch_ready_plaintext,
         "epoch-ready plaintext mismatch",

@@ -3037,7 +3037,7 @@ fn replacement_commit_and_epoch_ready_complete_in_order_across_restart() {
     );
     let acceptance = fixture
         .endpoint
-        .accept_epoch_ready(id(217), id(216), &ready.ciphertext)
+        .accept_epoch_ready(id(217), id(216), 7, &ready.ciphertext)
         .unwrap();
     assert_eq!(
         device

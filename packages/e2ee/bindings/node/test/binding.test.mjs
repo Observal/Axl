@@ -319,6 +319,7 @@ test("fresh lifecycle preserves barriers, exact retries, copied input, and close
     const epochAcceptance = await pair.daemon.acceptEpochReady(
       operation(34),
       operation(31),
+      7n,
       ready.ciphertext,
     );
     assert.equal(

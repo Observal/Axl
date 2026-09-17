@@ -245,6 +245,7 @@ export interface DaemonEndpoint {
   acceptEpochReady(
     operationId: Uint8Array,
     logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
   ): Promise<NativeEpochReadyAcceptance>;
   removeDevice(
