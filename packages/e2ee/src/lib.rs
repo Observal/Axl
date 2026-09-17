@@ -407,6 +407,7 @@ pub struct PreparedEnvelope {
     logical_message_id: Id,
     class: MessageClass,
     epoch: u64,
+    hosted_generation: u64,
     commit: Option<CommitMetadata>,
     ciphertext: Box<[u8]>,
 }
@@ -431,6 +432,9 @@ impl PreparedEnvelope {
     }
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+    pub fn hosted_generation(&self) -> u64 {
+        self.hosted_generation
     }
     pub fn commit_metadata(&self) -> Option<&CommitMetadata> {
         self.commit.as_ref()
@@ -682,6 +686,7 @@ impl Endpoint {
             logical_message_id,
             class,
             epoch,
+            generation,
         )?;
         self.transaction_pending = true;
         Ok(envelope)
@@ -721,6 +726,7 @@ impl Endpoint {
             logical_message_id,
             class,
             epoch,
+            0,
         )?;
         self.transaction_pending = true;
         Ok(envelope)
@@ -1152,6 +1158,7 @@ impl Daemon {
             id,
             MessageClass::Commit,
             epoch,
+            generation,
         )?;
         envelope.commit = Some(CommitMetadata {
             commit_id,
@@ -1225,6 +1232,7 @@ impl Daemon {
             id,
             MessageClass::Commit,
             epoch,
+            generation,
         )?;
         envelope.commit = Some(CommitMetadata {
             commit_id,
@@ -1462,6 +1470,7 @@ impl Phone {
             id,
             MessageClass::UpdateProposal,
             epoch,
+            generation,
         )?;
         endpoint.transaction_pending = true;
         Ok(envelope)
@@ -1707,6 +1716,7 @@ fn bounded_envelope(
     logical_message_id: Id,
     class: MessageClass,
     epoch: u64,
+    hosted_generation: u64,
 ) -> Result<PreparedEnvelope, Error> {
     let class_limit = match class {
         MessageClass::ApplicationRequest | MessageClass::ApplicationDelivery => ENVELOPE_MAX_BYTES,
@@ -1723,6 +1733,7 @@ fn bounded_envelope(
         logical_message_id,
         class,
         epoch,
+        hosted_generation,
         commit: None,
         ciphertext: bytes.into_boxed_slice(),
     })
