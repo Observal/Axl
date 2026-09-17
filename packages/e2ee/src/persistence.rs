@@ -41,6 +41,11 @@ pub(crate) mod linux_secret_service;
 #[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
 pub(crate) mod macos_keychain;
 mod pairing_lifecycle;
+#[cfg(target_os = "windows")]
+#[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
+pub(crate) mod windows_dpapi;
+#[cfg(target_os = "windows")]
+mod windows_fs;
 pub use pairing_lifecycle::{
     ActivationAcceptance, ActivationOutcome, ClaimFailure, ClaimSubmission,
     DurablePendingInvitation, DurablePreJoinDevice, EpochReadyAcceptance, InvitationLifecycle,
@@ -2898,6 +2903,8 @@ fn canonical_storage_root(root: &Path) -> Result<PathBuf, PersistenceError> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(PersistenceError::IdentityMismatch);
     }
+    #[cfg(target_os = "windows")]
+    windows_fs::validate_path_handle(root, true)?;
     root.canonicalize().map_err(|_| PersistenceError::Io)
 }
 
@@ -2906,7 +2913,11 @@ fn regular_file_exists(path: &Path) -> Result<bool, PersistenceError> {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(PersistenceError::IdentityMismatch)
         }
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            #[cfg(target_os = "windows")]
+            windows_fs::validate_path_handle(path, false)?;
+            Ok(true)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(_) => Err(PersistenceError::Io),
     }
@@ -3125,7 +3136,15 @@ fn create_private_file(path: &Path) -> Result<(), PersistenceError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_WRITE_THROUGH;
+        options.custom_flags(FILE_FLAG_WRITE_THROUGH);
+    }
     let file = options.open(path).map_err(|_| PersistenceError::Io)?;
+    #[cfg(target_os = "windows")]
+    windows_fs::flush_file(&file)?;
     drop(file);
     restrict_file(path)
 }
@@ -3138,9 +3157,15 @@ fn sync_parent_directory(path: &Path) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::Io)
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn sync_parent_directory(path: &Path) -> Result<(), PersistenceError> {
+    let parent = path.parent().ok_or(PersistenceError::Io)?;
+    windows_fs::sync_directory(parent)
+}
+
+#[cfg(all(not(unix), not(target_os = "windows")))]
 fn sync_parent_directory(_path: &Path) -> Result<(), PersistenceError> {
-    Ok(())
+    Err(PersistenceError::Io)
 }
 
 #[cfg(unix)]
@@ -3148,9 +3173,14 @@ fn restrict_directory(path: &Path) -> Result<(), PersistenceError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|_| PersistenceError::Io)
 }
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn restrict_directory(path: &Path) -> Result<(), PersistenceError> {
+    windows_fs::validate_path_handle(path, true)?;
+    windows_fs::harden_path(path)
+}
+#[cfg(all(not(unix), not(target_os = "windows")))]
 fn restrict_directory(_path: &Path) -> Result<(), PersistenceError> {
-    Ok(())
+    Err(PersistenceError::Io)
 }
 
 #[cfg(unix)]
@@ -3158,9 +3188,14 @@ fn restrict_file(path: &Path) -> Result<(), PersistenceError> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|_| PersistenceError::Io)
 }
-#[cfg(not(unix))]
+#[cfg(target_os = "windows")]
+fn restrict_file(path: &Path) -> Result<(), PersistenceError> {
+    windows_fs::validate_path_handle(path, false)?;
+    windows_fs::harden_path(path)
+}
+#[cfg(all(not(unix), not(target_os = "windows")))]
 fn restrict_file(_path: &Path) -> Result<(), PersistenceError> {
-    Ok(())
+    Err(PersistenceError::Io)
 }
 
 fn state_aad(session: Id, generation: u64, rollback: u64, epoch: u64) -> Vec<u8> {

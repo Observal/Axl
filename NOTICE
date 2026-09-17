@@ -42,3 +42,6 @@ Axl's Linux envelope-key store uses an exact-commit fork of `secret-service` 5.2
 MIT OR Apache-2.0. The fork is based on upstream tag `v5.2.0` and adds bounded item creation and deletion APIs that
 return prompt-required outcomes without executing Secret Service prompts. Its D-Bus client dependency
 `zbus` 5.19.0 is distributed under MIT.
+
+Axl's Windows envelope-key store uses `windows-sys` 0.61.2 and `windows-link` 0.2.1 as
+unmodified external dependencies under MIT OR Apache-2.0.

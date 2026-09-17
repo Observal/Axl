@@ -38,5 +38,8 @@ security-framework-sys = { version = "=2.17.0", default-features = false, featur
 secret-service = { git = "https://github.com/Observal/secret-service-rs.git", rev = "1721451b21acfc3450be8799d92947653a5656e3", version = "=5.2.0", default-features = false, features = ["rt-async-io-crypto-rust"] }
 zbus = { version = "=5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "=0.61.2", default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_Threading"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "=0.2.17", default-features = false, features = ["js"] }
