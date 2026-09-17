@@ -1,0 +1,36 @@
+{
+  "name": "@axl/e2ee-browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./loader/index.js"
+    }
+  },
+  "files": [
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "THIRD_PARTY_LICENSES.txt",
+    "index.d.ts",
+    "integrity.json",
+    "loader/index.js",
+    "wasm/*",
+    "worker/*",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs production",
+    "build:test": "node scripts/build.mjs test",
+    "check:abi": "node scripts/check-abi.mjs",
+    "check:types": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext test/types.test.ts",
+    "test": "node scripts/test.mjs",
+    "test:safari": "node scripts/safari-webdriver.mjs",
+    "pack:local": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

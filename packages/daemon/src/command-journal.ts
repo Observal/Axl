@@ -219,6 +219,11 @@ async function appendSynced(path: string, record: CommandRecord): Promise<void> 
   }
 }
 
+export interface StartedCommand<Result> {
+  readonly acceptance: Promise<CommandAcceptance>;
+  readonly completion: Promise<Result>;
+}
+
 export class CommandJournal {
   readonly path: string;
   private readonly entries = new Map<string, CommandEntry>();
@@ -315,17 +320,36 @@ export class CommandJournal {
     },
     effect: (acceptance: CommandAcceptance) => Promise<RpcResult<Method>>,
   ): Promise<RpcResult<Method>> {
-    return this.accept(input).then((entry) => {
-      const completion = entry.completion;
-      if (completion?.type === "succeeded") {
-        return parseRpcResult(input.method, completion.result);
+    const started = this.start(input, effect);
+    void started.acceptance.catch(() => undefined);
+    return started.completion;
+  }
+
+  start<Method extends RetryableMutationMethod>(
+    input: {
+      readonly idempotencyKey: string;
+      readonly method: Method;
+      readonly requestHash: string;
+      readonly targetSessionId?: SessionId;
+      readonly intendedSessionId?: SessionId;
+      readonly affectedOperationId?: string;
+      readonly interactionId?: string;
+    },
+    effect: (acceptance: CommandAcceptance) => Promise<RpcResult<Method>>,
+  ): StartedCommand<RpcResult<Method>> {
+    const entryPromise = this.accept(input);
+    const acceptance = entryPromise.then((entry) => entry.acceptance);
+    const completion = entryPromise.then((entry) => {
+      const persisted = entry.completion;
+      if (persisted?.type === "succeeded") {
+        return parseRpcResult(input.method, persisted.result);
       }
-      if (completion?.type === "failed") {
+      if (persisted?.type === "failed") {
         throw new CommandJournalError(
-          completion.error.code,
-          completion.error.message,
-          completion.error.retryable,
-          completion.error.details,
+          persisted.error.code,
+          persisted.error.message,
+          persisted.error.retryable,
+          persisted.error.details,
         );
       }
       if (entry.running !== undefined) return entry.running as Promise<RpcResult<Method>>;
@@ -384,6 +408,7 @@ export class CommandJournal {
       );
       return running;
     });
+    return { acceptance, completion };
   }
 
   private accept(input: {

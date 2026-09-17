@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Hari Srinivasan
+# SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
 name: CI
 
 on:
   pull_request:
-    branches: [main, "release/**"]
+    branches: [main, RC, "release/**"]
   merge_group:
     types: [checks_requested]
   push:
@@ -27,6 +28,8 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       workflows: ${{ steps.filter.outputs.workflows }}
+      relay: ${{ steps.filter.outputs.relay }}
+      e2ee: ${{ steps.filter.outputs.e2ee }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
@@ -35,6 +38,7 @@ jobs:
           filters: |
             code:
               - 'packages/**'
+              - 'services/**'
               - 'distribution/**'
               - 'scripts/**'
               - 'package.json'
@@ -46,6 +50,20 @@ jobs:
               - '.github/workflows/ci.yml'
             workflows:
               - '.github/workflows/**'
+            e2ee:
+              - 'packages/e2ee/**'
+              - '.github/workflows/ci.yml'
+            relay:
+              - 'services/relay/**'
+              - 'services/control-plane/**'
+              - 'packages/daemon/src/remote-*.ts'
+              - 'packages/daemon/test/remote-*.test.ts'
+              - 'packages/sdk/src/remote-*.ts'
+              - 'packages/sdk/test/remote-*.test.ts'
+              - 'packages/protocol/src/remote-transport.ts'
+              - 'packages/protocol/test/fixtures/remote-transport-v1.json'
+              - 'packages/protocol/test/fixtures/internal-relay-api-v1.json'
+              - '.github/workflows/ci.yml'
 
   quality:
     name: Build and test
@@ -73,6 +91,343 @@ jobs:
       - name: Format, lint, type-check, test, and build
         if: needs.changes.outputs.code == 'true'
         run: pnpm check
+
+  e2ee:
+    name: E2EE core
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: changes
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Install pinned Rust audit tools
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Test, lint, and audit the E2EE core
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        run: |
+          cargo test --locked
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked -p axl-e2ee --all-targets --features browser-test-fixtures -- -D warnings
+          cargo clippy --locked -p axl-e2ee-node --all-targets --features test-fixtures -- -D warnings
+          cargo audit --deny warnings
+          cargo deny check
+
+  e2ee-macos-keychain:
+    name: E2EE macOS Keychain (${{ matrix.target }})
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Run target-gated Keychain model and local runtime checks
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        env:
+          AXL_RUN_MACOS_KEYCHAIN_TESTS: '1'
+        run: |
+          sw_vers
+          uname -m
+          cargo test --locked -p axl-e2ee macos_keychain -- --nocapture
+
+  e2ee-storage-cross:
+    name: E2EE storage compile (${{ matrix.target }})
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-gnu
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Install target
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        run: rustup target add ${{ matrix.target }}
+      - name: Compile target-gated storage and tests
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        run: cargo check --locked -p axl-e2ee --tests --target ${{ matrix.target }}
+
+  e2ee-windows-model:
+    name: E2EE Windows DPAPI model (x64)
+    needs: changes
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Run Windows record and identity-policy tests
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee
+        run: cargo test --locked -p axl-e2ee windows_dpapi::tests
+
+  e2ee-browser-tooling:
+    name: E2EE browser tooling
+    needs: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - name: Install pinned Rust audit tools
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Format, lint, audit, and deny the standalone tooling lock
+        if: needs.changes.outputs.e2ee == 'true'
+        working-directory: packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo audit --deny warnings
+          cargo deny check
+
+  e2ee-browser:
+    name: E2EE browser (${{ matrix.browser }})
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox, webkit]
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+      - name: Install dependencies
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          cargo fetch --locked --manifest-path packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver/Cargo.toml
+      - name: Install Playwright browser system libraries
+        if: needs.changes.outputs.e2ee == 'true' && matrix.browser != 'chrome'
+        run: pnpm --filter @axl/e2ee-browser exec playwright install-deps ${{ matrix.browser }}
+      - name: Install the checksum-verified test-only Playwright browser
+        if: needs.changes.outputs.e2ee == 'true' && matrix.browser != 'chrome'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/axl-playwright-browsers
+        run: node packages/e2ee/bindings/browser/scripts/install-verified-playwright-linux.mjs ${{ matrix.browser }}
+      - name: Build and verify the private browser artifacts
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm --filter @axl/e2ee-browser build
+          pnpm --filter @axl/e2ee-browser build:test
+          pnpm --filter @axl/e2ee-browser check:abi
+          pnpm --filter @axl/e2ee-browser check:types
+          (cd packages/e2ee && cargo clippy --locked --target wasm32-unknown-unknown -p axl-e2ee --features browser-test-fixtures -- -D warnings)
+          (cd packages/e2ee && cargo clippy --locked --target wasm32-unknown-unknown -p axl-e2ee-browser --all-targets --features test-fixtures --no-deps -- -D warnings)
+      - name: Run ${{ matrix.browser }} browser evidence
+        if: needs.changes.outputs.e2ee == 'true'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/axl-playwright-browsers
+        run: pnpm --filter @axl/e2ee-browser exec playwright test --project=${{ matrix.browser }}
+
+  e2ee-browser-safari:
+    name: E2EE browser (Safari WebDriver)
+    needs: changes
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+      - name: Install dependencies and build browser artifacts
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          cargo fetch --locked --manifest-path packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver/Cargo.toml
+          pnpm --filter @axl/e2ee-browser build
+          pnpm --filter @axl/e2ee-browser build:test
+          pnpm --filter @axl/e2ee-browser check:abi
+      - name: Run actual Safari WebDriver evidence
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          sudo safaridriver --enable
+          pnpm --filter @axl/e2ee-browser test:safari
+
+  e2ee-node:
+    name: E2EE Node (${{ matrix.target }}, Node ${{ matrix.node }})
+    needs: changes
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: darwin-arm64
+            node: 22.19.0
+          - runner: macos-15
+            target: darwin-arm64
+            node: 24.13.1
+          - runner: macos-15-intel
+            target: darwin-x64
+            node: 22.19.0
+          - runner: macos-15-intel
+            target: darwin-x64
+            node: 24.13.1
+          - runner: ubuntu-latest
+            target: linux-x64-gnu
+            node: 22.19.0
+          - runner: ubuntu-latest
+            target: linux-x64-gnu
+            node: 24.13.1
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64-gnu
+            node: 22.19.0
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64-gnu
+            node: 24.13.1
+          - runner: windows-latest
+            target: win32-x64-msvc
+            node: 22.19.0
+          - runner: windows-latest
+            target: win32-x64-msvc
+            node: 24.13.1
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Set up Erlang and Elixir for real relay integration
+        if: needs.changes.outputs.e2ee == 'true' && matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1'
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: 27.3.4.17
+          elixir-version: 1.18.5
+      - name: Fetch relay dependencies for real E2EE integration
+        if: needs.changes.outputs.e2ee == 'true' && matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1'
+        working-directory: services/relay
+        run: mix deps.get --check-locked
+      - name: Install pinned pnpm
+        if: needs.changes.outputs.e2ee == 'true'
+        run: npm install --global pnpm@11.25.0 --ignore-scripts
+      - name: Install Node dependencies
+        if: needs.changes.outputs.e2ee == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build, test, verify, and package the Node binding
+        if: needs.changes.outputs.e2ee == 'true'
+        env:
+          AXL_RUN_REAL_E2EE_RELAY_INTEGRATION: ${{ matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1' && '1' || '0' }}
+        run: |
+          pnpm --filter @axl/e2ee-node test
+          pnpm --filter @axl/e2ee-node check:abi
+          pnpm --filter @axl/e2ee-node pack:local
+
+  relay:
+    name: Relay build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: changes
+    steps:
+      - name: No relay changes
+        if: needs.changes.outputs.relay != 'true'
+        run: echo "No relay changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.relay == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.relay == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.relay == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install Node dependencies
+        if: needs.changes.outputs.relay == 'true'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Set up Erlang and Elixir
+        if: needs.changes.outputs.relay == 'true'
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: 27.3.4.17
+          elixir-version: 1.18.5
+      - name: Restore Mix caches
+        if: needs.changes.outputs.relay == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            services/relay/deps
+            services/relay/_build
+            ~/.mix
+          key: relay-${{ runner.os }}-${{ hashFiles('services/relay/mix.lock') }}
+      - name: Fetch relay dependencies
+        if: needs.changes.outputs.relay == 'true'
+        working-directory: services/relay
+        run: mix deps.get --check-locked
+      - name: Format, compile, test, analyze, and audit relay
+        if: needs.changes.outputs.relay == 'true'
+        working-directory: services/relay
+        run: mix format --check-formatted && mix compile --warnings-as-errors && mix test && mix credo --strict && mix dialyzer && mix deps.audit
+      - name: Run disposable hosted-path integration
+        if: needs.changes.outputs.relay == 'true'
+        env:
+          AXL_RUN_HOSTED_PATH_INTEGRATION: '1'
+        run: pnpm --filter @axl/daemon test
 
   licenses:
     name: REUSE licenses

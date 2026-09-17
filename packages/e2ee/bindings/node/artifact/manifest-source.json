@@ -1,0 +1,16 @@
+{
+  "abiVersion": 1,
+  "profileId": "axl-e2ee-mls-pq-v1",
+  "profileRevision": 1,
+  "nodeApi": 9,
+  "productionStorageReady": false,
+  "integrityPurpose": "Packaging-corruption detection only; not a signature or trust anchor.",
+  "intendedTargets": [
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-x64-gnu",
+    "linux-arm64-gnu",
+    "win32-x64-msvc",
+    "win32-arm64-msvc"
+  ]
+}

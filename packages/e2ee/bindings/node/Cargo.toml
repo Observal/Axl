@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "axl-e2ee-node"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+build = "build.rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+test-fixtures = ["axl-e2ee/node-test-fixtures"]
+
+[dependencies]
+axl-e2ee = { path = "../.." }
+napi = { version = "=3.12.5", default-features = false, features = ["napi9"] }
+napi-derive = { version = "=3.6.6", default-features = false, features = ["strict"] }
+
+[build-dependencies]
+napi-build = { version = "=2.4.2", default-features = false }
