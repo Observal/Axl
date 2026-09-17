@@ -2,20 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  REMOTE_TRANSPORT_VERSION,
+  type CryptoSessionId,
+  type DeviceId,
   decodeRemoteDaemonMessage,
   encodeBase64,
   encodeRelayBinaryFrame,
+  type IssueRelayTicketRequest,
+  type IssueRelayTicketResult,
+  type OpaqueOutboxRecord,
   parseDeviceId,
   parseIssueRelayTicketRequest,
   parseIssueRelayTicketResult,
   parseRelayBinaryFrame,
   parseRelayDiscoveryMessage,
-  type CryptoSessionId,
-  type DeviceId,
-  type IssueRelayTicketRequest,
-  type IssueRelayTicketResult,
-  type OpaqueOutboxRecord,
+  REMOTE_TRANSPORT_VERSION,
   type RelayDelivery,
   type RelayFailure,
   type RelayPeerRoute,
@@ -714,6 +714,8 @@ export class RemoteRelayConnection {
 export interface AuthenticatedRemotePayload {
   readonly authenticatedPeerId: DeviceId;
   readonly plaintext: Uint8Array;
+  /** Control-only records mutate native cryptographic state and are not decoded as daemon RPC. */
+  readonly controlOnly?: boolean;
   /** Commits receive acknowledgement after the authenticated payload has been accepted locally. */
   readonly acknowledge?: () => Promise<void>;
 }
@@ -908,6 +910,11 @@ export class RemoteHostedDelivery {
         "bad_relay_message",
         "Delivery is not authenticated to the daemon",
       );
+    }
+    if (opened.controlOnly === true) {
+      await opened.acknowledge?.();
+      await this.flush();
+      return;
     }
     const message = decodeRemoteDaemonMessage(opened.plaintext);
     if (message.type === "daemon_accepted") {

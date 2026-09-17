@@ -284,6 +284,21 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
 
   async open(opaqueEnvelope: Uint8Array): Promise<AuthenticatedRemotePayload> {
     const envelope: RemoteE2eeEnvelope = parseRemoteE2eeEnvelope(opaqueEnvelope);
+    if (envelope.messageClass === "commit") {
+      const operation = derivedId(envelope.operationId, 0x45);
+      const readyLogical = derivedId(envelope.logicalMessageId, 0x46);
+      try {
+        await this.applyUpdateCommit(opaqueEnvelope, uuidText(operation), uuidText(readyLogical));
+        return {
+          authenticatedPeerId: this.options.daemonDeviceId,
+          plaintext: new Uint8Array(),
+          controlOnly: true,
+        };
+      } finally {
+        operation.fill(0);
+        readyLogical.fill(0);
+      }
+    }
     if (envelope.messageClass !== "application_delivery") {
       throw new TypeError("Remote E2EE envelope is not an application delivery");
     }

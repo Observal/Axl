@@ -696,6 +696,7 @@ impl Endpoint {
         &mut self,
         class: MessageClass,
         logical_message_id: Id,
+        generation: u64,
         plaintext: &[u8],
     ) -> Result<PreparedEnvelope, Error> {
         self.ensure_ready()?;
@@ -710,7 +711,7 @@ impl Endpoint {
         }
         let aad = self
             .context
-            .aad(self.identity.role, class, logical_message_id, 0)
+            .aad(self.identity.role, class, logical_message_id, generation)
             .encode();
         let group = self.group.as_mut().ok_or(Error::InactiveAfterRollback)?;
         let epoch = group.epoch().as_u64();
@@ -726,7 +727,7 @@ impl Endpoint {
             logical_message_id,
             class,
             epoch,
-            0,
+            generation,
         )?;
         self.transaction_pending = true;
         Ok(envelope)
@@ -737,6 +738,7 @@ impl Endpoint {
         envelope: &[u8],
         class: MessageClass,
         logical_message_id: Id,
+        generation: u64,
     ) -> Result<PreparedPlaintext, Error> {
         self.ensure_ready()?;
         if envelope.len() > ENVELOPE_MAX_BYTES {
@@ -755,7 +757,7 @@ impl Endpoint {
             .map_err(|_| Error::InvalidCiphertext)?;
         if let Err(error) = Aad::validate_exact(
             processed.aad(),
-            &self.expected_aad(class, logical_message_id, 0),
+            &self.expected_aad(class, logical_message_id, generation),
         ) {
             self.invalidate();
             return Err(error);
@@ -1056,7 +1058,7 @@ impl Daemon {
         id: Id,
     ) -> Result<PreparedPlaintext, Error> {
         self.endpoint
-            .receive_control(bytes, MessageClass::PairActivation, id)
+            .receive_control(bytes, MessageClass::PairActivation, id, 0)
     }
 
     pub(crate) fn receive_update_proposal(
@@ -1247,9 +1249,10 @@ impl Daemon {
         &mut self,
         bytes: &[u8],
         id: Id,
+        generation: u64,
     ) -> Result<PreparedPlaintext, Error> {
         self.endpoint
-            .receive_control(bytes, MessageClass::EpochReady, id)
+            .receive_control(bytes, MessageClass::EpochReady, id, generation)
     }
 
     #[cfg(any(test, feature = "browser-test-fixtures"))]
@@ -1436,7 +1439,7 @@ impl Phone {
         plaintext: &[u8],
     ) -> Result<PreparedEnvelope, Error> {
         self.endpoint_mut()?
-            .prepare_control(MessageClass::PairActivation, id, plaintext)
+            .prepare_control(MessageClass::PairActivation, id, 0, plaintext)
     }
 
     pub(crate) fn prepare_self_update(
@@ -1585,10 +1588,11 @@ impl Phone {
     pub(crate) fn prepare_epoch_ready(
         &mut self,
         id: Id,
+        generation: u64,
         plaintext: &[u8],
     ) -> Result<PreparedEnvelope, Error> {
         self.endpoint_mut()?
-            .prepare_control(MessageClass::EpochReady, id, plaintext)
+            .prepare_control(MessageClass::EpochReady, id, generation, plaintext)
     }
 
     #[cfg(any(test, feature = "browser-test-fixtures"))]

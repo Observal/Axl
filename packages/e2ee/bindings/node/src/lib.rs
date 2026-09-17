@@ -1251,15 +1251,17 @@ impl DaemonEndpoint {
         &self,
         operation_id: Buffer,
         logical_id: Buffer,
+        generation: BigInt,
         ciphertext: Buffer,
     ) -> Result<AsyncTask<Work<NativeEpochReadyAcceptance>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
+        let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(ciphertext.as_ref(), 2 * 1024, "bound_exceeded")?;
         self.work(move |slot, _| {
             Ok(NativeEpochReadyAcceptance {
                 inner: daemon_mut(slot)?
-                    .accept_epoch_ready(op, logical, &bytes)
+                    .accept_epoch_ready(op, logical, generation, &bytes)
                     .map_err(map_persistence)?,
             })
         })

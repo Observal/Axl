@@ -1555,10 +1555,17 @@ impl DurablePendingInvitation {
         &mut self,
         operation_id: Id,
         logical_message_id: Id,
+        hosted_generation: u64,
         ciphertext: &[u8],
     ) -> Result<EpochReadyAcceptance, PersistenceError> {
-        let fingerprint =
-            operation_fingerprint_parts(OP_EPOCH_READY, &[&logical_message_id, ciphertext])?;
+        let fingerprint = operation_fingerprint_parts(
+            OP_EPOCH_READY,
+            &[
+                &logical_message_id,
+                &hosted_generation.to_be_bytes(),
+                ciphertext,
+            ],
+        )?;
         let mut transaction = begin_current(&self.store)?;
         if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
             transaction.rollback()?;
@@ -1586,7 +1593,8 @@ impl DurablePendingInvitation {
             Arc::clone(&self.store.clock),
             transaction.accepted_ids.clone(),
         )?;
-        let plaintext = daemon.receive_epoch_ready(ciphertext, logical_message_id)?;
+        let plaintext =
+            daemon.receive_epoch_ready(ciphertext, logical_message_id, hosted_generation)?;
         validate_epoch_ready_payload(
             plaintext.plaintext(),
             lifecycle.crypto_session_id,
@@ -2648,7 +2656,11 @@ impl DurablePreJoinDevice {
             lifecycle.group_id.ok_or(PersistenceError::Corrupt)?,
             &metadata,
         );
-        let envelope = phone.prepare_epoch_ready(epoch_ready_logical_message_id, &payload)?;
+        let envelope = phone.prepare_epoch_ready(
+            epoch_ready_logical_message_id,
+            hosted_generation,
+            &payload,
+        )?;
         let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
         lifecycle.pair_lifecycle = Some(PairLifecycle::WaitingForEpochReady);
         lifecycle.pending_commit = Some(metadata);
