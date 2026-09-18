@@ -119,7 +119,13 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
     banner: {
       js: 'import { createRequire as __axlCreateRequire } from "node:module";\nconst require = __axlCreateRequire(import.meta.url);',
     },
-    external: ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "yaml"],
+    external: [
+      "@modelcontextprotocol/sdk",
+      "@modelcontextprotocol/sdk/*",
+      "yaml",
+      "playwright",
+      "playwright-core",
+    ],
     define: {
       "process.env.AXL_BUILD_VERSION": JSON.stringify(manifest.version),
       "process.env.AXL_WEB_ASSET_PATH": JSON.stringify("web"),
