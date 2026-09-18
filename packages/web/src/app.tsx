@@ -193,7 +193,7 @@ function sessionStateHistory(conversation: ConversationState): readonly { readon
       case "config.profile": history.push({ id: event.id, label: "Profile", detail: event.payload.profile, timestamp: event.timestamp }); break;
       case "config.thinking": history.push({ id: event.id, label: "Thinking", detail: event.payload.clamped ? `${event.payload.requested} → ${event.payload.effective}` : event.payload.effective, timestamp: event.timestamp }); break;
       case "config.dialect": history.push({ id: event.id, label: "Tool dialect", detail: `${event.payload.dialectId} · ${event.payload.reason.replaceAll("_", " ")}`, timestamp: event.timestamp }); break;
-      case "config.tools": history.push({ id: event.id, label: "Web tools", detail: `search ${event.payload.webSearch ? "on" : "off"} · fetch ${event.payload.webFetch ? "on" : "off"}`, timestamp: event.timestamp }); break;
+      case "config.tools": history.push({ id: event.id, label: "Web tools", detail: `search ${event.payload.webSearch ? "on" : "off"} · fetch ${event.payload.webFetch ? "on" : "off"} · browser ${event.payload.browser ? "on" : "off"}`, timestamp: event.timestamp }); break;
       case "sandbox.configured": history.push({ id: event.id, label: "Sandbox", detail: event.payload.enforced ? `${event.payload.provider} enforced` : "not enforced", timestamp: event.timestamp }); break;
       default: break;
     }

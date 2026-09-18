@@ -514,6 +514,7 @@ export interface AxlAppOptions {
   readonly profile?: SessionProfile;
   readonly webFetch?: boolean;
   readonly webSearch?: boolean;
+  readonly browser?: boolean;
   readonly toolOutputDisplay?: ToolOutputDisplay;
   readonly thinkingDisplay?: "show" | "compact" | "hide";
   readonly tuiMode?: "regular" | "fullscreen";
@@ -537,6 +538,7 @@ export interface AxlAppOptions {
     requestSettings?: ModelRequestSettings;
     webFetch?: boolean;
     webSearch?: boolean;
+    browser?: boolean;
     theme?: string;
     toolOutputDisplay?: ToolOutputDisplay;
     thinkingDisplay?: "show" | "compact" | "hide";
@@ -658,6 +660,7 @@ export class AxlApp {
   private providerInventory: readonly ProviderInventoryGroup[] = [];
   private webFetchEnabled: boolean;
   private webSearchEnabled: boolean;
+  private browserEnabled: boolean;
   private initialResumePending: boolean;
   private lastInterrupt = 0;
   private branch: string | undefined;
@@ -722,6 +725,7 @@ export class AxlApp {
     this.imageDisplay = options.imageDisplay ?? "auto";
     this.webFetchEnabled = options.webFetch ?? true;
     this.webSearchEnabled = options.webSearch ?? true;
+    this.browserEnabled = options.browser ?? false;
     this.initialResumePending = options.initialResume ?? false;
     this.mediaCache = new MediaCache(
       () => this.client,
@@ -1019,6 +1023,7 @@ export class AxlApp {
             ...(options.profile === undefined ? {} : { profile: options.profile }),
             ...(options.webFetch === undefined ? {} : { webFetch: options.webFetch }),
             ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+            ...(options.browser === undefined ? {} : { browser: options.browser }),
           })
         : await resumeSessionMetadata(options.client, options.sessionId);
     const cwd = opened?.cwd ?? options.cwd;
@@ -1677,6 +1682,7 @@ export class AxlApp {
     if (event.type === "config.tools") {
       this.webFetchEnabled = event.payload.webFetch;
       this.webSearchEnabled = event.payload.webSearch;
+      this.browserEnabled = event.payload.browser;
     }
     if (event.type === "user.message") this.consumePendingTurnInput(event);
 
@@ -3287,6 +3293,11 @@ export class AxlApp {
           label: "Web search tool",
           description: this.webSearchEnabled ? "on" : "off",
         },
+        {
+          value: "browser",
+          label: "Browser tool",
+          description: this.browserEnabled ? "on" : "off",
+        },
         { value: "images", label: "Image display", description: this.imageDisplay },
         { value: "diff", label: "Diff layout", description: this.diffLayout },
       ],
@@ -3309,16 +3320,27 @@ export class AxlApp {
         else if (value === "review") this.selectWorkspaceReview();
         else if (value === "web-fetch") this.selectWebTool("webFetch");
         else if (value === "web-search") this.selectWebTool("webSearch");
+        else if (value === "browser") this.selectWebTool("browser");
         else if (value === "images") this.selectImageDisplay();
         else this.selectDiffLayout();
       },
     });
   }
 
-  private selectWebTool(tool: "webFetch" | "webSearch"): void {
-    const current = tool === "webFetch" ? this.webFetchEnabled : this.webSearchEnabled;
+  private selectWebTool(tool: "webFetch" | "webSearch" | "browser"): void {
+    const current =
+      tool === "webFetch"
+        ? this.webFetchEnabled
+        : tool === "webSearch"
+          ? this.webSearchEnabled
+          : this.browserEnabled;
     this.openPicker({
-      title: tool === "webFetch" ? "Web fetch tool" : "Web search tool",
+      title:
+        tool === "webFetch"
+          ? "Web fetch tool"
+          : tool === "webSearch"
+            ? "Web search tool"
+            : "Browser tool",
       items: [
         { value: "on", label: "On", description: "include the tool in model requests" },
         { value: "off", label: "Off", description: "remove all schema and prompt contribution" },
@@ -5101,6 +5123,7 @@ export class AxlApp {
     requestSettings?: ModelRequestSettings;
     webFetch?: boolean;
     webSearch?: boolean;
+    browser?: boolean;
     theme?: string;
     toolOutputDisplay?: ToolOutputDisplay;
     thinkingDisplay?: "show" | "compact" | "hide";
@@ -5134,6 +5157,7 @@ export class AxlApp {
     requestSettings?: ModelRequestSettings;
     webFetch?: boolean;
     webSearch?: boolean;
+    browser?: boolean;
   }): Promise<void> {
     if (this.configuring) {
       this.notice = this.view.palette.dim("· configuration change already in progress");

@@ -370,6 +370,7 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.deepEqual(events.find((event) => event.type === "config.tools")?.payload, {
     webFetch: true,
     webSearch: true,
+    browser: false,
   });
 
   for (const [profile, expectedTools] of [

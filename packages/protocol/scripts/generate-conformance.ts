@@ -119,7 +119,7 @@ const eventPayloads = {
   "config.entitlement": { entitlementId: "credential-reference" },
   "config.profile": { profile: "standard" },
   "config.thinking": { requested: "high", effective: "medium", clamped: true },
-  "config.tools": { webFetch: true, webSearch: false },
+  "config.tools": { webFetch: true, webSearch: false, browser: false },
   "config.dialect": {
     dialectId: "openai-chat",
     rosterFingerprint: digest,
@@ -430,6 +430,7 @@ const results = {
     profile: "standard",
     webFetch: true,
     webSearch: false,
+    browser: false,
     boundaryEventIds: [eventId],
   },
   "session.interaction.respond": {

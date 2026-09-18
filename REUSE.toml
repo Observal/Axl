@@ -44,6 +44,15 @@ SPDX-License-Identifier = "Apache-2.0"
 
 [[annotations]]
 path = [
+  "packages/extensions/browser/package.json",
+  "packages/extensions/browser/tsconfig.build.json",
+  "packages/extensions/browser/tsconfig.json",
+]
+SPDX-FileCopyrightText = "2026 Tanvi Reddy"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = [
   "packages/ai/package.json",
   "packages/extensions/api/package.json",
   "packages/extensions/api/tsconfig.build.json",

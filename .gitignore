@@ -6,6 +6,8 @@ dist/
 .release/
 coverage/
 docs/screenshots/
+.axl-screenshots/
+.axl-downloads/
 *.tsbuildinfo
 .env
 .env.*

@@ -139,6 +139,7 @@ interface CliArguments {
   profile?: SessionProfile;
   webFetch?: boolean;
   webSearch?: boolean;
+  browser?: boolean;
   theme?: string;
   tuiMode?: "regular" | "fullscreen";
   image?: string;
@@ -251,6 +252,8 @@ function parseArguments(argv: readonly string[]): CliArguments {
     else if (argument === "--no-web-fetch") parsed.webFetch = false;
     else if (argument === "--web-search") parsed.webSearch = true;
     else if (argument === "--no-web-search") parsed.webSearch = false;
+    else if (argument === "--browser") parsed.browser = true;
+    else if (argument === "--no-browser") parsed.browser = false;
     else if (argument === "--cwd") parsed.cwd = next();
     else if (argument === "--theme") parsed.theme = next();
     else if (argument === "--tui-mode") {
@@ -417,6 +420,7 @@ interface ActiveConfig {
   readonly thinkingLevel: ThinkingLevel;
   readonly webFetch: boolean;
   readonly webSearch: boolean;
+  readonly browser: boolean;
 }
 
 function missingDaemon(error: unknown): boolean {
@@ -497,6 +501,7 @@ async function connectOrStartDaemon(input: {
   readonly image?: string;
   readonly webFetch: boolean;
   readonly webSearch: boolean;
+  readonly browser: boolean;
   readonly clientKind: string;
 }): Promise<AxlClient> {
   try {
@@ -536,6 +541,7 @@ async function connectOrStartDaemon(input: {
         ...(input.image === undefined ? [] : ["--image", input.image]),
         ...(input.webFetch ? [] : ["--no-web-fetch"]),
         ...(input.webSearch ? [] : ["--no-web-search"]),
+        ...(input.browser ? ["--browser"] : []),
       ],
       { detached: true, stdio: "ignore" },
     );
@@ -652,6 +658,7 @@ async function runHeadless(
     thinkingLevel: input.active.thinkingLevel,
     webFetch: input.active.webFetch,
     webSearch: input.active.webSearch,
+    browser: input.active.browser,
     ...(input.profile === undefined ? {} : { profile: input.profile }),
   });
   let terminal: AssistantMessageEvent | undefined;
@@ -967,6 +974,7 @@ async function main(): Promise<void> {
     thinkingLevel: cli.thinking ?? settings.thinkingLevel ?? "medium",
     webFetch: cli.webFetch ?? settings.webFetch ?? true,
     webSearch: cli.webSearch ?? settings.webSearch ?? true,
+    browser: cli.browser ?? settings.browser ?? false,
   };
 
   if (cli.unsafe && ["daemon", "json", "print", "rpc"].includes(cli.command ?? "")) {
@@ -1051,6 +1059,7 @@ async function main(): Promise<void> {
         ...(target.image === undefined ? {} : { image: target.image }),
         webFetch: active.webFetch,
         webSearch: active.webSearch,
+        browser: active.browser,
         clientKind,
       });
     }
@@ -1267,6 +1276,9 @@ async function main(): Promise<void> {
       mcpTerminalExtension,
       promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),
       skillTerminalExtension,
+      ...(active.browser
+        ? [(await import("@axl/extension-browser")).browserTerminalExtension]
+        : []),
     ],
     clearStartupLine: startupIndicator,
     reconnectClient: () => connectTarget(currentTarget),
@@ -1281,6 +1293,7 @@ async function main(): Promise<void> {
     ...(cli.profile === undefined ? {} : { profile: cli.profile }),
     webFetch: active.webFetch,
     webSearch: active.webSearch,
+    browser: active.browser,
     ...(cli.sessionId === undefined ? {} : { sessionId: cli.sessionId }),
     onExit: () => {
       void Promise.allSettled([...webGateways].map((gateway) => gateway.close())).finally(() =>
