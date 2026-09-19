@@ -8,9 +8,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-
-import { ConversationProjector } from "@axl/sdk";
 import { parseOperationId, parseSessionId, type SessionActivityFrame } from "@axl/protocol";
+import { ConversationProjector } from "@axl/sdk";
 
 import {
   detectImageMediaType,
@@ -69,13 +68,25 @@ test("detects image bytes and conservative terminal protocols", () => {
   const bytes = png(12, 8);
   assert.equal(detectImageMediaType(bytes), "image/png");
   assert.deepEqual(imageDimensions(bytes, "image/png"), { width: 12, height: 8 });
-  assert.deepEqual(detectTerminalMedia({ TERM_PROGRAM: "iTerm.app" }), { images: "iterm2" });
-  assert.deepEqual(detectTerminalMedia({ KITTY_WINDOW_ID: "1" }), { images: "kitty" });
+  assert.deepEqual(detectTerminalMedia({ TERM_PROGRAM: "iTerm.app" }), {
+    images: "iterm2",
+    activityRaster: null,
+  });
+  assert.deepEqual(detectTerminalMedia({ KITTY_WINDOW_ID: "1" }), {
+    images: "kitty",
+    activityRaster: null,
+  });
+  assert.deepEqual(detectTerminalMedia({ WT_SESSION: "session" }), {
+    images: null,
+    activityRaster: "sixel",
+  });
   assert.deepEqual(detectTerminalMedia({ KITTY_WINDOW_ID: "1", TMUX: "/tmp/tmux" }), {
     images: null,
+    activityRaster: null,
   });
   assert.deepEqual(detectTerminalMedia({ TMUX: "/tmp/tmux", AXL_IMAGE_PROTOCOL: "kitty" }), {
     images: "kitty",
+    activityRaster: null,
   });
 });
 

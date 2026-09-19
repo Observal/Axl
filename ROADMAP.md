@@ -2485,6 +2485,12 @@ Resolve each decision only before its dependent phase:
 | Cross-provider and shared-team pooling | Phase 12 |
 | Remote connectivity topology | Resolved: hosted E2EE relay first; direct routing later |
 
+### Scoped sequencing exception: Axl Lounge
+
+Axl Lounge is implemented as a client-local terminal feature using the public `terminal.activities` and `terminal.activity-storage` capabilities. It ships Wordle, 2048, Minesweeper, Sudoku, and Chess Puzzles with deterministic offline data, bounded local storage, responsive Agent/game layouts, accessibility modes, and host-owned cleanup. Chess includes 1,000 reviewed CC0 Lichess tactics, exact sourced-line progression, and calibrated raster rendering with semantic fallback. Lounge does not change daemon or session authority. See [`docs/architecture/lounge.md`](docs/architecture/lounge.md).
+
+Web UI game support, Productive mode, and Vibe mode remain deferred.
+
 ### Immediate next slice
 
 Complete these dogfood fixes before continuing Phase 5:

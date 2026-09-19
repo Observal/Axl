@@ -59,6 +59,7 @@ test("loads bounded user themes with project overrides and inherited roles", asy
   assert.match(palette.toolBackground?.("x") ?? "", /48;2;16;24;32m/);
   assert.match(palette.selection?.("x") ?? "", /38;2;255;255;255;48;2;102;51;153m/);
   assert.match(palette.thinking?.("high", "x") ?? "", /38;2;255;0;170m/);
+  assert.match(palette.activityBackground?.("surfaceAlternate", "x") ?? "", /48;2;60;56;54m/);
   assert.equal(typeof palette.error("x"), "string");
 });
 

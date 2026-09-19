@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -65,6 +65,55 @@ test("enforces protocol, kernel, runtime, TUI, and extension dependency boundari
     "packages/extensions/example/src/index.ts imports private kernel path @axl/kernel/private",
     "packages/tui/src/index.ts imports @axl/ai; TUI source may import only client-facing packages",
     "apps/example/index.ts imports @axl/kernel; apps may import only @axl/sdk",
+  ]);
+});
+
+test("rejects every forbidden Lounge import form and permits the public API", () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-lounge-boundaries-"));
+  writePackage(root, "extensions/api", { name: "@axl/extension-api" });
+  writePackage(
+    root,
+    "extensions/lounge",
+    {
+      name: "@axl/extension-lounge",
+      dependencies: {
+        "@axl/extension-api": "workspace:*",
+        "@axl/sdk": "workspace:*",
+      },
+    },
+    `
+      import type { TerminalExtension } from "@axl/extension-api";
+      import "@axl/tui";
+      import "@axl/extension-api/private";
+      void import("node:fs");
+      type Internal = import("@axl/sdk").AxlClient;
+      export const extension: TerminalExtension | undefined = undefined;
+    `,
+  );
+
+  assert.deepEqual(checkWorkspace(root), [
+    "packages/extensions/lounge may depend only on the public extension API, found @axl/sdk",
+    "packages/extensions/lounge/src/index.ts imports @axl/tui; Lounge may import only the public extension API",
+    "packages/extensions/lounge/src/index.ts imports @axl/extension-api/private; Lounge may import only the public extension API",
+    "packages/extensions/lounge/src/index.ts imports node:fs; Lounge may import only the public extension API",
+    "packages/extensions/lounge/src/index.ts imports @axl/sdk; Lounge may import only the public extension API",
+  ]);
+});
+
+test("rejects Lounge relative imports that escape the package", () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-lounge-relative-boundaries-"));
+  writePackage(root, "extensions/api", { name: "@axl/extension-api" });
+  writePackage(
+    root,
+    "extensions/lounge",
+    {
+      name: "@axl/extension-lounge",
+      dependencies: { "@axl/extension-api": "workspace:*" },
+    },
+    'import type { TerminalExtension } from "@axl/extension-api";\nimport "../../tui/src/index.ts";\nexport const extension: TerminalExtension | undefined = undefined;\n',
+  );
+  assert.deepEqual(checkWorkspace(root), [
+    "packages/extensions/lounge/src/index.ts imports ../../tui/src/index.ts; Lounge relative imports must stay inside its package",
   ]);
 });
 

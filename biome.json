@@ -6,7 +6,8 @@
       "!**/{dist,node_modules}",
       "!.release",
       "!packages/ai/src/catalog.generated.ts",
-      "!packages/ai/src/catalog.generated"
+      "!packages/ai/src/catalog.generated",
+      "!packages/extensions/lounge/src/chess-puzzles.generated.ts"
     ]
   },
   "formatter": {

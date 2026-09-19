@@ -112,6 +112,10 @@ export function checkWorkspace(root: string): string[] {
     "marked",
     protocolName,
   ]);
+  const lounge = packages.find(
+    ({ directory }) => directory === resolve(root, "packages/extensions/lounge"),
+  );
+  const loungeRuntimeAllowed = new Set(["@axl/extension-api"]);
 
   if (protocol) {
     for (const dependency of runtimeDependencies(protocol.manifest)) {
@@ -167,6 +171,16 @@ export function checkWorkspace(root: string): string[] {
     }
   }
 
+  if (lounge) {
+    for (const dependency of runtimeDependencies(lounge.manifest)) {
+      if (!loungeRuntimeAllowed.has(dependency)) {
+        errors.push(
+          `${relative(root, lounge.directory)} may depend only on the public extension API, found ${dependency}`,
+        );
+      }
+    }
+  }
+
   for (const { directory } of packages) {
     walk(resolve(directory, "src"), (path) => {
       const extension = path.slice(path.lastIndexOf("."));
@@ -206,6 +220,20 @@ export function checkWorkspace(root: string): string[] {
           errors.push(
             `${relative(root, path)} imports ${specifier}; TUI source may import only client-facing packages`,
           );
+        }
+        if (directory === lounge?.directory) {
+          if (specifier.startsWith(".")) {
+            const target = resolve(dirname(path), specifier);
+            if (!isInside(target, lounge.directory)) {
+              errors.push(
+                `${relative(root, path)} imports ${specifier}; Lounge relative imports must stay inside its package`,
+              );
+            }
+          } else if (!loungeRuntimeAllowed.has(specifier)) {
+            errors.push(
+              `${relative(root, path)} imports ${specifier}; Lounge may import only the public extension API`,
+            );
+          }
         }
         if (isInside(directory, resolve(root, "packages/extensions"))) {
           if (specifier.startsWith(".")) {
