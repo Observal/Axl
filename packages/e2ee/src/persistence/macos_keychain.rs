@@ -1290,17 +1290,14 @@ mod tests {
     fn concurrent_conflicting_prepare_never_overwrites_the_winner() {
         let keychain = FakeKeychain::available();
         keychain.block_two_inserts();
-        let store = Arc::new(store(Arc::clone(&keychain)));
+        let first_store = store(Arc::clone(&keychain));
+        let second_store = store(Arc::clone(&keychain));
+        let verifier = store(Arc::clone(&keychain));
         let session = [0x44; 16];
         let key = [0x45; 16];
-        let first = {
-            let store = Arc::clone(&store);
-            thread::spawn(move || store.prepare(session, key, &[0x46; 32], b"first"))
-        };
-        let second = {
-            let store = Arc::clone(&store);
-            thread::spawn(move || store.prepare(session, key, &[0x47; 32], b"second"))
-        };
+        let first = thread::spawn(move || first_store.prepare(session, key, &[0x46; 32], b"first"));
+        let second =
+            thread::spawn(move || second_store.prepare(session, key, &[0x47; 32], b"second"));
         let outcomes = [first.join().unwrap(), second.join().unwrap()];
         assert_eq!(outcomes.iter().filter(|value| value.is_ok()).count(), 1);
         assert_eq!(
@@ -1315,9 +1312,9 @@ mod tests {
         } else {
             (b"second".as_slice(), [0x47; 32])
         };
-        store.activate(session, key, winning_context).unwrap();
+        verifier.activate(session, key, winning_context).unwrap();
         assert_eq!(
-            store.load(session, key, winning_context).unwrap(),
+            verifier.load(session, key, winning_context).unwrap(),
             winning_key
         );
     }
