@@ -1255,6 +1255,7 @@ impl Daemon {
             .receive_control(bytes, MessageClass::EpochReady, id, generation)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn prepare_resync_control(
         &mut self,
         id: Id,
@@ -1674,6 +1675,7 @@ impl Phone {
             .prepare_control(MessageClass::EpochReady, id, generation, plaintext)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn receive_resync_control(
         &mut self,
         bytes: &[u8],
