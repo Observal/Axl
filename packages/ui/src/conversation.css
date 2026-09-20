@@ -1,4 +1,5 @@
 /* SPDX-FileCopyrightText: 2026 Hari Srinivasan */
+/* SPDX-FileCopyrightText: 2026 Shaan Narendran */
 /* SPDX-License-Identifier: Apache-2.0 */
 
 .message { position:relative; display:grid; grid-template-columns:32px minmax(0,1fr); gap:12px; padding:20px 0 0; }
@@ -175,6 +176,9 @@
 .questionnaire legend { display:grid; gap:3px; margin-bottom:5px; }
 .questionnaire legend > small { color:var(--accent); font-size:9px; letter-spacing:.04em; text-transform:uppercase; }
 .question-options { display:grid; gap:7px; }
+.question-custom textarea { width:100%; box-sizing:border-box; resize:vertical; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--code-bg); color:var(--text); font:11px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; }
+.question-review-detail { margin:0; padding:10px 16px 4px; color:var(--text-soft); font-size:11px; line-height:1.5; }
+.question-review-detail pre { margin:6px 0 0; padding:10px; overflow:auto; border:1px solid var(--line); border-radius:6px; background:var(--code-bg); color:var(--text-soft); font:11px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; }
 .question-preview { max-height:260px; margin:8px 0 0; overflow:auto; padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--code-bg); color:var(--text-soft); font:11px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; white-space:pre-wrap; }
 .questionnaire { max-width:720px; padding:0; border-color:var(--line-soft); background:var(--panel); overflow:hidden; }
 .questionnaire > header { min-height:52px; padding:0 16px; border-bottom:1px solid var(--line-soft); }

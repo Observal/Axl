@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 // Full-width terminal panel used by selectors, approvals, and login flows.
@@ -26,9 +27,10 @@ export function renderDialog(input: DialogInput): string[] {
   const { title, rows, footer, width, palette } = input;
   const inner = dialogInnerWidth(width);
   const border = (palette.border ?? palette.dim)("─".repeat(Math.max(1, width - 2)));
-  const content = rows.flatMap((row) =>
-    row.length === 0 ? [""] : wrapLine(row, inner).map((line) => `  ${line}`),
-  );
+  // A row must never carry a raw newline: it would desynchronize the frame from the terminal.
+  const content = rows
+    .flatMap((row) => row.split("\n"))
+    .flatMap((row) => (row.length === 0 ? [""] : wrapLine(row, inner).map((line) => `  ${line}`)));
   return [
     border,
     "",

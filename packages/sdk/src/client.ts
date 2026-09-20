@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -279,6 +280,14 @@ export class AxlClient {
     options: Omit<RequestOptions, "idempotencyKey"> = {},
   ): Promise<RpcResult<"mcp.config.remove">> {
     return this.request("mcp.config.remove", params, options);
+  }
+
+  /** Connects to a candidate definition and lists its tools without saving it. */
+  probeMcpServer(
+    params: RpcParams<"mcp.config.probe">,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"mcp.config.probe">> {
+    return this.request("mcp.config.probe", params, options);
   }
 
   listProviders(

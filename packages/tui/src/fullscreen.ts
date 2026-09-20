@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -17,6 +18,7 @@ import {
   styleCellRanges,
   truncateToWidth,
   clipFrame,
+  RESET_LINE,
   visibleWidth,
 } from "./render.ts";
 import type { TerminalOutput } from "./terminal.ts";
@@ -36,12 +38,97 @@ export type FullscreenExitOutput = "transcript" | "resume-hint";
 export type FullscreenScrollbar = "auto" | "always" | "hidden";
 export type FullscreenMouse = "capture" | "native";
 
+/** A modal dialog drawn over the transcript instead of replacing the dock. */
+export interface FloatingDialog {
+  /** Dialog rows rendered at `width`; leading and trailing rule lines are replaced by the box border. */
+  readonly lines: readonly string[];
+  readonly width: number;
+  readonly cursor?: CursorPlacement;
+  /** Rows that must stay visible when the dialog is taller than the viewport. */
+  readonly pinnedRows?: number;
+}
+
 export interface FullscreenFrame {
   readonly document: readonly TranscriptRow[];
   readonly dock: readonly string[];
   readonly cursor?: CursorPlacement;
   readonly palette: Palette;
   readonly sessionId: string;
+  readonly floating?: FloatingDialog;
+}
+
+/** Widest a floating dialog grows; wider terminals show the transcript around it. */
+export const FLOATING_DIALOG_MAX_WIDTH = 100;
+
+/** Dialog width for a terminal of `columns`, leaving room for the box and margins. */
+export function floatingDialogWidth(columns: number): number {
+  return Math.max(20, Math.min(FLOATING_DIALOG_MAX_WIDTH, columns - 4));
+}
+
+const RULE_LINE = /^\s*─{3,}\s*$/u;
+
+function padCells(value: string, width: number): string {
+  const shown = truncateToWidth(value, width, "");
+  return `${shown}${" ".repeat(Math.max(0, width - visibleWidth(shown)))}`;
+}
+
+/**
+ * Wraps dialog rows in a rounded box. The dialog renderers draw full-width
+ * rules as their top and bottom; those become the box edges so nothing doubles.
+ */
+export function frameFloatingDialog(
+  dialog: FloatingDialog,
+  maxRows: number,
+  palette: Palette,
+): { readonly lines: readonly string[]; readonly cursor?: CursorPlacement } {
+  const border = palette.border ?? palette.dim;
+  let body = [...dialog.lines];
+  let cursor = dialog.cursor;
+  if (body.length > 0 && RULE_LINE.test(stripAnsi(body[0] as string))) {
+    body = body.slice(1);
+    if (cursor !== undefined) cursor = { ...cursor, row: cursor.row - 1 };
+  }
+  if (body.length > 0 && RULE_LINE.test(stripAnsi(body[body.length - 1] as string))) body.pop();
+  while (body.length > 0 && stripAnsi(body[0] as string).trim() === "") {
+    body = body.slice(1);
+    if (cursor !== undefined) cursor = { ...cursor, row: cursor.row - 1 };
+  }
+  while (body.length > 0 && stripAnsi(body[body.length - 1] as string).trim() === "") body.pop();
+  const clipped = clipFrame(body, Math.max(1, maxRows - 2), cursor, dialog.pinnedRows ?? 0);
+  const inner = Math.max(1, dialog.width - 2);
+  const lines = [
+    border(`╭${"─".repeat(inner)}╮`),
+    ...clipped.lines.map(
+      (line) => `${border("│")}${padCells(line, inner)}${RESET_LINE}${border("│")}`,
+    ),
+    border(`╰${"─".repeat(inner)}╯`),
+  ];
+  return {
+    lines,
+    ...(clipped.cursor === undefined
+      ? {}
+      : {
+          cursor: {
+            ...clipped.cursor,
+            row: clipped.cursor.row + 1,
+            column: clipped.cursor.column + 1,
+          },
+        }),
+  };
+}
+
+/** Places `box` over `row` starting at `left`, dimming whatever the box does not cover. */
+function overlayRow(
+  row: string,
+  box: string,
+  left: number,
+  width: number,
+  palette: Palette,
+): string {
+  const boxWidth = visibleWidth(box);
+  const before = padCells(palette.dim(plainTextByCells(row, 0, left)), left);
+  const after = plainTextByCells(row, left + boxWidth, width);
+  return `${before}${box}${palette.dim(after)}`;
 }
 
 export interface FullscreenScreenOptions {
@@ -309,13 +396,38 @@ export class FullscreenScreen {
     const screen = rows.slice(0, this.height).map((line) => truncateToWidth(line, this.width, ""));
     if (this.height >= 5)
       this.applyScrollbar(screen, frame.document.length, viewportHeight, frame.palette);
+    let floatingCursor: CursorPlacement | undefined;
+    if (frame.floating !== undefined && this.height >= 5) {
+      // Modal: dim the transcript, center the dialog over it, keep the dock visible below.
+      for (let row = 1; row <= viewportHeight; row += 1) {
+        screen[row] = frame.palette.dim(plainTextByCells(screen[row] ?? "", 0, this.width));
+      }
+      const box = frameFloatingDialog(frame.floating, viewportHeight, frame.palette);
+      const left = Math.max(0, Math.floor((this.width - frame.floating.width) / 2));
+      const top = 1 + Math.max(0, Math.floor((viewportHeight - box.lines.length) / 2));
+      box.lines.forEach((line, index) => {
+        const row = top + index;
+        if (row >= 1 && row <= viewportHeight) {
+          screen[row] = overlayRow(screen[row] ?? "", line, left, this.width, frame.palette);
+        }
+      });
+      if (box.cursor !== undefined && top + box.cursor.row <= viewportHeight) {
+        floatingCursor = {
+          ...box.cursor,
+          row: top + box.cursor.row,
+          column: left + box.cursor.column,
+        };
+      }
+    }
 
     let output = `${SYNC_BEGIN}\x1b[?7l${this.repair ? "\x1b[2J\x1b[H" : ""}`;
     for (let row = 0; row < this.height; row += 1) {
       if (!this.repair && screen[row] === this.previous[row]) continue;
       output += `\x1b[${row + 1};1H\x1b[2K${screen[row] ?? ""}`;
     }
-    if (dock.cursor !== undefined && !this.searchMode) {
+    if (floatingCursor !== undefined && !this.searchMode) {
+      output += `\x1b[${floatingCursor.row + 1};${Math.min(this.width - 1, floatingCursor.column) + 1}H${floatingCursor.visible === false ? "\x1b[?25l" : "\x1b[?25h"}`;
+    } else if (dock.cursor !== undefined && !this.searchMode && frame.floating === undefined) {
       const row = (this.height < 5 ? 0 : viewportHeight + 3) + dock.cursor.row;
       output += `\x1b[${row + 1};${Math.min(this.width - 1, dock.cursor.column) + 1}H${dock.cursor.visible === false ? "\x1b[?25l" : "\x1b[?25h"}`;
     } else output += "\x1b[?25l";

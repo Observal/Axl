@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -7,7 +8,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadMcpConfig, McpConfigError, McpConfigStore, mcpSecretValues } from "../src/index.ts";
+import {
+  loadMcpConfig,
+  McpConfigError,
+  McpConfigStore,
+  mcpSecretReferences,
+  mcpSecretValues,
+  resolveMcpSecretValue,
+} from "../src/index.ts";
 
 test("loads only global mcpServers and infers transports", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-mcp-config-"));
@@ -85,4 +93,62 @@ test("rejects legacy, ambiguous, unsafe, and unknown configuration", async (cont
   await assert.rejects(load, McpConfigError);
   await writeFile(path, JSON.stringify({ mcpServers: { bad: { url: ":not-a-url" } } }));
   await assert.rejects(load, McpConfigError);
+  await writeFile(
+    path,
+    JSON.stringify({
+      mcpServers: {
+        bad: {
+          url: "https://example.com/mcp",
+          headers: { Authorization: "Bearer literal-secret" },
+        },
+      },
+    }),
+  );
+  await assert.rejects(load, /literal values are never stored/u);
+  await writeFile(
+    path,
+    JSON.stringify({
+      mcpServers: { bad: { command: "x", env: { TOKEN: "ghp-abc.123 literal" } } },
+    }),
+  );
+  await assert.rejects(load, McpConfigError);
+});
+
+test("header and env values may be variable names or ${VAR} templates", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-mcp-config-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        remote: {
+          url: "https://example.com/mcp",
+          headers: { Authorization: "Bearer ${GH_PAT}", "X-Key": "API_KEY" },
+        },
+        local: { command: "x", env: { DSN: "postgres://${DB_USER}:${DB_PASS}@db/app" } },
+      },
+    }),
+  );
+  const servers = await loadMcpConfig({ cwd: root, globalDirectory: root });
+  assert.deepEqual(mcpSecretReferences("Bearer ${GH_PAT}"), ["GH_PAT"]);
+  assert.deepEqual(mcpSecretReferences("API_KEY"), ["API_KEY"]);
+  assert.deepEqual(mcpSecretReferences("Bearer literal"), []);
+  const env = { GH_PAT: "pat", API_KEY: "key", DB_USER: "u", DB_PASS: "p" };
+  assert.deepEqual([...mcpSecretValues(servers, env)].sort(), ["key", "p", "pat", "u"]);
+  assert.equal(
+    resolveMcpSecretValue("Bearer ${GH_PAT}", env, () => "h"),
+    "Bearer pat",
+  );
+  assert.equal(
+    resolveMcpSecretValue("API_KEY", env, () => "h"),
+    "key",
+  );
+  assert.equal(
+    resolveMcpSecretValue("postgres://${DB_USER}:${DB_PASS}@db/app", env, () => "h"),
+    "postgres://u:p@db/app",
+  );
+  assert.throws(
+    () => resolveMcpSecretValue("Bearer ${MISSING}", env, () => "header"),
+    /MISSING is not set/u,
+  );
 });

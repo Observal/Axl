@@ -1,14 +1,18 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  floatingDialogWidth,
+  frameFloatingDialog,
   FullscreenScreen,
   fullscreenAction,
   PLAIN_PALETTE,
+  renderDialog,
   type TranscriptRow,
 } from "../src/index.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -384,4 +388,76 @@ test("reflow retains the nearest surviving row of a paused source", () => {
   terminal.write(capture.text());
   assert.equal(terminal.rows()[1], "wrapped 2");
   screen.exit([], "resume-hint", "fixture");
+});
+
+test("a floating dialog is boxed and centered over a dimmed transcript with the dock still visible", () => {
+  const capture = output();
+  const terminal = { ...capture.terminal, columns: 60, rows: 14 };
+  const screen = new FullscreenScreen(terminal, 60, 14, "hidden");
+  const document = rows(Array.from({ length: 30 }, (_, index) => `transcript line ${index}`));
+  const width = floatingDialogWidth(60);
+  assert.equal(width, 56);
+  const dialog = renderDialog({
+    title: "MCP servers",
+    rows: ["first row", "> typing here"],
+    footer: "Esc close",
+    width,
+    palette: PLAIN_PALETTE,
+  });
+  const promptRow = dialog.findIndex((line) => line.includes("> typing here"));
+  screen.enter();
+  screen.render({
+    ...frame(document),
+    dock: ["editor", "status"],
+    floating: {
+      lines: dialog,
+      width,
+      cursor: { row: promptRow, column: 2 + "> typing here".length },
+    },
+  });
+  const virtual = new VirtualTerminal(60, 14);
+  virtual.write(capture.text());
+  const lines = virtual.rows();
+  const top = lines.findIndex((line) => line.includes("╭"));
+  const bottom = lines.findIndex((line) => line.includes("╰"));
+  assert.ok(top > 0, "box top is below the header");
+  assert.ok(bottom > top);
+  assert.match(lines[top + 1] ?? "", /│\s+MCP servers/u);
+  assert.match(lines.join("\n"), /│.*first row.*│/u);
+  assert.match(lines.join("\n"), /│.*Esc close.*│/u);
+  assert.equal(
+    lines.slice(top, bottom + 1).some((line) => /^─+$/u.test(line.trim())),
+    false,
+    "the dialog's own rules were replaced by the box edges",
+  );
+  assert.equal(lines.includes("editor"), true, "the dock stays visible under the dialog");
+  assert.equal(
+    lines.some((line) => line.trimStart().startsWith("transcript line")),
+    true,
+    "transcript remains around the box",
+  );
+  const cursorLine = lines[virtual.cursorRow] ?? "";
+  assert.equal(
+    cursorLine.slice(0, virtual.cursorColumn).endsWith("> typing here"),
+    true,
+    "caret follows the prompt into the box",
+  );
+  assert.equal(virtual.cursorVisible, true);
+});
+
+test("a dialog taller than the viewport is clipped inside the box, keeping its cursor row", () => {
+  const box = frameFloatingDialog(
+    {
+      lines: ["────────", ...Array.from({ length: 30 }, (_, index) => `row ${index}`), "────────"],
+      width: 20,
+      cursor: { row: 30, column: 3 },
+    },
+    10,
+    PLAIN_PALETTE,
+  );
+  assert.equal(box.lines.length, 10);
+  assert.match(box.lines[0] ?? "", /^╭─+╮$/u);
+  assert.match(box.lines[9] ?? "", /^╰─+╯$/u);
+  assert.match(box.lines[8] ?? "", /row 29/u);
+  assert.deepEqual(box.cursor, { row: 8, column: 4 });
 });

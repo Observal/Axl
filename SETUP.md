@@ -1,5 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Set up Axl
@@ -203,7 +204,7 @@ Axl walks from the repository root to the working directory. Later definitions r
 
 ## Add MCP servers
 
-Run `/mcp` in the terminal or web client to manage tested global servers. You can also ask the model to add, update, list, or remove a server through the daemon-owned `configure_mcp` capability. Both paths validate and atomically update `~/.axl/mcp.json` without granting sandboxed commands access to credentials or session state. Axl does not load project-local MCP configuration. Axl supports MCP `2025-11-25` over stdio and Streamable HTTP, including OAuth. Tools stay outside the model roster until selected through `capability_search`. See [`packages/extensions/mcp/README.md`](packages/extensions/mcp/README.md) for custom server schemas and security rules.
+Run `/mcp` in the terminal or web client to see server status and add any MCP server from its README through a guided, probe-before-save flow. You can also ask the model to add, update, list, or remove a server through the daemon-owned `configure_mcp` capability. Both paths validate and atomically update `~/.axl/mcp.json` without granting sandboxed commands access to credentials or session state. Axl does not load project-local MCP configuration. Axl supports MCP `2025-11-25` over stdio and Streamable HTTP, including OAuth. Tools stay outside the model roster until selected through `capability_search`. See [`packages/extensions/mcp/README.md`](packages/extensions/mcp/README.md) for custom server schemas and security rules.
 
 ## Development commands
 

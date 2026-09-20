@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { type CapabilityService, ToolCapabilityService, type ToolRegistry } from "@axl/kernel";
 import {
@@ -15,26 +16,53 @@ import {
 } from "@axl/protocol";
 import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 
-import { mcpConfigurationFingerprint, type NamedMcpServerConfig } from "./config.ts";
+import {
+  type McpDiscoveryStateReader,
+  mcpConfigurationFingerprint,
+  mcpDefinitionFingerprint,
+  type NamedMcpServerConfig,
+} from "./config.ts";
 import type { McpManager } from "./manager.ts";
 import type { McpToolBinding, McpToolDiscovery } from "./types.ts";
 
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 const MAX_CACHE_BYTES = 10 * 1024 * 1024;
+const MAX_FAILURE_BYTES = 2_000;
 const MCP_AUTHORITY = "mcp.call";
 
 interface CacheFile {
   readonly version: typeof CACHE_VERSION;
   readonly servers: readonly CacheServer[];
+  readonly failures: readonly CacheFailure[];
 }
 
 interface CacheServer {
   readonly fingerprint: string;
+  readonly definitionFingerprint: string;
   readonly server: string;
   readonly discoveredAt: number;
   readonly protocolVersion: string;
   readonly tools: readonly CachedTool[];
+}
+
+interface CacheFailure {
+  readonly fingerprint: string;
+  readonly definitionFingerprint: string;
+  readonly server: string;
+  readonly failedAt: number;
+  /** Redacted error message. */
+  readonly error: string;
+}
+
+/** Location of the private MCP metadata cache for one Axl home. */
+export function mcpCapabilityCachePath(axlHome: string): string {
+  return join(axlHome, "cache", "mcp-tools.json");
+}
+
+export interface McpDiscoveryFailure {
+  readonly server: string;
+  readonly error: string;
 }
 
 interface CachedTool {
@@ -100,12 +128,32 @@ export class McpCapabilityService implements CapabilityService {
 function validCache(value: unknown): CacheFile | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const input = value as Partial<CacheFile>;
-  if (input.version !== CACHE_VERSION || !Array.isArray(input.servers)) return undefined;
+  if (
+    input.version !== CACHE_VERSION ||
+    !Array.isArray(input.servers) ||
+    !Array.isArray(input.failures)
+  ) {
+    return undefined;
+  }
+  for (const failure of input.failures) {
+    if (
+      typeof failure !== "object" ||
+      failure === null ||
+      typeof failure.fingerprint !== "string" ||
+      typeof failure.definitionFingerprint !== "string" ||
+      typeof failure.server !== "string" ||
+      typeof failure.failedAt !== "number" ||
+      typeof failure.error !== "string"
+    ) {
+      return undefined;
+    }
+  }
   for (const server of input.servers) {
     if (
       typeof server !== "object" ||
       server === null ||
       typeof server.fingerprint !== "string" ||
+      typeof server.definitionFingerprint !== "string" ||
       typeof server.server !== "string" ||
       typeof server.discoveredAt !== "number" ||
       typeof server.protocolVersion !== "string" ||
@@ -158,6 +206,10 @@ async function writeCache(path: string, cache: CacheFile): Promise<void> {
   }
 }
 
+function byServer<T extends { readonly server: string }>(entries: readonly T[]): T[] {
+  return [...entries].sort((left, right) => left.server.localeCompare(right.server));
+}
+
 export async function updateMcpCapabilityCache(input: {
   readonly cachePath: string;
   readonly server: NamedMcpServerConfig;
@@ -167,17 +219,41 @@ export async function updateMcpCapabilityCache(input: {
   const cached = await readCache(input.cachePath);
   const entry: CacheServer = {
     fingerprint: mcpConfigurationFingerprint(input.server.config),
+    definitionFingerprint: mcpDefinitionFingerprint(input.server.definition),
     server: input.server.name,
     discoveredAt: input.discoveredAt ?? Date.now(),
     ...input.discovery,
   };
   await writeCache(input.cachePath, {
     version: CACHE_VERSION,
-    servers: [
+    servers: byServer([
       ...(cached?.servers.filter((server) => server.server !== input.server.name) ?? []),
       entry,
-    ].sort((left, right) => left.server.localeCompare(right.server)),
+    ]),
+    failures: cached?.failures.filter((failure) => failure.server !== input.server.name) ?? [],
   });
+}
+
+/** Projects cached discovery state for the daemon-owned configuration store. */
+export function mcpDiscoveryStateReader(cachePath: string): McpDiscoveryStateReader {
+  return {
+    async read() {
+      const cached = await readCache(cachePath);
+      return {
+        discovered: (cached?.servers ?? []).map((server) => ({
+          server: server.server,
+          definitionFingerprint: server.definitionFingerprint,
+          discoveredAt: server.discoveredAt,
+          tools: server.tools.map((tool) => ({ name: tool.name, description: tool.description })),
+        })),
+        failed: (cached?.failures ?? []).map((failure) => ({
+          server: failure.server,
+          definitionFingerprint: failure.definitionFingerprint,
+          error: failure.error,
+        })),
+      };
+    },
+  };
 }
 
 function binding(
@@ -210,19 +286,38 @@ function binding(
   };
 }
 
+function failureText(cause: unknown, redact: (text: string) => string): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  const redacted = redact(message.replace(/\s+/g, " ").trim() || "unknown error");
+  return redacted.length <= MAX_FAILURE_BYTES
+    ? redacted
+    : `${redacted.slice(0, MAX_FAILURE_BYTES - 1)}…`;
+}
+
+/**
+ * Indexes every enabled server. A server that cannot be discovered contributes
+ * no capability records; its failure is cached and returned so the daemon can
+ * project it, and the remaining servers still load.
+ */
 export async function loadMcpCapabilities(input: {
   readonly servers: readonly NamedMcpServerConfig[];
   readonly manager: McpManager;
   readonly tools: ToolRegistry;
   readonly cachePath: string;
   readonly now?: number;
-}): Promise<{ readonly service: McpCapabilityService; readonly authority: string }> {
+}): Promise<{
+  readonly service: McpCapabilityService;
+  readonly authority: string;
+  readonly failures: readonly McpDiscoveryFailure[];
+}> {
   const now = input.now ?? Date.now();
   const cached = await readCache(input.cachePath);
   const next: CacheServer[] = [];
+  const failures: CacheFailure[] = [];
   const bindings: McpToolBinding[] = [];
   for (const server of input.servers) {
     const fingerprint = mcpConfigurationFingerprint(server.config);
+    const definitionFingerprint = mcpDefinitionFingerprint(server.definition);
     const hit = cached?.servers.find(
       (entry) =>
         entry.server === server.name &&
@@ -236,9 +331,22 @@ export async function loadMcpCapabilities(input: {
     else {
       try {
         const discovered = await input.manager.discoverTools(server.name);
-        metadata = { fingerprint, server: server.name, discoveredAt: now, ...discovered };
+        metadata = {
+          fingerprint,
+          definitionFingerprint,
+          server: server.name,
+          discoveredAt: now,
+          ...discovered,
+        };
       } catch (cause) {
-        throw new Error(`Cannot index MCP server ${server.name}: ${String(cause)}`, { cause });
+        failures.push({
+          fingerprint,
+          definitionFingerprint,
+          server: server.name,
+          failedAt: now,
+          error: failureText(cause, (text) => input.manager.redactText(text)),
+        });
+        continue;
       }
     }
     next.push(metadata);
@@ -248,7 +356,15 @@ export async function loadMcpCapabilities(input: {
       input.tools.registerCapability(frozen.identity, input.manager.makeDirectTool(frozen));
     }
   }
-  await writeCache(input.cachePath, { version: CACHE_VERSION, servers: next });
+  await writeCache(input.cachePath, {
+    version: CACHE_VERSION,
+    servers: byServer(next),
+    failures: byServer(failures),
+  });
   const authorities = new Set([MCP_AUTHORITY]);
-  return { service: new McpCapabilityService(bindings, authorities), authority: MCP_AUTHORITY };
+  return {
+    service: new McpCapabilityService(bindings, authorities),
+    authority: MCP_AUTHORITY,
+    failures: failures.map((failure) => ({ server: failure.server, error: failure.error })),
+  };
 }

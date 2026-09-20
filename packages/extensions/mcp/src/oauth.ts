@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { randomUUID } from "node:crypto";
@@ -257,15 +258,22 @@ class PersistentOAuthProvider implements OAuthClientProvider {
   async redirectToAuthorization(url: URL): Promise<void> {
     assertSafeAuthorizationUrl(url);
     const code = this.callback.waitForCode(this.stateValue, this.signal);
-    const response = await this.interact(
-      {
-        kind: "mcp_elicitation_url",
-        source: this.source,
-        message: "Authorize this MCP server in your browser",
-        data: { url: url.href },
-      },
-      this.signal,
-    );
+    let response: McpInteractionResponse;
+    try {
+      response = await this.interact(
+        {
+          kind: "mcp_elicitation_url",
+          source: this.source,
+          message: "Authorize this MCP server in your browser",
+          data: { url: url.href },
+        },
+        this.signal,
+      );
+    } catch (error) {
+      await this.callback.close();
+      await code.catch(() => undefined);
+      throw error;
+    }
     if (response.action !== "accept") {
       await this.callback.close();
       await code.catch(() => undefined);

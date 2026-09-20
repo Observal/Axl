@@ -1,4 +1,5 @@
 /* SPDX-FileCopyrightText: 2026 Hari Srinivasan */
+/* SPDX-FileCopyrightText: 2026 Shaan Narendran */
 /* SPDX-License-Identifier: Apache-2.0 */
 
 * { box-sizing:border-box; }
@@ -629,8 +630,17 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .provider-row header strong { color:var(--text-soft); font-size:12px; font-weight:600; }
 .provider-row p { margin:5px 0 0; color:var(--subtle); font-size:10px; overflow-wrap:anywhere; }
 .provider-state { color:#88888f; font-size:9px; text-transform:capitalize; }
-.provider-state.authenticated { color:#72ad8a; }
-.provider-state.reauthentication_required { color:#c2a267; }
+.provider-state.authenticated,.provider-state.discovered { color:#72ad8a; }
+.provider-state.reauthentication_required,.provider-state.pending { color:#c2a267; }
+.provider-state.failed { color:#cf8d93; }
+.provider-state.disabled { color:var(--muted); }
+.mcp-tools { margin:8px 0 0; padding:0; list-style:none; display:grid; gap:4px; }
+.mcp-tools li { display:grid; grid-template-columns:12px minmax(0,1fr); gap:8px; align-items:baseline; color:var(--subtle); font-size:10px; line-height:1.45; }
+.mcp-tools li > span:first-child { color:var(--muted); }
+.mcp-tools li.active > span:first-child,.mcp-tools li.active strong { color:var(--accent); }
+.mcp-tools strong { color:var(--text-soft); font-weight:600; margin-right:6px; }
+.mcp-add { margin-top:14px; }
+.mcp-add .questionnaire { max-width:none; }
 .provider-error { display:block; margin:6px 0 0; color:#cf8d93; font-size:10px; line-height:1.45; }
 .provider-empty { color:var(--muted); font-size:12px; }
 .provider-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:5px; }

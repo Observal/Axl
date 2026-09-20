@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { ProtocolValidationError } from "./event-envelope.ts";
@@ -28,12 +29,31 @@ export interface McpStdioServerDefinition {
 
 export type McpServerDefinition = McpHttpServerDefinition | McpStdioServerDefinition;
 
+/**
+ * Daemon-projected discovery state for one configured server.
+ * `pending` means no session has discovered the server yet.
+ */
+export type McpServerStatus = "discovered" | "failed" | "disabled" | "pending";
+
+export interface McpServerToolSummary {
+  readonly name: string;
+  readonly description: string;
+}
+
+export interface McpServerEntry {
+  readonly name: string;
+  readonly definition: McpServerDefinition;
+  readonly status: McpServerStatus;
+  readonly tools: readonly McpServerToolSummary[];
+  /** Present when `status` is `discovered`. */
+  readonly discoveredAt?: number;
+  /** Redacted failure message. Present when `status` is `failed`. */
+  readonly error?: string;
+}
+
 export interface McpConfigListResult {
   readonly path: string;
-  readonly servers: readonly {
-    readonly name: string;
-    readonly definition: McpServerDefinition;
-  }[];
+  readonly servers: readonly McpServerEntry[];
 }
 
 export interface McpConfigUpsertParams {
@@ -45,9 +65,38 @@ export interface McpConfigRemoveParams {
   readonly name: string;
 }
 
+export interface McpConfigProbeParams {
+  readonly name: string;
+  readonly definition: McpServerDefinition;
+}
+
+export interface McpConfigProbeResult {
+  readonly protocolVersion: string;
+  readonly tools: readonly McpServerToolSummary[];
+  /**
+   * The server answered but requires OAuth before it lists tools. Saving it is
+   * safe; the browser authorization prompt appears when a session first connects.
+   */
+  readonly authorization?: "required";
+}
+
 export interface McpConfigMutationResult extends McpConfigListResult {
   readonly changed: boolean;
 }
+
+export const MCP_CONFIG_LIMITS = {
+  servers: 256,
+  toolsPerServer: 1_000,
+  toolDescription: 4_096,
+  error: 2_000,
+} as const;
+
+export const MCP_SERVER_STATUSES: readonly McpServerStatus[] = [
+  "discovered",
+  "failed",
+  "disabled",
+  "pending",
+];
 
 const SERVER_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
@@ -184,25 +233,96 @@ export function parseMcpServerName(value: unknown, path: string): string {
   return value;
 }
 
+function parseToolSummaries(value: unknown, path: string): readonly McpServerToolSummary[] {
+  if (!Array.isArray(value) || value.length > MCP_CONFIG_LIMITS.toolsPerServer) {
+    throw new ProtocolValidationError(
+      path,
+      `must be an array of at most ${MCP_CONFIG_LIMITS.toolsPerServer} tools`,
+    );
+  }
+  return value.map((item, index) => {
+    const tool = object(item, `${path}[${index}]`);
+    exact(tool, `${path}[${index}]`, ["name", "description"]);
+    const description = tool.description;
+    if (typeof description !== "string" || description.length > MCP_CONFIG_LIMITS.toolDescription) {
+      throw new ProtocolValidationError(
+        `${path}[${index}].description`,
+        `must be a string of at most ${MCP_CONFIG_LIMITS.toolDescription} characters`,
+      );
+    }
+    return { name: text(tool.name, `${path}[${index}].name`), description };
+  });
+}
+
+function parseServerEntry(value: unknown, path: string): McpServerEntry {
+  const item = object(value, path);
+  exact(item, path, ["name", "definition", "status", "tools", "discoveredAt", "error"]);
+  const status = item.status;
+  if (typeof status !== "string" || !MCP_SERVER_STATUSES.includes(status as McpServerStatus)) {
+    throw new ProtocolValidationError(`${path}.status`, "must be a known MCP server status");
+  }
+  if (item.discoveredAt !== undefined) {
+    if (status !== "discovered") {
+      throw new ProtocolValidationError(
+        `${path}.discoveredAt`,
+        "is only allowed when status is discovered",
+      );
+    }
+    if (!Number.isSafeInteger(item.discoveredAt) || (item.discoveredAt as number) < 0) {
+      throw new ProtocolValidationError(
+        `${path}.discoveredAt`,
+        "must be a non-negative safe integer",
+      );
+    }
+  }
+  if (item.error !== undefined) {
+    if (status !== "failed") {
+      throw new ProtocolValidationError(`${path}.error`, "is only allowed when status is failed");
+    }
+    if (typeof item.error !== "string" || item.error.length > MCP_CONFIG_LIMITS.error) {
+      throw new ProtocolValidationError(
+        `${path}.error`,
+        `must be a string of at most ${MCP_CONFIG_LIMITS.error} characters`,
+      );
+    }
+  } else if (status === "failed") {
+    throw new ProtocolValidationError(`${path}.error`, "is required when status is failed");
+  }
+  return {
+    name: parseMcpServerName(item.name, `${path}.name`),
+    definition: parseMcpServerDefinition(item.definition, `${path}.definition`),
+    status: status as McpServerStatus,
+    tools: parseToolSummaries(item.tools, `${path}.tools`),
+    ...(item.discoveredAt === undefined ? {} : { discoveredAt: item.discoveredAt as number }),
+    ...(item.error === undefined ? {} : { error: item.error as string }),
+  };
+}
+
 export function parseMcpConfigListResult(value: unknown): McpConfigListResult {
   const input = object(value, "result");
   exact(input, "result", ["path", "servers"]);
-  if (!Array.isArray(input.servers) || input.servers.length > 256) {
-    throw new ProtocolValidationError("result.servers", "must be an array of at most 256 servers");
+  if (!Array.isArray(input.servers) || input.servers.length > MCP_CONFIG_LIMITS.servers) {
+    throw new ProtocolValidationError(
+      "result.servers",
+      `must be an array of at most ${MCP_CONFIG_LIMITS.servers} servers`,
+    );
   }
   return {
     path: text(input.path, "result.path"),
-    servers: input.servers.map((value, index) => {
-      const item = object(value, `result.servers[${index}]`);
-      exact(item, `result.servers[${index}]`, ["name", "definition"]);
-      return {
-        name: parseMcpServerName(item.name, `result.servers[${index}].name`),
-        definition: parseMcpServerDefinition(
-          item.definition,
-          `result.servers[${index}].definition`,
-        ),
-      };
-    }),
+    servers: input.servers.map((item, index) => parseServerEntry(item, `result.servers[${index}]`)),
+  };
+}
+
+export function parseMcpConfigProbeResult(value: unknown): McpConfigProbeResult {
+  const input = object(value, "result");
+  exact(input, "result", ["protocolVersion", "tools", "authorization"]);
+  if (input.authorization !== undefined && input.authorization !== "required") {
+    throw new ProtocolValidationError("result.authorization", 'must be "required" when present');
+  }
+  return {
+    protocolVersion: text(input.protocolVersion, "result.protocolVersion"),
+    tools: parseToolSummaries(input.tools, "result.tools"),
+    ...(input.authorization === undefined ? {} : { authorization: "required" as const }),
   };
 }
 

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { access, readdir } from "node:fs/promises";
@@ -289,9 +290,59 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
   // Sandboxed startup fails closed before listening. Unsafe startup may listen
   // first because its lack of isolation is already explicit and logged.
   const initialAssembly = unsafe ? undefined : await loadAssembly();
-  const { AxlDaemon, installDaemonCommandCapabilities } = await import("@axl/daemon");
-  const { McpConfigStore } = await import("@axl/extension-mcp");
-  const mcpConfigurationStore = new McpConfigStore(axlHome, process.cwd());
+  const { AxlDaemon, installDaemonCommandCapabilities, McpProbeFailedError } = await import(
+    "@axl/daemon"
+  );
+  const {
+    McpConfigStore,
+    mcpCapabilityCachePath,
+    mcpDiscoveryStateReader,
+    McpProbeError,
+    mcpSecretValues: mcpSecretValuesOf,
+    probeMcpServer,
+    resolveMcpServerConfig,
+  } = await import("@axl/extension-mcp");
+  const mcpCachePath = mcpCapabilityCachePath(axlHome);
+  const mcpConfigurationStore = new McpConfigStore(
+    axlHome,
+    process.cwd(),
+    mcpDiscoveryStateReader(mcpCachePath),
+  );
+  const probeMcpConfiguration = async (
+    params: import("@axl/protocol").McpConfigProbeParams,
+    signal?: AbortSignal,
+  ): Promise<import("@axl/protocol").McpConfigProbeResult> => {
+    const { sandbox } = await loadAssembly();
+    const cwd = process.cwd();
+    let server: import("@axl/extension-mcp").NamedMcpServerConfig;
+    try {
+      server = resolveMcpServerConfig(params.name, params.definition, cwd);
+    } catch (error) {
+      throw new McpProbeFailedError(
+        params.name,
+        error instanceof Error ? error.message : "Invalid MCP server definition",
+        { cause: error },
+      );
+    }
+    const policy = { workspace: cwd, readableRoots: [cwd], protectedPaths: [axlHome] };
+    try {
+      return await probeMcpServer({
+        server,
+        cwd,
+        stateDirectory: join(stateDirectory, "mcp-probe"),
+        blobDirectory: join(stateDirectory, "blobs"),
+        secretValues: mcpSecretValuesOf([server]),
+        wrapStdio: (input) => sandbox.wrapProcess({ ...input, policy }),
+        cachePath: mcpCachePath,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      if (error instanceof McpProbeError) {
+        throw new McpProbeFailedError(params.name, error.message, { cause: error });
+      }
+      throw error;
+    }
+  };
   const providerManagement = {
     list: async (...args: Parameters<import("@axl/daemon").ProviderManagementService["list"]>) =>
       createProviderManagementService((await loadAssembly()).providers).list(...args),
@@ -327,6 +378,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       list: () => mcpConfigurationStore.list(),
       upsert: ({ name, definition }) => mcpConfigurationStore.upsert(name, definition),
       remove: ({ name }) => mcpConfigurationStore.remove(name),
+      probe: probeMcpConfiguration,
     },
     runtime: async ({
       sessionId,
@@ -438,17 +490,12 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           daemonCapabilities.source,
         ];
         if (await exists(join(axlHome, "mcp.json"))) {
-          const {
-            loadMcpCapabilities,
-            loadMcpConfig,
-            McpManager,
-            mcpSecretValues,
-            updateMcpCapabilityCache,
-          } = await import("@axl/extension-mcp");
+          const { loadMcpCapabilities, loadMcpConfig, McpManager, updateMcpCapabilityCache } =
+            await import("@axl/extension-mcp");
           const servers = await loadMcpConfig({ cwd, globalDirectory: axlHome });
-          for (const value of mcpSecretValues(servers)) mcpSecrets.add(value);
+          for (const value of mcpSecretValuesOf(servers)) mcpSecrets.add(value);
           if (servers.length > 0) {
-            const cachePath = join(axlHome, "cache", "mcp-tools.json");
+            const cachePath = mcpCachePath;
             const manager = new McpManager({
               servers,
               cwd,

@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
-import { useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import type {
   InteractionAction,
   JsonObject,
@@ -144,10 +145,23 @@ function InteractionForm({ interaction, respond }: { readonly interaction: Proje
   </section>;
 }
 
-function UserQuestionnaire({ interaction, respond }: { readonly interaction: ProjectedInteraction; readonly respond: InteractionResponder }): React.JSX.Element {
-  const questions = Array.isArray(interaction.request.payload.data?.questions)
-    ? interaction.request.payload.data.questions as unknown as readonly UserQuestion[]
-    : [];
+export interface QuestionnaireFormProps {
+  readonly questions: readonly UserQuestion[];
+  /** Accessible label and visible heading for the review step. */
+  readonly title?: string;
+  readonly submitLabel?: string;
+  readonly pendingLabel?: string;
+  /** Extra review content derived from the answers, e.g. the exact effect of submitting. */
+  readonly review?: (answers: readonly UserQuestionAnswer[]) => ReactNode;
+  readonly onSubmit: (answers: readonly UserQuestionAnswer[]) => Promise<void>;
+  readonly onCancel: () => void | Promise<void>;
+}
+
+/**
+ * Stepped questionnaire shared by model questions and client-local guided flows.
+ * Questions without options go straight to text entry.
+ */
+export function QuestionnaireForm({ questions, title, submitLabel = "Submit", pendingLabel = "Submitting…", review, onSubmit, onCancel }: QuestionnaireFormProps): React.JSX.Element {
   const [answers, setAnswers] = useState<readonly UserQuestionAnswer[]>(() =>
     questions.map((_, questionIndex) => ({ questionIndex, selectedLabels: [] })),
   );
@@ -158,6 +172,10 @@ function UserQuestionnaire({ interaction, respond }: { readonly interaction: Pro
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
   const question = questions[step];
+  const textOnly = question !== undefined && question.options.length === 0;
+  useEffect(() => {
+    if (textOnly) setCustom(true);
+  }, [textOnly, step]);
   const answer = answers[step] ?? { questionIndex: step, selectedLabels: [] };
   const update = (next: UserQuestionAnswer): void => {
     setAnswers((current) => current.map((item, index) => index === step ? next : item));
@@ -172,7 +190,8 @@ function UserQuestionnaire({ interaction, respond }: { readonly interaction: Pro
     setSubmitting(true);
     setError(undefined);
     try {
-      await respond(interaction.interactionId, action, action === "accept" ? { answers } : undefined);
+      if (action === "accept") await onSubmit(answers);
+      else await onCancel();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not submit answers");
       setSubmitting(false);
@@ -182,24 +201,25 @@ function UserQuestionnaire({ interaction, respond }: { readonly interaction: Pro
     return <div className="notice system-notice warning"><strong>Questionnaire unavailable</strong><small>No questions were provided.</small></div>;
   }
   if (reviewing) {
-    return <section className="interaction-card questionnaire" aria-label="Review answers">
-      <header><strong>Review answers</strong><small>{questions.length}/{questions.length}</small></header>
+    return <section className="interaction-card questionnaire" aria-label={title ?? "Review answers"}>
+      <header><strong>{title === undefined ? "Review answers" : `${title} · review`}</strong><small>{questions.length}/{questions.length}</small></header>
       <div className="question-review">
         {questions.map((item, index) => {
           const itemAnswer = answers[index];
           return <button type="button" key={item.question} onClick={() => { setStep(index); setReviewing(false); }}>
-            <span><strong>{item.question}</strong><small>{[...(itemAnswer?.selectedLabels ?? []), itemAnswer?.customAnswer].filter(Boolean).join(", ")}</small></span>
+            <span><strong>{item.header}</strong><small>{[...(itemAnswer?.selectedLabels ?? []), itemAnswer?.customAnswer].filter(Boolean).join(", ") || "(unanswered)"}</small></span>
             <span>Edit</span>
           </button>;
         })}
       </div>
+      {review && <div className="question-review-detail">{review(answers)}</div>}
       {error && <div className="interaction-error" role="alert">{error}</div>}
-      <footer><button type="button" disabled={submitting} onClick={() => void submit("cancel")}>Cancel</button><button className="primary" type="button" disabled={submitting} onClick={() => void submit("accept")}>{submitting ? "Submitting…" : "Submit"}</button></footer>
+      <footer><button type="button" disabled={submitting} onClick={() => void submit("cancel")}>Cancel</button><button className="primary" type="button" disabled={submitting} onClick={() => void submit("accept")}>{submitting ? pendingLabel : submitLabel}</button></footer>
     </section>;
   }
   const hasAnswer = answer.selectedLabels.length > 0 || (answer.customAnswer?.trim().length ?? 0) > 0;
-  return <section className="interaction-card questionnaire" aria-label="Questions from Axl">
-    <header><strong>{question.question}</strong><small>{step + 1}/{questions.length}</small></header>
+  return <section className="interaction-card questionnaire" aria-label={title ?? "Questions from Axl"}>
+    <header><strong>{question.question}</strong><small>{title === undefined ? "" : `${question.header} · `}{step + 1}/{questions.length}</small></header>
     <div className={`question-stage${preview === undefined ? "" : " has-preview"}`}>
       <div className="question-options" role="group" aria-label={question.header}>
         {question.options.map((option, optionIndex) => {
@@ -232,7 +252,7 @@ function UserQuestionnaire({ interaction, respond }: { readonly interaction: Pro
             <kbd>{optionIndex + 1}</kbd>
           </button>;
         })}
-        <button
+        {!textOnly && <button
           className={custom ? "selected" : undefined}
           type="button"
           aria-pressed={custom}
@@ -249,15 +269,26 @@ function UserQuestionnaire({ interaction, respond }: { readonly interaction: Pro
         >
           <span><strong>Type something else…</strong><small>Provide an answer not listed above</small></span>
           <kbd>{question.options.length + 1}</kbd>
-        </button>
-        {custom && <div className="question-custom"><input
-          type="text"
-          aria-label={`Custom answer for ${question.question}`}
-          autoFocus
-          maxLength={4000}
-          value={answer.customAnswer ?? ""}
-          onChange={(event) => update({ ...answer, customAnswer: event.target.value })}
-        /></div>}
+        </button>}
+        {(custom || textOnly) && <div className="question-custom">{textOnly
+          ? <textarea
+            aria-label={`Answer for ${question.header}`}
+            autoFocus
+            rows={3}
+            maxLength={4000}
+            value={answer.customAnswer ?? ""}
+            onChange={(event) => update({ questionIndex: step, selectedLabels: [], customAnswer: event.target.value })}
+            onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey && hasAnswer) { event.preventDefault(); advance(); } }}
+          />
+          : <input
+            type="text"
+            aria-label={`Answer for ${question.header}`}
+            autoFocus
+            maxLength={4000}
+            value={answer.customAnswer ?? ""}
+            onChange={(event) => update({ questionIndex: step, selectedLabels: question.multiSelect === true ? answer.selectedLabels : [], customAnswer: event.target.value })}
+            onKeyDown={(event) => { if (event.key === "Enter" && hasAnswer) { event.preventDefault(); advance(); } }}
+          />}</div>}
       </div>
       {preview && <div className="question-preview"><Markdown text={preview} /></div>}
     </div>
@@ -266,10 +297,21 @@ function UserQuestionnaire({ interaction, respond }: { readonly interaction: Pro
       <button type="button" disabled={submitting} onClick={() => void submit("cancel")}>Cancel</button>
       <span>
         {step > 0 && <button type="button" onClick={() => { setStep((current) => current - 1); setCustom(false); setPreview(undefined); }}>Back</button>}
-        {(question.multiSelect === true || custom) && <button className="primary" type="button" disabled={!hasAnswer || submitting} onClick={advance}>{step === questions.length - 1 ? "Review" : "Continue"}</button>}
+        {(question.multiSelect === true || custom || textOnly) && <button className="primary" type="button" disabled={!hasAnswer || submitting} onClick={advance}>{step === questions.length - 1 ? "Review" : "Continue"}</button>}
       </span>
     </footer>
   </section>;
+}
+
+function UserQuestionnaire({ interaction, respond }: { readonly interaction: ProjectedInteraction; readonly respond: InteractionResponder }): React.JSX.Element {
+  const questions = Array.isArray(interaction.request.payload.data?.questions)
+    ? interaction.request.payload.data.questions as unknown as readonly UserQuestion[]
+    : [];
+  return <QuestionnaireForm
+    questions={questions}
+    onSubmit={(answers) => respond(interaction.interactionId, "accept", { answers }).then(() => undefined)}
+    onCancel={() => respond(interaction.interactionId, "cancel").then(() => undefined)}
+  />;
 }
 
 function InteractionApproval({ interaction, respond, error: initialError }: { readonly interaction: ProjectedInteraction; readonly respond: InteractionResponder; readonly error?: string | undefined }): React.JSX.Element {

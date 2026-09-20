@@ -271,10 +271,17 @@ const params = {
   "provider.auth.logout": { providerId: "provider-1" },
   "mcp.config.list": {},
   "mcp.config.upsert": {
-    name: "context7",
-    definition: { url: "https://mcp.context7.com/mcp" },
+    name: "docs",
+    definition: {
+      url: "https://mcp.example.com/mcp",
+      headers: { Authorization: "Bearer ${DOCS_TOKEN}" },
+    },
   },
-  "mcp.config.remove": { name: "context7" },
+  "mcp.config.remove": { name: "docs" },
+  "mcp.config.probe": {
+    name: "docs",
+    definition: { url: "https://mcp.example.com/mcp", headers: { Authorization: "DOCS_TOKEN" } },
+  },
   "session.create": {
     cwd: "/workspace",
     providerId: "provider-1",
@@ -444,17 +451,56 @@ const results = {
   "provider.auth.logout": { providerId: "provider-1", phase: "logged_out" },
   "mcp.config.list": {
     path: "/home/user/.axl/mcp.json",
-    servers: [{ name: "context7", definition: { url: "https://mcp.context7.com/mcp" } }],
+    servers: [
+      {
+        name: "docs",
+        definition: {
+          url: "https://mcp.example.com/mcp",
+          headers: { Authorization: "DOCS_TOKEN" },
+        },
+        status: "discovered",
+        tools: [{ name: "search_docs", description: "Search the documentation." }],
+        discoveredAt: 1,
+      },
+      {
+        name: "local",
+        definition: { command: "example-mcp-server", enabled: false },
+        status: "disabled",
+        tools: [],
+      },
+      {
+        name: "broken",
+        definition: { url: "https://broken.example.com/mcp" },
+        status: "failed",
+        tools: [],
+        error: "endpoint returned HTTP 404",
+      },
+    ],
   },
   "mcp.config.upsert": {
     path: "/home/user/.axl/mcp.json",
-    servers: [{ name: "context7", definition: { url: "https://mcp.context7.com/mcp" } }],
+    servers: [
+      {
+        name: "docs",
+        definition: {
+          url: "https://mcp.example.com/mcp",
+          headers: { Authorization: "DOCS_TOKEN" },
+        },
+        status: "pending",
+        tools: [],
+      },
+    ],
     changed: true,
   },
   "mcp.config.remove": {
     path: "/home/user/.axl/mcp.json",
     servers: [],
     changed: true,
+  },
+  "mcp.config.probe": {
+    protocolVersion: "2025-11-25",
+    tools: [],
+    authorization: "required",
   },
   "session.create": opened,
   "session.resume": opened,

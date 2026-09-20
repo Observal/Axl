@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -55,6 +56,7 @@ test("command catalog publishes the complete built-in shared directory", () => {
     "mcp.config.list",
     "mcp.config.upsert",
     "mcp.config.remove",
+    "mcp.config.probe",
     "session.blob.abort",
     "session.blob.chunk",
     "session.blob.commit",
@@ -80,7 +82,7 @@ test("command catalog publishes the complete built-in shared directory", () => {
     parseSessionId("00000000-0000-4000-8000-000000000001"),
   );
 
-  assert.equal(catalog.generation, "builtin-4");
+  assert.equal(catalog.generation, "builtin-5");
   assert.deepEqual(
     catalog.commands.map((command) => command.name),
     [

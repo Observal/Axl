@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -35,7 +36,7 @@ function makeConfigureMcpTool(context: ModelToolContext) {
   return {
     name: "configure_mcp",
     description:
-      "List, add, update, or remove MCP servers in ~/.axl/mcp.json. Use either {url, headers?, oauth?, roots?} for Streamable HTTP or {command, args?, cwd?, env?, roots?} for stdio. Header and env values name host environment variables rather than containing secrets. Changes reload after this response.",
+      "List, add, update, or remove MCP servers in ~/.axl/mcp.json. Use either {url, headers?, oauth?, roots?} for Streamable HTTP or {command, args?, cwd?, env?, roots?} for stdio. Header and env values name host environment variables rather than containing secrets. Listing reports each server's discovery status and tool count. Changes reload after this response.",
     inputSchema: {
       type: "object",
       properties: {
@@ -76,8 +77,19 @@ function makeConfigureMcpTool(context: ModelToolContext) {
         throw new TypeError("configure_mcp action must be list, upsert, or remove");
       }
       signal.throwIfAborted();
+      const compact = {
+        path: result.path,
+        ...("changed" in result ? { changed: result.changed } : {}),
+        servers: result.servers.map((server) => ({
+          name: server.name,
+          definition: server.definition,
+          status: server.status,
+          toolCount: server.tools.length,
+          ...(server.error === undefined ? {} : { error: server.error }),
+        })),
+      };
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        content: [{ type: "text" as const, text: JSON.stringify(compact) }],
         isError: false,
       };
     },
@@ -154,7 +166,12 @@ const BUILT_INS: readonly BuiltInCommand[] = [
     description: "configure global MCP servers",
     context: "global",
     argument: { required: false, hint: "server" },
-    requiredCapabilities: ["mcp.config.list", "mcp.config.upsert", "mcp.config.remove"],
+    requiredCapabilities: [
+      "mcp.config.list",
+      "mcp.config.upsert",
+      "mcp.config.remove",
+      "mcp.config.probe",
+    ],
     modelTool: {
       identity: "tool:configure-mcp",
       aliases: ["configure mcp", "add mcp server", "remove mcp server"],
@@ -309,7 +326,7 @@ export function commandCatalog(
   sessionId?: SessionId,
 ): CommandListResult {
   return {
-    generation: "builtin-4",
+    generation: "builtin-5",
     commands: BUILT_INS.filter((command) =>
       command.requiredCapabilities.every((capability) => capabilities.has(capability)),
     ).map(({ modelTool: _modelTool, ...command }) => ({

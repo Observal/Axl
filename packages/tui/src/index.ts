@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "./activity.ts";
@@ -20,10 +21,12 @@ export * from "./input-buffer.ts";
 export * from "./live-assistant.ts";
 export * from "./login-dialog.ts";
 export * from "./markdown.ts";
+export * from "./mcp-panel.ts";
 export * from "./media.ts";
 export * from "./overlay.ts";
 export * from "./picker.ts";
 export * from "./provider-login.ts";
+export * from "./questionnaire.ts";
 export * from "./render.ts";
 export * from "./setup.ts";
 export * from "./stack.ts";

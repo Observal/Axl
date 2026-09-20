@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
@@ -16,7 +17,6 @@ import {
   MAX_UPLOAD_BLOB_BYTES,
   type McpConfigListResult,
   type McpServerDefinition,
-  mcpServerPresets,
   type ModelChoice,
   NewSessionController,
   type NewSessionDraft,
@@ -492,6 +492,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         onEvent: (event) => {
           if (live && event.type === "config.dialect" && event.payload.reason === "reload") {
             void providerDirectoryController.current?.load(true).catch(() => undefined);
+            if (current.connection.grantedCapabilities.includes("mcp.config.list")) {
+              void current.listMcpServers().then(setMcpConfiguration).catch(() => undefined);
+            }
           }
         },
         onChange: (projector) => {
@@ -1917,27 +1920,81 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     }
   };
 
-  const updateMcpServer = async (
-    name: string,
-    definition?: McpServerDefinition,
+  const reloadAfterMcpChange = async (notice: string): Promise<void> => {
+    if (client === undefined) return;
+    if (opened !== undefined) await commandController.current?.invoke("/reload", opened.sessionId);
+    setMcpConfiguration(await client.listMcpServers());
+    showActionNotice(notice);
+  };
+
+  /** Probe first, save only when the server answers, then reload. Errors surface in the form. */
+  const addMcpServer = async (name: string, definition: McpServerDefinition): Promise<void> => {
+    if (client === undefined) throw new Error("The daemon connection is unavailable");
+    setMcpError(undefined);
+    const probed = await client.probeMcpServer({ name, definition });
+    await client.upsertMcpServer({ name, definition });
+    await reloadAfterMcpChange(
+      probed.authorization === "required"
+        ? `MCP server ${name} added · authorize it in your browser when prompted`
+        : `MCP server ${name} added · ${probed.tools.length} tool${probed.tools.length === 1 ? "" : "s"}`,
+    );
+  };
+
+  const importMcpServers = async (
+    servers: readonly { readonly name: string; readonly definition: McpServerDefinition }[],
   ): Promise<void> => {
-    if (client === undefined || opened === undefined) return;
+    if (client === undefined) throw new Error("The daemon connection is unavailable");
+    setMcpError(undefined);
+    let tools = 0;
+    const needsAuthorization: string[] = [];
+    for (const server of servers) {
+      try {
+        const probed = await client.probeMcpServer(server);
+        tools += probed.tools.length;
+        if (probed.authorization === "required") needsAuthorization.push(server.name);
+      } catch (cause) {
+        throw new Error(`${server.name}: ${cause instanceof Error ? cause.message : "connection failed"}`);
+      }
+    }
+    for (const server of servers) await client.upsertMcpServer(server);
+    const subject = servers.length === 1 ? `MCP server ${servers[0]?.name}` : `${servers.length} MCP servers`;
+    await reloadAfterMcpChange(
+      needsAuthorization.length > 0
+        ? `${subject} added · ${needsAuthorization.join(", ")}: authorize in your browser when prompted`
+        : `${subject} added · ${tools} tool${tools === 1 ? "" : "s"}`,
+    );
+  };
+
+  const mutateMcpServer = async (notice: string, action: () => Promise<unknown>): Promise<void> => {
+    if (client === undefined) return;
     setMcpBusy(true);
     setMcpError(undefined);
     try {
-      const result =
-        definition === undefined
-          ? await client.removeMcpServer({ name })
-          : await client.upsertMcpServer({ name, definition });
-      setMcpConfiguration(result);
-      await commandController.current?.invoke("/reload", opened.sessionId);
-      showActionNotice(`MCP server ${name} ${definition === undefined ? "removed" : "added"}`);
+      await action();
+      await reloadAfterMcpChange(notice);
     } catch (cause) {
       setMcpError(cause instanceof Error ? cause.message : "Could not update MCP configuration");
     } finally {
       setMcpBusy(false);
     }
   };
+
+  const removeMcpServer = (name: string): Promise<void> =>
+    mutateMcpServer(`MCP server ${name} removed`, () => client?.removeMcpServer({ name }) ?? Promise.resolve());
+
+  const setMcpServerEnabled = (name: string, enabled: boolean): Promise<void> =>
+    mutateMcpServer(`MCP server ${name} ${enabled ? "enabled" : "disabled"}`, async () => {
+      const current = mcpConfiguration?.servers.find((server) => server.name === name)
+        ?? (await client?.listMcpServers())?.servers.find((server) => server.name === name);
+      if (current === undefined) throw new Error(`MCP server ${name} is no longer configured`);
+      const { enabled: _previous, ...rest } = current.definition;
+      await client?.upsertMcpServer({ name, definition: enabled ? rest : { ...rest, enabled: false } });
+    });
+
+  const mcpActiveIdentities = useMemo(
+    () => new Set(conversation.activeCapabilities.map((event) => event.payload.capability.identity)),
+    [conversation.activeCapabilities],
+  );
 
   const refreshProviders = async (providerId?: string): Promise<void> => {
     setProviderActionError(undefined);
@@ -2268,7 +2325,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         }}
       />
     </div>
-    {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={currentPreferences()} theme={theme} providers={providerInventory} providerLoading={providerLoading} providerRefresh={providerDirectory.refresh} providerError={providerError} providerLogin={providerLogin} settingsError={settingsError} mcp={mcpConfiguration} mcpError={mcpError} mcpBusy={mcpBusy} mcpPresets={mcpServerPresets(opened?.cwd ?? ".")} canRefresh={hasCapability("provider.catalog.refresh")} canLogin={canLoginProvider} canLogout={hasCapability("provider.auth.logout")} onTab={(tab) => { setControlCenter(tab); if (tab === "mcp") void loadMcpConfiguration(); }} onPreferences={applyWebPreferences} onTheme={(nextTheme) => { setSettingsError(undefined); setTheme(nextTheme); }} onRefresh={(providerId) => void refreshProviders(providerId)} onCancelRefresh={() => providerDirectoryController.current?.cancelRefresh()} onLogin={(providerId, method) => void startProviderLogin(providerId, method)} onCancelLogin={cancelProviderLogin} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId, method) => void copyProviderLogin(providerId, method)} onMcpAdd={(name, definition) => void updateMcpServer(name, definition)} onMcpRemove={(name) => void updateMcpServer(name)} onClose={() => { setControlCenter(undefined); setSettingsError(undefined); setMcpError(undefined); }} /></Suspense>}
+    {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={currentPreferences()} theme={theme} providers={providerInventory} providerLoading={providerLoading} providerRefresh={providerDirectory.refresh} providerError={providerError} providerLogin={providerLogin} settingsError={settingsError} mcp={mcpConfiguration} mcpError={mcpError} mcpBusy={mcpBusy} mcpActiveIdentities={mcpActiveIdentities} canRefresh={hasCapability("provider.catalog.refresh")} canLogin={canLoginProvider} canLogout={hasCapability("provider.auth.logout")} onTab={(tab) => { setControlCenter(tab); if (tab === "mcp") void loadMcpConfiguration(); }} onPreferences={applyWebPreferences} onTheme={(nextTheme) => { setSettingsError(undefined); setTheme(nextTheme); }} onRefresh={(providerId) => void refreshProviders(providerId)} onCancelRefresh={() => providerDirectoryController.current?.cancelRefresh()} onLogin={(providerId, method) => void startProviderLogin(providerId, method)} onCancelLogin={cancelProviderLogin} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId, method) => void copyProviderLogin(providerId, method)} onMcpAdd={addMcpServer} onMcpImport={importMcpServers} onMcpRemove={(name) => void removeMcpServer(name)} onMcpSetEnabled={(name, enabled) => void setMcpServerEnabled(name, enabled)} onMcpReload={() => void mutateMcpServer("MCP servers reloaded", () => Promise.resolve())} onClose={() => { setControlCenter(undefined); setSettingsError(undefined); setMcpError(undefined); }} /></Suspense>}
     {sessionLifecycleOpen && selectedSummary && <SessionLifecycle session={selectedSummary} busy={busy} capabilities={lifecycleCapabilities} {...(sessionLifecycleError === undefined ? {} : { error: sessionLifecycleError })} onRename={(title) => void renameSession(title)} onClone={() => void cloneSession()} onExport={() => void exportArtifact()} onDispose={() => void disposeSession()} onDelete={() => void deleteSession()} onClose={() => { setSessionLifecycleOpen(false); setSessionLifecycleError(undefined); }} />}
     {requeueOpen && <RequeueDialog items={pausedQueue} busyItemId={requeueBusyItemId} error={requeueError} onRequeue={(queueItemId) => void requeueItem(queueItemId)} onClose={() => { setRequeueOpen(false); setRequeueError(undefined); }} />}
     {newSessionOpen && <NewSessionDialog

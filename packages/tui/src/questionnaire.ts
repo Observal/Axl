@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import type { UserQuestion, UserQuestionAnswer } from "@axl/protocol";
@@ -15,6 +16,13 @@ interface QuestionnaireOptions {
   readonly refresh: () => void;
   readonly submit: (answers: readonly UserQuestionAnswer[]) => Promise<void>;
   readonly cancel: () => Promise<void>;
+  /** Optional dialog title; model questionnaires render without one. */
+  readonly title?: string;
+  /** Extra review-step lines derived from the answers, e.g. the exact effect of submitting. */
+  readonly review?: (answers: readonly UserQuestionAnswer[]) => readonly string[];
+  /** Footer shown while `submit` is running. */
+  readonly pendingLabel?: string;
+  readonly submitLabel?: string;
 }
 
 export class QuestionnaireOverlay implements Overlay {
@@ -34,6 +42,7 @@ export class QuestionnaireOverlay implements Overlay {
       questionIndex,
       selectedLabels: [],
     }));
+    this.enterStep();
   }
 
   render(width: number): string[] {
@@ -47,20 +56,27 @@ export class QuestionnaireOverlay implements Overlay {
       rows.push(palette.accent((palette.bold ?? ((text) => text))("Review answers")), "");
       for (const [index, question] of this.options.questions.entries()) {
         const answer = this.answers[index];
-        rows.push(`${palette.dim(`${index + 1}.`)} ${sanitizeTerminalText(question.question)}`);
-        rows.push(
-          `   ${palette.dim(
-            [...(answer?.selectedLabels ?? []), answer?.customAnswer]
-              .flatMap((value) => (value === undefined ? [] : [sanitizeTerminalText(value)]))
-              .join(", "),
-          )}`,
-        );
+        rows.push(`${palette.dim(`${index + 1}.`)} ${sanitizeTerminalText(question.header)}`);
+        const echoed =
+          [...(answer?.selectedLabels ?? []), answer?.customAnswer]
+            .flatMap((value) => (value === undefined ? [] : [sanitizeTerminalText(value)]))
+            .join(", ")
+            .replace(/\s+/gu, " ")
+            .trim() || "(unanswered)";
+        rows.push(`   ${palette.dim(truncateToWidth(echoed, Math.max(8, inner - 3), "…"))}`);
+      }
+      const review = this.options.review?.(this.answers) ?? [];
+      if (review.length > 0) {
+        rows.push("");
+        for (const line of review) rows.push(...wrapLine(sanitizeTerminalText(line), inner));
       }
       if (this.error) rows.push("", palette.error(this.error));
       return renderDialog({
-        title: "",
+        title: this.options.title ?? "",
         rows,
-        footer: "Enter to submit · ←/Tab to edit · Esc to cancel",
+        footer: this.pending
+          ? (this.options.pendingLabel ?? "Submitting…")
+          : `Enter to ${this.options.submitLabel ?? "submit"} · ←/Tab to edit · Esc to cancel`,
         width,
         palette,
       });
@@ -95,24 +111,37 @@ export class QuestionnaireOverlay implements Overlay {
       );
       rows.push(...this.descriptionLines(choice.description, inner, palette));
     }
-    rows.push(
-      this.optionLine(
-        question.options.length,
-        "Type something.",
-        question.multiSelect === true
-          ? answer.customAnswer === undefined
-            ? palette.dim("[ ]")
-            : palette.accent("[✓]")
-          : undefined,
-        inner,
-        palette,
-      ),
-    );
+    if (question.options.length > 0) {
+      rows.push(
+        this.optionLine(
+          question.options.length,
+          "Type something.",
+          question.multiSelect === true
+            ? answer.customAnswer === undefined
+              ? palette.dim("[ ]")
+              : palette.accent("[✓]")
+            : undefined,
+          inner,
+          palette,
+        ),
+      );
+    }
 
+    let promptRow: number | undefined;
+    let promptWidth = 0;
     if (this.editingCustom) {
-      const prompt = `> ${this.customValue}`;
-      rows.push("", truncateToWidth(prompt, inner, ""));
-      this.position = { row: rows.length + 1, column: 2 + visibleWidth(prompt) };
+      // Pasted text may contain newlines; show a single-line tail so the caret stays visible.
+      const value = this.customValue.replace(/\s+/gu, " ");
+      const available = Math.max(1, inner - 2);
+      const shown =
+        visibleWidth(value) <= available
+          ? value
+          : `…${value.slice(Math.max(0, value.length - (available - 1)))}`;
+      const prompt = `> ${shown}`;
+      if (question.options.length > 0) rows.push("");
+      rows.push(prompt);
+      promptRow = rows.length - 1;
+      promptWidth = visibleWidth(prompt);
     } else {
       const preview = question.options[this.option]?.preview;
       if (preview) {
@@ -125,15 +154,24 @@ export class QuestionnaireOverlay implements Overlay {
       }
     }
     if (this.error) rows.push("", palette.error(this.error));
-    return renderDialog({
-      title: "",
+    const rendered = renderDialog({
+      title: this.options.title ?? "",
       rows,
       footer: this.editingCustom
-        ? "Enter to save · Esc to go back"
+        ? question.options.length === 0
+          ? "Enter to continue · Tab/Arrow keys to navigate · Esc to cancel"
+          : "Enter to save · Esc to go back"
         : "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
       width,
       palette,
     });
+    if (promptRow !== undefined) {
+      // Locate the prompt in the final output so title rows and wrapping cannot skew the caret.
+      const marker = `  ${rows[promptRow] ?? ""}`;
+      const row = rendered.indexOf(marker);
+      if (row >= 0) this.position = { row, column: 2 + promptWidth };
+    }
+    return rendered;
   }
 
   cursor(): { row: number; column: number } | undefined {
@@ -156,9 +194,20 @@ export class QuestionnaireOverlay implements Overlay {
       at = decoded.next;
       const key = decoded.key;
       if (this.editingCustom) {
+        const textOnly = (this.options.questions[this.step]?.options.length ?? 0) === 0;
         if (key.kind === "escape") {
+          if (textOnly) {
+            void this.cancel();
+            return;
+          }
           this.editingCustom = false;
           this.customValue = "";
+        } else if (textOnly && (key.kind === "tab" || key.kind === "right")) {
+          this.saveCustom(false);
+          this.moveStep(1);
+        } else if (textOnly && (key.kind === "shift-tab" || key.kind === "left")) {
+          this.saveCustom(false);
+          this.moveStep(-1);
         } else if (key.kind === "enter") {
           this.saveCustom();
         } else if (key.kind === "backspace") {
@@ -237,6 +286,19 @@ export class QuestionnaireOverlay implements Overlay {
       (this.options.questions.length + 1);
     this.option = 0;
     this.error = undefined;
+    this.enterStep();
+  }
+
+  /** Questions without options go straight to text entry. */
+  private enterStep(): void {
+    const question = this.options.questions[this.step];
+    if (question !== undefined && question.options.length === 0) {
+      this.editingCustom = true;
+      this.customValue = this.answers[this.step]?.customAnswer ?? "";
+    } else {
+      this.editingCustom = false;
+      this.customValue = "";
+    }
   }
 
   private select(): void {
@@ -260,17 +322,24 @@ export class QuestionnaireOverlay implements Overlay {
     this.moveStep(1);
   }
 
-  private saveCustom(): void {
+  private saveCustom(advance = true): void {
     const value = this.customValue.trim();
-    if (!value) return;
     const question = this.options.questions[this.step];
     const answer = this.answers[this.step];
     if (question === undefined || answer === undefined) return;
+    if (!value) {
+      if (advance && question.options.length === 0) {
+        this.answers[this.step] = { questionIndex: this.step, selectedLabels: [] };
+        this.moveStep(1);
+      }
+      return;
+    }
     this.answers[this.step] = {
       questionIndex: this.step,
       selectedLabels: question.multiSelect === true ? answer.selectedLabels : [],
       customAnswer: value,
     };
+    if (!advance) return;
     this.editingCustom = false;
     this.customValue = "";
     if (question.multiSelect !== true) this.moveStep(1);

@@ -1,13 +1,26 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
-import { useEffect, useRef, type JSX } from "react";
-import type {
-  McpConfigListResult,
-  McpServerDefinition,
-  ProviderInventoryGroup,
-  ProviderLoginMethod,
+import { useEffect, useRef, useState, type JSX } from "react";
+import {
+  describeMcpServerDefinition,
+  formatMcpServerSummary,
+  MCP_ADD_SERVER_QUESTIONS,
+  MCP_IMPORT_QUESTION,
+  MCP_STATUS_LABELS,
+  type McpConfigListResult,
+  type McpServerDefinition,
+  type McpServerEntry,
+  mcpServerDefinitionFromDraft,
+  mcpRequiredEnvironment,
+  mcpServerDraftFromAnswers,
+  parseMcpImport,
+  type ProviderInventoryGroup,
+  type ProviderLoginMethod,
+  summarizeMcpServers,
 } from "@axl/sdk";
+import { QuestionnaireForm } from "@axl/ui/react";
 import type { WebTheme } from "./commands.ts";
 import { trapDialogFocus } from "./dialog-focus.ts";
 import { DOCK_WIDTH_RANGE, SIDEBAR_WIDTH_RANGE, type WebPreferences } from "./environment.ts";
@@ -42,7 +55,7 @@ export function ControlCenter({
   mcp,
   mcpError,
   mcpBusy,
-  mcpPresets,
+  mcpActiveIdentities,
   canRefresh,
   canLogin,
   canLogout,
@@ -56,7 +69,10 @@ export function ControlCenter({
   onLogout,
   onCopyLogin,
   onMcpAdd,
+  onMcpImport,
   onMcpRemove,
+  onMcpSetEnabled,
+  onMcpReload,
   onClose,
 }: {
   readonly tab: ControlCenterTab;
@@ -74,7 +90,8 @@ export function ControlCenter({
   readonly mcp?: McpConfigListResult | undefined;
   readonly mcpError?: string | undefined;
   readonly mcpBusy: boolean;
-  readonly mcpPresets: Readonly<Record<string, McpServerDefinition>>;
+  /** Capability identities activated in this session, e.g. `mcp:server/tool`. */
+  readonly mcpActiveIdentities: ReadonlySet<string>;
   readonly canRefresh: boolean;
   readonly canLogin: boolean;
   readonly canLogout: boolean;
@@ -87,11 +104,19 @@ export function ControlCenter({
   readonly onCancelLogin: () => void;
   readonly onLogout: (providerId: string) => void;
   readonly onCopyLogin: (providerId: string, method: ProviderLoginMethod) => void;
-  readonly onMcpAdd: (name: string, definition: McpServerDefinition) => void;
+  /** Probes the definition, saves it only on success, and reloads. Rejects with a user-facing message. */
+  readonly onMcpAdd: (name: string, definition: McpServerDefinition) => Promise<void>;
+  /** Probes every pasted server, saves them only if all answer, and reloads. */
+  readonly onMcpImport: (servers: readonly { readonly name: string; readonly definition: McpServerDefinition }[]) => Promise<void>;
   readonly onMcpRemove: (name: string) => void;
+  readonly onMcpSetEnabled: (name: string, enabled: boolean) => void;
+  readonly onMcpReload: () => void;
   readonly onClose: () => void;
 }): JSX.Element {
   const dialog = useRef<HTMLElement>(null);
+  const [mcpAdding, setMcpAdding] = useState<"guided" | "import">();
+  const [mcpExpanded, setMcpExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const [mcpRemoving, setMcpRemoving] = useState<string>();
   useEffect(() => {
     const prior = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     dialog.current?.querySelector<HTMLElement>("button, input")?.focus();
@@ -132,13 +157,88 @@ export function ControlCenter({
         })}</div>
         <p className="provider-footnote">Sign-in prompts and credentials stay in the trusted terminal host. This page receives only provider status.</p>
       </div> : <div className="providers-pane">
-        <div className="providers-heading"><span><strong>MCP servers</strong><small>{mcp?.path ?? "Global MCP configuration"}</small></span></div>
+        <div className="providers-heading"><span><strong>MCP servers</strong><small>{mcp?.path ?? "Global MCP configuration"}{mcp && mcp.servers.length > 0 ? ` · ${formatMcpServerSummary(summarizeMcpServers(mcp.servers))}` : ""}</small></span><span className="provider-actions"><button disabled={mcpBusy || mcp === undefined} onClick={onMcpReload}>Reload</button><button disabled={mcpBusy || mcpAdding !== undefined} onClick={() => setMcpAdding("import")}>Paste config</button><button className="primary" disabled={mcpBusy || mcpAdding !== undefined} onClick={() => setMcpAdding("guided")}>Add server</button></span></div>
         {mcpError && <p className="provider-error" role="alert">{mcpError}</p>}
-        {mcp?.servers.length === 0 && <p className="provider-empty">No MCP servers are configured.</p>}
-        <div className="provider-list">{mcp?.servers.map((server) => <article className="provider-row" key={server.name}><div className="provider-mark" aria-hidden="true">M</div><div><header><strong>{server.name}</strong><span className="provider-state authenticated">active</span></header><p>{"url" in server.definition ? server.definition.url : `${server.definition.command} ${(server.definition.args ?? []).join(" ")}`}</p></div><div className="provider-actions"><button disabled={mcpBusy} onClick={() => onMcpRemove(server.name)}>Remove</button></div></article>)}</div>
-        <div className="providers-heading"><span><strong>Add a tested server</strong><small>Saved globally and available after reload</small></span></div>
-        <div className="provider-list">{Object.entries(mcpPresets).filter(([name]) => !mcp?.servers.some((server) => server.name === name)).map(([name, definition]) => <article className="provider-row" key={name}><div className="provider-mark" aria-hidden="true">+</div><div><header><strong>{name}</strong></header><p>{"url" in definition ? definition.url : definition.command}</p></div><div className="provider-actions"><button disabled={mcpBusy} onClick={() => onMcpAdd(name, definition)}>Add</button></div></article>)}</div>
+        {mcp?.servers.length === 0 && mcpAdding === undefined && <p className="provider-empty">No MCP servers are configured. Paste the config block from any MCP server's README, or use the guided add flow.</p>}
+        <div className="provider-list">{mcp?.servers.map((server) => <McpServerRow key={server.name} server={server} busy={mcpBusy} expanded={mcpExpanded.has(server.name)} confirming={mcpRemoving === server.name} activeIdentities={mcpActiveIdentities} onToggle={() => setMcpExpanded((current) => { const next = new Set(current); if (next.has(server.name)) next.delete(server.name); else next.add(server.name); return next; })} onRemove={() => { if (mcpRemoving === server.name) { setMcpRemoving(undefined); onMcpRemove(server.name); } else setMcpRemoving(server.name); }} onKeep={() => setMcpRemoving(undefined)} onSetEnabled={(enabled) => onMcpSetEnabled(server.name, enabled)} />)}</div>
+        {mcpAdding === "import" && <div className="mcp-add"><QuestionnaireForm
+          title="Import MCP servers"
+          questions={[MCP_IMPORT_QUESTION]}
+          submitLabel="Connect and save"
+          pendingLabel="Connecting to each server…"
+          review={(answers) => {
+            try {
+              const servers = parseMcpImport(answers[0]?.customAnswer ?? "");
+              const required = mcpRequiredEnvironment(servers);
+              return <><span>Will be written to {mcp?.path ?? "~/.axl/mcp.json"} as:</span><pre>{JSON.stringify(Object.fromEntries(servers.map((server) => [server.name, server.definition])), null, 2)}</pre>{required.length > 0 && <span>Reads from the daemon's environment: <code>{required.join(", ")}</code>. Export them before starting the daemon.</span>}<span>Axl connects to each server first and saves only if all of them answer. A server that asks for OAuth is saved and authorized in your browser when the session reloads.</span></>;
+            } catch (cause) {
+              return <span className="provider-error" role="alert">{cause instanceof Error ? cause.message : "Invalid input"}</span>;
+            }
+          }}
+          onSubmit={async (answers) => {
+            await onMcpImport(parseMcpImport(answers[0]?.customAnswer ?? ""));
+            setMcpAdding(undefined);
+          }}
+          onCancel={() => setMcpAdding(undefined)}
+        /></div>}
+        {mcpAdding === "guided" && <div className="mcp-add"><QuestionnaireForm
+          title="Add MCP server"
+          questions={MCP_ADD_SERVER_QUESTIONS}
+          submitLabel="Connect and save"
+          pendingLabel="Connecting to the server…"
+          review={(answers) => {
+            try {
+              const { name, definition } = mcpServerDefinitionFromDraft(mcpServerDraftFromAnswers(answers));
+              const required = mcpRequiredEnvironment([{ definition }]);
+              return <><span>Will be written to {mcp?.path ?? "~/.axl/mcp.json"} as:</span><pre>{JSON.stringify({ [name]: definition }, null, 2)}</pre>{required.length > 0 && <span>Reads from the daemon's environment: <code>{required.join(", ")}</code>. Export them before starting the daemon.</span>}<span>Axl connects first and saves only if the server answers. A server that asks for OAuth is saved and authorized in your browser when the session reloads.</span></>;
+            } catch (cause) {
+              return <span className="provider-error" role="alert">{cause instanceof Error ? cause.message : "Incomplete answers"}</span>;
+            }
+          }}
+          onSubmit={async (answers) => {
+            const { name, definition } = mcpServerDefinitionFromDraft(mcpServerDraftFromAnswers(answers));
+            await onMcpAdd(name, definition);
+            setMcpAdding(undefined);
+          }}
+          onCancel={() => setMcpAdding(undefined)}
+        /></div>}
+        <p className="provider-footnote">Servers are saved to the daemon's global configuration and connect only when their tools are activated. Header and environment values name variables in the daemon's environment; Axl never stores the secrets themselves.</p>
       </div>}
     </section>
   </div>;
+}
+
+function McpServerRow({ server, busy, expanded, confirming, activeIdentities, onToggle, onRemove, onKeep, onSetEnabled }: {
+  readonly server: McpServerEntry;
+  readonly busy: boolean;
+  readonly expanded: boolean;
+  readonly confirming: boolean;
+  readonly activeIdentities: ReadonlySet<string>;
+  readonly onToggle: () => void;
+  readonly onRemove: () => void;
+  readonly onKeep: () => void;
+  readonly onSetEnabled: (enabled: boolean) => void;
+}): JSX.Element {
+  const toolCount = server.tools.length;
+  return <article className="provider-row" aria-label={`MCP server ${server.name}`}>
+    <div className="provider-mark" aria-hidden="true">{"url" in server.definition ? "⇅" : ">_"}</div>
+    <div>
+      <header><strong>{server.name}</strong><span className={`provider-state ${server.status}`}>{MCP_STATUS_LABELS[server.status]}</span></header>
+      <p>{describeMcpServerDefinition(server.definition)}{server.status === "discovered" ? ` · ${toolCount} tool${toolCount === 1 ? "" : "s"}` : ""}</p>
+      {server.error && <small className="provider-error" role="alert">{server.error}</small>}
+      {expanded && toolCount > 0 && <ul className="mcp-tools" aria-label={`${server.name} tools`}>{server.tools.map((tool) => {
+        const active = activeIdentities.has(`mcp:${server.name}/${tool.name}`);
+        return <li key={tool.name} className={active ? "active" : undefined} title={active ? "Activated in this session" : "Available through capability search"}><span aria-hidden="true">{active ? "●" : "○"}</span><span><strong>{tool.name}</strong>{tool.description}</span></li>;
+      })}</ul>}
+    </div>
+    <div className="provider-actions">
+      {confirming
+        ? <><span className="provider-state failed">Remove {server.name}?</span><button disabled={busy} onClick={onRemove}>Remove</button><button disabled={busy} onClick={onKeep}>Keep</button></>
+        : <>
+          {toolCount > 0 && <button disabled={busy} aria-expanded={expanded} onClick={onToggle}>{expanded ? "Hide tools" : "Tools"}</button>}
+          <button disabled={busy} onClick={() => onSetEnabled(server.status === "disabled")}>{server.status === "disabled" ? "Enable" : "Disable"}</button>
+          <button disabled={busy} onClick={onRemove}>Remove</button>
+        </>}
+    </div>
+  </article>;
 }

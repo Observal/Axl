@@ -2,10 +2,11 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -215,7 +216,7 @@ test("discovers native and unsafe histories with explicit placement labels", asy
 });
 
 test("assembles an authoritative local runtime without a presentation client", async (context) => {
-  const root = await mkdtemp(join(tmpdir(), "axl-runtime-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-runtime-")));
   context.after(() => rm(root, { recursive: true, force: true }));
   const axlHome = join(root, ".axl");
   const workspace = join(root, "workspace");
@@ -236,6 +237,7 @@ test("assembles an authoritative local runtime without a presentation client", a
     join(axlHome, "mcp.json"),
     JSON.stringify({
       mcpServers: {
+        broken: { command: process.execPath, args: ["-e", "process.exit(7)"] },
         fixture: {
           command: process.execPath,
           args: [
@@ -298,19 +300,57 @@ test("assembles an authoritative local runtime without a presentation client", a
     true,
   );
   assert.deepEqual(
-    (await client.listMcpServers()).servers.map((server) => server.name),
-    ["fixture"],
+    (await client.listMcpServers()).servers.map((server) => [server.name, server.status]),
+    [
+      ["broken", "pending"],
+      ["fixture", "pending"],
+    ],
   );
   assert.deepEqual(
     (
       await client.upsertMcpServer({
-        name: "context7",
-        definition: { url: "https://mcp.context7.com/mcp" },
+        name: "docs",
+        definition: { url: "https://mcp.example.com/mcp" },
       })
     ).servers.map((server) => server.name),
-    ["context7", "fixture"],
+    ["broken", "docs", "fixture"],
   );
-  assert.equal((await client.removeMcpServer({ name: "context7" })).changed, true);
+  assert.equal((await client.removeMcpServer({ name: "docs" })).changed, true);
+  const probed = await client.probeMcpServer({
+    name: "fixture",
+    definition: {
+      command: process.execPath,
+      args: [
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          "../../extensions/mcp/test/fixtures/server.mjs",
+        ),
+      ],
+      roots: ["."],
+    },
+  });
+  assert.deepEqual(
+    probed.tools.map((tool) => tool.name),
+    ["echo", "interactive", "tasker"],
+  );
+  await assert.rejects(
+    client.probeMcpServer({
+      name: "broken",
+      definition: { command: process.execPath, args: ["-e", "process.exit(7)"] },
+    }),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "mcp_probe_failed" &&
+      error.details?.server === "broken",
+  );
+  await assert.rejects(
+    client.probeMcpServer({ name: "plain", definition: { url: "http://example.com/mcp" } }),
+    (error) => error instanceof AxlClientError && error.code === "mcp_probe_failed",
+  );
+  assert.equal(
+    (await client.listMcpServers()).servers.find((server) => server.name === "fixture")?.status,
+    "discovered",
+  );
   const allProviders = await client.listProviders();
   assert.equal(allProviders.providers.length, 41);
   assert.deepEqual(
@@ -424,12 +464,26 @@ test("assembles an authoritative local runtime without a presentation client", a
   );
   const mcpCache = JSON.parse(await readFile(join(axlHome, "cache", "mcp-tools.json"), "utf8")) as {
     servers: Array<{ server: string; tools: Array<{ name: string }> }>;
+    failures: Array<{ server: string; error: string }>;
   };
   assert.equal(mcpCache.servers[0]?.server, "fixture");
   assert.deepEqual(
     mcpCache.servers[0]?.tools.map((tool) => tool.name),
     ["echo", "interactive", "tasker"],
   );
+  assert.deepEqual(
+    mcpCache.failures.map((failure) => failure.server),
+    ["broken"],
+  );
+  const projected = await client.listMcpServers();
+  assert.deepEqual(
+    projected.servers.map((server) => [server.name, server.status, server.tools.length]),
+    [
+      ["broken", "failed", 0],
+      ["fixture", "discovered", 3],
+    ],
+  );
+  assert.ok((projected.servers[0]?.error?.length ?? 0) > 0);
   const prompt = events
     .filter((event) => event.type === "prompt.section")
     .map((event) => (event.type === "prompt.section" ? event.payload.content : ""))

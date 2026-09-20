@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-FileCopyrightText: 2026 Srihari -->
+<!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl
@@ -349,9 +350,15 @@ Implemented first-party integrations include:
 
 ### Configure MCP servers
 
-Run `/mcp` in the terminal or web client to add tested servers or remove configured servers. Axl writes the global configuration to `~/.axl/mcp.json`, validates it, sets mode `0600`, and reloads the active session. The model can discover and activate the same `configure_mcp` capability when you ask it to add or remove an MCP server. This configuration path is daemon-managed and does not require weakening the command sandbox.
+Run `/mcp` in the terminal or web client. The panel lists every configured server with its daemon-reported discovery state (`discovered`, `failed` with the error, `disabled`, or `not discovered yet`), its tool count, and the tools that are active in the current session. From there you can add, enable, disable, remove, or reload servers.
 
-For a custom remote server, add an entry under `mcpServers`:
+To add a server quickly, press `p` (terminal) or **Paste config** (web) and paste the `mcpServers` block from the server's README, a bare server URL, or a command line. Axl translates common host formats, derives a name when none is given, maps VS Code `${input:id}` placeholders to `${ID}`, and lists the environment variables the entry reads so you know what to export. Both GitHub README snippets paste as-is: the header-less one is authorized with OAuth in your browser, the PAT one only needs `export GITHUB_MCP_PAT=…` before starting the daemon.
+
+The guided alternative asks step by step: name, transport (remote Streamable HTTP or local stdio process), the URL or command line copied from the server's README, optional header or environment variable names for secrets, and optional filesystem roots. The review step shows the exact JSON that will be written. Axl connects to the server and lists its tools first; only a server that answers is saved to `~/.axl/mcp.json` (validated, atomic, mode `0600`), after which the active session reloads. A server that later fails discovery is isolated: the rest of the session loads, the panel shows the failure, and the footer reports `mcp:discovered/total`.
+
+The model can discover and activate the same `configure_mcp` capability when you ask it to add or remove an MCP server. This configuration path is daemon-managed and does not require weakening the command sandbox.
+
+You can also edit the file directly. For a remote server, add an entry under `mcpServers`:
 
 ```json
 {
@@ -364,7 +371,7 @@ For a custom remote server, add an entry under `mcpServers`:
 }
 ```
 
-Header and child-process environment values name host environment variables. They are not literal secrets. Local stdio servers use `command`, optional `args`, `cwd`, `env`, and `roots`:
+Header and child-process environment values are read from the daemon's environment, never stored: a bare name such as `GITHUB_TOKEN` sends that variable's value, and a template such as `Bearer ${GITHUB_TOKEN}` wraps it in literal text. A remote server that answers `401` without configured headers is authorized with OAuth: Axl opens the browser prompt, and saves the token privately. Local stdio servers use `command`, optional `args`, `cwd`, `env`, and `roots`:
 
 ```json
 {

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomUUID } from "node:crypto";
@@ -1044,6 +1045,8 @@ export class AxlDaemon {
         return this.mcpConfigurationService().upsert(request.params);
       case "mcp.config.remove":
         return this.mcpConfigurationService().remove(request.params);
+      case "mcp.config.probe":
+        return this.mcpConfigurationService().probe(request.params, signal);
       case "session.create": {
         const {
           cwd,

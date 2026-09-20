@@ -32,6 +32,7 @@ import type {
   SessionProfile,
   SessionSummary,
   ThinkingLevel,
+  UserQuestionAnswer,
 } from "@axl/protocol";
 import {
   parseEventId,
@@ -48,9 +49,18 @@ import {
   ConversationProjector,
   type DaemonHostControl,
   type DaemonHostStatus,
+  formatMcpServerSummary,
+  MCP_ADD_SERVER_QUESTIONS,
+  MCP_IMPORT_QUESTION,
+  type McpImportedServer,
+  mcpServerDefinitionFromDraft,
+  mcpServerDraftFromAnswers,
+  mcpRequiredEnvironment,
+  mcpServerReviewLines,
   type ModelRequestSettings,
-  mcpServerPresets,
   orderPendingTurnInputs,
+  parseMcpImport,
+  summarizeMcpServers,
   type PresentationCommand,
   ProviderClientError,
   restoreQueuedPrompts,
@@ -82,7 +92,13 @@ import { decodeOneKey, LineEditor } from "./editor.ts";
 import { EditorFrameComponent } from "./editor-frame.ts";
 import { ExtensionWidgetsComponent } from "./extension-ui.ts";
 import { editPromptExternally } from "./external-editor.ts";
-import { type FullscreenMouse, FullscreenScreen, fullscreenDockHeight } from "./fullscreen.ts";
+import {
+  type FloatingDialog,
+  type FullscreenMouse,
+  FullscreenScreen,
+  floatingDialogWidth,
+  fullscreenDockHeight,
+} from "./fullscreen.ts";
 import { isMouseReport } from "./fullscreen-input.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
 import type { LoginDialogDefinition } from "./login-dialog.ts";
@@ -97,6 +113,7 @@ import {
 import { type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
+import { McpPanelOverlay } from "./mcp-panel.ts";
 import { QuestionnaireOverlay } from "./questionnaire.ts";
 import {
   AUTOWRAP_OFF,
@@ -584,6 +601,23 @@ type TranscriptEntry =
   | { readonly kind: "lines"; readonly lines: readonly string[] };
 
 /** A terminal projection over one daemon-owned Axl session. */
+
+/** Notice after saving MCP servers: tool count plus which servers still need browser authorization. */
+function mcpAddedNotice(
+  names: readonly string[],
+  tools: number,
+  needsAuthorization: readonly string[],
+): string {
+  const subject = names.length === 1 ? `MCP server ${names[0]}` : `${names.length} MCP servers`;
+  const parts = [`· ${subject} added`];
+  if (tools > 0 || needsAuthorization.length === 0)
+    parts.push(`${tools} ${tools === 1 ? "tool" : "tools"}`);
+  if (needsAuthorization.length > 0) {
+    parts.push(`${needsAuthorization.join(", ")}: authorize in your browser when prompted`);
+  }
+  return parts.join(" · ");
+}
+
 export class AxlApp {
   sessionId: SessionId;
   private cwd: string;
@@ -640,6 +674,8 @@ export class AxlApp {
   private height: number;
   private readonly transcript: TranscriptEntry[] = [];
   private notice: string | undefined;
+  /** Daemon-reported MCP summary for the footer, e.g. `mcp:2/3`. */
+  private mcpFooter: string | undefined;
   private readonly overlays = new OverlayStack();
   private stopped = false;
   private spinnerIndex = 0;
@@ -1094,6 +1130,7 @@ export class AxlApp {
     app.hydrating = false;
     app.setWorking(app.sessionSubscription?.projector.overview.activeOperationId !== undefined);
     app.openNextInteraction();
+    void app.refreshMcpStatus("open");
 
     try {
       await app.restartThemeWatcher(false);
@@ -1272,7 +1309,10 @@ export class AxlApp {
     return this.view.palette.dim(text);
   }
 
-  private liveFrame(includePendingTools = true): {
+  private liveFrame(
+    includePendingTools = true,
+    includeOverlay = true,
+  ): {
     lines: readonly string[];
     cursor?: CursorPlacement;
   } {
@@ -1291,7 +1331,7 @@ export class AxlApp {
           },
         ]
       : [];
-    if (this.overlays.active !== undefined) {
+    if (includeOverlay && this.overlays.active !== undefined) {
       const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
       const lines = [...prefix, ...this.overlays.render(this.width)];
       const cursor = this.overlays.cursorPlacement();
@@ -1323,7 +1363,7 @@ export class AxlApp {
       ...(editorMode ? { mode: editorMode } : {}),
       location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
         this.view.sandbox ? `  sandbox:${this.view.sandbox}` : ""
-      }${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.extensionHost
+      }${this.mcpFooter ? `  ${this.mcpFooter}` : ""}${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.extensionHost
         .statuses()
         .map((line) => `  · ${this.styledExtensionLine(line)}`)
         .join("")}`,
@@ -1568,19 +1608,36 @@ export class AxlApp {
     this.cancelRender();
     this.lastPaint = performance.now();
     const resized = this.applyResize();
-    const { lines, cursor } = this.liveFrame(this.tuiMode === "regular");
     if (this.tuiMode === "fullscreen") {
+      const floating = this.floatingDialog();
+      const dock = this.liveFrame(false, floating === undefined);
       this.fullscreen.render({
         document: this.fullscreenDocumentRows(),
-        dock: lines,
-        ...(cursor === undefined ? {} : { cursor }),
+        dock: dock.lines,
+        ...(dock.cursor === undefined || floating !== undefined ? {} : { cursor: dock.cursor }),
         palette: this.view.palette,
         sessionId: this.sessionId,
+        ...(floating === undefined ? {} : { floating }),
       });
       return;
     }
+    const { lines, cursor } = this.liveFrame(true);
     if (resized) this.repaintRegularTranscript(lines.length);
     this.options.output.write(this.screen.frame([{ render: () => [...lines] }], cursor));
+  }
+
+  /** In fullscreen mode every dialog floats over the transcript instead of replacing the dock. */
+  private floatingDialog(): FloatingDialog | undefined {
+    if (this.overlays.active === undefined) return undefined;
+    const width = floatingDialogWidth(this.width);
+    const cursor = this.overlays.cursorPlacement();
+    return {
+      // One column narrower than the box so right-aligned text never touches the border.
+      lines: this.overlays.render(width - 1),
+      width,
+      ...(cursor === undefined ? {} : { cursor }),
+      pinnedRows: this.overlays.active instanceof PickerOverlay ? 4 : 0,
+    };
   }
 
   private fullscreenDocumentRows() {
@@ -1685,6 +1742,9 @@ export class AxlApp {
     if (event.type === "config.tools") {
       this.webFetchEnabled = event.payload.webFetch;
       this.webSearchEnabled = event.payload.webSearch;
+    }
+    if (event.type === "config.dialect" && event.payload.reason === "reload" && !this.hydrating) {
+      void this.refreshMcpStatus("reload");
     }
     if (event.type === "user.message") this.consumePendingTurnInput(event);
 
@@ -2502,7 +2562,7 @@ export class AxlApp {
         this.openSettings();
         return;
       case "mcp":
-        await this.openMcpSettings();
+        this.openMcpPanel(argument?.trim() || undefined);
         return;
       case "login":
         await this.loginProvider(argument);
@@ -2634,7 +2694,7 @@ export class AxlApp {
         await this.showProviders(outcome.argument);
         return;
       case "mcp":
-        await this.openMcpSettings();
+        this.openMcpPanel(outcome.argument?.trim() || undefined);
         return;
       case "login":
         await this.loginProvider(outcome.argument);
@@ -3261,62 +3321,244 @@ export class AxlApp {
     ];
   }
 
-  private async openMcpSettings(): Promise<void> {
+  private mcpCapabilityGranted(capability: string): boolean {
     try {
-      const configured = await this.client.listMcpServers();
-      const active = new Set(configured.servers.map((server) => server.name));
-      const presets = mcpServerPresets(this.cwd);
-      this.openPicker({
-        title: "MCP servers",
-        items: [
-          ...configured.servers.map((server) => ({
-            value: `remove:${server.name}`,
-            label: `Remove ${server.name}`,
-            description: "currently configured",
-          })),
-          ...Object.keys(presets)
-            .filter((name) => !active.has(name))
-            .map((name) => ({
-              value: `add:${name}`,
-              label: `Add ${name}`,
-              description: "add tested global server",
-            })),
-        ],
-        current: "",
-        preview: () => [
-          `Global config: ${configured.path}`,
-          "Changes apply to every project and reload this session.",
-        ],
-        onPick: (value) => {
-          void (async () => {
-            const separator = value.indexOf(":");
-            const action = value.slice(0, separator);
-            const name = value.slice(separator + 1);
-            if (action === "remove") await this.client.removeMcpServer({ name });
-            else {
-              const definition = presets[name];
-              if (definition === undefined) throw new Error(`Unknown MCP preset ${name}`);
-              await this.client.upsertMcpServer({ name, definition });
-            }
-            await this.commandController.invoke("/reload", this.sessionId);
-            this.notice = this.view.palette.dim(
-              `· MCP server ${name} ${action === "remove" ? "removed" : "added"}`,
-            );
-            this.redraw();
-          })().catch((error: unknown) => {
-            this.notice = this.view.palette.error(
-              `✖ ${error instanceof Error ? error.message : "MCP configuration failed"}`,
-            );
-            this.redraw();
-          });
-        },
-      });
-    } catch (error) {
-      this.notice = this.view.palette.error(
-        `✖ ${error instanceof Error ? error.message : "MCP configuration failed"}`,
-      );
-      this.redraw();
+      return this.client.connection.grantedCapabilities?.includes(capability) === true;
+    } catch {
+      // The SDK throws while a reconnect is replacing the connection.
+      return false;
     }
+  }
+
+  private mcpConfigurationGranted(): boolean {
+    return ["mcp.config.list", "mcp.config.upsert", "mcp.config.remove", "mcp.config.probe"].every(
+      (capability) => this.mcpCapabilityGranted(capability),
+    );
+  }
+
+  /** Projects the daemon's MCP discovery state into the footer and, on reload, a notice. */
+  private async refreshMcpStatus(reason: "open" | "reload"): Promise<void> {
+    if (this.stopped || !this.mcpCapabilityGranted("mcp.config.list")) return;
+    let servers: Awaited<ReturnType<AxlClient["listMcpServers"]>>["servers"];
+    try {
+      servers = (await this.client.listMcpServers()).servers;
+    } catch {
+      // The footer is a projection. A transient RPC failure must not interrupt the session.
+      return;
+    }
+    if (this.stopped) return;
+    const summary = summarizeMcpServers(servers);
+    this.mcpFooter = summary.total === 0 ? undefined : `mcp:${summary.discovered}/${summary.total}`;
+    if (summary.total > 0 && (reason === "reload" || summary.failed > 0)) {
+      const text = `· MCP · ${formatMcpServerSummary(summary)}`;
+      this.notice =
+        summary.failed > 0 ? this.view.palette.error(text) : this.view.palette.dim(text);
+    }
+    this.redraw();
+  }
+
+  private mcpActiveIdentities(): ReadonlySet<string> {
+    return new Set(
+      (this.sessionSubscription?.projector.state.activeCapabilities ?? []).map(
+        (event) => event.payload.capability.identity,
+      ),
+    );
+  }
+
+  private openMcpPanel(focus?: string): void {
+    if (!this.mcpConfigurationGranted()) {
+      this.notice = this.view.palette.error("✖ MCP configuration was not granted to this client");
+      this.redraw();
+      return;
+    }
+    const close = (): void => {
+      this.overlays.close();
+      this.openNextInteraction();
+      this.redraw();
+    };
+    this.overlays.replace(
+      new McpPanelOverlay({
+        palette: () => this.view.palette,
+        refresh: () => this.redraw(),
+        load: () => this.client.listMcpServers(),
+        activeIdentities: () => this.mcpActiveIdentities(),
+        ...(focus === undefined ? {} : { focus }),
+        onAdd: () => this.openMcpAddFlow(),
+        onImport: () => this.openMcpImportFlow(),
+        remove: async (name) => {
+          await this.client.removeMcpServer({ name });
+          await this.reloadAfterMcpChange(`· MCP server ${name} removed`);
+        },
+        setEnabled: async (name, enabled) => {
+          const current = (await this.client.listMcpServers()).servers.find(
+            (server) => server.name === name,
+          );
+          if (current === undefined) throw new Error(`MCP server ${name} is no longer configured`);
+          const { enabled: _previous, ...rest } = current.definition;
+          await this.client.upsertMcpServer({
+            name,
+            definition: enabled ? rest : { ...rest, enabled: false },
+          });
+          await this.reloadAfterMcpChange(
+            `· MCP server ${name} ${enabled ? "enabled" : "disabled"}`,
+          );
+        },
+        reload: () => this.reloadAfterMcpChange("· MCP servers reloaded"),
+        close,
+      }),
+    );
+    this.redraw();
+  }
+
+  private async reloadAfterMcpChange(notice: string): Promise<void> {
+    await this.commandController.invoke("/reload", this.sessionId);
+    this.notice = this.view.palette.dim(notice);
+    await this.refreshMcpStatus("open");
+  }
+
+  /** Quick import: paste a README config block, a URL, or a command line. */
+  private openMcpImportFlow(): void {
+    let configPath = "~/.axl/mcp.json";
+    void this.client
+      .listMcpServers()
+      .then((result) => {
+        configPath = result.path;
+        this.redraw();
+      })
+      .catch(() => undefined);
+    const parse = (answers: readonly UserQuestionAnswer[]): McpImportedServer[] =>
+      parseMcpImport(answers[0]?.customAnswer ?? "");
+    const dialog = new QuestionnaireOverlay({
+      title: "Import MCP servers",
+      questions: [MCP_IMPORT_QUESTION],
+      palette: () => this.view.palette,
+      refresh: () => this.redraw(),
+      submitLabel: "connect and save",
+      pendingLabel: "Connecting to each server and listing its tools…",
+      review: (answers) => {
+        try {
+          const servers = parse(answers);
+          const required = mcpRequiredEnvironment(servers);
+          return [
+            `Will be written to ${configPath} as:`,
+            ...JSON.stringify(
+              Object.fromEntries(servers.map((server) => [server.name, server.definition])),
+              null,
+              2,
+            ).split("\n"),
+            "",
+            ...(required.length === 0
+              ? []
+              : [
+                  `Reads from the daemon's environment: ${required.join(", ")}. Export them before starting axl.`,
+                ]),
+            "Axl connects to each server first and saves only if all of them answer. A server that asks for OAuth is saved and authorized in your browser when the session reloads.",
+          ];
+        } catch (error) {
+          return [
+            this.view.palette.error(
+              `✖ ${error instanceof Error ? error.message : "Invalid input"}`,
+            ),
+          ];
+        }
+      },
+      submit: async (answers) => {
+        const servers = parse(answers);
+        let tools = 0;
+        const needsAuthorization: string[] = [];
+        for (const server of servers) {
+          try {
+            const probed = await this.client.probeMcpServer(server);
+            tools += probed.tools.length;
+            if (probed.authorization === "required") needsAuthorization.push(server.name);
+          } catch (error) {
+            throw new Error(
+              `${server.name}: ${error instanceof Error ? error.message : "connection failed"}`,
+            );
+          }
+        }
+        for (const server of servers) await this.client.upsertMcpServer(server);
+        this.overlays.close();
+        this.openMcpPanel(servers[0]?.name);
+        await this.reloadAfterMcpChange(
+          mcpAddedNotice(
+            servers.map((server) => server.name),
+            tools,
+            needsAuthorization,
+          ),
+        );
+      },
+      cancel: async () => {
+        this.overlays.close();
+        this.openMcpPanel();
+      },
+    });
+    this.overlays.replace(dialog);
+    this.redraw();
+  }
+
+  /** Guided add flow: the same stepped questionnaire the model uses for ask_user_question. */
+  private openMcpAddFlow(): void {
+    let configPath = "~/.axl/mcp.json";
+    void this.client
+      .listMcpServers()
+      .then((result) => {
+        configPath = result.path;
+        this.redraw();
+      })
+      .catch(() => undefined);
+    const build = (answers: readonly UserQuestionAnswer[]) =>
+      mcpServerDefinitionFromDraft(mcpServerDraftFromAnswers(answers));
+    const dialog = new QuestionnaireOverlay({
+      title: "Add MCP server",
+      questions: MCP_ADD_SERVER_QUESTIONS,
+      palette: () => this.view.palette,
+      refresh: () => this.redraw(),
+      submitLabel: "connect and save",
+      pendingLabel: "Connecting to the server and listing its tools…",
+      review: (answers) => {
+        try {
+          const { name, definition } = build(answers);
+          const required = mcpRequiredEnvironment([{ definition }]);
+          return [
+            ...mcpServerReviewLines(name, definition, configPath),
+            "",
+            ...(required.length === 0
+              ? []
+              : [
+                  `Reads from the daemon's environment: ${required.join(", ")}. Export them before starting axl.`,
+                ]),
+            "Axl connects first and saves only if the server answers. A server that asks for OAuth is saved and authorized in your browser when the session reloads.",
+          ];
+        } catch (error) {
+          return [
+            this.view.palette.error(
+              `✖ ${error instanceof Error ? error.message : "Incomplete answers"}`,
+            ),
+          ];
+        }
+      },
+      submit: async (answers) => {
+        const { name, definition } = build(answers);
+        const probed = await this.client.probeMcpServer({ name, definition });
+        await this.client.upsertMcpServer({ name, definition });
+        this.overlays.close();
+        this.openMcpPanel(name);
+        await this.reloadAfterMcpChange(
+          mcpAddedNotice(
+            [name],
+            probed.tools.length,
+            probed.authorization === "required" ? [name] : [],
+          ),
+        );
+      },
+      cancel: async () => {
+        this.overlays.close();
+        this.openMcpPanel();
+      },
+    });
+    this.overlays.replace(dialog);
+    this.redraw();
   }
 
   private openSettings(): void {

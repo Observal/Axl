@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -793,7 +794,7 @@ test("model MCP configuration uses the daemon-owned store and queues reload", as
         configured.push([name, definition]);
         return Promise.resolve({
           path: "/tmp/mcp.json",
-          servers: [{ name, definition }],
+          servers: [{ name, definition, status: "pending" as const, tools: [] }],
           changed: true,
         });
       },

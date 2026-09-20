@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from "node:crypto";
@@ -15,6 +16,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import {
   StreamableHTTPClientTransport,
   type StreamableHTTPClientTransportOptions,
+  StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { TaskStore } from "@modelcontextprotocol/sdk/experimental/tasks/index.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -58,6 +60,7 @@ import {
   type McpServerConfig,
   mcpConfigurationFingerprint,
   type NamedMcpServerConfig,
+  resolveMcpSecretValue,
 } from "./config.ts";
 import { createOAuthSession, type OAuthSession } from "./oauth.ts";
 import { FileTaskStore } from "./task-store.ts";
@@ -91,6 +94,14 @@ function toJson(value: unknown): JsonValue {
   return JSON.parse(encoded) as JsonValue;
 }
 
+/** The SDK reports an unauthenticated 401 as a transport error carrying the HTTP status. */
+function isUnauthorizedStatus(error: unknown): boolean {
+  if (error instanceof UnauthorizedError) return true;
+  return (
+    error instanceof StreamableHTTPError && (error.code === 401 || /\b401\b/u.test(error.message))
+  );
+}
+
 function errorResult(message: string): ToolExecutionResult {
   return { content: [{ type: "text", text: message }], isError: true };
 }
@@ -108,12 +119,12 @@ function safeEnvironment(
     const value = source[name];
     if (value !== undefined) result[name] = value;
   }
-  for (const [target, sourceName] of Object.entries(configured)) {
-    const value = source[sourceName];
-    if (value === undefined) {
-      throw new Error(`MCP environment source ${sourceName} is not set for ${target}`);
-    }
-    result[target] = value;
+  for (const [target, template] of Object.entries(configured)) {
+    result[target] = resolveMcpSecretValue(
+      template,
+      source,
+      () => `MCP environment source for ${target}`,
+    );
   }
   return result;
 }
@@ -123,10 +134,11 @@ function httpHeaders(
   source: Readonly<Record<string, string | undefined>>,
 ): Headers {
   const headers = new Headers();
-  for (const [header, sourceName] of Object.entries(configured)) {
-    const value = source[sourceName];
-    if (value === undefined) throw new Error(`MCP header source ${sourceName} is not set`);
-    headers.set(header, value);
+  for (const [header, template] of Object.entries(configured)) {
+    headers.set(
+      header,
+      resolveMcpSecretValue(template, source, () => `MCP header source for ${header}`),
+    );
   }
   return headers;
 }
@@ -551,48 +563,98 @@ export class McpManager implements ExtensionHost {
     const opened = await this.transport(server, signal);
     oauthForClose = opened.oauth;
     cleanupForClose = opened.cleanup;
-    try {
-      await client.connect(
-        opened.transport as unknown as Transport,
-        this.requestOptions(server.config, signal, logs),
-      );
-    } catch (error) {
-      if (!(error instanceof UnauthorizedError) || !opened.oauth) {
-        await opened.oauth?.close();
-        await opened.cleanup?.();
-        throw error;
+    const finish = async (
+      candidate: Awaited<ReturnType<McpManager["transport"]>>,
+    ): Promise<Connection> => {
+      try {
+        await client.connect(
+          candidate.transport as unknown as Transport,
+          this.requestOptions(server.config, signal, logs),
+        );
+      } catch (error) {
+        if (!(error instanceof UnauthorizedError) || !candidate.oauth) {
+          await candidate.oauth?.close();
+          await candidate.cleanup?.();
+          throw error;
+        }
+        const code = candidate.oauth.provider.takeAuthorizationCode();
+        if (!code) {
+          await candidate.oauth.close();
+          throw new Error(`MCP server ${server.name} requires authorization`);
+        }
+        if (!(candidate.transport instanceof StreamableHTTPClientTransport)) {
+          throw new Error("OAuth is only valid for Streamable HTTP transports");
+        }
+        await candidate.transport.finishAuth(code);
+        const retried = await this.transport(server, signal, candidate.oauth);
+        await client.connect(
+          retried.transport as unknown as Transport,
+          this.requestOptions(server.config, signal, logs),
+        );
+        return {
+          client,
+          transport: retried.transport,
+          oauth: candidate.oauth,
+          ...(retried.cleanup === undefined ? {} : { cleanup: retried.cleanup }),
+          taskStore,
+          logs,
+        };
       }
-      const code = opened.oauth.provider.takeAuthorizationCode();
-      if (!code) {
-        await opened.oauth.close();
-        throw new Error(`MCP server ${server.name} requires authorization`);
-      }
-      if (!(opened.transport instanceof StreamableHTTPClientTransport)) {
-        throw new Error("OAuth is only valid for Streamable HTTP transports");
-      }
-      await opened.transport.finishAuth(code);
-      const retried = await this.transport(server, signal, opened.oauth);
-      await client.connect(
-        retried.transport as unknown as Transport,
-        this.requestOptions(server.config, signal, logs),
-      );
       return {
         client,
-        transport: retried.transport,
-        oauth: opened.oauth,
-        ...(retried.cleanup === undefined ? {} : { cleanup: retried.cleanup }),
+        transport: candidate.transport,
+        ...(candidate.oauth ? { oauth: candidate.oauth } : {}),
+        ...(candidate.cleanup === undefined ? {} : { cleanup: candidate.cleanup }),
         taskStore,
         logs,
       };
-    }
-    return {
-      client,
-      transport: opened.transport,
-      ...(opened.oauth ? { oauth: opened.oauth } : {}),
-      ...(opened.cleanup === undefined ? {} : { cleanup: opened.cleanup }),
-      taskStore,
-      logs,
     };
+    try {
+      return await finish(opened);
+    } catch (error) {
+      // A credential-less HTTP server that answers 401 is asking for OAuth. Arm it and
+      // retry once; the user still has to approve the authorization in the browser.
+      if (
+        !isUnauthorizedStatus(error) ||
+        opened.oauth !== undefined ||
+        server.config.transport !== "http" ||
+        server.config.oauth !== undefined ||
+        Object.keys(server.config.headers).length > 0
+      ) {
+        throw error;
+      }
+      this.pushLog(logs, {
+        level: "info",
+        data: "server requires authorization; starting OAuth",
+      });
+      const armed = await this.transport(
+        server,
+        signal,
+        await this.oauthSession(server, {}, signal),
+      );
+      oauthForClose = armed.oauth;
+      cleanupForClose = armed.cleanup;
+      return await finish(armed);
+    }
+  }
+
+  private oauthSession(
+    server: NamedMcpServerConfig,
+    config: NonNullable<Extract<McpServerConfig, { transport: "http" }>["oauth"]>,
+    signal: AbortSignal,
+  ): Promise<OAuthSession> {
+    return createOAuthSession({
+      path: join(this.options.stateDirectory, `${server.name}.json`),
+      config,
+      source: `mcp:${server.name}`,
+      interact: this.options.interact,
+      signal,
+      env: this.options.env ?? process.env,
+      onSecrets: (values) => {
+        for (const value of values) this.secretValues.add(value);
+        this.options.onSecrets?.(values);
+      },
+    });
   }
 
   private async transport(
@@ -638,18 +700,7 @@ export class McpManager implements ExtensionHost {
     const oauth =
       existingOAuth ??
       (server.config.oauth
-        ? await createOAuthSession({
-            path: join(this.options.stateDirectory, `${server.name}.json`),
-            config: server.config.oauth,
-            source: `mcp:${server.name}`,
-            interact: this.options.interact,
-            signal,
-            env,
-            onSecrets: (values) => {
-              for (const value of values) this.secretValues.add(value);
-              this.options.onSecrets?.(values);
-            },
-          })
+        ? await this.oauthSession(server, server.config.oauth, signal)
         : undefined);
     const options: StreamableHTTPClientTransportOptions = {
       requestInit: { headers },
@@ -780,8 +831,13 @@ export class McpManager implements ExtensionHost {
     return redactJsonValue(toJson(value), [...this.secretValues]);
   }
 
-  private redactedText(value: string): string {
+  /** Removes every known secret value from free text before it leaves the manager. */
+  redactText(value: string): string {
     return this.redacted(value) as string;
+  }
+
+  private redactedText(value: string): string {
+    return this.redactText(value);
   }
 
   private pushLog(logs: JsonValue[], value: unknown): void {

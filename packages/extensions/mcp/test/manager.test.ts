@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -20,6 +21,8 @@ import {
   mcpCanonicalToolName,
   mcpConfigurationFingerprint,
   type NamedMcpServerConfig,
+  probeMcpServer,
+  resolveMcpServerConfig,
 } from "../src/index.ts";
 
 const fixtureServer = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "server.mjs");
@@ -107,6 +110,7 @@ test("stdio MCP discovers and directly calls frozen tools", async (context) => {
   const config: NamedMcpServerConfig = {
     name: "fixture",
     source: "test",
+    definition: { command: process.execPath, args: [fixtureServer], roots: [cwd] },
     config: {
       transport: "stdio",
       command: process.execPath,
@@ -169,8 +173,11 @@ test("stdio MCP discovers and directly calls frozen tools", async (context) => {
   assert.equal(cleanupCalls, 1);
 });
 
-test("Streamable HTTP completes OAuth discovery, PKCE, registration, and token use", async (context) => {
-  const cwd = await workspace(context);
+/** Fake resource + authorization server: 401 until `Bearer access-token`, then an empty tool list. */
+async function oauthFixture(context: TestContext): Promise<{
+  readonly base: string;
+  readonly authenticated: () => boolean;
+}> {
   let base = "";
   let authenticated = false;
   const server = createServer((request, response) => {
@@ -266,12 +273,20 @@ test("Streamable HTTP completes OAuth discovery, PKCE, registration, and token u
   const address = server.address();
   assert.ok(address && typeof address !== "string");
   base = `http://127.0.0.1:${address.port}`;
+  return { base, authenticated: () => authenticated };
+}
+
+test("Streamable HTTP completes OAuth discovery, PKCE, registration, and token use", async (context) => {
+  const cwd = await workspace(context);
+  const fixture = await oauthFixture(context);
+  const base = fixture.base;
   const approvals: McpInteractionRequest[] = [];
   const manager = new McpManager({
     servers: [
       {
         name: "oauth",
         source: "test",
+        definition: { url: `${base}/mcp`, oauth: {} },
         config: {
           transport: "http",
           url: `${base}/mcp`,
@@ -302,8 +317,53 @@ test("Streamable HTTP completes OAuth discovery, PKCE, registration, and token u
 
   const result = await manager.discoverTools("oauth");
   assert.deepEqual(result.tools, []);
-  assert.equal(authenticated, true);
+  assert.equal(fixture.authenticated(), true);
   assert.equal(approvals.length, 1);
+});
+
+test("a credential-less HTTP server that answers 401 triggers OAuth without oauth config", async (context) => {
+  const cwd = await workspace(context);
+  const fixture = await oauthFixture(context);
+  const approvals: McpInteractionRequest[] = [];
+  const manager = new McpManager({
+    servers: [resolveMcpServerConfig("github-like", { url: `${fixture.base}/mcp` }, cwd, "test")],
+    cwd,
+    sessionId: "test-session",
+    stateDirectory: join(cwd, "state"),
+    blobDirectory: join(cwd, "blobs"),
+    model,
+    modelId: "fixture-model",
+    interact: async (request) => {
+      approvals.push(request);
+      await fetch(request.data?.url as string);
+      return { action: "accept" };
+    },
+    wrapStdio: (process) => ({ ...process, env: {} }),
+  });
+  context.after(() => manager.dispose());
+  const result = await manager.discoverTools("github-like");
+  assert.deepEqual(result.tools, []);
+  assert.equal(fixture.authenticated(), true);
+  assert.deepEqual(
+    approvals.map((request) => request.kind),
+    ["mcp_elicitation_url"],
+  );
+});
+
+test("a probe reports authorization as required instead of completing OAuth", async (context) => {
+  const cwd = await workspace(context);
+  const fixture = await oauthFixture(context);
+  const result = await probeMcpServer({
+    server: resolveMcpServerConfig("github-like", { url: `${fixture.base}/mcp` }, cwd),
+    cwd,
+    stateDirectory: join(cwd, "probe-state"),
+    blobDirectory: join(cwd, "blobs"),
+    wrapStdio: (process) => ({ ...process, env: {} }),
+    timeoutMs: 10_000,
+  });
+  assert.equal(result.authorization, "required");
+  assert.deepEqual(result.tools, []);
+  assert.equal(fixture.authenticated(), false);
 });
 
 test("Streamable HTTP sends configured headers and negotiates 2025-11-25", async (context) => {
@@ -371,10 +431,14 @@ test("Streamable HTTP sends configured headers and negotiates 2025-11-25", async
   const config: NamedMcpServerConfig = {
     name: "http",
     source: "test",
+    definition: {
+      url: `http://127.0.0.1:${address.port}/mcp`,
+      headers: { Authorization: "Bearer ${MCP_TEST_AUTH}", "X-Static": "MCP_TEST_STATIC" },
+    },
     config: {
       transport: "http",
       url: `http://127.0.0.1:${address.port}/mcp`,
-      headers: { Authorization: "MCP_TEST_AUTH" },
+      headers: { Authorization: "Bearer ${MCP_TEST_AUTH}", "X-Static": "MCP_TEST_STATIC" },
       roots: [],
       enabled: true,
       requestTimeoutMs: 5_000,
@@ -383,7 +447,7 @@ test("Streamable HTTP sends configured headers and negotiates 2025-11-25", async
   const manager = managerFor({
     cwd,
     interactions: [],
-    env: { PATH: process.env.PATH, MCP_TEST_AUTH: "Bearer test-token" },
+    env: { PATH: process.env.PATH, MCP_TEST_AUTH: "test-token", MCP_TEST_STATIC: "static" },
     config,
   });
   context.after(() => manager.dispose());

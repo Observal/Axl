@@ -21,5 +21,22 @@
     "rules": {
       "recommended": true
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "packages/extensions/mcp/**",
+        "packages/sdk/src/mcp.ts",
+        "packages/sdk/test/mcp.test.ts",
+        "packages/protocol/scripts/generate-conformance.ts"
+      ],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noTemplateCurlyInString": "off"
+          }
+        }
+      }
+    }
+  ]
 }

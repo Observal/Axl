@@ -1,8 +1,9 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -13,10 +14,15 @@ import type { ModelStreamEvent } from "@axl/protocol";
 
 import {
   loadMcpCapabilities,
+  McpConfigStore,
   McpManager,
   type McpManagerOptions,
   mcpCanonicalToolName,
+  mcpDiscoveryStateReader,
+  McpProbeError,
   type NamedMcpServerConfig,
+  probeMcpServer,
+  resolveMcpServerConfig,
 } from "../src/index.ts";
 
 const fixtureServer = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "server.mjs");
@@ -37,6 +43,7 @@ async function setup(context: TestContext) {
   const config: NamedMcpServerConfig = {
     name: "fixture",
     source: join(cwd, "mcp.json"),
+    definition: { command: process.execPath, args: [fixtureServer], roots: [cwd] },
     config: {
       transport: "stdio",
       command: process.execPath,
@@ -119,4 +126,145 @@ test("indexes MCP tools as inactive capabilities and reuses a private cache", as
     cachePath,
   });
   assert.equal(cached.service.records.length, 3);
+});
+
+const passthroughStdio: McpManagerOptions["wrapStdio"] = (process) => ({
+  ...process,
+  env: Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    ),
+  ),
+});
+
+test("a failing server is isolated, cached as failed, and projected with its status", async (context) => {
+  const { cwd, config, cachePath } = await setup(context);
+  const broken: NamedMcpServerConfig = {
+    name: "broken",
+    source: config.source,
+    definition: {
+      command: process.execPath,
+      args: ["-e", "process.exit(3)"],
+      env: { TOKEN: "AXL_TEST_MCP_SECRET" },
+    },
+    config: {
+      transport: "stdio",
+      command: process.execPath,
+      args: ["-e", "process.exit(3)"],
+      env: { TOKEN: "AXL_TEST_MCP_SECRET" },
+      roots: [cwd],
+      enabled: true,
+      requestTimeoutMs: 2_000,
+    },
+  };
+  const both = new McpManager({
+    servers: [broken, config],
+    cwd,
+    sessionId: "test-session",
+    stateDirectory: join(cwd, "state"),
+    blobDirectory: join(cwd, "blobs"),
+    model,
+    modelId: "fixture",
+    secretValues: ["hunter2-secret-value"],
+    interact: async () => ({ action: "accept" }),
+    wrapStdio: passthroughStdio,
+    env: { PATH: process.env.PATH, AXL_TEST_MCP_SECRET: "hunter2-secret-value" },
+  });
+  context.after(() => both.dispose());
+  const tools = new ToolRegistry();
+  const loaded = await loadMcpCapabilities({
+    servers: [broken, config],
+    manager: both,
+    tools,
+    cachePath,
+  });
+  assert.deepEqual(
+    loaded.service.records.map((record) => record.identity),
+    ["mcp:fixture/echo", "mcp:fixture/interactive", "mcp:fixture/tasker"],
+  );
+  assert.equal(loaded.failures.length, 1);
+  assert.equal(loaded.failures[0]?.server, "broken");
+  assert.ok((loaded.failures[0]?.error.length ?? 0) > 0);
+  assert.equal(JSON.stringify(loaded.failures).includes("hunter2-secret-value"), false);
+  assert.equal((await readFile(cachePath, "utf8")).includes("hunter2-secret-value"), false);
+
+  await mkdir(join(cwd, "home"), { recursive: true });
+  await writeFile(
+    join(cwd, "home", "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        broken: broken.definition,
+        fixture: config.definition,
+        fresh: { url: "https://mcp.example.com/mcp" },
+        off: { url: "https://mcp.example.com/mcp", enabled: false },
+      },
+    }),
+  );
+  const store = new McpConfigStore(join(cwd, "home"), cwd, mcpDiscoveryStateReader(cachePath));
+  const listed = await store.list();
+  assert.deepEqual(
+    listed.servers.map((server) => [
+      server.name,
+      server.status,
+      server.tools.map((tool) => tool.name),
+    ]),
+    [
+      ["broken", "failed", []],
+      ["fixture", "discovered", ["echo", "interactive", "tasker"]],
+      ["fresh", "pending", []],
+      ["off", "disabled", []],
+    ],
+  );
+  assert.equal(typeof listed.servers[0]?.error, "string");
+  assert.equal(typeof listed.servers[1]?.discoveredAt, "number");
+
+  await store.upsert("fixture", { ...config.definition, requestTimeoutMs: 9_000 });
+  assert.equal(
+    (await store.list()).servers.find((server) => server.name === "fixture")?.status,
+    "pending",
+  );
+});
+
+test("probing connects once, reports tools, records the cache, and never persists config", async (context) => {
+  const { cwd, config, cachePath } = await setup(context);
+  const result = await probeMcpServer({
+    server: resolveMcpServerConfig("fixture", config.definition, cwd),
+    cwd,
+    stateDirectory: join(cwd, "probe-state"),
+    blobDirectory: join(cwd, "blobs"),
+    wrapStdio: passthroughStdio,
+    env: { PATH: process.env.PATH },
+    cachePath,
+  });
+  assert.deepEqual(
+    result.tools.map((tool) => tool.name),
+    ["echo", "interactive", "tasker"],
+  );
+  assert.equal(typeof result.protocolVersion, "string");
+  const cached = JSON.parse(await readFile(cachePath, "utf8")) as { servers: { server: string }[] };
+  assert.deepEqual(
+    cached.servers.map((server) => server.server),
+    ["fixture"],
+  );
+
+  await assert.rejects(
+    probeMcpServer({
+      server: resolveMcpServerConfig(
+        "broken",
+        { command: process.execPath, args: ["-e", "process.exit(3)"] },
+        cwd,
+      ),
+      cwd,
+      stateDirectory: join(cwd, "probe-state"),
+      blobDirectory: join(cwd, "blobs"),
+      wrapStdio: passthroughStdio,
+      env: { PATH: process.env.PATH },
+      timeoutMs: 5_000,
+    }),
+    (error: unknown) => error instanceof McpProbeError && error.message.length > 0,
+  );
+  assert.throws(
+    () => resolveMcpServerConfig("bad", { url: "http://example.com/mcp" }, cwd),
+    /HTTPS/u,
+  );
 });

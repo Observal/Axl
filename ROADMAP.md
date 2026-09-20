@@ -3,6 +3,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
 <!-- SPDX-FileCopyrightText: 2026 Srihari -->
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl roadmap
@@ -1800,7 +1801,7 @@ The Phase 4 gate still stands, but several current paths need replacement before
 
 - [x] Add a strict `exec` profile that exposes only sandboxed Bash and activates no Skills or MCP servers.
 - [x] Replace the prompt-wide skill catalog with daemon-owned BM25 search and session-scoped activation.
-- [ ] Replace the generic MCP invocation path with turn-selected, provider-native tool schemas and frozen per-turn bindings.
+- [x] Replace the generic MCP invocation path with provider-native tool schemas and session-scoped, frozen bindings.
 - [x] Add `ask_user_question` to interactive sessions and verify that it is absent from goals and headless runs.
 - [ ] Add blind credential brokering before dogfooding credentialed third-party extensions or local MCP servers.
 - [x] Keep the fail-closed sandbox default and test the explicit `--unsafe` mode separately.

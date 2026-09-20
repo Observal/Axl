@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
@@ -26,10 +27,13 @@ import { parseBlobReference, parseEvent, parseUserContent } from "./events.ts";
 import {
   type McpConfigListResult,
   type McpConfigMutationResult,
+  type McpConfigProbeParams,
+  type McpConfigProbeResult,
   type McpConfigRemoveParams,
   type McpConfigUpsertParams,
   parseMcpConfigListResult,
   parseMcpConfigMutationResult,
+  parseMcpConfigProbeResult,
   parseMcpServerDefinition,
   parseMcpServerName,
 } from "./mcp-configuration.ts";
@@ -685,6 +689,7 @@ export const WIRE_CAPABILITIES = [
   "mcp.config.list",
   "mcp.config.upsert",
   "mcp.config.remove",
+  "mcp.config.probe",
 ] as const satisfies readonly CapabilityId[];
 
 export interface ClientIdentity {
@@ -808,6 +813,10 @@ export interface RpcMethodMap {
   readonly "mcp.config.remove": {
     readonly params: McpConfigRemoveParams;
     readonly result: McpConfigMutationResult;
+  };
+  readonly "mcp.config.probe": {
+    readonly params: McpConfigProbeParams;
+    readonly result: McpConfigProbeResult;
   };
   readonly "session.create": {
     readonly params: { readonly cwd: string } & SessionConfiguration;
@@ -1177,6 +1186,7 @@ export const RPC_ERROR_CODES = [
   "region_required",
   "region_unsupported",
   "provider_configuration_required",
+  "mcp_probe_failed",
 ] as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number] | (string & {});
@@ -1700,6 +1710,17 @@ export function parseWireRequest(value: unknown): WireRequest {
       ...base,
       method,
       params: { name: parseMcpServerName(params.name, "request.params.name") },
+    };
+  }
+  if (method === "mcp.config.probe") {
+    exact(params, "request.params", ["name", "definition"]);
+    return {
+      ...base,
+      method,
+      params: {
+        name: parseMcpServerName(params.name, "request.params.name"),
+        definition: parseMcpServerDefinition(params.definition, "request.params.definition"),
+      },
     };
   }
   if (method === "session.create") {
@@ -2613,6 +2634,8 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseMcpConfigListResult(value);
   } else if (method === "mcp.config.upsert" || method === "mcp.config.remove") {
     parsed = parseMcpConfigMutationResult(value);
+  } else if (method === "mcp.config.probe") {
+    parsed = parseMcpConfigProbeResult(value);
   } else if (method === "session.create" || method === "session.resume") {
     parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
@@ -3019,6 +3042,7 @@ export const RPC_METHODS = [
   "mcp.config.list",
   "mcp.config.upsert",
   "mcp.config.remove",
+  "mcp.config.probe",
   "session.create",
   "session.resume",
   "session.list",
@@ -3142,6 +3166,7 @@ export const RPC_METHOD_ERROR_CODES = {
   "mcp.config.list": [],
   "mcp.config.upsert": [],
   "mcp.config.remove": [],
+  "mcp.config.probe": ["mcp_probe_failed"],
   "session.create": [
     "invalid_cwd",
     ...MUTATION_ERRORS,

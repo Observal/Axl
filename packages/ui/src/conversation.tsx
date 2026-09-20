@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import { useMemo, useState } from "react";
@@ -20,6 +21,8 @@ import {
 } from "@axl/sdk";
 import { editDiffRows } from "./diff.ts";
 import { InteractionCard, type InteractionResponder } from "./interaction.tsx";
+
+export { QuestionnaireForm, type QuestionnaireFormProps } from "./interaction.tsx";
 import { Markdown } from "./markdown.tsx";
 import { highlightLine, languageForPath } from "./syntax.ts";
 
