@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
@@ -531,7 +532,9 @@ export class ConversationProjector {
           );
         }
         this.interactions.set(event.payload.interactionId, { ...interaction, resolution: event });
-        this.updateOperation(event.operationId, "running");
+        // The resolution is recorded under the responding RPC's operation for idempotency.
+        // The operation that resumes is the one that asked.
+        this.updateOperation(interaction.request.operationId ?? event.operationId, "running");
         break;
       }
       case "capability.searched":

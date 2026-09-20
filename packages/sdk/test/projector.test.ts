@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -232,11 +233,14 @@ test("derives operation and interaction lifecycle from canonical events", () => 
     operationId,
   });
   assert.equal(projector.state.operations[0]?.status, "waiting_interaction");
+  // The daemon records the resolution under the responding RPC's operation, not the turn's.
+  const respondOperation = parseOperationId("00000000-0000-4000-8000-0000000000ee");
   projector.applyEvent({
     ...event("interaction.resolved", { interactionId: "approval-1", action: "accept" }),
-    operationId,
+    operationId: respondOperation,
   });
   assert.equal(projector.state.operations[0]?.status, "running");
+  assert.equal(projector.state.activeOperationId, operationId);
   projector.applyEvent({
     ...event("assistant.message", { content: [], stopReason: "aborted" }),
     operationId,
