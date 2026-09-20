@@ -952,6 +952,54 @@ test("interrupting during model output records an aborted turn cleanly", async (
   assert.equal(path.length > 0, true);
 });
 
+test("an aborted turn with no output leaves the live history identical to replay", async (context) => {
+  const controller = new AbortController();
+  const requests: ModelTurnRequest[] = [];
+  let turn = 0;
+  const port: ModelPort = {
+    stream: (request) => {
+      requests.push(request);
+      turn += 1;
+      const current = turn;
+      return (async function* () {
+        if (current === 1) {
+          controller.abort();
+          yield { type: "aborted" } as const;
+          return;
+        }
+        yield { type: "text_delta", text: "ok" } as const;
+        yield {
+          type: "completed",
+          stopReason: "stop",
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        } as const;
+      })();
+    },
+  };
+  const { session } = await makeSession(context, port);
+  const aborted = await session.runTurn([{ type: "text", text: "first" }], controller.signal);
+  assert.equal(aborted.stopReason, "aborted");
+  const completed = await session.runTurn([{ type: "text", text: "second" }]);
+  assert.equal(completed.stopReason, "stop");
+
+  const second = requests[1];
+  assert.ok(second !== undefined);
+  for (const message of second.messages) {
+    assert.ok(
+      message.content.length > 0 ||
+        (message.role === "assistant" && (message.toolCalls?.length ?? 0) > 0),
+      `empty ${message.role} message reached the provider`,
+    );
+  }
+  const replayed = messagesFromLineage((await session.log.read()).events);
+  assert.deepEqual(
+    second.messages.map((message) => [message.role, message.content.length]),
+    replayed
+      .slice(0, second.messages.length)
+      .map((message) => [message.role, message.content.length]),
+  );
+});
+
 test("interrupting during a tool stops after the paired result", async (context) => {
   const controller = new AbortController();
   const registry = new ToolRegistry();

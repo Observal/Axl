@@ -721,11 +721,16 @@ export class AgentSession {
             : { errorMessage: `${outcome.error.code}: ${outcome.error.message}` }),
         });
         appended.push(assistantEvent);
-        this.messages.push({
-          role: "assistant",
-          content: assistantEvent.payload.content,
-          toolCalls: outcome.toolCalls,
-        });
+        // Keep the live history identical to `messagesFromCompactedLineage`: an aborted or
+        // failed turn with no content and no tool calls is recorded canonically but is not a
+        // model-visible message. Providers reject empty assistant messages.
+        if (assistantEvent.payload.content.length > 0 || outcome.toolCalls.length > 0) {
+          this.messages.push({
+            role: "assistant",
+            content: assistantEvent.payload.content,
+            toolCalls: outcome.toolCalls,
+          });
+        }
         this.onActivity?.({
           operationId,
           sequence: ++activity.sequence,
