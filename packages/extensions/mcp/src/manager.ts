@@ -6,9 +6,11 @@ import { createHash } from "node:crypto";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { ExtensionHost, KernelTool, ModelTurnRequest, ToolExecutionResult } from "@axl/kernel";
+import { redactJsonValue } from "@axl/kernel";
+import type { JsonObject, JsonValue, ModelMessage, UserContent } from "@axl/protocol";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   StreamableHTTPClientTransport,
@@ -40,6 +42,7 @@ import {
   ElicitationCompleteNotificationSchema,
   ElicitRequestSchema,
   ErrorCode,
+  LATEST_PROTOCOL_VERSION,
   ListRootsRequestSchema,
   LoggingMessageNotificationSchema,
   McpError,
@@ -50,14 +53,15 @@ import {
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
-import { redactJsonValue } from "@axl/kernel";
-import type { ExtensionHost, KernelTool, ModelTurnRequest, ToolExecutionResult } from "@axl/kernel";
-import type { JsonObject, JsonValue, ModelMessage, UserContent } from "@axl/protocol";
 
-import type { McpServerConfig, NamedMcpServerConfig } from "./config.ts";
+import {
+  type McpServerConfig,
+  mcpConfigurationFingerprint,
+  type NamedMcpServerConfig,
+} from "./config.ts";
 import { createOAuthSession, type OAuthSession } from "./oauth.ts";
 import { FileTaskStore } from "./task-store.ts";
-import type { McpManagerOptions } from "./types.ts";
+import type { McpManagerOptions, McpToolBinding, McpToolDiscovery } from "./types.ts";
 
 const MAX_BLOB_BYTES = 25_000_000;
 const MAX_JSON_BYTES = 200_000;
@@ -85,50 +89,6 @@ function toJson(value: unknown): JsonValue {
     throw new Error(`MCP value exceeds ${MAX_JSON_BYTES} bytes`);
   }
   return JSON.parse(encoded) as JsonValue;
-}
-
-function asObject(value: unknown, path: string): JsonObject {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError(`${path} must be an object`);
-  }
-  return value as JsonObject;
-}
-
-function requiredString(input: JsonObject, name: string): string {
-  const value = input[name];
-  if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`mcp.${name} must be a non-empty string`);
-  }
-  return value;
-}
-
-function optionalString(input: JsonObject, name: string): string | undefined {
-  const value = input[name];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string" || value.length === 0) {
-    throw new TypeError(`mcp.${name} must be a non-empty string`);
-  }
-  return value;
-}
-
-function rejectUnknown(input: JsonObject): void {
-  const allowed = [
-    "action",
-    "server",
-    "name",
-    "arguments",
-    "uri",
-    "cursor",
-    "taskTtl",
-    "taskId",
-    "level",
-    "ref",
-    "argument",
-    "context",
-  ];
-  for (const key of Object.keys(input)) {
-    if (!allowed.includes(key)) throw new TypeError(`mcp.${key} is not allowed`);
-  }
 }
 
 function errorResult(message: string): ToolExecutionResult {
@@ -353,203 +313,80 @@ export class McpManager implements ExtensionHost {
     this.connections.clear();
   }
 
-  makeTool(): KernelTool {
+  async discoverTools(serverName: string, signal?: AbortSignal): Promise<McpToolDiscovery> {
+    const operationSignal = signal ?? new AbortController().signal;
+    const server = this.configurations.get(serverName);
+    if (server === undefined) throw new Error(`Unknown MCP server ${serverName}`);
+    const connection = await this.connection(server, operationSignal);
+    const tools: McpToolDiscovery["tools"][number][] = [];
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await connection.client.listTools(
+        cursor === undefined ? {} : { cursor },
+        this.requestOptions(server.config, operationSignal, connection.logs),
+      );
+      for (const tool of page.tools) {
+        if (tools.length >= 1_000)
+          throw new Error(`MCP server ${serverName} exposes too many tools`);
+        tools.push({
+          name: tool.name,
+          description: tool.description ?? tool.title ?? tool.name,
+          inputSchema: toJson(tool.inputSchema) as JsonObject,
+          ...(tool.annotations === undefined
+            ? {}
+            : { annotations: toJson(tool.annotations) as JsonObject }),
+          ...(tool.execution?.taskSupport === undefined
+            ? {}
+            : { taskSupport: tool.execution.taskSupport }),
+        });
+      }
+      cursor = page.nextCursor;
+      if (cursor !== undefined && (cursors.has(cursor) || cursors.size >= 100)) {
+        throw new Error(`MCP server ${serverName} returned invalid tools/list pagination`);
+      }
+      if (cursor !== undefined) cursors.add(cursor);
+    } while (cursor !== undefined);
     return {
-      name: "mcp",
-      description:
-        "Use configured Model Context Protocol servers. Supports server discovery, tools, resources, prompts, completions, logging, tasks, progress, and cancellation.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          action: {
-            type: "string",
-            enum: [
-              "list_servers",
-              "ping",
-              "server_info",
-              "list_tools",
-              "call_tool",
-              "list_resources",
-              "list_resource_templates",
-              "read_resource",
-              "subscribe_resource",
-              "unsubscribe_resource",
-              "list_prompts",
-              "get_prompt",
-              "complete",
-              "set_log_level",
-              "logs",
-              "list_tasks",
-              "get_task",
-              "get_task_result",
-              "cancel_task",
-            ],
-          },
-          server: { type: "string" },
-          name: { type: "string" },
-          arguments: { type: "object" },
-          uri: { type: "string" },
-          cursor: { type: "string" },
-          taskTtl: { type: "integer", minimum: 1 },
-          taskId: { type: "string" },
-          level: { type: "string" },
-          ref: { type: "object" },
-          argument: { type: "object" },
-          context: { type: "object" },
-        },
-        required: ["action"],
-        additionalProperties: false,
-      },
+      protocolVersion:
+        connection.transport instanceof StreamableHTTPClientTransport
+          ? (connection.transport.protocolVersion ?? LATEST_PROTOCOL_VERSION)
+          : LATEST_PROTOCOL_VERSION,
+      tools,
+    };
+  }
+
+  makeDirectTool(binding: McpToolBinding): KernelTool {
+    const server = this.configurations.get(binding.serverName);
+    if (server === undefined) throw new Error(`Unknown MCP server ${binding.serverName}`);
+    if (mcpConfigurationFingerprint(server.config) !== binding.configurationFingerprint) {
+      throw new Error(`MCP server ${binding.serverName} configuration changed`);
+    }
+    const validate = this.schemaValidator.getValidator(binding.inputSchema as never);
+    return {
+      name: binding.canonicalName,
+      description: binding.description,
+      inputSchema: binding.inputSchema,
       execute: async (input, signal) => {
         try {
-          return await this.execute(input, signal);
+          const validation = validate(input);
+          if (!validation.valid) {
+            throw new TypeError(
+              validation.errorMessage ?? `Invalid arguments for MCP tool ${binding.toolName}`,
+            );
+          }
+          return await this.callDirectTool(server, binding, input, signal);
         } catch (error) {
           if (signal.aborted) throw error;
+          const message = error instanceof Error ? error.message : String(error);
           return errorResult(
-            this.redactedText(error instanceof Error ? error.message : String(error)),
+            this.redactedText(
+              `MCP tool ${binding.serverName}/${binding.toolName} failed: ${message}`,
+            ),
           );
         }
       },
     };
-  }
-
-  private async execute(input: JsonObject, signal: AbortSignal): Promise<ToolExecutionResult> {
-    rejectUnknown(input);
-    const action = requiredString(input, "action");
-    if (action === "list_servers") {
-      return this.jsonResult(
-        this.options.servers.map((server) => ({
-          name: server.name,
-          transport: server.config.transport,
-          source: server.source,
-        })),
-      );
-    }
-    const serverName = requiredString(input, "server");
-    const server = this.configurations.get(serverName);
-    if (!server) return errorResult(`Unknown MCP server ${serverName}`);
-    const connection = await this.connection(server, signal);
-    const options = this.requestOptions(server.config, signal, connection.logs);
-
-    switch (action) {
-      case "ping":
-        return this.jsonResult(await connection.client.ping(options));
-      case "server_info":
-        return this.jsonResult({
-          implementation: connection.client.getServerVersion(),
-          capabilities: connection.client.getServerCapabilities(),
-          instructions: connection.client.getInstructions(),
-        });
-      case "list_tools":
-        return this.jsonResult(
-          await connection.client.listTools(
-            optionalString(input, "cursor") ? { cursor: optionalString(input, "cursor") } : {},
-            options,
-          ),
-        );
-      case "call_tool":
-        return this.callTool(connection, server, input, signal);
-      case "list_resources":
-        return this.jsonResult(
-          await connection.client.listResources(
-            optionalString(input, "cursor") ? { cursor: optionalString(input, "cursor") } : {},
-            options,
-          ),
-        );
-      case "list_resource_templates":
-        return this.jsonResult(
-          await connection.client.listResourceTemplates(
-            optionalString(input, "cursor") ? { cursor: optionalString(input, "cursor") } : {},
-            options,
-          ),
-        );
-      case "read_resource":
-        return this.resourceResult(
-          await connection.client.readResource({ uri: requiredString(input, "uri") }, options),
-        );
-      case "subscribe_resource":
-        return this.jsonResult(
-          await connection.client.subscribeResource({ uri: requiredString(input, "uri") }, options),
-        );
-      case "unsubscribe_resource":
-        return this.jsonResult(
-          await connection.client.unsubscribeResource(
-            { uri: requiredString(input, "uri") },
-            options,
-          ),
-        );
-      case "list_prompts":
-        return this.jsonResult(
-          await connection.client.listPrompts(
-            optionalString(input, "cursor") ? { cursor: optionalString(input, "cursor") } : {},
-            options,
-          ),
-        );
-      case "get_prompt":
-        return this.jsonResult(
-          await connection.client.getPrompt(
-            {
-              name: requiredString(input, "name"),
-              ...(input.arguments === undefined
-                ? {}
-                : {
-                    arguments: asObject(input.arguments, "mcp.arguments") as Record<string, string>,
-                  }),
-            },
-            options,
-          ),
-        );
-      case "complete":
-        return this.jsonResult(
-          await connection.client.complete(
-            {
-              ref: asObject(input.ref, "mcp.ref") as never,
-              argument: asObject(input.argument, "mcp.argument") as never,
-              ...(input.context === undefined
-                ? {}
-                : { context: asObject(input.context, "mcp.context") as never }),
-            },
-            options,
-          ),
-        );
-      case "set_log_level":
-        return this.jsonResult(
-          await connection.client.setLoggingLevel(requiredString(input, "level") as never, options),
-        );
-      case "logs":
-        return this.jsonResult(connection.logs);
-      case "list_tasks":
-        return this.jsonResult(
-          await connection.client.experimental.tasks.listTasks(
-            optionalString(input, "cursor"),
-            options,
-          ),
-        );
-      case "get_task":
-        return this.jsonResult(
-          await connection.client.experimental.tasks.getTask(
-            requiredString(input, "taskId"),
-            options,
-          ),
-        );
-      case "get_task_result":
-        return this.jsonResult(
-          await connection.client.experimental.tasks.getTaskResult(
-            requiredString(input, "taskId"),
-            CallToolResultSchema,
-            options,
-          ),
-        );
-      case "cancel_task":
-        return this.jsonResult(
-          await connection.client.experimental.tasks.cancelTask(
-            requiredString(input, "taskId"),
-            options,
-          ),
-        );
-      default:
-        return errorResult(`Unknown MCP action ${action}`);
-    }
   }
 
   private requestOptions(config: McpServerConfig, signal: AbortSignal, logs?: JsonValue[]) {
@@ -566,72 +403,58 @@ export class McpManager implements ExtensionHost {
     };
   }
 
-  private async callTool(
-    connection: Connection,
+  private async callDirectTool(
     server: NamedMcpServerConfig,
-    input: JsonObject,
+    binding: McpToolBinding,
+    arguments_: JsonObject,
     signal: AbortSignal,
   ): Promise<ToolExecutionResult> {
-    const name = requiredString(input, "name");
-    const arguments_ =
-      input.arguments === undefined ? {} : asObject(input.arguments, "mcp.arguments");
-    const tools = await connection.client.listTools(
-      {},
-      this.requestOptions(server.config, signal, connection.logs),
-    );
-    const metadata = tools.tools.find((tool) => tool.name === name);
-    if (!metadata) return errorResult(`MCP server ${server.name} has no tool ${name}`);
-
+    if (mcpConfigurationFingerprint(server.config) !== binding.configurationFingerprint) {
+      throw new Error(`MCP server ${server.name} configuration changed`);
+    }
     const consent = await this.options.interact(
       {
         kind: "mcp_tool",
         source: `mcp:${server.name}`,
-        message: `Allow MCP tool ${name}?`,
+        message: `Allow MCP tool ${binding.toolName}?`,
         data: {
-          name,
+          name: binding.toolName,
           arguments: this.redacted(arguments_) as JsonObject,
-          annotations: this.redacted(metadata.annotations ?? {}),
+          annotations: this.redacted(binding.annotations ?? {}),
         },
       },
       signal,
     );
     if (consent.action !== "accept") {
-      return errorResult(`User ${rejected(consent.action)} MCP tool ${name}`);
+      return errorResult(`User ${rejected(consent.action)} MCP tool ${binding.toolName}`);
     }
 
-    const taskTtl = input.taskTtl;
-    if (
-      taskTtl !== undefined &&
-      (typeof taskTtl !== "number" || !Number.isSafeInteger(taskTtl) || taskTtl < 1)
-    ) {
-      throw new TypeError("mcp.taskTtl must be a positive safe integer");
-    }
-    const useTask = metadata.execution?.taskSupport === "required" || taskTtl !== undefined;
-    if (useTask) {
+    const connection = await this.connection(server, signal);
+    if (binding.taskSupport === "required") {
       const messages: JsonValue[] = [];
       let final: CallToolResult | undefined;
       for await (const message of connection.client.experimental.tasks.callToolStream(
-        { name, arguments: arguments_ },
+        { name: binding.toolName, arguments: arguments_ },
         CallToolResultSchema,
         {
           ...this.requestOptions(server.config, signal, connection.logs),
-          task: { ttl: typeof taskTtl === "number" ? taskTtl : server.config.requestTimeoutMs * 5 },
+          task: { ttl: server.config.requestTimeoutMs * 5 },
         },
       )) {
         messages.push(this.redacted(message));
         if (message.type === "result") final = message.result;
         else if (message.type === "error") throw message.error;
       }
-      if (!final) throw new Error(`MCP task tool ${name} ended without a result`);
+      if (!final) throw new Error(`MCP task tool ${binding.toolName} ended without a result`);
       return this.callResult(final, { taskMessages: messages });
     }
     const result = await connection.client.callTool(
-      { name, arguments: arguments_ },
+      { name: binding.toolName, arguments: arguments_ },
       CallToolResultSchema,
       this.requestOptions(server.config, signal, connection.logs),
     );
     if (!("content" in result) || !Array.isArray(result.content)) {
-      throw new Error(`MCP tool ${name} returned a legacy result`);
+      throw new Error(`MCP tool ${binding.toolName} returned a legacy result`);
     }
     return this.callResult(result as CallToolResult);
   }
@@ -703,8 +526,19 @@ export class McpManager implements ExtensionHost {
     client.setNotificationHandler(LoggingMessageNotificationSchema, (message) =>
       this.pushLog(logs, message.params),
     );
+    client.setNotificationHandler(ToolListChangedNotificationSchema, (message) => {
+      this.pushLog(logs, message);
+      if (this.options.onToolListChanged === undefined) return;
+      void this.discoverTools(server.name)
+        .then((discovery) => this.options.onToolListChanged?.(server, discovery))
+        .catch((error: unknown) =>
+          this.pushLog(logs, {
+            level: "error",
+            data: `Cannot refresh MCP metadata: ${String(error)}`,
+          }),
+        );
+    });
     for (const schema of [
-      ToolListChangedNotificationSchema,
       PromptListChangedNotificationSchema,
       ResourceListChangedNotificationSchema,
       ResourceUpdatedNotificationSchema,
@@ -813,6 +647,7 @@ export class McpManager implements ExtensionHost {
             env,
             onSecrets: (values) => {
               for (const value of values) this.secretValues.add(value);
+              this.options.onSecrets?.(values);
             },
           })
         : undefined);
@@ -952,28 +787,6 @@ export class McpManager implements ExtensionHost {
   private pushLog(logs: JsonValue[], value: unknown): void {
     logs.push(this.redacted(value));
     if (logs.length > MAX_LOG_ENTRIES) logs.shift();
-  }
-
-  private jsonResult(value: unknown): ToolExecutionResult {
-    const json = this.redacted(value);
-    return {
-      content: [{ type: "text", text: JSON.stringify(json, null, 2) }],
-      isError: false,
-      details: json,
-    };
-  }
-
-  private async resourceResult(
-    value: Awaited<ReturnType<AnyClient["readResource"]>>,
-  ): Promise<ToolExecutionResult> {
-    const content: UserContent[] = [];
-    for (const item of value.contents) {
-      if ("text" in item) content.push({ type: "text", text: this.redactedText(item.text) });
-      else
-        content.push(await this.storeBlob(item.blob, item.mimeType ?? "application/octet-stream"));
-    }
-    toJson(content);
-    return { content, isError: false, details: { itemCount: value.contents.length } };
   }
 
   private async callResult(

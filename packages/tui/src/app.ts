@@ -49,6 +49,7 @@ import {
   type DaemonHostControl,
   type DaemonHostStatus,
   type ModelRequestSettings,
+  mcpServerPresets,
   orderPendingTurnInputs,
   type PresentationCommand,
   ProviderClientError,
@@ -2500,6 +2501,9 @@ export class AxlApp {
       case "settings":
         this.openSettings();
         return;
+      case "mcp":
+        await this.openMcpSettings();
+        return;
       case "login":
         await this.loginProvider(argument);
         return;
@@ -2628,6 +2632,9 @@ export class AxlApp {
         return;
       case "providers":
         await this.showProviders(outcome.argument);
+        return;
+      case "mcp":
+        await this.openMcpSettings();
         return;
       case "login":
         await this.loginProvider(outcome.argument);
@@ -3252,6 +3259,64 @@ export class AxlApp {
             `  last call ${last.maxOutputTokens} output tokens · ${last.estimatedInputTokens} input estimate + ${last.contextReserveTokens} reserve / ${last.contextWindow} context`,
           ]),
     ];
+  }
+
+  private async openMcpSettings(): Promise<void> {
+    try {
+      const configured = await this.client.listMcpServers();
+      const active = new Set(configured.servers.map((server) => server.name));
+      const presets = mcpServerPresets(this.cwd);
+      this.openPicker({
+        title: "MCP servers",
+        items: [
+          ...configured.servers.map((server) => ({
+            value: `remove:${server.name}`,
+            label: `Remove ${server.name}`,
+            description: "currently configured",
+          })),
+          ...Object.keys(presets)
+            .filter((name) => !active.has(name))
+            .map((name) => ({
+              value: `add:${name}`,
+              label: `Add ${name}`,
+              description: "add tested global server",
+            })),
+        ],
+        current: "",
+        preview: () => [
+          `Global config: ${configured.path}`,
+          "Changes apply to every project and reload this session.",
+        ],
+        onPick: (value) => {
+          void (async () => {
+            const separator = value.indexOf(":");
+            const action = value.slice(0, separator);
+            const name = value.slice(separator + 1);
+            if (action === "remove") await this.client.removeMcpServer({ name });
+            else {
+              const definition = presets[name];
+              if (definition === undefined) throw new Error(`Unknown MCP preset ${name}`);
+              await this.client.upsertMcpServer({ name, definition });
+            }
+            await this.commandController.invoke("/reload", this.sessionId);
+            this.notice = this.view.palette.dim(
+              `· MCP server ${name} ${action === "remove" ? "removed" : "added"}`,
+            );
+            this.redraw();
+          })().catch((error: unknown) => {
+            this.notice = this.view.palette.error(
+              `✖ ${error instanceof Error ? error.message : "MCP configuration failed"}`,
+            );
+            this.redraw();
+          });
+        },
+      });
+    } catch (error) {
+      this.notice = this.view.palette.error(
+        `✖ ${error instanceof Error ? error.message : "MCP configuration failed"}`,
+      );
+      this.redraw();
+    }
   }
 
   private openSettings(): void {

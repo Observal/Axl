@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { loadMcpConfig, mcpSecretValues, McpConfigError } from "../src/index.ts";
+import { loadMcpConfig, McpConfigError, McpConfigStore, mcpSecretValues } from "../src/index.ts";
 
-test("loads stdio and HTTP servers with project overrides", async (context) => {
+test("loads only global mcpServers and infers transports", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-mcp-config-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const global = join(root, "global");
@@ -19,19 +19,10 @@ test("loads stdio and HTTP servers with project overrides", async (context) => {
   await writeFile(
     join(global, "mcp.json"),
     JSON.stringify({
-      servers: {
-        local: { transport: "stdio", command: "node", args: ["server.mjs"], roots: ["."] },
-        disabled: { transport: "stdio", command: "false" },
-      },
-    }),
-  );
-  await writeFile(
-    join(project, ".axl", "mcp.json"),
-    JSON.stringify({
-      servers: {
-        disabled: { transport: "stdio", command: "false", enabled: false },
+      mcpServers: {
+        local: { command: "node", args: ["server.mjs"], roots: ["."] },
+        disabled: { command: "false", enabled: false },
         remote: {
-          transport: "http",
           url: "https://example.com/mcp",
           headers: { Authorization: "EXAMPLE_TOKEN" },
           oauth: { clientId: "axl", scope: "tools" },
@@ -39,28 +30,59 @@ test("loads stdio and HTTP servers with project overrides", async (context) => {
       },
     }),
   );
+  await writeFile(
+    join(project, ".axl", "mcp.json"),
+    JSON.stringify({ mcpServers: { ignored: { command: "false" } } }),
+  );
 
   const servers = await loadMcpConfig({ cwd: project, globalDirectory: global });
   assert.deepEqual(
-    servers.map((server) => server.name),
-    ["local", "remote"],
+    servers.map((server) => [server.name, server.config.transport]),
+    [
+      ["local", "stdio"],
+      ["remote", "http"],
+    ],
   );
   assert.equal(servers[0]?.config.roots[0], project);
   assert.deepEqual(mcpSecretValues(servers, { EXAMPLE_TOKEN: "top-secret" }), ["top-secret"]);
 });
 
-test("rejects unsafe HTTP URLs and unknown configuration", async (context) => {
+test("configuration store atomically adds and removes private global servers", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-mcp-store-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new McpConfigStore(root, root);
+
+  const added = await store.upsert("context7", { url: "https://mcp.context7.com/mcp" });
+  assert.equal(added.changed, true);
+  assert.equal(added.servers[0]?.name, "context7");
+  assert.equal((await lstat(join(root, "mcp.json"))).mode & 0o777, 0o600);
+  assert.deepEqual(JSON.parse(await readFile(join(root, "mcp.json"), "utf8")), {
+    mcpServers: { context7: { url: "https://mcp.context7.com/mcp" } },
+  });
+  assert.equal((await store.remove("context7")).servers.length, 0);
+
+  await rm(join(root, "mcp.json"));
+  await writeFile(join(root, "target.json"), '{"mcpServers":{}}');
+  await symlink(join(root, "target.json"), join(root, "mcp.json"));
+  await assert.rejects(() => store.list(), /not a symlink/);
+});
+
+test("rejects legacy, ambiguous, unsafe, and unknown configuration", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-mcp-config-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(join(root, ".axl"));
+  await mkdir(root, { recursive: true });
+  const path = join(root, "mcp.json");
+  const load = () => loadMcpConfig({ cwd: root, globalDirectory: root });
+
+  await writeFile(path, JSON.stringify({ servers: {} }));
+  await assert.rejects(load, McpConfigError);
   await writeFile(
-    join(root, ".axl", "mcp.json"),
-    JSON.stringify({ servers: { bad: { transport: "http", url: "http://example.com/mcp" } } }),
+    path,
+    JSON.stringify({ mcpServers: { bad: { url: "https://example.com", command: "node" } } }),
   );
-  await assert.rejects(loadMcpConfig({ cwd: root }), McpConfigError);
-  await writeFile(
-    join(root, ".axl", "mcp.json"),
-    JSON.stringify({ servers: { bad: { transport: "http", url: ":not-a-url" } } }),
-  );
-  await assert.rejects(loadMcpConfig({ cwd: root }), McpConfigError);
+  await assert.rejects(load, McpConfigError);
+  await writeFile(path, JSON.stringify({ mcpServers: { bad: { url: "http://example.com/mcp" } } }));
+  await assert.rejects(load, McpConfigError);
+  await writeFile(path, JSON.stringify({ mcpServers: { bad: { url: ":not-a-url" } } }));
+  await assert.rejects(load, McpConfigError);
 });

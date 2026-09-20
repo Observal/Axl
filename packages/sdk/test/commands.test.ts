@@ -61,6 +61,16 @@ const catalog: CommandListResult = {
       availability: { state: "available" },
     },
     {
+      id: "core.mcp",
+      name: "mcp",
+      aliases: [],
+      description: "Configure MCP servers",
+      context: "global",
+      argument: { required: false, hint: "server" },
+      requiredCapabilities: ["mcp.config.list", "mcp.config.upsert", "mcp.config.remove"],
+      availability: { state: "available" },
+    },
+    {
       id: "core.thinking",
       name: "thinking",
       aliases: ["effort"],
@@ -196,6 +206,10 @@ test("command controller loads, searches, and invokes typed operations", async (
     surface: "login",
     argument: "azure",
   });
+  assert.deepEqual(await commands.invoke("/mcp", sessionId), {
+    state: "focus",
+    surface: "mcp",
+  });
   assert.deepEqual(
     await commands.invoke("/request output 2048", sessionId, {
       requestSettings: { maxOutputTokens: null, httpIdleTimeoutMs: 30_000 },
@@ -277,6 +291,7 @@ test("command directory sorts daemon and presentation commands by name", () => {
       "import",
       "login",
       "logout",
+      "mcp",
       "refresh",
       "reload",
       "rename",

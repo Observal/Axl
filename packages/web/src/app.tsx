@@ -14,6 +14,9 @@ import {
   type InteractionAction,
   type JsonObject,
   MAX_UPLOAD_BLOB_BYTES,
+  type McpConfigListResult,
+  type McpServerDefinition,
+  mcpServerPresets,
   type ModelChoice,
   NewSessionController,
   type NewSessionDraft,
@@ -330,6 +333,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [newSessionError, setNewSessionError] = useState<string>();
   const [presence, setPresence] = useState<readonly AttachmentPresence[]>([]);
   const [providerActionError, setProviderActionError] = useState<string>();
+  const [mcpConfiguration, setMcpConfiguration] = useState<McpConfigListResult>();
+  const [mcpError, setMcpError] = useState<string>();
+  const [mcpBusy, setMcpBusy] = useState(false);
   const [settingsError, setSettingsError] = useState<string>();
   const [providerLogin, setProviderLogin] = useState<{
     readonly providerId: string;
@@ -1681,6 +1687,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (outcome.surface === "model" || outcome.surface === "thinking") {
         setModelPickerInitialFocus(outcome.surface);
         setModelPickerOpenRequest((current) => current + 1);
+      } else if (outcome.surface === "mcp") {
+        setUsageOpen(false);
+        setTranscriptSearchOpen(false);
+        setControlCenter("mcp");
+        void loadMcpConfiguration();
       } else if (
         outcome.surface === "providers" ||
         outcome.surface === "login" ||
@@ -1891,6 +1902,41 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     setChangesView(preferences.changesView);
     if (preferences.panes.join() !== paneLayout.panes.join()) setPaneLayout(createPaneLayout(preferences.panes));
     persistLayout(preferences);
+  };
+
+  const loadMcpConfiguration = async (): Promise<void> => {
+    if (client === undefined || !hasCapability("mcp.config.list")) return;
+    setMcpBusy(true);
+    setMcpError(undefined);
+    try {
+      setMcpConfiguration(await client.listMcpServers());
+    } catch (cause) {
+      setMcpError(cause instanceof Error ? cause.message : "Could not load MCP configuration");
+    } finally {
+      setMcpBusy(false);
+    }
+  };
+
+  const updateMcpServer = async (
+    name: string,
+    definition?: McpServerDefinition,
+  ): Promise<void> => {
+    if (client === undefined || opened === undefined) return;
+    setMcpBusy(true);
+    setMcpError(undefined);
+    try {
+      const result =
+        definition === undefined
+          ? await client.removeMcpServer({ name })
+          : await client.upsertMcpServer({ name, definition });
+      setMcpConfiguration(result);
+      await commandController.current?.invoke("/reload", opened.sessionId);
+      showActionNotice(`MCP server ${name} ${definition === undefined ? "removed" : "added"}`);
+    } catch (cause) {
+      setMcpError(cause instanceof Error ? cause.message : "Could not update MCP configuration");
+    } finally {
+      setMcpBusy(false);
+    }
   };
 
   const refreshProviders = async (providerId?: string): Promise<void> => {
@@ -2222,7 +2268,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         }}
       />
     </div>
-    {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={currentPreferences()} theme={theme} providers={providerInventory} providerLoading={providerLoading} providerRefresh={providerDirectory.refresh} providerError={providerError} providerLogin={providerLogin} settingsError={settingsError} canRefresh={hasCapability("provider.catalog.refresh")} canLogin={canLoginProvider} canLogout={hasCapability("provider.auth.logout")} onTab={setControlCenter} onPreferences={applyWebPreferences} onTheme={(nextTheme) => { setSettingsError(undefined); setTheme(nextTheme); }} onRefresh={(providerId) => void refreshProviders(providerId)} onCancelRefresh={() => providerDirectoryController.current?.cancelRefresh()} onLogin={(providerId, method) => void startProviderLogin(providerId, method)} onCancelLogin={cancelProviderLogin} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId, method) => void copyProviderLogin(providerId, method)} onClose={() => { setControlCenter(undefined); setSettingsError(undefined); }} /></Suspense>}
+    {controlCenter && <Suspense fallback={null}><ControlCenter tab={controlCenter} preferences={currentPreferences()} theme={theme} providers={providerInventory} providerLoading={providerLoading} providerRefresh={providerDirectory.refresh} providerError={providerError} providerLogin={providerLogin} settingsError={settingsError} mcp={mcpConfiguration} mcpError={mcpError} mcpBusy={mcpBusy} mcpPresets={mcpServerPresets(opened?.cwd ?? ".")} canRefresh={hasCapability("provider.catalog.refresh")} canLogin={canLoginProvider} canLogout={hasCapability("provider.auth.logout")} onTab={(tab) => { setControlCenter(tab); if (tab === "mcp") void loadMcpConfiguration(); }} onPreferences={applyWebPreferences} onTheme={(nextTheme) => { setSettingsError(undefined); setTheme(nextTheme); }} onRefresh={(providerId) => void refreshProviders(providerId)} onCancelRefresh={() => providerDirectoryController.current?.cancelRefresh()} onLogin={(providerId, method) => void startProviderLogin(providerId, method)} onCancelLogin={cancelProviderLogin} onLogout={(providerId) => void logoutProvider(providerId)} onCopyLogin={(providerId, method) => void copyProviderLogin(providerId, method)} onMcpAdd={(name, definition) => void updateMcpServer(name, definition)} onMcpRemove={(name) => void updateMcpServer(name)} onClose={() => { setControlCenter(undefined); setSettingsError(undefined); setMcpError(undefined); }} /></Suspense>}
     {sessionLifecycleOpen && selectedSummary && <SessionLifecycle session={selectedSummary} busy={busy} capabilities={lifecycleCapabilities} {...(sessionLifecycleError === undefined ? {} : { error: sessionLifecycleError })} onRename={(title) => void renameSession(title)} onClone={() => void cloneSession()} onExport={() => void exportArtifact()} onDispose={() => void disposeSession()} onDelete={() => void deleteSession()} onClose={() => { setSessionLifecycleOpen(false); setSessionLifecycleError(undefined); }} />}
     {requeueOpen && <RequeueDialog items={pausedQueue} busyItemId={requeueBusyItemId} error={requeueError} onRequeue={(queueItemId) => void requeueItem(queueItemId)} onClose={() => { setRequeueOpen(false); setRequeueError(undefined); }} />}
     {newSessionOpen && <NewSessionDialog

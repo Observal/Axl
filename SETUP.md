@@ -151,11 +151,11 @@ Axl reads global configuration from `~/.axl`:
 - `credentials.json` for credentials managed by `axl login`
 - `settings.json` for model, thinking, web-tool, theme, and terminal preferences
 
-Credentials and settings apply in every workspace. Axl also reads hierarchical `AGENTS.md`, `.axl/skills`, `.agents/skills`, and `.axl/mcp.json` resources. A nearer project Skill replaces a broader or global Skill with the same identity. Reload the session after changing instructions, Skills, or MCP configuration.
+Credentials and settings apply in every workspace. Axl also reads hierarchical `AGENTS.md`, `.axl/skills`, and `.agents/skills` resources. A nearer project Skill replaces a broader or global Skill with the same identity. MCP configuration is global and user-owned. Use `/mcp` in the terminal or web client, ask the model to configure a server, or edit the file directly. Managed changes validate the config, write it privately, and reload the active session.
 
 ## Session profiles
 
-The `standard` profile is the default. It exposes `read`, `write`, `edit`, `bash`, `web_fetch`, `web_search`, and daemon-owned capability discovery. Agent Skills and model-callable tools declared by the daemon command registry become visible only after explicit activation and remain active for the rest of the session. The current command-backed tools are `compact_context` and `reload_context`. MCP runtime activation remains disabled until selected provider-native MCP tools are implemented.
+The `standard` profile is the default. It exposes `read`, `write`, `edit`, `bash`, `web_fetch`, `web_search`, and daemon-owned capability discovery. Agent Skills and model-callable tools declared by the daemon command registry become visible only after explicit activation and remain active for the rest of the session. Command-backed tools include `compact_context`, `reload_context`, and progressively disclosed `configure_mcp`. Selected MCP tools use their native schemas.
 
 Use the `exec` profile to create a Bash-only session:
 
@@ -203,7 +203,7 @@ Axl walks from the repository root to the working directory. Later definitions r
 
 ## Add MCP servers
 
-Put global MCP configuration in `~/.axl/mcp.json` or project configuration in `<workspace>/.axl/mcp.json`. Axl supports MCP `2025-11-25` over stdio and Streamable HTTP, including OAuth. See [`packages/extensions/mcp/README.md`](packages/extensions/mcp/README.md) for the schema and security rules.
+Run `/mcp` in the terminal or web client to manage tested global servers. You can also ask the model to add, update, list, or remove a server through the daemon-owned `configure_mcp` capability. Both paths validate and atomically update `~/.axl/mcp.json` without granting sandboxed commands access to credentials or session state. Axl does not load project-local MCP configuration. Axl supports MCP `2025-11-25` over stdio and Streamable HTTP, including OAuth. Tools stay outside the model roster until selected through `capability_search`. See [`packages/extensions/mcp/README.md`](packages/extensions/mcp/README.md) for custom server schemas and security rules.
 
 ## Development commands
 

@@ -3,29 +3,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  type BlobReference,
+  type CapabilityId,
+  type ClientIdentity,
+  type ConnectionInitializeResult,
   encodeWireMessage,
   isKnownRpcErrorCode,
   isProviderRpcErrorCode,
   isRetryableMutationMethod,
   isRpcErrorAllowed,
-  parseServerMessage,
-  parseWireRequest,
-  requiredCapability,
-  WIRE_PROTOCOL_VERSION,
-  type BlobReference,
-  type CapabilityId,
-  type ClientIdentity,
-  type ConnectionInitializeResult,
   type OperationId,
   type PresenceDelivery,
   type ProviderRpcErrorCode,
   type ProviderRpcErrorDetails,
+  parseServerMessage,
+  parseWireRequest,
   type RpcMethod,
   type RpcParams,
   type RpcResult,
+  requiredCapability,
   type ServerMessage,
   type SessionId,
   type SessionsChangedDelivery,
+  WIRE_PROTOCOL_VERSION,
   type WireActivity,
   type WireEvent,
 } from "@axl/protocol";
@@ -259,6 +259,26 @@ export class AxlClient {
     options: Omit<RequestOptions, "idempotencyKey"> = {},
   ): Promise<RpcResult<"command.list">> {
     return this.request("command.list", params, options);
+  }
+
+  listMcpServers(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"mcp.config.list">> {
+    return this.request("mcp.config.list", {}, options);
+  }
+
+  upsertMcpServer(
+    params: RpcParams<"mcp.config.upsert">,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"mcp.config.upsert">> {
+    return this.request("mcp.config.upsert", params, options);
+  }
+
+  removeMcpServer(
+    params: RpcParams<"mcp.config.remove">,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"mcp.config.remove">> {
+    return this.request("mcp.config.remove", params, options);
   }
 
   listProviders(

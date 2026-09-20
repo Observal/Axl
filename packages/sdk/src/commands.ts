@@ -6,10 +6,10 @@ import {
   type CommandListResult,
   type EventId,
   type ModelRequestSettings,
-  parseCommandListResult,
-  parseModelRequestSettings,
   type ProviderAuthenticationStatus,
   type ProviderCatalogRefreshResult,
+  parseCommandListResult,
+  parseModelRequestSettings,
   type SessionConfiguration,
   type SessionForkResult,
   type SessionId,
@@ -39,6 +39,7 @@ export type CommandSurface =
   | "model"
   | "thinking"
   | "providers"
+  | "mcp"
   | "login"
   | "logout"
   | "request"
@@ -245,6 +246,7 @@ export class CommandController {
         return { state: "session-configured", command: "thinking", update };
       }
       case "providers":
+      case "mcp":
       case "login":
         return {
           state: "focus",

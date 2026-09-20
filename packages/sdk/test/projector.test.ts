@@ -7,16 +7,16 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  type CanonicalEvent,
   ConversationProjector,
-  orderPendingTurnInputs,
   EVENT_FORMAT_VERSION,
+  type EventPayloadMap,
+  type EventType,
+  orderPendingTurnInputs,
   ProjectionError,
   parseEvent,
   parseOperationId,
   parseSessionId,
-  type CanonicalEvent,
-  type EventPayloadMap,
-  type EventType,
 } from "../src/index.ts";
 
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
@@ -192,12 +192,13 @@ test("classifies first-party tool presentation intents", () => {
     ["read-1", "read"],
     ["write-1", "write"],
     ["edit-1", "edit"],
+    ["mcp-1", "mcp_context7_query-docs_aef4d8b911"],
   ] as const) {
     projector.applyEvent(event("tool.call", { callId, name, input: {} }));
   }
   assert.deepEqual(
     projector.state.tools.map((tool) => tool.renderIntent),
-    ["shell", "read", "edit", "edit"],
+    ["shell", "read", "edit", "edit", "mcp"],
   );
 });
 

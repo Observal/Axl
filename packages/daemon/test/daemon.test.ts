@@ -28,11 +28,11 @@ import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 
 import {
+  buildStablePrompt,
   type CompactionSettings,
   JsonlEventLog,
   type ModelPort,
   type ModelRetryOptions,
-  buildStablePrompt,
   ToolRegistry,
 } from "@axl/kernel";
 import type {
@@ -774,6 +774,42 @@ test("derives model-callable tools from the daemon command registry", () => {
     commands.commands.map((command) => command.id),
   );
   assert.deepEqual(tools.declarations(), []);
+});
+
+test("model MCP configuration uses the daemon-owned store and queues reload", async () => {
+  const tools = new ToolRegistry();
+  const configured: Array<[string, unknown]> = [];
+  let reloads = 0;
+  const installed = installDaemonCommandCapabilities({
+    tools,
+    compact: () => Promise.resolve({ state: "queued" }),
+    reload: () => {
+      reloads += 1;
+      return Promise.resolve({ state: "queued" });
+    },
+    mcp: {
+      list: () => Promise.resolve({ path: "/tmp/mcp.json", servers: [] }),
+      upsert: (name, definition) => {
+        configured.push([name, definition]);
+        return Promise.resolve({
+          path: "/tmp/mcp.json",
+          servers: [{ name, definition }],
+          changed: true,
+        });
+      },
+      remove: () => Promise.resolve({ path: "/tmp/mcp.json", servers: [], changed: true }),
+    },
+  });
+  assert.ok(installed.source.records.some((record) => record.identity === "tool:configure-mcp"));
+  tools.activateCapability("tool:configure-mcp");
+  await tools
+    .get("configure_mcp")
+    ?.execute(
+      { action: "upsert", name: "context7", definition: { url: "https://mcp.context7.com/mcp" } },
+      new AbortController().signal,
+    );
+  assert.deepEqual(configured, [["context7", { url: "https://mcp.context7.com/mcp" }]]);
+  assert.equal(reloads, 1);
 });
 
 test("publishes a capability-filtered command catalog", async (context) => {

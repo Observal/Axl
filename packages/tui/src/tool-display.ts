@@ -450,11 +450,6 @@ function transactionTarget(name: string, input: Record<string, unknown>): string
   }
   if (name === "grep") return `/${field(input, "pattern") ?? ""}/ · ${pathLabel(input)}`;
   if (name === "find") return `${field(input, "pattern") ?? ""} · ${pathLabel(input)}`;
-  if (name === "mcp") {
-    return [field(input, "server"), field(input, "name") ?? field(input, "action")]
-      .filter(Boolean)
-      .join(" · ");
-  }
   if (name === "skill") {
     const action = field(input, "action") ?? "load";
     const target = field(input, "name") ?? field(input, "path") ?? "";
@@ -624,7 +619,7 @@ export function renderToolTransaction(input: {
     input.mode === "focus" &&
     input.status === "succeeded" &&
     (custom?.hideWhenSuccessfulInFocus ??
-      ["read", "grep", "find", "ls", "mcp", "skill"].includes(input.name))
+      ["read", "grep", "find", "ls", "skill"].includes(input.name))
   )
     return [];
   const target = previewText(
@@ -721,5 +716,5 @@ export function renderShellPassthrough(input: {
 }
 
 function isMcpTool(name: string): boolean {
-  return name === "mcp" || name.startsWith("mcp_") || name.includes("__mcp__");
+  return name.startsWith("mcp_") || name.includes("__mcp__");
 }

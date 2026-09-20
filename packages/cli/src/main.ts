@@ -1223,14 +1223,8 @@ async function main(): Promise<void> {
     return settingsWrite;
   };
 
-  const [
-    { AxlApp },
-    { mcpTerminalExtension },
-    { promptTemplatesExtension },
-    { skillTerminalExtension },
-  ] = await Promise.all([
+  const [{ AxlApp }, { promptTemplatesExtension }, { skillTerminalExtension }] = await Promise.all([
     tuiModule ?? import("@axl/tui"),
-    import("@axl/extension-mcp"),
     import("@axl/extension-prompts"),
     import("@axl/extension-skills"),
   ]);
@@ -1265,7 +1259,6 @@ async function main(): Promise<void> {
     imageDisplay: settings.imageDisplay ?? "auto",
     globalThemeDirectory: join(axlHome, "themes"),
     extensions: [
-      mcpTerminalExtension,
       promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),
       skillTerminalExtension,
     ],

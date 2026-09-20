@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { TerminalExtensionHost } from "@axl/extension-api";
-import { mcpTerminalExtension } from "@axl/extension-mcp";
 import { skillTerminalExtension } from "@axl/extension-skills";
 
 import {
@@ -186,23 +185,11 @@ test("focus mode hides routine success while retaining failures and edits", () =
   assert.match(failed.join("\n"), /not found/);
 });
 
-test("first-party MCP and capability views use public renderer registrations", async () => {
-  const host = new TerminalExtensionHost([mcpTerminalExtension, skillTerminalExtension]);
+test("capability views use public renderer registrations", async () => {
+  const host = new TerminalExtensionHost([skillTerminalExtension]);
   await host.activate();
-  const mcpRenderer = host.toolRenderer("mcp");
   const capabilityRenderer = host.toolRenderer("capability_search");
-  assert.ok(mcpRenderer);
   assert.ok(capabilityRenderer);
-  const mcp = renderToolTransaction({
-    callId: "mcp-call",
-    name: "mcp",
-    args: { server: "docs", action: "call_tool", name: "search" },
-    status: "running",
-    width: 80,
-    mode: "compact",
-    palette: PLAIN_PALETTE,
-    renderer: mcpRenderer,
-  });
   const capability = renderToolTransaction({
     callId: "capability-call",
     name: "capability_search",
@@ -213,7 +200,6 @@ test("first-party MCP and capability views use public renderer registrations", a
     palette: PLAIN_PALETTE,
     renderer: capabilityRenderer,
   });
-  assert.match(mcp.join("\n"), /MCP {2}docs · search/);
   assert.match(capability.join("\n"), /CAPABILITY {2}activate · skill:review/);
   assert.equal(capability.join("\n").includes("TOOL CAPABILITY_SEARCH"), false);
   const settledSkill = renderToolTransaction({

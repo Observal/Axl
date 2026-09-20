@@ -4,7 +4,7 @@
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-License-Identifier: Apache-2.0
 
-import { readdir } from "node:fs/promises";
+import { access, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { CredentialStore } from "@axl/ai";
@@ -70,6 +70,16 @@ export type LocalSessionPlacement =
 export interface LocalSessionDescriptor extends SessionSummary {
   readonly placement: LocalSessionPlacement;
   readonly placementLabel: string;
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function directories(path: string): Promise<readonly string[]> {
@@ -280,6 +290,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
   // first because its lack of isolation is already explicit and logged.
   const initialAssembly = unsafe ? undefined : await loadAssembly();
   const { AxlDaemon, installDaemonCommandCapabilities } = await import("@axl/daemon");
+  const { McpConfigStore } = await import("@axl/extension-mcp");
+  const mcpConfigurationStore = new McpConfigStore(axlHome, process.cwd());
   const providerManagement = {
     list: async (...args: Parameters<import("@axl/daemon").ProviderManagementService["list"]>) =>
       createProviderManagementService((await loadAssembly()).providers).list(...args),
@@ -311,6 +323,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     sandboxProvider: unsafe ? "none" : (initialAssembly?.sandbox.provider ?? "unknown"),
     ...(sandboxSelection.type === "oci" ? { sandboxImage: sandboxSelection.image } : {}),
     providerManagement,
+    mcpConfiguration: {
+      list: () => mcpConfigurationStore.list(),
+      upsert: ({ name, definition }) => mcpConfigurationStore.upsert(name, definition),
+      remove: ({ name }) => mcpConfigurationStore.remove(name),
+    },
     runtime: async ({
       sessionId,
       cwd,
@@ -393,6 +410,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         );
       }
       if (active.userQuestions) tools.register(kernel.makeAskUserQuestionTool(interact));
+      let extensionHost: import("@axl/kernel").ExtensionHost | undefined;
+      const mcpSecrets = new Set<string>();
       if (profile === "standard") {
         const { discoverSkills, SkillCapabilityService } = await import("@axl/extension-skills");
         const skills = await discoverSkills({
@@ -403,18 +422,77 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           tools,
           compact,
           reload,
+          mcp: {
+            list: () => mcpConfigurationStore.list(),
+            upsert: (name, definition) => mcpConfigurationStore.upsert(name, definition),
+            remove: (name) => mcpConfigurationStore.remove(name),
+          },
         });
         const grantedAuthorities = new Set([
           "skills.activate",
           ...daemonCapabilities.grantedAuthorities,
         ]);
         const skillService = new SkillCapabilityService(skills, { grantedAuthorities });
+        const capabilitySources: import("@axl/kernel").CapabilitySource[] = [
+          { records: skillService.records, service: skillService },
+          daemonCapabilities.source,
+        ];
+        if (await exists(join(axlHome, "mcp.json"))) {
+          const {
+            loadMcpCapabilities,
+            loadMcpConfig,
+            McpManager,
+            mcpSecretValues,
+            updateMcpCapabilityCache,
+          } = await import("@axl/extension-mcp");
+          const servers = await loadMcpConfig({ cwd, globalDirectory: axlHome });
+          for (const value of mcpSecretValues(servers)) mcpSecrets.add(value);
+          if (servers.length > 0) {
+            const cachePath = join(axlHome, "cache", "mcp-tools.json");
+            const manager = new McpManager({
+              servers,
+              cwd,
+              sessionId,
+              stateDirectory: join(stateDirectory, "mcp"),
+              blobDirectory: join(stateDirectory, "blobs"),
+              model,
+              modelId: active.modelId,
+              secretValues: [...mcpSecrets],
+              onSecrets: (values) => {
+                for (const value of values) mcpSecrets.add(value);
+              },
+              onToolListChanged: (server, discovery) =>
+                updateMcpCapabilityCache({ cachePath, server, discovery }),
+              interact: async (request, signal) => {
+                const response = await interact(request, signal);
+                if (
+                  response.action !== "accept" &&
+                  response.action !== "decline" &&
+                  response.action !== "cancel"
+                ) {
+                  throw new Error(`Unsupported MCP interaction response ${response.action}`);
+                }
+                return {
+                  action: response.action,
+                  ...(response.content ? { content: response.content } : {}),
+                };
+              },
+              wrapStdio: (input) => sandbox.wrapProcess({ ...input, policy }),
+            });
+            const mcp = await loadMcpCapabilities({
+              servers,
+              manager,
+              tools,
+              cachePath,
+            });
+            grantedAuthorities.add(mcp.authority);
+            capabilitySources.push({ records: mcp.service.records, service: mcp.service });
+            extensionHost = manager;
+          }
+        }
         tools.register(
           kernel.makeCapabilitySearchTool(
-            new kernel.CompositeCapabilityService(
-              [{ records: skillService.records, service: skillService }, daemonCapabilities.source],
-              grantedAuthorities,
-            ),
+            new kernel.CompositeCapabilityService(capabilitySources, grantedAuthorities),
           ),
         );
       }
@@ -445,8 +523,10 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           secretValues: () => [
             ...(braveSearchKey === undefined ? [] : [braveSearchKey]),
             ...providerSecrets,
+            ...mcpSecrets,
           ],
         },
+        ...(extensionHost === undefined ? {} : { extensionHost }),
         sandbox: sandbox.configuredPayload(),
         configProvider: { providerId: active.providerId },
         configModel: { modelId: active.modelId },

@@ -9,6 +9,7 @@ export * from "./commands.ts";
 export * from "./configuration.ts";
 export * from "./delivery.ts";
 export * from "./host.ts";
+export * from "./mcp.ts";
 export * from "./models.ts";
 export * from "./new-session.ts";
 export * from "./presentation.ts";

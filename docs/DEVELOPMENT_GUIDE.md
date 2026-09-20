@@ -280,7 +280,7 @@ AGENTS.md
 .axl/mcp.json
 ```
 
-Project instructions augment applicable global instructions. A project skill or MCP server replaces a global entry with the same name. Use `/reload` after changing instructions, skills, or MCP configuration for an open session.
+Project instructions augment applicable global instructions. A project Skill replaces a broader or global Skill with the same name. MCP configuration is loaded only from the user-owned `~/.axl/mcp.json`. Use `/reload` after changing instructions, Skills, or MCP configuration for an open session.
 
 Do not commit secrets. Configuration entries reference environment variable names rather than embedding credential values.
 

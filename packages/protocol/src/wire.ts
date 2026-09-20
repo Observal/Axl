@@ -23,6 +23,16 @@ import type {
   UserContent,
 } from "./events.ts";
 import { parseBlobReference, parseEvent, parseUserContent } from "./events.ts";
+import {
+  type McpConfigListResult,
+  type McpConfigMutationResult,
+  type McpConfigRemoveParams,
+  type McpConfigUpsertParams,
+  parseMcpConfigListResult,
+  parseMcpConfigMutationResult,
+  parseMcpServerDefinition,
+  parseMcpServerName,
+} from "./mcp-configuration.ts";
 import { type ModelRequestSettings, parseModelRequestSettings } from "./model-request.ts";
 import {
   isProviderRpcErrorCode,
@@ -672,6 +682,9 @@ export const WIRE_CAPABILITIES = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  "mcp.config.list",
+  "mcp.config.upsert",
+  "mcp.config.remove",
 ] as const satisfies readonly CapabilityId[];
 
 export interface ClientIdentity {
@@ -783,6 +796,18 @@ export interface RpcMethodMap {
   readonly "provider.auth.logout": {
     readonly params: ProviderLogoutParams;
     readonly result: ProviderLogoutResult;
+  };
+  readonly "mcp.config.list": {
+    readonly params: Record<string, never>;
+    readonly result: McpConfigListResult;
+  };
+  readonly "mcp.config.upsert": {
+    readonly params: McpConfigUpsertParams;
+    readonly result: McpConfigMutationResult;
+  };
+  readonly "mcp.config.remove": {
+    readonly params: McpConfigRemoveParams;
+    readonly result: McpConfigMutationResult;
   };
   readonly "session.create": {
     readonly params: { readonly cwd: string } & SessionConfiguration;
@@ -1652,6 +1677,29 @@ export function parseWireRequest(value: unknown): WireRequest {
       ...base,
       method,
       params: { providerId: parseProviderIdParam(params.providerId, "request.params.providerId") },
+    };
+  }
+  if (method === "mcp.config.list") {
+    exact(params, "request.params", []);
+    return { ...base, method, params: {} };
+  }
+  if (method === "mcp.config.upsert") {
+    exact(params, "request.params", ["name", "definition"]);
+    return {
+      ...base,
+      method,
+      params: {
+        name: parseMcpServerName(params.name, "request.params.name"),
+        definition: parseMcpServerDefinition(params.definition, "request.params.definition"),
+      },
+    };
+  }
+  if (method === "mcp.config.remove") {
+    exact(params, "request.params", ["name"]);
+    return {
+      ...base,
+      method,
+      params: { name: parseMcpServerName(params.name, "request.params.name") },
     };
   }
   if (method === "session.create") {
@@ -2561,6 +2609,10 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseProviderAuthenticationStatusResult(value);
   } else if (method === "provider.auth.login" || method === "provider.auth.logout") {
     parsed = parseProviderAuthenticationStatus(value, path);
+  } else if (method === "mcp.config.list") {
+    parsed = parseMcpConfigListResult(value);
+  } else if (method === "mcp.config.upsert" || method === "mcp.config.remove") {
+    parsed = parseMcpConfigMutationResult(value);
   } else if (method === "session.create" || method === "session.resume") {
     parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
@@ -2964,6 +3016,9 @@ export const RPC_METHODS = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  "mcp.config.list",
+  "mcp.config.upsert",
+  "mcp.config.remove",
   "session.create",
   "session.resume",
   "session.list",
@@ -3084,6 +3139,9 @@ export const RPC_METHOD_ERROR_CODES = {
     "authentication_unavailable",
     "authentication_failed",
   ],
+  "mcp.config.list": [],
+  "mcp.config.upsert": [],
+  "mcp.config.remove": [],
   "session.create": [
     "invalid_cwd",
     ...MUTATION_ERRORS,

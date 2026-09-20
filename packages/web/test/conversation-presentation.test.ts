@@ -263,8 +263,8 @@ test("renders specialized tool details and actionable MCP forms", () => {
           type: "tool.call",
           payload: {
             callId: "mcp",
-            name: "mcp",
-            input: { action: "call_tool", server: "issues", name: "lookup", arguments: { id: 1 } },
+            name: "mcp_issues_lookup_1234567890",
+            input: { id: 1 },
           },
         },
       },
@@ -317,8 +317,8 @@ test("renders specialized tool details and actionable MCP forms", () => {
       },
       {
         callEventId: "mcp",
-        name: "mcp",
-        input: { action: "call_tool", server: "issues", name: "lookup", arguments: { id: 1 } },
+        name: "mcp_issues_lookup_1234567890",
+        input: { id: 1 },
         renderIntent: "mcp",
         result: {
           content: [{ type: "text", text: "AXL-1" }],

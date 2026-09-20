@@ -28,6 +28,30 @@ export interface WrappedMcpProcess {
   readonly cleanup?: () => Promise<void>;
 }
 
+export interface McpToolBinding {
+  readonly identity: string;
+  readonly canonicalName: string;
+  readonly serverName: string;
+  readonly toolName: string;
+  readonly description: string;
+  readonly inputSchema: JsonObject;
+  readonly annotations?: JsonObject;
+  readonly taskSupport?: "forbidden" | "optional" | "required";
+  readonly configurationFingerprint: string;
+  readonly source: string;
+}
+
+export interface McpToolDiscovery {
+  readonly protocolVersion: string;
+  readonly tools: readonly {
+    readonly name: string;
+    readonly description: string;
+    readonly inputSchema: JsonObject;
+    readonly annotations?: JsonObject;
+    readonly taskSupport?: "forbidden" | "optional" | "required";
+  }[];
+}
+
 export interface McpManagerOptions {
   readonly servers: readonly NamedMcpServerConfig[];
   readonly cwd: string;
@@ -37,6 +61,11 @@ export interface McpManagerOptions {
   readonly model: ModelPort;
   readonly modelId: string;
   readonly secretValues?: readonly string[];
+  readonly onSecrets?: (values: readonly string[]) => void;
+  readonly onToolListChanged?: (
+    server: NamedMcpServerConfig,
+    discovery: McpToolDiscovery,
+  ) => void | Promise<void>;
   readonly interact: (
     request: McpInteractionRequest,
     signal?: AbortSignal,

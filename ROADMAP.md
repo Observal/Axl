@@ -1902,7 +1902,7 @@ The client-local terminal presentation surface was brought forward with the TUI.
 - [x] Return an idempotent disposer from every terminal registration.
 - [x] Require an explicit terminal capability manifest before activation.
 - [x] Keep daemon and kernel internals inaccessible from terminal extensions.
-- [x] Use the public tool-renderer registration for first-party MCP and Agent Skills presentation.
+- [x] Use the public tool-renderer registration for first-party Agent Skills presentation; native MCP tools use shared tool presentation.
 - [x] Remove extension-owned UI, listeners, and tracked work on disable, reload, rollback, and exit.
 
 ##### Remaining runtime and cross-client surface
@@ -1917,7 +1917,7 @@ The client-local terminal presentation surface was brought forward with the TUI.
 
 #### Resource formats
 
-The checked standards items were brought forward by request. They do not complete the Phase 6 extension API. Agent Skills now use daemon-owned BM25 discovery and session-scoped activation. The generic MCP gateway remains temporary and must be replaced by the direct-tool path below.
+The checked standards items were brought forward by request. They do not complete the Phase 6 extension API. Agent Skills and MCP tools now use daemon-owned BM25 discovery and session-scoped activation.
 
 - [ ] Support native extensions, skills, hooks, prompt templates, themes, MCP servers, and `AGENTS.md`.
 - [x] Implement MCP natively against protocol version `2025-11-25`.
@@ -1934,12 +1934,12 @@ The checked standards items were brought forward by request. They do not complet
 - [x] Keep the stable prompt free of capability catalogs and Skill bodies.
 - [x] Return only compact metadata and canonical paths during search, then load full Skill instructions only during activation.
 - [ ] Let explicit user requests such as `/skill:pull-request` bypass ranking and load the named capability.
-- [ ] Expose matching executable tools through complete provider-native schemas before inference, then dispatch them directly.
+- [x] Expose matching executable tools through complete provider-native schemas before inference, then dispatch them directly.
 - [x] Keep additive Skill activations active for the rest of the session and restore them from canonical events after restart.
 - [x] Validate identity, policy, authority, availability, and containment at activation.
 - [x] Record searches, activations, denials, and exact model-visible additions canonically.
 - [x] Remove disabled, unavailable, untrusted, and unauthorized capabilities before indexing. Discovery does not grant authority.
-- [ ] Do not add embeddings, a vector database, provider-native `tool_search`, or generic untyped invocation for normal tool execution.
+- [x] Do not add embeddings, a vector database, provider-native `tool_search`, or generic untyped invocation for normal tool execution.
 - [x] Add scoped harness-control capabilities for the `/compact` and `/reload` daemon operations.
 
 #### Blind credential foundation
@@ -2491,7 +2491,7 @@ Complete these dogfood fixes before continuing Phase 5:
 
 1. [Complete] Add interactive-only `ask_user_question` with visible blocker behavior for non-interactive goals.
 2. [Complete] Build local BM25 capability search and canonical session-scoped Agent Skill activation.
-3. Replace the generic MCP gateway with selected provider-native tool schemas and frozen per-turn dispatch bindings.
+3. [Complete] Replace the generic MCP gateway with selected provider-native tool schemas and frozen session bindings.
 4. Add the bearer-token and basic-auth credential broker before using credentialed third-party processes in dogfood sessions.
 5. Serialize `edit` and `write` operations by canonical file path, re-read inside the queue, and reject stale exact-text edits before writing.
 6. Add bounded parallel tool execution with deterministic call/result ordering and explicit concurrency policy.

@@ -8,8 +8,9 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { FileCredentialStore, getStaticModelCatalog } from "@axl/ai";
 import { AxlDaemon } from "@axl/daemon";
@@ -232,6 +233,23 @@ test("assembles an authoritative local runtime without a presentation client", a
   if (customSource === undefined) throw new Error("DeepSeek catalog is empty");
   await mkdir(axlHome, { recursive: true });
   await writeFile(
+    join(axlHome, "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        fixture: {
+          command: process.execPath,
+          args: [
+            join(
+              dirname(fileURLToPath(import.meta.url)),
+              "../../extensions/mcp/test/fixtures/server.mjs",
+            ),
+          ],
+          roots: ["."],
+        },
+      },
+    }),
+  );
+  await writeFile(
     join(axlHome, "models.json"),
     JSON.stringify({
       providers: {
@@ -275,6 +293,24 @@ test("assembles an authoritative local runtime without a presentation client", a
     securityMode: "unsafe",
     sandboxProvider: "none",
   });
+  assert.equal(
+    (await client.listCommands()).commands.some((command) => command.name === "mcp"),
+    true,
+  );
+  assert.deepEqual(
+    (await client.listMcpServers()).servers.map((server) => server.name),
+    ["fixture"],
+  );
+  assert.deepEqual(
+    (
+      await client.upsertMcpServer({
+        name: "context7",
+        definition: { url: "https://mcp.context7.com/mcp" },
+      })
+    ).servers.map((server) => server.name),
+    ["context7", "fixture"],
+  );
+  assert.equal((await client.removeMcpServer({ name: "context7" })).changed, true);
   const allProviders = await client.listProviders();
   assert.equal(allProviders.providers.length, 41);
   assert.deepEqual(
@@ -385,6 +421,14 @@ test("assembles an authoritative local runtime without a presentation client", a
       "ask_user_question",
       "capability_search",
     ],
+  );
+  const mcpCache = JSON.parse(await readFile(join(axlHome, "cache", "mcp-tools.json"), "utf8")) as {
+    servers: Array<{ server: string; tools: Array<{ name: string }> }>;
+  };
+  assert.equal(mcpCache.servers[0]?.server, "fixture");
+  assert.deepEqual(
+    mcpCache.servers[0]?.tools.map((tool) => tool.name),
+    ["echo", "interactive", "tasker"],
   );
   const prompt = events
     .filter((event) => event.type === "prompt.section")

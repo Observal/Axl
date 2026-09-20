@@ -344,8 +344,41 @@ Implemented first-party integrations include:
 
 - Prompt template discovery, argument expansion, and editable review
 - Agent Skills discovery, validation, and progressive loading
-- MCP 2025-11-25 over stdio and Streamable HTTP
+- MCP over stdio and Streamable HTTP with daemon-owned discovery and session-scoped native tool activation
 - capability-scoped terminal commands, shortcuts, widgets, lifecycle listeners, and tool renderers
+
+### Configure MCP servers
+
+Run `/mcp` in the terminal or web client to add tested servers or remove configured servers. Axl writes the global configuration to `~/.axl/mcp.json`, validates it, sets mode `0600`, and reloads the active session. The model can discover and activate the same `configure_mcp` capability when you ask it to add or remove an MCP server. This configuration path is daemon-managed and does not require weakening the command sandbox.
+
+For a custom remote server, add an entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "example": {
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "EXAMPLE_API_TOKEN" }
+    }
+  }
+}
+```
+
+Header and child-process environment values name host environment variables. They are not literal secrets. Local stdio servers use `command`, optional `args`, `cwd`, `env`, and `roots`:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "/path/to/project"],
+      "roots": ["/path/to/project"]
+    }
+  }
+}
+```
+
+Restart the daemon or run `/reload` after editing the file manually. MCP tools stay outside the stable prompt until selected through capability discovery.
 
 ## Package map
 

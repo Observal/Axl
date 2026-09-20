@@ -30,7 +30,6 @@
   },
   "devDependencies": {
     "@axl/daemon": "workspace:*",
-    "@axl/extension-mcp": "workspace:*",
     "@axl/extension-skills": "workspace:*",
     "@axl/kernel": "workspace:*"
   }

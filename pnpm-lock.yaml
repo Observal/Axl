@@ -56,9 +56,6 @@ importers:
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon
-      '@axl/extension-mcp':
-        specifier: workspace:*
-        version: link:../extensions/mcp
       '@axl/extension-prompts':
         specifier: workspace:*
         version: link:../extensions/prompts
@@ -105,9 +102,6 @@ importers:
 
   packages/extensions/mcp:
     dependencies:
-      '@axl/extension-api':
-        specifier: workspace:*
-        version: link:../api
       '@axl/kernel':
         specifier: workspace:*
         version: link:../../kernel
@@ -158,6 +152,9 @@ importers:
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@axl/extension-mcp':
+        specifier: workspace:*
+        version: link:../extensions/mcp
       '@axl/extension-skills':
         specifier: workspace:*
         version: link:../extensions/skills
@@ -217,9 +214,6 @@ importers:
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon
-      '@axl/extension-mcp':
-        specifier: workspace:*
-        version: link:../extensions/mcp
       '@axl/extension-skills':
         specifier: workspace:*
         version: link:../extensions/skills

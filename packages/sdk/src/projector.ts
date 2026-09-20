@@ -196,7 +196,7 @@ function renderIntent(name: string): ProjectedToolCall["renderIntent"] {
   }
   if (normalized.includes("search") || normalized.includes("grep")) return "search";
   if (normalized.includes("web") || normalized.includes("fetch")) return "web";
-  if (normalized.startsWith("mcp") || normalized.includes("__")) return "mcp";
+  if (normalized.startsWith("mcp_")) return "mcp";
   if (normalized.includes("workflow")) return "workflow";
   return "generic";
 }

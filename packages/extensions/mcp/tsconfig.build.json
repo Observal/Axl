@@ -10,9 +10,6 @@
   "exclude": ["dist", "test"],
   "references": [
     {
-      "path": "../api/tsconfig.build.json"
-    },
-    {
       "path": "../../protocol/tsconfig.build.json"
     },
     {

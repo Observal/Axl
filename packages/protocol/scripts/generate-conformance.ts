@@ -269,6 +269,12 @@ const params = {
   "provider.auth.status": { providerId: "provider-1" },
   "provider.auth.login": { providerId: "provider-1", method: "oauth" },
   "provider.auth.logout": { providerId: "provider-1" },
+  "mcp.config.list": {},
+  "mcp.config.upsert": {
+    name: "context7",
+    definition: { url: "https://mcp.context7.com/mcp" },
+  },
+  "mcp.config.remove": { name: "context7" },
   "session.create": {
     cwd: "/workspace",
     providerId: "provider-1",
@@ -436,6 +442,20 @@ const results = {
     source: "OAuth",
   },
   "provider.auth.logout": { providerId: "provider-1", phase: "logged_out" },
+  "mcp.config.list": {
+    path: "/home/user/.axl/mcp.json",
+    servers: [{ name: "context7", definition: { url: "https://mcp.context7.com/mcp" } }],
+  },
+  "mcp.config.upsert": {
+    path: "/home/user/.axl/mcp.json",
+    servers: [{ name: "context7", definition: { url: "https://mcp.context7.com/mcp" } }],
+    changed: true,
+  },
+  "mcp.config.remove": {
+    path: "/home/user/.axl/mcp.json",
+    servers: [],
+    changed: true,
+  },
   "session.create": opened,
   "session.resume": opened,
   "session.list": {

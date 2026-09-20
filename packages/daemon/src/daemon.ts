@@ -53,6 +53,7 @@ import {
 import { commandCatalog } from "./command-catalog.ts";
 import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
 import { DataDirectoryLock } from "./data-directory-lock.ts";
+import type { McpConfigurationService } from "./mcp-configuration.ts";
 import type { ProviderManagementService } from "./provider-management.ts";
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
@@ -72,6 +73,7 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly heartbeatIntervalMs?: number;
   readonly presenceTimeoutMs?: number;
   readonly providerManagement?: ProviderManagementService;
+  readonly mcpConfiguration?: McpConfigurationService;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -207,6 +209,7 @@ export class AxlDaemon {
   private readonly heartbeatIntervalMs: number;
   private readonly presenceTimeoutMs: number;
   private readonly providerManagement: ProviderManagementService | undefined;
+  private readonly mcpConfiguration: McpConfigurationService | undefined;
   private readonly capabilities: readonly string[];
   private readonly hostOptions: Pick<
     DaemonOptions,
@@ -245,10 +248,12 @@ export class AxlDaemon {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.presenceTimeoutMs = options.presenceTimeoutMs ?? PRESENCE_TIMEOUT_MS;
     this.providerManagement = options.providerManagement;
-    this.capabilities =
-      this.providerManagement === undefined
-        ? WIRE_CAPABILITIES.filter((capability) => !capability.startsWith("provider."))
-        : WIRE_CAPABILITIES;
+    this.mcpConfiguration = options.mcpConfiguration;
+    this.capabilities = WIRE_CAPABILITIES.filter(
+      (capability) =>
+        (this.providerManagement !== undefined || !capability.startsWith("provider.")) &&
+        (this.mcpConfiguration !== undefined || !capability.startsWith("mcp.config.")),
+    );
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
       this.snapshotIdleLifetimeMs <= 0 ||
@@ -1033,6 +1038,12 @@ export class AxlDaemon {
         return this.providers().login(request.params, signal);
       case "provider.auth.logout":
         return this.providers().logout(request.params, signal);
+      case "mcp.config.list":
+        return this.mcpConfigurationService().list();
+      case "mcp.config.upsert":
+        return this.mcpConfigurationService().upsert(request.params);
+      case "mcp.config.remove":
+        return this.mcpConfigurationService().remove(request.params);
       case "session.create": {
         const {
           cwd,
@@ -1278,6 +1289,16 @@ export class AxlDaemon {
         await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
         return { disposed: true, historyPreserved: true };
     }
+  }
+
+  private mcpConfigurationService(): McpConfigurationService {
+    if (this.mcpConfiguration === undefined) {
+      throw new DaemonError(
+        "unsupported_capability",
+        "MCP configuration is not available in this daemon",
+      );
+    }
+    return this.mcpConfiguration;
   }
 
   private providers(): ProviderManagementService {
