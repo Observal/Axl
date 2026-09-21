@@ -4,7 +4,7 @@
 
 # Native E2EE storage schema
 
-Status: Session 40B native schema, version 1
+Status: native schema version 2 storage foundation; witness mutation integration remains disabled
 
 ## Database ownership
 
@@ -45,15 +45,30 @@ restricted to modes `0700` and `0600` respectively.
 Every security-sensitive write transaction explicitly selects `redb::Durability::Immediate` and
 enables redb two-phase commit. Persistent savepoints are not used.
 
-## Version 1 tables
+## Version 2 tables
+
+The table names remain stable because their values carry explicit versions. Production readers
+accept schema version 2 only. They reject version 1 and unknown newer versions without migration,
+deletion, or recreation.
 
 | Table | Key | Value |
 | --- | --- | --- |
-| `metadata_v1` | fixed numeric field ID | schema version, lifecycle, crypto session binding, profile binding, generation, rollback counter, committed epoch, epoch authenticator, and pending obsolete wrapping-record ID |
-| `encrypted_state_v1` | fixed current-state key | versioned AES-256-GCM envelope containing the complete OpenMLS provider image, restart clock state, and authenticated durable-record manifest |
-| `operations_v1` | 16-byte operation ID | canonical input fingerprint, committed generation, and exact typed result |
+| `metadata_v1` | fixed numeric field ID | schema version, lifecycle, crypto session binding, profile binding, generation, rollback counter, committed epoch, epoch authenticator, confirmed witness counter and commitment, previous certificate hash, registration state, current key ID, and obsolete key ID |
+| `encrypted_state_v1` | fixed current-state key | format-version-2 AES-256-GCM envelope containing the complete OpenMLS provider image, restart clock state, and authenticated durable-record manifest |
+| `operations_v1` | 16-byte operation ID | version-2 operation kind, canonical input fingerprint, committed generation, exact-result kind, and pending or completed disposition, followed by the bounded result locator |
+| `pending_witness_v2` | fixed `current` key | at most one canonical record containing the operation ID and kind, fingerprint, exact request and hash, exact committed transition, confirmed predecessor, successor and obsolete key IDs, disposition, and exact-result kind |
 | `outbox_v1` | 16-byte operation ID | stable crypto session ID, logical message ID, class, epoch, profile revision, retry state, exact MLS ciphertext, and optional commit ID, target epoch, and epoch authenticator |
 | `accepted_messages_v1` | 16-byte operation ID | stable crypto session ID, logical message ID, class, epoch, profile revision, and acknowledgement state |
+
+Exact-result format version 2 uses tags `1` empty success, `2` envelope reference, `3` receive,
+`4` pairing publication, `5` pairing decision, `6` protected acceptance, `7` lifecycle, and `8`
+acknowledgement reference. The total encoding remains bounded to 65,497 bytes. Maximum ciphertext
+stays in its authenticated inner-state record and is referenced rather than duplicated.
+
+The clear state header is canonical AEAD associated data. It binds the schema and profile, session,
+generation, rollback counter, epoch and authenticator, confirmed witness counter and commitment,
+previous certificate hash, registration state, current key ID, and obsolete key ID. These fields
+remain authenticated when no pending operation exists.
 
 The encrypted provider image includes OpenMLS group state, signer material, replay state, retained
 past-epoch deadlines, the last accepted wall-clock value, endpoint identity binding, the
@@ -64,10 +79,14 @@ image after acknowledgement. Consumed MLS message keys are not reconstructed.
 The manifest is a SHA-384 digest over domain-separated SHA-384 digests of cryptographic metadata,
 operation, outbox, and accepted-message entries. The initialization/ready publication marker is
 excluded: changing it can only block opening or reach the ordinary encrypted-state validation; it
-cannot make missing or altered cryptographic state valid. The manifest is stored inside the
-AES-256-GCM state envelope and checked before any durable record is trusted. Modification of any logical ID, class, profile,
-session binding, acknowledgement, retry state, operation mapping, or exact ciphertext quarantines
-the group.
+cannot make missing or altered cryptographic state valid. `pending_witness_v2` is also excluded
+because it contains the committed transition whose sealed inner state contains this manifest.
+Including it would create a cycle. The pending locator is instead validated by opening its committed
+transition and cross-checking the authenticated request, request hash, predecessor, successor key,
+exact result kind, generation, inner state, operation kind, fingerprint, and disposition. The
+manifest is stored inside the AES-256-GCM state envelope and checked before any other durable record
+is trusted. Modification of any logical ID, class, profile, session binding, acknowledgement, retry
+state, operation mapping, or exact ciphertext quarantines the group.
 
 ## Transaction order
 
@@ -266,9 +285,10 @@ operations against one group.
 
 ## Migrations and failure policy
 
-Schema and encrypted-state formats have independent explicit version fields. Version 1 has no
-predecessor and therefore no migration. Future migrations must be one-way transactions with fixture
-coverage. A newer schema, downgrade, malformed record, AEAD failure, missing wrapping record,
+Schema and encrypted-state formats have independent explicit version fields. Version 2 has no
+production migration from version 1 because version 1 lacks a confirmed witness head and
+registration proof. Future migrations require a separately approved one-way transaction with fixture
+coverage. A version-1 schema, newer schema, downgrade, malformed record, AEAD failure, missing wrapping record,
 crypto-session/profile mismatch, generation mismatch, rollback, or epoch-authenticator mismatch
 quarantines the group or fails opening. None triggers automatic reset.
 
