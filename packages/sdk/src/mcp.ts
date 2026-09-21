@@ -320,13 +320,37 @@ export interface McpImportedServer {
 
 const RESERVED_HOST_LABELS = new Set(["mcp", "api", "www", "app", "server", "remote"]);
 
+const NAME_CHARACTER = /^[a-z0-9_.-]$/u;
+const NAME_LEADING_CHARACTER = /^[a-z0-9]$/u;
+
+/** Trims characters that may not start or end a name. Index scans keep this linear. */
+function trimNameEdges(value: string): string {
+  let start = 0;
+  while (start < value.length && !NAME_LEADING_CHARACTER.test(value[start] as string)) start += 1;
+  let end = value.length;
+  while (end > start && !NAME_CHARACTER.test(value[end - 1] as string)) end -= 1;
+  return value.slice(start, end);
+}
+
 function sanitizeName(raw: string): string {
-  const cleaned = raw
-    .toLowerCase()
-    .replace(/[^a-z0-9_.-]+/gu, "-")
-    .replace(/^[^a-z0-9]+|[^a-z0-9_.-]+$/gu, "")
-    .slice(0, 128);
+  const cleaned = trimNameEdges(raw.toLowerCase().replace(/[^a-z0-9_.-]+/gu, "-")).slice(0, 128);
   return cleaned === "" ? "mcp" : cleaned;
+}
+
+/**
+ * Drops `//` comments that README snippets add to JSON. A comment starts at
+ * the first `//` after the last double quote on its line, so URLs inside
+ * strings survive. Index scans keep this linear in the input length.
+ */
+function stripLineComments(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => {
+      const lastQuote = line.lastIndexOf('"');
+      const comment = line.indexOf("//", lastQuote + 1);
+      return comment === -1 ? line : line.slice(0, comment);
+    })
+    .join("\n");
 }
 
 /** Derives a stable, readable server name from a definition, like `github` or `server-memory`. */
@@ -519,7 +543,7 @@ export function parseMcpImport(text: string): McpImportedServer[] {
   } catch {
     // README snippets often carry trailing commas or comments; strip the common cases once.
     try {
-      parsed = JSON.parse(trimmed.replace(/\/\/[^\n"]*$/gmu, "").replace(/,\s*([}\]])/gu, "$1"));
+      parsed = JSON.parse(stripLineComments(trimmed).replace(/,\s*([}\]])/gu, "$1"));
     } catch {
       throw new Error("That is not valid JSON. Paste the block exactly as shown in the README.");
     }

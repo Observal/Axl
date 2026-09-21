@@ -311,3 +311,22 @@ test("a pasted literal token is never treated as a variable and never echoed bac
   assert.equal(secretTemplate("GITHUB_MCP_PAT", "h"), "GITHUB_MCP_PAT");
   assert.throws(() => secretTemplate("github_mcp_pat", "h"), /literal value/u);
 });
+
+test("quick import strips README comments without touching URLs and trims name edges linearly", () => {
+  assert.deepEqual(
+    parseMcpImport(`{
+      // remote server copied from the README
+      "mcpServers": {
+        "docs": { "url": "https://docs.example.com/mcp" } // trailing note
+      }
+    }`),
+    [{ name: "docs", definition: { url: "https://docs.example.com/mcp" } }],
+  );
+  // Inputs that made the former regexes backtrack polynomially resolve quickly.
+  const commas = `${",".repeat(50_000)}x`;
+  assert.equal(deriveMcpServerName({ command: commas }), "x");
+  const slashes = `{${"//".repeat(50_000)}\n"mcpServers": {"a": {"url": "https://a.example.com/mcp"}}}`;
+  const started = Date.now();
+  assert.equal(parseMcpImport(slashes)[0]?.name, "a");
+  assert.ok(Date.now() - started < 2_000, "comment stripping stays linear");
+});
