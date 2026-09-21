@@ -41,10 +41,10 @@ const OUTER_AAD_DOMAIN: &[u8] = b"Axl rollback sealed outer v1";
 const SEALED_STATE_VERSION: u16 = 1;
 const COMMITTED_TRANSITION_VERSION: u16 = 1;
 const INNER_PAYLOAD_VERSION: u16 = 1;
-const MAX_INNER_STATE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_RESULT_BYTES: usize = 65_497;
+pub(crate) const MAX_INNER_STATE_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_RESULT_BYTES: usize = 65_497;
 const MAX_INNER_PAYLOAD_BYTES: usize = MAX_INNER_STATE_BYTES + MAX_RESULT_BYTES + 16;
-const MAX_COMMITTED_TRANSITION_BYTES: usize = MAX_INNER_PAYLOAD_BYTES + 4 * 1024;
+pub(crate) const MAX_COMMITTED_TRANSITION_BYTES: usize = MAX_INNER_PAYLOAD_BYTES + 4 * 1024;
 const ZERO_HASH: [u8; 48] = [0; 48];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1272,10 +1272,10 @@ impl EndpointWitnessState {
             MutationAuthorization::Register
                 if confirmed.counter == 0
                     && confirmed.commitment == ZERO_HASH
-                    && material.generation == 1 => {}
+                    && material.counter == 1 => {}
             MutationAuthorization::Advance(expected)
                 if expected == &confirmed
-                    && material.generation == confirmed.counter.saturating_add(1) => {}
+                    && material.counter == confirmed.counter.saturating_add(1) => {}
             _ => return Err(WitnessError::GenerationMismatch),
         }
         material.predecessor_commitment = self.head_commitment;
@@ -1608,6 +1608,7 @@ fn reconcile_endpoint_state(
 
 pub(crate) struct TransitionMaterial<'a> {
     pub lineage: WitnessLineage,
+    pub counter: u64,
     pub generation: u64,
     pub epoch: u64,
     pub epoch_authenticator: [u8; 48],
@@ -1627,14 +1628,14 @@ pub(crate) fn prepare_transition(
 ) -> Result<PreparedWitnessTransition, WitnessError> {
     if material.inner_state.len() > MAX_INNER_STATE_BYTES
         || material.exact_result.len() > MAX_RESULT_BYTES
+        || material.counter == 0
         || material.generation == 0
     {
         return Err(WitnessError::BoundExceeded);
     }
-    let counter = material.generation;
     let header = WitnessStateHeader {
         lineage: material.lineage.clone(),
-        counter,
+        counter: material.counter,
         generation: material.generation,
         epoch: material.epoch,
         epoch_authenticator: material.epoch_authenticator,
@@ -1673,18 +1674,19 @@ pub(crate) fn prepare_transition(
         .rand()
         .random_array::<32>()
         .map_err(|_| WitnessError::Crypto)?;
-    let kind = if counter == 1 {
+    let kind = if material.counter == 1 {
         WitnessRequestKind::Register
     } else {
         WitnessRequestKind::Advance
     };
-    let expected = (counter > 1).then_some((counter - 1, material.predecessor_commitment));
+    let expected =
+        (material.counter > 1).then_some((material.counter - 1, material.predecessor_commitment));
     let request = WitnessRequest::new_signed(WitnessRequestSigning {
         kind,
         lineage: material.lineage,
         operation_id: material.operation_id,
         expected,
-        proposed: Some((counter, commitment)),
+        proposed: Some((material.counter, commitment)),
         previous_certificate_hash: material.previous_certificate_hash,
         credential: material.credential,
         signer: material.signer,
@@ -1722,8 +1724,56 @@ pub(crate) fn prepare_transition(
         request,
         request_bytes,
         request_hash,
-        has_obsolete_key: counter > 1,
+        has_obsolete_key: material.counter > 1,
     })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CommittedTransitionInfo {
+    pub operation_id: Id,
+    pub counter: u64,
+    pub generation: u64,
+    pub current_key_id: Id,
+}
+
+pub(crate) fn inspect_committed_transition(
+    committed_record: &[u8],
+) -> Result<CommittedTransitionInfo, WitnessError> {
+    if committed_record.len() > MAX_COMMITTED_TRANSITION_BYTES {
+        return Err(WitnessError::BoundExceeded);
+    }
+    let mut cursor = Cursor::new(committed_record);
+    if cursor.u16()? != COMMITTED_TRANSITION_VERSION {
+        return Err(WitnessError::CorruptState);
+    }
+    let operation_id = cursor.array()?;
+    let sealed = SealedWitnessState::decode(cursor.u32_bytes(MAX_INNER_PAYLOAD_BYTES + 2 * 1024)?)?;
+    cursor.finish()?;
+    Ok(CommittedTransitionInfo {
+        operation_id,
+        counter: sealed.header.counter,
+        generation: sealed.header.generation,
+        current_key_id: sealed.header.current_key_id,
+    })
+}
+
+pub(crate) fn open_committed_transition(
+    committed_record: &[u8],
+    data_key: &[u8; 32],
+    lineage: &WitnessLineage,
+    credential: &PairingCredential,
+) -> Result<(CommittedTransitionInfo, RecoveredWitnessState), WitnessError> {
+    let info = inspect_committed_transition(committed_record)?;
+    let mut cursor = Cursor::new(committed_record);
+    cursor.u16()?;
+    let operation_id: Id = cursor.array()?;
+    let sealed = SealedWitnessState::decode(cursor.u32_bytes(MAX_INNER_PAYLOAD_BYTES + 2 * 1024)?)?;
+    cursor.finish()?;
+    let recovered = sealed.open(data_key, lineage, credential)?;
+    if recovered.request.operation_id != operation_id {
+        return Err(WitnessError::OperationMismatch);
+    }
+    Ok((info, recovered))
 }
 
 pub(crate) fn recover_committed_transition(
@@ -1734,20 +1784,8 @@ pub(crate) fn recover_committed_transition(
     current_key_active: bool,
     obsolete_key_erased: bool,
 ) -> Result<PendingWitnessOperation, WitnessError> {
-    if committed_record.len() > MAX_COMMITTED_TRANSITION_BYTES {
-        return Err(WitnessError::BoundExceeded);
-    }
-    let mut cursor = Cursor::new(committed_record);
-    if cursor.u16()? != COMMITTED_TRANSITION_VERSION {
-        return Err(WitnessError::CorruptState);
-    }
-    let operation_id: Id = cursor.array()?;
-    let sealed = SealedWitnessState::decode(cursor.u32_bytes(MAX_INNER_PAYLOAD_BYTES + 2 * 1024)?)?;
-    cursor.finish()?;
-    let recovered = sealed.open(data_key, lineage, credential)?;
-    if recovered.request.operation_id != operation_id {
-        return Err(WitnessError::OperationMismatch);
-    }
+    let (_, recovered) =
+        open_committed_transition(committed_record, data_key, lineage, credential)?;
     Ok(PendingWitnessOperation {
         request: recovered.request,
         request_bytes: recovered.request_bytes,
@@ -2344,6 +2382,7 @@ mod tests {
         let prepared = state
             .prepare(TransitionMaterial {
                 lineage: fixture.lineage.clone(),
+                counter: 2,
                 generation: 2,
                 epoch: 7,
                 epoch_authenticator: [11; 48],
@@ -2682,6 +2721,7 @@ mod tests {
         let fixture = fixture(2);
         let prepared = prepare_transition(TransitionMaterial {
             lineage: fixture.lineage.clone(),
+            counter: 2,
             generation: 2,
             epoch: 7,
             epoch_authenticator: [11; 48],
@@ -2846,6 +2886,7 @@ mod tests {
         let fixture = fixture(2);
         let prepared = prepare_transition(TransitionMaterial {
             lineage: fixture.lineage.clone(),
+            counter: 2,
             generation: 2,
             epoch: 7,
             epoch_authenticator: [11; 48],
@@ -2934,6 +2975,7 @@ mod tests {
         let fixture = fixture(2);
         let prepared = prepare_transition(TransitionMaterial {
             lineage: fixture.lineage.clone(),
+            counter: 2,
             generation: 2,
             epoch: 7,
             epoch_authenticator: [11; 48],
@@ -2974,6 +3016,7 @@ mod tests {
         state.previous_certificate_hash = [8; 48];
         let material = |operation_id| TransitionMaterial {
             lineage: fixture.lineage.clone(),
+            counter: 2,
             generation: 2,
             epoch: 7,
             epoch_authenticator: [11; 48],
@@ -3034,6 +3077,7 @@ mod tests {
         assert!(matches!(
             state.prepare(TransitionMaterial {
                 lineage: certificate_fixture.lineage.clone(),
+                counter: 3,
                 generation: 3,
                 epoch: 7,
                 epoch_authenticator: [11; 48],
@@ -3056,6 +3100,7 @@ mod tests {
         let fixture = fixture(1);
         let material = || TransitionMaterial {
             lineage: fixture.lineage.clone(),
+            counter: 1,
             generation: 1,
             epoch: 0,
             epoch_authenticator: [0; 48],
@@ -3126,6 +3171,7 @@ mod tests {
         assert!(matches!(
             pending.prepare(TransitionMaterial {
                 lineage: fixture.lineage.clone(),
+                counter: 2,
                 generation: 2,
                 epoch: 7,
                 epoch_authenticator: [11; 48],
@@ -3158,6 +3204,7 @@ mod tests {
         assert!(matches!(
             pending.prepare(TransitionMaterial {
                 lineage: fixture.lineage.clone(),
+                counter: 3,
                 generation: 3,
                 epoch: 7,
                 epoch_authenticator: [11; 48],

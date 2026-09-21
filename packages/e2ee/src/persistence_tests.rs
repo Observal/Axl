@@ -3684,3 +3684,86 @@ fn delayed_activation_rejection_never_opens_the_device() {
             .is_err()
     );
 }
+
+#[test]
+fn version_one_and_unknown_newer_stores_are_rejected_without_migration_or_recreation() {
+    const META: TableDefinition<u8, &[u8]> = TableDefinition::new("metadata_v1");
+    const META_SCHEMA: u8 = 1;
+
+    for version in [1_u16, crate::persistence::STORAGE_SCHEMA_VERSION + 1] {
+        let pair = durable_pair(210_u8.wrapping_add(version as u8));
+        pair.phone.store().close().unwrap();
+        let path = pair.phone.store().path().to_path_buf();
+        let session = pair.phone.store().crypto_session_id();
+        let root = path.parent().unwrap().to_path_buf();
+        let key_snapshot = pair.phone_keys.snapshot();
+        let database = Database::open(&path).unwrap();
+        let mut write = database.begin_write().unwrap();
+        write.set_durability(Durability::Immediate).unwrap();
+        write.set_two_phase_commit(true);
+        write
+            .open_table(META)
+            .unwrap()
+            .insert(META_SCHEMA, version.to_be_bytes().as_slice())
+            .unwrap();
+        write.commit().unwrap();
+        drop(database);
+        let original_length = fs::metadata(&path).unwrap().len();
+
+        assert!(matches!(
+            NativeTransactionalProvider::open(
+                &root,
+                session,
+                pair.phone_keys.clone(),
+                pair.phone_anchor.clone(),
+                Arc::new(NoFaults),
+                Arc::new(SystemClock),
+            ),
+            Err(PersistenceError::UnsupportedSchema)
+        ));
+        assert!(path.is_file());
+        assert_eq!(fs::metadata(&path).unwrap().len(), original_length);
+        let database = Database::open(&path).unwrap();
+        let read = database.begin_read().unwrap();
+        assert_eq!(
+            read.open_table(META)
+                .unwrap()
+                .get(META_SCHEMA)
+                .unwrap()
+                .unwrap()
+                .value(),
+            version.to_be_bytes()
+        );
+        drop(read);
+        drop(database);
+        assert_eq!(pair.phone_keys.snapshot(), key_snapshot);
+        assert_eq!(pair.phone_keys.destroy_calls(), 0);
+        assert!(!marker_path(&root, session).exists());
+    }
+}
+
+#[test]
+fn schema_v2_round_trips_confirmed_head_key_references_and_empty_pending_slot() {
+    const META: TableDefinition<u8, &[u8]> = TableDefinition::new("metadata_v1");
+    const PENDING: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pending_witness_v2");
+    let pair = durable_pair(214);
+    pair.phone.store().close().unwrap();
+    let database = Database::open(pair.phone.store().path()).unwrap();
+    let read = database.begin_read().unwrap();
+    let meta = read.open_table(META).unwrap();
+    assert_eq!(meta.get(1).unwrap().unwrap().value(), 2_u16.to_be_bytes());
+    assert_eq!(meta.get(11).unwrap().unwrap().value(), 0_u64.to_be_bytes());
+    assert_eq!(meta.get(12).unwrap().unwrap().value(), &[0_u8; 48]);
+    assert_eq!(meta.get(13).unwrap().unwrap().value(), &[0_u8; 48]);
+    assert_eq!(meta.get(14).unwrap().unwrap().value(), &[0_u8]);
+    let current = meta.get(15).unwrap().unwrap().value().to_vec();
+    let obsolete = meta.get(16).unwrap().unwrap().value().to_vec();
+    assert_eq!(current.len(), 16);
+    assert!(matches!(obsolete.len(), 0 | 16));
+    assert_ne!(current, obsolete);
+    drop(meta);
+    assert_eq!(read.open_table(PENDING).unwrap().iter().unwrap().count(), 0);
+    drop(read);
+    drop(database);
+    pair.phone.store().reopen().unwrap();
+}
