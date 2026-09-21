@@ -480,14 +480,31 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             remove: (name) => mcpConfigurationStore.remove(name),
           },
         });
+        const { DAEMON_EXTENSION_AUTHORITY, loadDaemonExtensions } = await import(
+          "@axl/extension-host"
+        );
         const grantedAuthorities = new Set([
           "skills.activate",
+          DAEMON_EXTENSION_AUTHORITY,
           ...daemonCapabilities.grantedAuthorities,
         ]);
         const skillService = new SkillCapabilityService(skills, { grantedAuthorities });
+        const daemonExtensions = await loadDaemonExtensions({
+          directory: join(axlHome, "extensions"),
+          cwd,
+          tools,
+          grantedAuthorities,
+          onFailure: (failure) => {
+            console.error(
+              `Axl extension ${failure.extensionId} ${failure.event} handler failed: ${failure.error.message}`,
+            );
+          },
+        });
+        const hosts: import("@axl/kernel").ExtensionHost[] = [daemonExtensions.host];
         const capabilitySources: import("@axl/kernel").CapabilitySource[] = [
           { records: skillService.records, service: skillService },
           daemonCapabilities.source,
+          daemonExtensions.source,
         ];
         if (await exists(join(axlHome, "mcp.json"))) {
           const { loadMcpCapabilities, loadMcpConfig, McpManager, updateMcpCapabilityCache } =
@@ -534,9 +551,10 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             });
             grantedAuthorities.add(mcp.authority);
             capabilitySources.push({ records: mcp.service.records, service: mcp.service });
-            extensionHost = manager;
+            hosts.push(manager);
           }
         }
+        extensionHost = kernel.composeExtensionHosts(hosts);
         tools.register(
           kernel.makeCapabilitySearchTool(
             new kernel.CompositeCapabilityService(capabilitySources, grantedAuthorities),

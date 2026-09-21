@@ -471,11 +471,20 @@ export async function summarizeCompaction(
     summary = `${summary}\n\n---\n\n**Turn Context (split turn):**\n\n${prefix.text}`;
     usage = addUsage(usage, prefix.usage);
   }
+  return {
+    summary: withFileSections(summary, plan),
+    usage,
+    readFiles: plan.readFiles,
+    modifiedFiles: plan.modifiedFiles,
+  };
+}
+
+/** Appends the cumulative read and modified file lists the model relies on after compaction. */
+export function withFileSections(summary: string, plan: CompactionPlan): string {
   const sections: string[] = [];
   if (plan.readFiles.length > 0)
     sections.push(`<read-files>\n${plan.readFiles.join("\n")}\n</read-files>`);
   if (plan.modifiedFiles.length > 0)
     sections.push(`<modified-files>\n${plan.modifiedFiles.join("\n")}\n</modified-files>`);
-  if (sections.length > 0) summary += `\n\n${sections.join("\n\n")}`;
-  return { summary, usage, readFiles: plan.readFiles, modifiedFiles: plan.modifiedFiles };
+  return sections.length > 0 ? `${summary}\n\n${sections.join("\n\n")}` : summary;
 }

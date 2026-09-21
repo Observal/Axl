@@ -24,6 +24,7 @@ import {
   type ModelMessage,
   type ModelStreamError,
   type OperationId,
+  type JsonObject,
   parseEvent,
   parseOperationId,
   type SessionActivityFrame,
@@ -34,12 +35,21 @@ import {
 } from "@axl/protocol";
 
 import {
+  type CompactionSummary,
   messagesFromCompactedLineage,
   prepareCompaction,
+  serializeCompactionMessages,
   shouldCompact,
   summarizeCompaction,
+  withFileSections,
 } from "./compaction.ts";
-import { type ExtensionHost, NOOP_EXTENSION_HOST } from "./extension-host.ts";
+import {
+  type CommandSource,
+  type ExtensionHost,
+  interceptCommand,
+  NOOP_EXTENSION_HOST,
+  type ToolCallDecision,
+} from "./extension-host.ts";
 import { type EventLogOptions, JsonlEventLog } from "./jsonl-event-log.ts";
 import type { ModelPort } from "./model-port.ts";
 import { SandboxViolationError } from "./path-policy.ts";
@@ -546,11 +556,29 @@ export class AgentSession {
     }
   }
 
+  /**
+   * Lets extensions replace or refuse a built-in command before it runs.
+   * Returns the arguments to run with; throws `CommandBlockedError` on refusal.
+   */
+  interceptCommand(
+    name: string,
+    source: CommandSource,
+    args: JsonObject,
+    signal?: AbortSignal,
+  ): Promise<JsonObject> {
+    return interceptCommand(
+      this.host,
+      { name, source, args },
+      signal ?? new AbortController().signal,
+    );
+  }
+
   /** Replaces older model-visible context with a durable continuation summary. */
   async compact(
     customInstructions?: string,
     signal?: AbortSignal,
     requestedOperationId?: OperationId,
+    source: Exclude<CommandSource, "automatic"> = "client",
   ): Promise<CanonicalEvent<"context.compacted">> {
     if (this.activeOperation !== null) {
       throw new OperationConflictError(
@@ -560,7 +588,13 @@ export class AgentSession {
     const operationId = requestedOperationId ?? parseOperationId(randomUUID(), "operationId");
     this.activeOperation = operationId;
     try {
-      const event = await this.compactOwned("manual", operationId, customInstructions, signal);
+      const event = await this.compactOwned(
+        "manual",
+        operationId,
+        customInstructions,
+        signal,
+        source,
+      );
       if (event === undefined) throw new CompactionUnavailableError(false);
       return event;
     } finally {
@@ -592,8 +626,9 @@ export class AgentSession {
     operationId: OperationId,
     customInstructions?: string,
     signal?: AbortSignal,
+    source: CommandSource = "automatic",
   ): Promise<CanonicalEvent<"context.compacted"> | undefined> {
-    const instructions = customInstructions?.trim();
+    let instructions = customInstructions?.trim();
     if (customInstructions !== undefined && !instructions) {
       throw new TypeError("Compaction instructions must not be empty");
     }
@@ -617,6 +652,30 @@ export class AgentSession {
       }
       return undefined;
     }
+    const decided = await this.interceptCommand(
+      "compact",
+      source,
+      {
+        reason,
+        ...(instructions === undefined ? {} : { instructions }),
+        ...(plan.previousSummary === undefined ? {} : { previousSummary: plan.previousSummary }),
+        transcript: serializeCompactionMessages(plan.messagesToSummarize),
+      },
+      signal,
+    );
+    if (decided.instructions !== undefined) {
+      if (typeof decided.instructions !== "string" || decided.instructions.trim().length === 0) {
+        throw new TypeError("Compaction instructions from an extension must be a non-empty string");
+      }
+      instructions = decided.instructions.trim();
+    }
+    let providedSummary: string | undefined;
+    if (decided.summary !== undefined) {
+      if (typeof decided.summary !== "string" || decided.summary.trim().length === 0) {
+        throw new TypeError("Compaction summary from an extension must be a non-empty string");
+      }
+      providedSummary = decided.summary;
+    }
     await this.append(operationId, "compaction.started", {
       reason,
       estimatedInputTokens: this.estimatedInputTokens(),
@@ -625,16 +684,24 @@ export class AgentSession {
       keepRecentTokens: this.compaction.keepRecentTokens,
     });
     try {
-      const result = await summarizeCompaction(
-        plan,
-        this.model,
-        instructions,
-        signal,
-        this.compaction.reserveTokens,
-        async (configuration) => {
-          await this.append(operationId, "model.request_configured", configuration);
-        },
-      );
+      const result: CompactionSummary =
+        providedSummary === undefined
+          ? await summarizeCompaction(
+              plan,
+              this.model,
+              instructions,
+              signal,
+              this.compaction.reserveTokens,
+              async (configuration) => {
+                await this.append(operationId, "model.request_configured", configuration);
+              },
+            )
+          : {
+              summary: withFileSections(providedSummary, plan),
+              usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+              readFiles: plan.readFiles,
+              modifiedFiles: plan.modifiedFiles,
+            };
       signal?.throwIfAborted();
       const event = await this.append(operationId, "context.compacted", {
         summary: result.summary,
@@ -1144,8 +1211,31 @@ export class AgentSession {
         },
       };
     }
+    const executionSignal = signal ?? new AbortController().signal;
+    if (this.host.beforeToolCall !== undefined) {
+      let decision: ToolCallDecision;
+      try {
+        decision = await this.host.beforeToolCall(
+          { callId: call.callId, name: call.name, input: call.input },
+          executionSignal,
+        );
+      } catch (error) {
+        decision = {
+          block: true,
+          reason: error instanceof Error ? error.message : "extension tool gate failed",
+        };
+      }
+      if (decision?.block) {
+        return {
+          result: {
+            content: [{ type: "text", text: `Tool ${call.name} was blocked: ${decision.reason}` }],
+            isError: true,
+          },
+        };
+      }
+    }
     try {
-      const result = await tool.execute(call.input, signal ?? new AbortController().signal, {
+      const result = await tool.execute(call.input, executionSignal, {
         activeCapabilities: new Set(this.activeCapabilityContent.keys()),
       });
       if (result.sessionEffects !== undefined && call.name !== "capability_search") {
@@ -1185,6 +1275,7 @@ export class AgentSession {
     const stored = await this.log.append(event);
     this.tip = stored.id;
     this.onEvent?.(stored);
+    this.host.observe?.(stored);
     return stored as CanonicalEvent<Type>;
   }
 }

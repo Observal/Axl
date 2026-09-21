@@ -100,6 +100,18 @@ importers:
 
   packages/extensions/api: {}
 
+  packages/extensions/host:
+    dependencies:
+      '@axl/extension-api':
+        specifier: workspace:*
+        version: link:../api
+      '@axl/kernel':
+        specifier: workspace:*
+        version: link:../../kernel
+      '@axl/protocol':
+        specifier: workspace:*
+        version: link:../../protocol
+
   packages/extensions/mcp:
     dependencies:
       '@axl/kernel':
@@ -152,6 +164,9 @@ importers:
       '@axl/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@axl/extension-host':
+        specifier: workspace:*
+        version: link:../extensions/host
       '@axl/extension-mcp':
         specifier: workspace:*
         version: link:../extensions/mcp

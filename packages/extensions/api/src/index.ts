@@ -92,6 +92,99 @@ export type TerminalExtensionEvent = TerminalExtensionEventInput & {
 
 export type ExtensionDisposer = () => void | Promise<void>;
 
+/**
+ * Daemon extension contracts. A daemon extension is a module in
+ * `~/.axl/extensions/` whose default export is a `DaemonExtensionFactory`. It
+ * runs inside the daemon process with the daemon's permissions and may add
+ * model-discoverable tools, block tool calls, and observe canonical events.
+ */
+export type DaemonJsonObject = Readonly<Record<string, unknown>>;
+
+export interface DaemonToolResult {
+  readonly content: readonly { readonly type: "text"; readonly text: string }[];
+  readonly isError?: boolean;
+}
+
+export interface DaemonToolDefinition {
+  /** Canonical tool name: `^[a-z][a-z0-9_]*$`. Must not shadow a built-in tool. */
+  readonly name: string;
+  readonly description: string;
+  /** JSON Schema for the tool input object. */
+  readonly inputSchema: DaemonJsonObject;
+  execute(
+    input: DaemonJsonObject,
+    signal: AbortSignal,
+  ): DaemonToolResult | Promise<DaemonToolResult>;
+}
+
+export interface DaemonToolCallEvent {
+  readonly callId: string;
+  readonly name: string;
+  readonly input: DaemonJsonObject;
+  readonly signal: AbortSignal;
+}
+
+/** Return `{ block: true, reason }` to stop the call. Any thrown error also blocks it. */
+export type DaemonToolCallDecision = { readonly block: true; readonly reason: string } | undefined;
+
+export interface DaemonSessionEvent {
+  readonly id: string;
+  readonly type: string;
+  readonly timestamp: number;
+  readonly payload: unknown;
+}
+
+export type DaemonCommandSource = "client" | "model" | "automatic";
+
+/**
+ * A built-in daemon command about to run. `name` is the built-in command name
+ * (`compact`, `reload`, `model`, `thinking`, `request`, `fork`, `clone`,
+ * `rename`). `args` are the command's inputs; the daemon documents each shape.
+ */
+export interface DaemonCommandEvent {
+  readonly name: string;
+  readonly source: DaemonCommandSource;
+  readonly args: DaemonJsonObject;
+  readonly signal: AbortSignal;
+}
+
+/**
+ * Return nothing to run the built-in unchanged, `{ args }` to run it with
+ * replaced inputs, or `{ block: true, reason }` to refuse it. A thrown error
+ * also refuses it.
+ */
+export type DaemonCommandDecision =
+  | { readonly args: DaemonJsonObject }
+  | { readonly block: true; readonly reason: string }
+  | undefined;
+
+export type DaemonCommandHandler = (
+  event: DaemonCommandEvent,
+) => DaemonCommandDecision | Promise<DaemonCommandDecision>;
+
+export type DaemonToolCallHandler = (
+  event: DaemonToolCallEvent,
+) => DaemonToolCallDecision | Promise<DaemonToolCallDecision>;
+
+export type DaemonSessionEventHandler = (event: DaemonSessionEvent) => void | Promise<void>;
+
+export interface DaemonExtensionApi {
+  /** Stable identity derived from the extension file name. */
+  readonly extensionId: string;
+  /** Session working directory. */
+  readonly cwd: string;
+  /** Adds a tool the model can discover through `capability_search` and activate for the session. */
+  registerTool(definition: DaemonToolDefinition): ExtensionDisposer;
+  on(event: "tool.call", handler: DaemonToolCallHandler): ExtensionDisposer;
+  /** Intercepts every built-in command before the daemon runs it. */
+  on(event: "command", handler: DaemonCommandHandler): ExtensionDisposer;
+  on(event: "session.event", handler: DaemonSessionEventHandler): ExtensionDisposer;
+  /** Registers cleanup that runs when the session ends. */
+  track(disposer: ExtensionDisposer): ExtensionDisposer;
+}
+
+export type DaemonExtensionFactory = (api: DaemonExtensionApi) => void | Promise<void>;
+
 export interface TerminalExtensionApi {
   registerCommand(command: TerminalCommand): ExtensionDisposer;
   registerShortcut(shortcut: TerminalShortcut): ExtensionDisposer;

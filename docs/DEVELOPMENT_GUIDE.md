@@ -596,6 +596,26 @@ Focused check:
 node --test packages/extensions/skills/test/*.test.ts
 ```
 
+### `@axl/extension-host`
+
+Location: `packages/extensions/host`
+
+Responsibilities:
+
+- discovery of user daemon extensions in `~/.axl/extensions/`;
+- importing `.ts` and `.js` extension modules into the daemon process;
+- the `DaemonExtensionApi` implementation: `registerTool`, `on("tool.call")`, `on("session.event")`, and `track`;
+- indexing extension tools as capabilities behind `capability_search`; and
+- one kernel `ExtensionHost` that gates tool calls, forwards durable events, and disposes tracked resources.
+
+Extensions run with the daemon's permissions and are trusted by placement. An invalid extension fails session start with its path and reason. A gate that throws blocks the tool call. See [`docs/extensions.md`](extensions.md).
+
+Focused check:
+
+```bash
+node --test packages/extensions/host/test/*.test.ts
+```
+
 ### `@axl/extension-mcp`
 
 Location: `packages/extensions/mcp`
