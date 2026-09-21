@@ -1187,6 +1187,7 @@ export const RPC_ERROR_CODES = [
   "region_unsupported",
   "provider_configuration_required",
   "mcp_probe_failed",
+  "command_blocked",
 ] as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number] | (string & {});
@@ -1580,6 +1581,40 @@ function selection(params: Record<string, unknown>, path: string): SessionSelect
       ? {}
       : { userQuestions: params.userQuestions as boolean }),
   };
+}
+
+const SESSION_CONFIGURATION_FIELDS = [
+  "providerId",
+  "modelId",
+  "thinkingLevel",
+  "requestSettings",
+  "webFetch",
+  "webSearch",
+  "userQuestions",
+  "profile",
+] as const;
+
+/** Validates a session configuration update. Extra keys other than `sessionId` are rejected. */
+export function parseSessionConfiguration(value: unknown, path: string): SessionConfiguration {
+  const params = object(value, path);
+  exact(params, path, ["sessionId", ...SESSION_CONFIGURATION_FIELDS]);
+  const configured = selection(params, path);
+  const profile = sessionProfile(params.profile, `${path}.profile`);
+  if (
+    configured.providerId === undefined &&
+    configured.requestSettings === undefined &&
+    configured.modelId === undefined &&
+    configured.thinkingLevel === undefined &&
+    configured.webFetch === undefined &&
+    configured.webSearch === undefined &&
+    profile === undefined
+  ) {
+    throw new ProtocolValidationError(
+      path,
+      "must include providerId, modelId, thinkingLevel, requestSettings, webFetch, webSearch, or profile",
+    );
+  }
+  return { ...configured, ...(profile === undefined ? {} : { profile }) };
 }
 
 export function parseWireRequest(value: unknown): WireRequest {
@@ -2002,40 +2037,13 @@ export function parseWireRequest(value: unknown): WireRequest {
     };
   }
   if (method === "session.configure") {
-    exact(params, "request.params", [
-      "sessionId",
-      "providerId",
-      "modelId",
-      "thinkingLevel",
-      "requestSettings",
-      "webFetch",
-      "webSearch",
-      "userQuestions",
-      "profile",
-    ]);
-    const configured = selection(params, "request.params");
-    const profile = sessionProfile(params.profile, "request.params.profile");
-    if (
-      configured.providerId === undefined &&
-      configured.requestSettings === undefined &&
-      configured.modelId === undefined &&
-      configured.thinkingLevel === undefined &&
-      configured.webFetch === undefined &&
-      configured.webSearch === undefined &&
-      profile === undefined
-    ) {
-      throw new ProtocolValidationError(
-        "request.params",
-        "must include providerId, modelId, thinkingLevel, requestSettings, webFetch, webSearch, or profile",
-      );
-    }
+    exact(params, "request.params", ["sessionId", ...SESSION_CONFIGURATION_FIELDS]);
     return {
       ...base,
       method,
       params: {
         sessionId: parseSessionId(params.sessionId, "request.params.sessionId"),
-        ...configured,
-        ...(profile === undefined ? {} : { profile }),
+        ...parseSessionConfiguration(params, "request.params"),
       },
     };
   }
@@ -3211,6 +3219,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "invalid_fork_point",
     ...MUTATION_ERRORS,
     "content_too_large",
+    "command_blocked",
   ],
   "session.clone": [
     ...SESSION_BASE_ERRORS,
@@ -3219,12 +3228,14 @@ export const RPC_METHOD_ERROR_CODES = {
     "empty_session",
     ...MUTATION_ERRORS,
     "content_too_large",
+    "command_blocked",
   ],
   "session.rename": [
     ...SESSION_BASE_ERRORS,
     "operation_active",
     ...MUTATION_ERRORS,
     "content_too_large",
+    "command_blocked",
   ],
   "session.delete": [...SESSION_BASE_ERRORS, "operation_active", ...MUTATION_ERRORS],
   "session.export": [
@@ -3283,6 +3294,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "operation_active",
     ...MUTATION_ERRORS,
     "content_too_large",
+    "command_blocked",
   ],
   "session.queue.enqueue": [
     ...SESSION_BASE_ERRORS,
@@ -3324,6 +3336,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "region_required",
     "region_unsupported",
     "provider_configuration_required",
+    "command_blocked",
   ],
   "session.configure": [
     ...SESSION_BASE_ERRORS,
@@ -3342,6 +3355,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "region_required",
     "region_unsupported",
     "provider_configuration_required",
+    "command_blocked",
   ],
   "session.interaction.respond": [
     ...SESSION_BASE_ERRORS,

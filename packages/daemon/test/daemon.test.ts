@@ -31,6 +31,7 @@ import { promisify } from "node:util";
 import {
   buildStablePrompt,
   type CompactionSettings,
+  type ExtensionHost,
   JsonlEventLog,
   type ModelPort,
   type ModelRetryOptions,
@@ -160,6 +161,7 @@ async function startDaemon(
     readonly compaction?: Partial<CompactionSettings>;
     readonly modelContextWindow?: number;
     readonly tools?: (sessionId: SessionId, dataDirectory: string) => ToolRegistry;
+    readonly extensionHost?: ExtensionHost;
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
@@ -167,7 +169,8 @@ async function startDaemon(
   const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
   const dataDirectory = join(directory, "data");
-  const { retry, compaction, modelContextWindow, tools, ...daemonOptions } = deliveryOptions;
+  const { retry, compaction, modelContextWindow, tools, extensionHost, ...daemonOptions } =
+    deliveryOptions;
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory,
@@ -182,6 +185,7 @@ async function startDaemon(
       ...(retry === undefined ? {} : { retry }),
       ...(compaction === undefined ? {} : { compaction }),
       ...(modelContextWindow === undefined ? {} : { modelContextWindow }),
+      ...(extensionHost === undefined ? {} : { extensionHost }),
     }),
   });
   await daemon.start();
@@ -4825,4 +4829,57 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
     content: [{ type: "text", text: "after reload" }],
   });
   assert.equal(sent.stopReason, "stop");
+});
+
+test("extensions replace or refuse built-in commands through command_blocked", async (context) => {
+  const seen: string[] = [];
+  const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
+    extensionHost: {
+      activate: () => undefined,
+      dispose: () => undefined,
+      beforeCommand: (command) => {
+        seen.push(`${command.source}:${command.name}`);
+        if (command.name === "rename") {
+          if (command.args.title === "secret") return { block: true, reason: "no secrets" };
+          return { args: { title: `${String(command.args.title)} (reviewed)` } };
+        }
+        if (command.name === "thinking") return { args: { thinkingLevel: "bogus" } };
+        return undefined;
+      },
+    },
+  });
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+
+  await assert.rejects(
+    client.request(
+      "session.rename",
+      { sessionId: created.sessionId, title: "secret" },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000301" },
+    ),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "command_blocked" &&
+      /no secrets/.test(error.message),
+  );
+  const renamed = await client.request(
+    "session.rename",
+    { sessionId: created.sessionId, title: "Plan" },
+    { idempotencyKey: "00000000-0000-4000-8000-000000000302" },
+  );
+  assert.equal(renamed.title, "Plan (reviewed)");
+
+  await assert.rejects(
+    client.request(
+      "session.configure",
+      { sessionId: created.sessionId, thinkingLevel: "high" },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000303" },
+    ),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "command_blocked" &&
+      /thinkingLevel/.test(error.message),
+  );
+  assert.deepEqual(seen, ["client:rename", "client:rename", "client:thinking"]);
 });

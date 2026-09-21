@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { EVENT_FORMAT_VERSION, WIRE_PROTOCOL_VERSION } from "../src/index.ts";
 
-test("keeps event format 1 and adds MCP discovery status and probing in wire protocol 23", () => {
+test("keeps event format 1 and adds extension command interception in wire protocol 24", () => {
   assert.equal(EVENT_FORMAT_VERSION, 1);
-  assert.equal(WIRE_PROTOCOL_VERSION, 23);
+  assert.equal(WIRE_PROTOCOL_VERSION, 24);
 });

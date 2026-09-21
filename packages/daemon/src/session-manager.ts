@@ -19,6 +19,8 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   AgentSession,
+  CommandBlockedError,
+  type CommandSource,
   type CompactionSettings,
   CompactionUnavailableError,
   EventLogMigrationRequiredError,
@@ -49,8 +51,10 @@ import {
   parseEvent,
   parseEventId,
   parseOperationId,
+  parseSessionConfiguration,
   parseSessionId,
   parseUserQuestionRequest,
+  ProtocolValidationError,
   parseUserQuestionResponse,
   type RestoredQueueItem,
   type SessionActivityFrame,
@@ -173,6 +177,7 @@ interface QueuedTurn {
 interface QueuedCompaction {
   readonly operationId: OperationId;
   readonly instructions?: string;
+  readonly source: Exclude<CommandSource, "automatic">;
 }
 
 interface QueuedReload {
@@ -253,6 +258,23 @@ function truncateUtf8(value: string, maxBytes: number): string {
   return bytes.byteLength <= maxBytes
     ? value
     : new TextDecoder().decode(bytes.subarray(0, maxBytes), { stream: true });
+}
+
+/**
+ * Names the built-in command behind a configuration update: `model`,
+ * `thinking`, or `request` when the update touches only that command's
+ * fields, otherwise `configure`.
+ */
+export function configureCommandName(update: SessionConfiguration): string {
+  const keys = Object.keys(update).filter(
+    (key) => (update as Record<string, unknown>)[key] !== undefined,
+  );
+  const only = (allowed: readonly string[]) =>
+    keys.length > 0 && keys.every((key) => allowed.includes(key));
+  if (only(["providerId", "modelId"])) return "model";
+  if (only(["thinkingLevel"])) return "thinking";
+  if (only(["requestSettings"])) return "request";
+  return "configure";
 }
 
 function userMessageText(event: CanonicalEvent): string | undefined {
@@ -512,7 +534,7 @@ export class SessionManager {
         ? {}
         : { contextResources: previousResources.payload.resources }),
       interact: (request, signal) => this.interact(sessionId, request, signal),
-      compact: (instructions) => this.compact(sessionId, instructions),
+      compact: (instructions) => this.compact(sessionId, instructions, undefined, "model"),
       reload: () => this.queueReload(sessionId),
       readBlob: (reference) => this.blobs.readAll(sessionId, reference),
     });
@@ -1127,7 +1149,20 @@ export class SessionManager {
     if (source.activeTurn || source.rebuilding || source.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this session; fork after it");
     }
-    const eventId = parseEventId(fromEventId, "fromEventId");
+    const decided = await this.interceptCommand(source, "fork", "client", {
+      fromEventId: parseEventId(fromEventId, "fromEventId"),
+    });
+    let eventId: EventId;
+    try {
+      eventId = parseEventId(decided.fromEventId, "extension.fork.fromEventId");
+    } catch (error) {
+      if (error instanceof ProtocolValidationError) {
+        throw new DaemonError("command_blocked", `Extension returned invalid ${error.message}`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
     const event = SessionTree.fromEvents(sourceId, source.events).event(eventId);
     if (event.type !== "user.message") {
       throw new DaemonError("invalid_fork_point", "A fork must start from a user message");
@@ -1149,6 +1184,7 @@ export class SessionManager {
     if (source.activeTurn || source.rebuilding || source.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this session; clone after it");
     }
+    await this.interceptCommand(source, "clone", "client", {});
     const tip = source.events.at(-1)?.id;
     if (tip === undefined)
       throw new DaemonError("empty_session", "Session has no history to clone");
@@ -1175,7 +1211,11 @@ export class SessionManager {
     if (existing?.type === "session.renamed") {
       return { title: existing.payload.title, eventId: existing.id };
     }
-    const event = await managed.session.rename(operationId, title);
+    const decided = await this.interceptCommand(managed, "rename", "client", { title });
+    if (typeof decided.title !== "string") {
+      throw new DaemonError("command_blocked", "Extension returned a non-string rename title");
+    }
+    const event = await managed.session.rename(operationId, decided.title);
     return { title: event.payload.title, eventId: event.id };
   }
 
@@ -1418,11 +1458,35 @@ export class SessionManager {
     );
   }
 
+  /**
+   * Lets session extensions replace or refuse a built-in command. Maps a
+   * refusal to the `command_blocked` RPC error.
+   */
+  private async interceptCommand(
+    managed: ManagedSession,
+    name: string,
+    source: CommandSource,
+    args: JsonObject,
+  ): Promise<JsonObject> {
+    try {
+      return await managed.session.interceptCommand(name, source, args);
+    } catch (error) {
+      if (error instanceof CommandBlockedError) {
+        throw new DaemonError("command_blocked", error.message, {
+          cause: error,
+          details: { command: error.command, reason: error.reason },
+        });
+      }
+      throw error;
+    }
+  }
+
   private async queueReload(sessionId: SessionId): Promise<{
     readonly state: "completed" | "queued";
     readonly operationId: OperationId;
   }> {
     const managed = this.managed(sessionId);
+    await this.interceptCommand(managed, "reload", "model", {});
     const operationId = parseOperationId(randomUUID(), "operationId");
     if (managed.activeTurn?.kind === "turn" && !managed.rebuilding) {
       managed.queuedReloads.push({ operationId });
@@ -1449,6 +1513,7 @@ export class SessionManager {
         return { boundaryEventIds: recovered.map((event) => event.id) };
       }
     }
+    await this.interceptCommand(managed, "reload", "client", {});
     const before = managed.events.length;
     await this.rebuild(managed, "reload", managed.selection, operationId);
     return { boundaryEventIds: managed.events.slice(before).map((event) => event.id) };
@@ -1480,6 +1545,24 @@ export class SessionManager {
         "operation_active",
         "An operation owns this branch; change configuration after it",
       );
+    }
+    const decided = await this.interceptCommand(
+      managed,
+      configureCommandName(update),
+      "client",
+      update as unknown as JsonObject,
+    );
+    if (decided !== (update as unknown as JsonObject)) {
+      try {
+        update = parseSessionConfiguration(decided, "extension.configure");
+      } catch (error) {
+        if (error instanceof ProtocolValidationError) {
+          throw new DaemonError("command_blocked", `Extension returned invalid ${error.message}`, {
+            cause: error,
+          });
+        }
+        throw error;
+      }
     }
     const model = managed.events.findLast((event) => event.type === "config.model");
     const thinking = managed.events.findLast((event) => event.type === "config.thinking");
@@ -2113,7 +2196,12 @@ export class SessionManager {
         const compaction = managed.queuedCompactions.shift();
         if (compaction !== undefined) {
           try {
-            await this.runCompaction(managed, compaction.instructions, compaction.operationId);
+            await this.runCompaction(
+              managed,
+              compaction.instructions,
+              compaction.operationId,
+              compaction.source,
+            );
           } catch (error) {
             const terminal = managed.events.some(
               (event) =>
@@ -2195,6 +2283,7 @@ export class SessionManager {
     sessionId: unknown,
     customInstructions?: string,
     operationId = parseOperationId(randomUUID(), "operationId"),
+    source: Exclude<CommandSource, "automatic"> = "client",
   ): Promise<
     | { state: "completed"; operationId: OperationId; eventId: EventId }
     | { state: "queued"; operationId: OperationId; eventId: EventId }
@@ -2220,6 +2309,7 @@ export class SessionManager {
       managed.queuedCompactions.push({
         operationId,
         ...(instructions === undefined ? {} : { instructions }),
+        source,
       });
       return { state: "queued", operationId, eventId: queued.id };
     }
@@ -2227,7 +2317,7 @@ export class SessionManager {
       throw new DaemonError("operation_active", "An operation already owns this branch");
     }
     try {
-      const event = await this.runCompaction(managed, instructions, operationId);
+      const event = await this.runCompaction(managed, instructions, operationId, source);
       return { state: "completed", operationId, eventId: event.id };
     } finally {
       this.startQueueDrain(managed);
@@ -2238,6 +2328,7 @@ export class SessionManager {
     managed: ManagedSession,
     customInstructions: string | undefined,
     operationId: OperationId,
+    source: Exclude<CommandSource, "automatic">,
   ): Promise<CanonicalEvent<"context.compacted">> {
     const active = deferredTurn("compaction", operationId);
     managed.activeTurn = active;
@@ -2246,6 +2337,7 @@ export class SessionManager {
         customInstructions,
         active.controller.signal,
         active.operationId,
+        source,
       );
     } catch (error) {
       if (active.controller.signal.aborted) {
@@ -2253,6 +2345,12 @@ export class SessionManager {
       }
       if (error instanceof CompactionUnavailableError) {
         throw new DaemonError("bad_request", error.message, { cause: error });
+      }
+      if (error instanceof CommandBlockedError) {
+        throw new DaemonError("command_blocked", error.message, {
+          cause: error,
+          details: { command: error.command, reason: error.reason },
+        });
       }
       throw error;
     } finally {
