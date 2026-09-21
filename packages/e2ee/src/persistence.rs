@@ -46,6 +46,7 @@ mod pairing_lifecycle;
 pub(crate) mod windows_dpapi;
 #[cfg(target_os = "windows")]
 mod windows_fs;
+mod witness_v2;
 pub use pairing_lifecycle::{
     ActivationAcceptance, ActivationOutcome, ClaimFailure, ClaimSubmission,
     DurablePendingInvitation, DurablePreJoinDevice, EpochReadyAcceptance, InvitationLifecycle,
@@ -54,17 +55,18 @@ pub use pairing_lifecycle::{
 };
 
 /// Current Axl native E2EE storage schema.
-pub const STORAGE_SCHEMA_VERSION: u16 = 1;
-const STATE_FORMAT_VERSION: u16 = 1;
+pub const STORAGE_SCHEMA_VERSION: u16 = 2;
+const STATE_FORMAT_VERSION: u16 = 2;
 const MAX_STATE_ENTRIES: usize = 8192;
 const MAX_STATE_BYTES: usize = 16 * 1024 * 1024;
-const STATE_AAD_LABEL: &[u8] = b"Axl encrypted OpenMLS state v1";
+const STATE_AAD_LABEL: &[u8] = b"Axl encrypted OpenMLS state v2";
 
 const META: TableDefinition<u8, &[u8]> = TableDefinition::new("metadata_v1");
 const STATE: TableDefinition<u8, &[u8]> = TableDefinition::new("encrypted_state_v1");
 const OPERATIONS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("operations_v1");
 const OUTBOX: TableDefinition<&[u8], &[u8]> = TableDefinition::new("outbox_v1");
 const ACCEPTED: TableDefinition<&[u8], &[u8]> = TableDefinition::new("accepted_messages_v1");
+const PENDING_WITNESS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("pending_witness_v2");
 
 const META_SCHEMA: u8 = 1;
 const META_SESSION: u8 = 2;
@@ -76,6 +78,13 @@ const META_EPOCH: u8 = 7;
 const META_EPOCH_AUTHENTICATOR: u8 = 8;
 const META_PENDING_ERASE: u8 = 9;
 const META_LIFECYCLE: u8 = 10;
+const META_CONFIRMED_WITNESS_COUNTER: u8 = 11;
+const META_CONFIRMED_WITNESS_COMMITMENT: u8 = 12;
+const META_PREVIOUS_CERTIFICATE_HASH: u8 = 13;
+const META_WITNESS_REGISTRATION: u8 = 14;
+const META_CURRENT_KEY_ID: u8 = 15;
+const META_OBSOLETE_KEY_ID: u8 = 16;
+const WITNESS_UNREGISTERED: u8 = 0;
 const LIFECYCLE_INITIALIZING: u8 = 1;
 const LIFECYCLE_READY: u8 = 2;
 const STATE_CURRENT: u8 = 1;
@@ -791,10 +800,26 @@ impl NativeTransactionalProvider {
                 .map_err(map_storage_error)?;
             meta.insert(META_LIFECYCLE, &[LIFECYCLE_INITIALIZING] as &[u8])
                 .map_err(map_storage_error)?;
+            meta.insert(
+                META_CONFIRMED_WITNESS_COUNTER,
+                0_u64.to_be_bytes().as_slice(),
+            )
+            .map_err(map_storage_error)?;
+            meta.insert(META_CONFIRMED_WITNESS_COMMITMENT, &[0_u8; 48] as &[u8])
+                .map_err(map_storage_error)?;
+            meta.insert(META_PREVIOUS_CERTIFICATE_HASH, &[0_u8; 48] as &[u8])
+                .map_err(map_storage_error)?;
+            meta.insert(META_WITNESS_REGISTRATION, &[WITNESS_UNREGISTERED] as &[u8])
+                .map_err(map_storage_error)?;
+            meta.insert(META_CURRENT_KEY_ID, &[] as &[u8])
+                .map_err(map_storage_error)?;
+            meta.insert(META_OBSOLETE_KEY_ID, &[] as &[u8])
+                .map_err(map_storage_error)?;
             write.open_table(STATE).map_err(map_table_error)?;
             write.open_table(OPERATIONS).map_err(map_table_error)?;
             write.open_table(OUTBOX).map_err(map_table_error)?;
             write.open_table(ACCEPTED).map_err(map_table_error)?;
+            write.open_table(PENDING_WITNESS).map_err(map_table_error)?;
         }
         write.commit().map_err(|_| PersistenceError::Storage)
     }
@@ -816,6 +841,46 @@ impl NativeTransactionalProvider {
         {
             return Err(PersistenceError::IdentityMismatch);
         }
+        let generation = read_u64(&meta, META_GENERATION)?;
+        let pending_erase = read_bytes(&meta, META_PENDING_ERASE)?;
+        let current_key = read_bytes(&meta, META_CURRENT_KEY_ID)?;
+        let obsolete_key = read_bytes(&meta, META_OBSOLETE_KEY_ID)?;
+        if !matches!(current_key.len(), 0 | 16)
+            || !matches!(obsolete_key.len(), 0 | 16)
+            || pending_erase != obsolete_key
+            || (generation == 0) != current_key.is_empty()
+        {
+            return Err(PersistenceError::Corrupt);
+        }
+        let registration = match read_bytes(&meta, META_WITNESS_REGISTRATION)?.as_slice() {
+            [WITNESS_UNREGISTERED] => witness_v2::WitnessRegistrationState::Unregistered,
+            [1] => witness_v2::WitnessRegistrationState::Registered,
+            _ => return Err(PersistenceError::Corrupt),
+        };
+        let confirmed = witness_v2::ConfirmedWitnessHead {
+            counter: read_u64(&meta, META_CONFIRMED_WITNESS_COUNTER)?,
+            commitment: read_bytes(&meta, META_CONFIRMED_WITNESS_COMMITMENT)?
+                .try_into()
+                .map_err(|_| PersistenceError::Corrupt)?,
+            previous_certificate_hash: read_bytes(&meta, META_PREVIOUS_CERTIFICATE_HASH)?
+                .try_into()
+                .map_err(|_| PersistenceError::Corrupt)?,
+            registration,
+        };
+        confirmed.validate()?;
+        drop(meta);
+        let pending = read.open_table(PENDING_WITNESS).map_err(map_table_error)?;
+        if let Some(operation) = witness_v2::read_pending_operation_from_table(&pending)? {
+            let expected_obsolete = operation
+                .obsolete_key_id
+                .map_or(Vec::new(), |value| value.to_vec());
+            if operation.confirmed_head != confirmed
+                || current_key.as_slice() != operation.successor_key_id
+                || obsolete_key != expected_obsolete
+            {
+                return Err(PersistenceError::Corrupt);
+            }
+        }
         Ok(())
     }
 
@@ -828,8 +893,8 @@ impl NativeTransactionalProvider {
             .map_err(map_transaction_error)?;
         let meta = read.open_table(META).map_err(map_table_error)?;
         let generation = read_u64(&meta, META_GENERATION)?;
-        let rollback_counter = read_u64(&meta, META_ROLLBACK_COUNTER)?;
-        let epoch = read_u64(&meta, META_EPOCH)?;
+        let current_key_id = read_bytes(&meta, META_CURRENT_KEY_ID)?;
+        let aad = state_aad(&meta)?;
         drop(meta);
         let state = read.open_table(STATE).map_err(map_table_error)?;
         let state_blob = state
@@ -837,13 +902,19 @@ impl NativeTransactionalProvider {
             .map_err(map_storage_error)?
             .map(|value| value.value().to_vec());
         drop(state);
+        let pending = {
+            let table = read.open_table(PENDING_WITNESS).map_err(map_table_error)?;
+            witness_v2::read_pending_operation_from_table(&table)?
+        };
         let Some(blob) = state_blob else {
             self.envelope_keys
                 .reconcile_prepared(self.crypto_session_id, None)?;
             return Ok(());
         };
         let sealed = SealedState::decode(&blob)?;
-        let aad = state_aad(self.crypto_session_id, generation, rollback_counter, epoch);
+        if current_key_id.as_slice() != sealed.key_id {
+            return Err(PersistenceError::Corrupt);
+        }
         self.envelope_keys
             .reconcile_prepared(self.crypto_session_id, Some((sealed.key_id, aad.clone())))
             .map_err(map_current_key_error)?;
@@ -859,8 +930,63 @@ impl NativeTransactionalProvider {
             &sealed.nonce,
             &aad,
         );
+        let plaintext = match decrypted {
+            Ok(value) => value,
+            Err(_) => {
+                key.fill(0);
+                return Err(PersistenceError::Corrupt);
+            }
+        };
+        let values = match decode_storage_image(&plaintext) {
+            Ok(value) => value,
+            Err(error) => {
+                key.fill(0);
+                return Err(error);
+            }
+        };
+        let pending_validation = (|| {
+            let Some(pending) = pending else {
+                return Ok(());
+            };
+            let metadata = decode_endpoint_metadata(
+                values
+                    .get(ENDPOINT_METADATA_KEY)
+                    .ok_or(PersistenceError::Corrupt)?,
+            )?;
+            let provider = CoreProvider::from_storage_values(values.clone())
+                .map_err(|_| PersistenceError::Corrupt)?;
+            let signer = SignatureKeyPair::read(
+                provider.storage(),
+                &metadata.signer_public,
+                SUITE.signature_algorithm(),
+            )
+            .ok_or(PersistenceError::Corrupt)?;
+            let credential =
+                crate::pairing::PairingCredential::new(metadata.identity.clone(), &signer)
+                    .map_err(|_| PersistenceError::Corrupt)?;
+            let lineage = crate::witness::WitnessLineage::from_identity(
+                &metadata.identity,
+                self.crypto_session_id,
+            )
+            .map_err(|_| PersistenceError::Corrupt)?;
+            let operations = read.open_table(OPERATIONS).map_err(map_table_error)?;
+            let operation_bytes = operations
+                .get(pending.operation_id.as_slice())
+                .map_err(map_storage_error)?
+                .ok_or(PersistenceError::Corrupt)?;
+            let (operation_index, _) =
+                witness_v2::WitnessOperationIndex::decode_prefix(operation_bytes.value())?;
+            pending.open_and_validate(
+                &key,
+                &lineage,
+                &credential,
+                generation,
+                &plaintext,
+                &operation_index,
+            )
+        })();
         key.fill(0);
-        let values = decode_storage_image(&decrypted.map_err(|_| PersistenceError::Corrupt)?)?;
+        pending_validation?;
         let expected_manifest = values
             .get(DURABLE_MANIFEST_KEY)
             .ok_or(PersistenceError::Corrupt)?;
@@ -1046,7 +1172,7 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             .begin_write()
             .map_err(map_transaction_error)?;
         configure_transaction(&mut write)?;
-        let (generation, rollback_counter, epoch, authenticator, state_blob) = {
+        let (generation, rollback_counter, epoch, authenticator, state_aad, state_blob) = {
             let meta = write.open_table(META).map_err(map_table_error)?;
             let generation = read_u64(&meta, META_GENERATION)?;
             let rollback_counter = read_u64(&meta, META_ROLLBACK_COUNTER)?;
@@ -1056,6 +1182,7 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             }
             let epoch = read_u64(&meta, META_EPOCH)?;
             let authenticator = read_bytes(&meta, META_EPOCH_AUTHENTICATOR)?.to_vec();
+            let state_aad = state_aad(&meta)?;
             drop(meta);
             let state = write.open_table(STATE).map_err(map_table_error)?;
             let state_blob = state
@@ -1067,6 +1194,7 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
                 rollback_counter,
                 epoch,
                 authenticator,
+                state_aad,
                 state_blob,
             )
         };
@@ -1079,10 +1207,9 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
         }
         let (provider, old_key_id) = if let Some(blob) = state_blob {
             let sealed = SealedState::decode(&blob)?;
-            let aad = state_aad(self.crypto_session_id, generation, rollback_counter, epoch);
             let mut key = self
                 .envelope_keys
-                .load(self.crypto_session_id, sealed.key_id, &aad)
+                .load(self.crypto_session_id, sealed.key_id, &state_aad)
                 .map_err(map_current_key_error)?;
             let crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
             let decrypted = crypto.crypto().aead_decrypt(
@@ -1090,7 +1217,7 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
                 &key,
                 &sealed.ciphertext,
                 &sealed.nonce,
-                &aad,
+                &state_aad,
             );
             key.fill(0);
             let plaintext = decrypted.map_err(|_| PersistenceError::Corrupt)?;
@@ -1353,13 +1480,6 @@ impl NativeGroupTransaction<'_> {
             .faults
             .check(FaultPoint::AfterCiphertextInsertion)?;
         prune_durable_records(self.write()?, next_generation)?;
-        let manifest_crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
-        let manifest = durable_manifest(self.write()?, manifest_crypto.crypto())?;
-        self.provider
-            .insert_internal(DURABLE_MANIFEST_KEY.to_vec(), manifest.to_vec());
-
-        let plaintext = encode_storage_image(&self.provider.storage_values())?;
-        let crypto = self.provider.crypto();
         let mut data_key = self
             .provider
             .rand()
@@ -1375,16 +1495,26 @@ impl NativeGroupTransaction<'_> {
             .rand()
             .random_array::<12>()
             .map_err(|_| PersistenceError::Storage)?;
-        let aad = state_aad(
-            self.owner.crypto_session_id,
-            next_generation,
-            next_counter,
-            self.next_epoch,
-        );
+        let aad = {
+            let write = self.write()?;
+            let mut meta = write.open_table(META).map_err(map_table_error)?;
+            meta.insert(META_CURRENT_KEY_ID, key_id.as_slice())
+                .map_err(map_storage_error)?;
+            meta.insert(META_OBSOLETE_KEY_ID, pending_erase.as_slice())
+                .map_err(map_storage_error)?;
+            state_aad(&meta)?
+        };
         self.owner
             .envelope_keys
             .prepare(self.owner.crypto_session_id, key_id, &data_key, &aad)?;
         self.prepared_key_id = Some(key_id);
+        let manifest_crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
+        let manifest = durable_manifest(self.write()?, manifest_crypto.crypto())?;
+        self.provider
+            .insert_internal(DURABLE_MANIFEST_KEY.to_vec(), manifest.to_vec());
+
+        let plaintext = encode_storage_image(&self.provider.storage_values())?;
+        let crypto = self.provider.crypto();
         let encrypted =
             crypto.aead_encrypt(AeadType::Aes256Gcm, &data_key, &plaintext, &nonce, &aad);
         data_key.fill(0);
@@ -3061,6 +3191,7 @@ fn inspect_initialization_state(
         OPERATIONS.name().to_owned(),
         OUTBOX.name().to_owned(),
         ACCEPTED.name().to_owned(),
+        PENDING_WITNESS.name().to_owned(),
     ]);
     let actual_tables = read
         .list_tables()
@@ -3114,8 +3245,14 @@ fn inspect_initialization_state(
         .iter()
         .map_err(map_storage_error)?
         .count();
+    let pending_witness_entries = read
+        .open_table(PENDING_WITNESS)
+        .map_err(map_table_error)?
+        .iter()
+        .map_err(map_storage_error)?
+        .count();
 
-    if metadata_entries == 10
+    if metadata_entries == 16
         && generation == 0
         && rollback_counter == 0
         && epoch == 0
@@ -3125,6 +3262,7 @@ fn inspect_initialization_state(
         && operation_entries == 0
         && outbox_entries == 0
         && accepted_entries == 0
+        && pending_witness_entries == 0
     {
         return Ok(InitializationState::Pristine);
     }
@@ -3212,7 +3350,10 @@ fn inspect_initialization_state(
         && state_entries == 1
         && valid_creation_shape;
 
-    if metadata_entries == 10 && (group_state_candidate || initial_state_candidate) {
+    if metadata_entries == 16
+        && pending_witness_entries <= 1
+        && (group_state_candidate || initial_state_candidate)
+    {
         Ok(InitializationState::Committed)
     } else {
         Ok(InitializationState::Inconsistent)
@@ -3289,16 +3430,63 @@ fn restrict_file(_path: &Path) -> Result<(), PersistenceError> {
     Err(PersistenceError::Io)
 }
 
-fn state_aad(session: Id, generation: u64, rollback: u64, epoch: u64) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(STATE_AAD_LABEL.len() + 16 + 2 + 2 + 8 * 3);
+fn state_aad(meta: &impl ReadableTable<u8, &'static [u8]>) -> Result<Vec<u8>, PersistenceError> {
+    let session: Id = read_bytes(meta, META_SESSION)?
+        .try_into()
+        .map_err(|_| PersistenceError::Corrupt)?;
+    let profile = read_bytes(meta, META_PROFILE)?;
+    let profile_length = u8::try_from(profile.len()).map_err(|_| PersistenceError::Corrupt)?;
+    let epoch_authenticator = read_bytes(meta, META_EPOCH_AUTHENTICATOR)?;
+    if !matches!(epoch_authenticator.len(), 0 | 48) {
+        return Err(PersistenceError::Corrupt);
+    }
+    let registration = read_bytes(meta, META_WITNESS_REGISTRATION)?;
+    if !matches!(registration.as_slice(), [0] | [1]) {
+        return Err(PersistenceError::Corrupt);
+    }
+    let confirmed_commitment = read_bytes(meta, META_CONFIRMED_WITNESS_COMMITMENT)?;
+    let previous_certificate_hash = read_bytes(meta, META_PREVIOUS_CERTIFICATE_HASH)?;
+    let current_key = read_bytes(meta, META_CURRENT_KEY_ID)?;
+    let obsolete_key = read_bytes(meta, META_OBSOLETE_KEY_ID)?;
+    if confirmed_commitment.len() != 48
+        || previous_certificate_hash.len() != 48
+        || !matches!(current_key.len(), 0 | 16)
+        || !matches!(obsolete_key.len(), 0 | 16)
+    {
+        return Err(PersistenceError::Corrupt);
+    }
+
+    let mut aad = Vec::with_capacity(STATE_AAD_LABEL.len() + 256);
     aad.extend_from_slice(STATE_AAD_LABEL);
-    aad.extend_from_slice(&session);
     aad.extend_from_slice(&STORAGE_SCHEMA_VERSION.to_be_bytes());
-    aad.extend_from_slice(&PROFILE_REVISION.to_be_bytes());
-    aad.extend_from_slice(&generation.to_be_bytes());
-    aad.extend_from_slice(&rollback.to_be_bytes());
-    aad.extend_from_slice(&epoch.to_be_bytes());
-    aad
+    aad.push(profile_length);
+    aad.extend_from_slice(&profile);
+    aad.extend_from_slice(&read_u16(meta, META_PROFILE_REVISION)?.to_be_bytes());
+    aad.extend_from_slice(&session);
+    aad.extend_from_slice(&read_u64(meta, META_GENERATION)?.to_be_bytes());
+    aad.extend_from_slice(&read_u64(meta, META_ROLLBACK_COUNTER)?.to_be_bytes());
+    aad.extend_from_slice(&read_u64(meta, META_EPOCH)?.to_be_bytes());
+    aad.push(epoch_authenticator.len() as u8);
+    aad.extend_from_slice(&epoch_authenticator);
+    aad.extend_from_slice(&read_u64(meta, META_CONFIRMED_WITNESS_COUNTER)?.to_be_bytes());
+    aad.extend_from_slice(&confirmed_commitment);
+    aad.extend_from_slice(&previous_certificate_hash);
+    aad.extend_from_slice(&registration);
+    put_aad_optional_id(&mut aad, &current_key)?;
+    put_aad_optional_id(&mut aad, &obsolete_key)?;
+    Ok(aad)
+}
+
+fn put_aad_optional_id(out: &mut Vec<u8>, value: &[u8]) -> Result<(), PersistenceError> {
+    match value.len() {
+        0 => out.push(0),
+        16 => {
+            out.push(1);
+            out.extend_from_slice(value);
+        }
+        _ => return Err(PersistenceError::Corrupt),
+    }
+    Ok(())
 }
 
 fn encode_storage_image(values: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<Vec<u8>, PersistenceError> {
@@ -3757,16 +3945,40 @@ fn encode_operation(
     generation: u64,
     operation: &CommittedOperation,
 ) -> Result<Vec<u8>, PersistenceError> {
-    let (kind, result) = match operation {
-        CommittedOperation::Envelope(record) => (1, encode_outbox(record)?),
-        CommittedOperation::Accepted(record) => (2, encode_accepted(record)),
-        CommittedOperation::OutboxAcknowledged(record) => (3, encode_outbox(record)?),
-        CommittedOperation::ReceiveAcknowledged(record) => (4, encode_accepted(record)),
-        CommittedOperation::Pairing(record) => (5, encode_pairing_operation(record)),
+    use witness_v2::{ExactResultKind, WitnessOperationDisposition};
+
+    let (kind, result_kind, result) = match operation {
+        CommittedOperation::Envelope(record) => (
+            1,
+            ExactResultKind::EnvelopeReference,
+            encode_outbox(record)?,
+        ),
+        CommittedOperation::Accepted(record) => {
+            (2, ExactResultKind::Receive, encode_accepted(record))
+        }
+        CommittedOperation::OutboxAcknowledged(record) => (
+            3,
+            ExactResultKind::AcknowledgementReference,
+            encode_outbox(record)?,
+        ),
+        CommittedOperation::ReceiveAcknowledged(record) => (
+            4,
+            ExactResultKind::AcknowledgementReference,
+            encode_accepted(record),
+        ),
+        CommittedOperation::Pairing(record) => (
+            5,
+            ExactResultKind::PairingDecision,
+            encode_pairing_operation(record),
+        ),
     };
     let mut out = Vec::new();
+    out.extend_from_slice(&witness_v2::RECORD_VERSION.to_be_bytes());
+    out.extend_from_slice(&32_u16.to_be_bytes());
     out.extend_from_slice(&fingerprint);
     out.extend_from_slice(&generation.to_be_bytes());
+    out.push(WitnessOperationDisposition::Completed as u8);
+    out.push(result_kind as u8);
     out.push(kind);
     put_bytes(&mut out, &result)?;
     Ok(out)
@@ -3775,18 +3987,38 @@ fn encode_operation(
 fn decode_operation_record(
     bytes: &[u8],
 ) -> Result<([u8; 48], u64, CommittedOperation), PersistenceError> {
+    use witness_v2::{ExactResultKind, WitnessOperationDisposition};
+
     let mut cursor = BinaryCursor::new(bytes);
+    if cursor.u16()? != witness_v2::RECORD_VERSION {
+        return Err(PersistenceError::UnsupportedSchema);
+    }
+    if cursor.u16()? != 32 {
+        return Err(PersistenceError::Corrupt);
+    }
     let fingerprint = cursor.array()?;
     let generation = cursor.u64()?;
+    if cursor.u8()? != WitnessOperationDisposition::Completed as u8 {
+        return Err(PersistenceError::Corrupt);
+    }
+    let result_kind = ExactResultKind::try_from(cursor.u8()?)?;
     let kind = cursor.u8()?;
     let result = cursor.bytes()?;
     cursor.finish()?;
-    let operation = match kind {
-        1 => CommittedOperation::Envelope(decode_outbox(result)?),
-        2 => CommittedOperation::Accepted(decode_accepted(result)?),
-        3 => CommittedOperation::OutboxAcknowledged(decode_outbox(result)?),
-        4 => CommittedOperation::ReceiveAcknowledged(decode_accepted(result)?),
-        5 => CommittedOperation::Pairing(decode_pairing_operation(result)?),
+    let operation = match (kind, result_kind) {
+        (1, ExactResultKind::EnvelopeReference) => {
+            CommittedOperation::Envelope(decode_outbox(result)?)
+        }
+        (2, ExactResultKind::Receive) => CommittedOperation::Accepted(decode_accepted(result)?),
+        (3, ExactResultKind::AcknowledgementReference) => {
+            CommittedOperation::OutboxAcknowledged(decode_outbox(result)?)
+        }
+        (4, ExactResultKind::AcknowledgementReference) => {
+            CommittedOperation::ReceiveAcknowledged(decode_accepted(result)?)
+        }
+        (5, ExactResultKind::PairingDecision) => {
+            CommittedOperation::Pairing(decode_pairing_operation(result)?)
+        }
         _ => return Err(PersistenceError::Corrupt),
     };
     Ok((fingerprint, generation, operation))
@@ -3803,9 +4035,7 @@ fn decode_operation(bytes: &[u8]) -> Result<CommittedOperation, PersistenceError
 }
 
 fn decode_operation_generation(bytes: &[u8]) -> Result<u64, PersistenceError> {
-    let mut cursor = BinaryCursor::new(bytes);
-    let _: [u8; 48] = cursor.array()?;
-    cursor.u64()
+    decode_operation_record(bytes).map(|(_, generation, _)| generation)
 }
 
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PersistenceError> {
