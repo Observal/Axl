@@ -14,7 +14,7 @@ type GeneratorRunner = (
 
 function walk(directory: string, visit: (path: string) => void): void {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if ([".git", "dist", "node_modules"].includes(entry.name)) continue;
+    if ([".git", ".reference", "dist", "node_modules"].includes(entry.name)) continue;
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) walk(path, visit);
     else visit(path);

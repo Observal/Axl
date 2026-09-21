@@ -4,6 +4,8 @@
 node_modules/
 dist/
 .release/
+# Read-only reference checkouts (see AGENTS.md). Never tracked.
+.reference/
 coverage/
 docs/screenshots/
 *.tsbuildinfo

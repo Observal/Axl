@@ -54,6 +54,8 @@ Standard sessions expose one stable `capability_search` tool instead of placing 
 
 Agent Skills are discovered from `~/.axl/skills/`, `~/.agents/skills/`, and repository-root-to-working-directory `.axl/skills/` and `.agents/skills/` locations. Later definitions replace earlier definitions with the same `skill:<name>` identity. Discovery validates frontmatter and containment only. It does not execute scripts or expose instruction bodies, references, or assets. Full instructions load only through explicit activation.
 
+Daemon extensions are TypeScript or JavaScript files in `~/.axl/extensions/`. They run inside the daemon process with its permissions and can add model-discoverable tools, block tool calls, replace or refuse built-in commands such as `/compact`, and observe canonical events. See [Daemon extensions](docs/extensions.md).
+
 Daemon commands may declare a model-callable tool in the authoritative command registry. The current `compact_context` and `reload_context` tools use that progressive disclosure path: their provider-native schemas are absent until activation and remain available for the session afterward. Compaction and reload requests made during a response queue behind that response.
 
 ## Prompt templates
@@ -421,6 +423,7 @@ Restart the daemon or run `/reload` after editing the file manually. MCP tools s
 - [Setup](SETUP.md)
 - [Session profiles](docs/session-profiles.md)
 - [Context compaction](docs/compaction.md)
+- [Daemon extensions](docs/extensions.md)
 - [Development guide](docs/DEVELOPMENT_GUIDE.md)
 - [Product vision and implementation roadmap](ROADMAP.md)
 - [Repository structure](CODE_STRUCTURE.md)

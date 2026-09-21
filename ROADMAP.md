@@ -420,15 +420,19 @@ The public extension API is capability-scoped and grows only from working consum
 
 The implemented client-local terminal presentation surface supports commands and completion, shortcuts, status and working labels, bounded widgets, lifecycle listeners, tool renderers, and tracked cleanup. It cannot mutate canonical session state or access daemon and kernel internals. MCP and Agent Skills currently use its public tool-renderer registration.
 
-The daemon/runtime surface begins in Phase 6 with operations that have runtime consumers:
+The daemon extension surface is implemented in `@axl/extension-api` and hosted by `@axl/extension-host`. A daemon extension is a `.ts` or `.js` module in `~/.axl/extensions/` whose default export receives the API. It runs inside the daemon process:
 
 ```text
-registerTool
-registerSkill
-on
+registerTool          model-discoverable tool, indexed through capability_search
+on("tool.call")       block a tool call before it runs; a thrown error also blocks
+on("command")         replace the inputs of, or refuse, any built-in command
+on("session.event")   observe every durable canonical event
+track                 cleanup that runs when the session ends
 ```
 
-Every registration returns a disposer. Extensions declare capabilities before activation. Shared-state commands use typed daemon RPC, while presentation-only commands stay in the terminal API. `registerProvider`, `registerHook`, `registerTheme`, broader renderers, and `registerWebPanel` are added only when their first implementation needs them.
+`registerSkill` follows when its first consumer needs it.
+
+Every registration returns a disposer. An invalid extension fails session start with the file path and reason; nothing is skipped silently. Extension tools stay out of the stable prompt until the model activates them. Shared-state commands use typed daemon RPC, while presentation-only commands stay in the terminal API. `registerProvider`, `registerHook`, `registerTheme`, broader renderers, and `registerWebPanel` are added only when their first implementation needs them.
 
 Example manifest:
 
@@ -471,7 +475,7 @@ Axl implements established agent standards directly:
 
 A standard qualifies when it is open and used by more than one vendor. Its current steward does not affect Axl's implementation. The same rule applies outside agent tooling: Axl uses OCI specifications for containers and `devcontainer.json` for repository environments (section 11).
 
-The adoption compiler handles proprietary or divergent formats (section 4). Resources that already use supported standards install without conversion. They still pass the normal trust checks, including capability declarations, installation approval, and extension isolation (section 10.4). Standards compliance does not make executable code safe.
+The adoption compiler handles proprietary or divergent formats (section 4). Resources that already use supported standards install without conversion. They still pass the normal trust checks, including capability declarations, installation approval, and extension trust (section 10.4). Standards compliance does not make executable code safe.
 
 ### 6. Subagents
 
@@ -957,11 +961,11 @@ If confinement is required and no provider is available, execution must fail. It
 
 A provider reports which controls from section 10.2 it can enforce and at what strength. A session fails at startup when its policy requires an unavailable control instead of running with weaker isolation.
 
-#### 10.4 Extension isolation
+#### 10.4 Extension trust
 
-Trusted first-party extensions may run in the daemon process. Third-party extensions, adopted extensions, and local MCP servers run as separate processes under the selected sandbox. They receive only capability RPC, bounded filesystem and network access, and credential handles. If the required isolation is unavailable, activation fails.
+Daemon extensions are trusted by placement. Code the user puts in `~/.axl/extensions/` runs inside the daemon process with the daemon's permissions. Axl does not sandbox that code; installing a file there is the trust decision. Extensions can only narrow behavior through the extension seam: they may block tool calls and add tools, and they cannot widen sandbox or policy limits because enforcement sits below the seam (section 2.6).
 
-V1 does not allow a third-party extension to be promoted into the daemon process. Declarative skills may load before process isolation is complete because they do not execute code.
+Project-local extension directories are not loaded until a project trust decision exists. Local MCP servers remain separate processes under the selected sandbox because they are foreign programs, not user-authored extension code.
 
 #### 10.5 Sandboxed browser
 
@@ -1908,7 +1912,10 @@ The client-local terminal presentation surface was brought forward with the TUI.
 
 ##### Remaining runtime and cross-client surface
 
-- [ ] Add `registerTool`, `registerSkill`, and runtime lifecycle listeners when their first working consumers need them.
+- [x] Add in-process daemon extensions loaded from `~/.axl/extensions/` with `registerTool`, `on("tool.call")`, `on("command")`, `on("session.event")`, and tracked cleanup.
+- [ ] Route daemon-level commands (providers, MCP configuration, session catalog) through `on("command")` once extensions can load outside a session.
+- [ ] Add `registerSkill` when its first working consumer needs it.
+- [ ] Load project-local `.axl/extensions/` after an explicit project trust decision.
 - [ ] Route shared-state extension commands through typed daemon RPC instead of client projection state.
 - [ ] Add `registerProvider`, `registerHook`, `registerTheme`, broader renderers, and `registerWebPanel` only when the first working consumer needs each API.
 - [ ] Require an explicit runtime capability manifest before activation.
@@ -1956,12 +1963,9 @@ The checked standards items were brought forward by request. They do not complet
 
 #### Executable activation boundary
 
-- [ ] Build a process host for third-party and adopted executable extensions before allowing them to activate.
-- [ ] Run those processes under the selected sandbox and expose only capability RPC.
-- [ ] Give untrusted processes bounded filesystem and network access plus credential handles, never raw managed credentials.
-- [ ] Fail activation when required isolation is unavailable.
-- [ ] Keep third-party in-process promotion out of v1.
-- [x] Allow declarative skills before the executable process host exists.
+- [x] Run user daemon extensions in the daemon process, trusted by placement in `~/.axl/extensions/` (section 10.4).
+- [ ] Require an explicit project trust decision before loading project-local extensions.
+- [ ] Give adopted and generated extensions a review and approval step before they are written into `~/.axl/extensions/` (section 8.4).
 - [x] Run local stdio MCP servers as sandboxed child processes.
 
 #### Initial first-party extensions
@@ -1973,7 +1977,7 @@ The checked standards items were brought forward by request. They do not complet
 
 #### Exit gate
 
-The terminal presentation surface already has first-party renderer consumers and deterministic cleanup. Phase 6 completes when the runtime registrations have real first-party consumers, disabled runtime features leave no prompt, UI, or background work, and untrusted executable extensions cannot run in the daemon process.
+The terminal presentation surface already has first-party renderer consumers and deterministic cleanup. Phase 6 completes when the runtime registrations have real first-party consumers and disabled runtime features leave no prompt, UI, or background work.
 
 ### Phase 7: Complete permission and isolation system
 
@@ -2011,12 +2015,11 @@ The terminal presentation surface already has first-party renderer consumers and
 - [ ] Add loopback-only port publishing by default.
 - [ ] Add per-site explicit opt-in for authenticated browsing.
 
-#### Extension isolation hardening
+#### Extension hardening
 
-- [ ] Add resource limits and lifecycle supervision to the Phase 6 extension process host.
 - [x] Apply resource limits and lifecycle cleanup to existing sandboxed stdio MCP processes.
-- [ ] Verify that extension processes cannot bypass filesystem, network, or credential policy through host APIs.
-- [ ] Keep trusted in-process execution limited to first-party extensions throughout v1.
+- [ ] Verify that extension tool-call gates and registered tools cannot widen filesystem, network, or credential policy through the extension seam.
+- [ ] Report extension handler failures through the daemon diagnostics surface instead of stderr.
 
 #### OCI runtime
 
@@ -2049,7 +2052,7 @@ The terminal presentation surface already has first-party renderer consumers and
 
 #### Exit gate
 
-Adversarial tests cannot escape workspace path rules, tool egress policy, extension process capabilities, or required container isolation. Missing enforcement always blocks execution.
+Adversarial tests cannot escape workspace path rules, tool egress policy, or required container isolation through the extension seam. Missing enforcement always blocks execution.
 
 ### Phase 8: Child sessions, modes, and orchestration
 
