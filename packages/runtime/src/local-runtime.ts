@@ -8,7 +8,7 @@
 import { access, readdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { CredentialStore } from "@axl/ai";
+import type { CredentialStore, ModelProvider } from "@axl/ai";
 import { type AxlDaemon, listStoredSessions } from "@axl/daemon";
 import {
   type CompactionPreferences,
@@ -253,6 +253,10 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         providers: import("@axl/ai").ProviderRegistry;
       }>
     | undefined;
+  const extensionProviders = new Map<
+    string,
+    { readonly extensionId: string; references: number; readonly unregister: () => Promise<void> }
+  >();
   const loadAssembly = () => {
     assemblyPromise ??= Promise.all([
       import("@axl/ai"),
@@ -369,7 +373,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
-  const daemon = new AxlDaemon({
+  let daemon: AxlDaemon;
+  daemon = new AxlDaemon({
     ...(options.buildVersion === undefined ? {} : { buildVersion: options.buildVersion }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),
     ...(options.forceTerminate === undefined ? {} : { forceTerminate: options.forceTerminate }),
@@ -424,12 +429,6 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         webSearch: profile === "standard" && (selection.webSearch ?? defaults.webSearch ?? true),
         userQuestions: profile === "standard" && (selection.userQuestions ?? false),
       };
-      const modelInfo = await validateProviderSelection(
-        providers,
-        active.providerId,
-        active.modelId,
-      );
-      const thinking = ai.clampThinkingLevel(modelInfo, active.thinkingLevel);
       const compaction = resolveCompactionSettings(
         defaults.compaction,
         active.providerId,
@@ -446,24 +445,34 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       const providerSecrets = new Set<string>();
       let extensionHost: import("@axl/kernel").ExtensionHost | undefined;
       let capabilityService: import("@axl/kernel").CapabilityService | undefined;
-      const model = ai.modelPortForRegistry(providers, {
-        providerId: active.providerId,
-        requestSettings,
-        modelId: active.modelId,
-        thinkingLevel: thinking.effective,
-        readBlob,
-        onResolvedSecrets: (values) => {
-          for (const value of values) providerSecrets.add(value);
-        },
-        providerHooks: {
-          beforeHeaders: (input, requestSignal) =>
-            extensionHost?.beforeProviderHeaders?.(input, requestSignal) ?? input.headers,
-          beforeRequest: (input, requestSignal) =>
-            extensionHost?.beforeProviderRequest?.(input, requestSignal) ?? input.payload,
-          afterResponse: (input, requestSignal) =>
-            extensionHost?.afterProviderResponse?.(input, requestSignal),
-        },
-      });
+      const resolveModel = async () => {
+        const modelInfo = await validateProviderSelection(
+          providers,
+          active.providerId,
+          active.modelId,
+        );
+        const thinking = ai.clampThinkingLevel(modelInfo, active.thinkingLevel);
+        const model = ai.modelPortForRegistry(providers, {
+          providerId: active.providerId,
+          requestSettings,
+          modelId: active.modelId,
+          thinkingLevel: thinking.effective,
+          readBlob,
+          onResolvedSecrets: (values) => {
+            for (const value of values) providerSecrets.add(value);
+          },
+          providerHooks: {
+            beforeHeaders: (input, requestSignal) =>
+              extensionHost?.beforeProviderHeaders?.(input, requestSignal) ?? input.headers,
+            beforeRequest: (input, requestSignal) =>
+              extensionHost?.beforeProviderRequest?.(input, requestSignal) ?? input.payload,
+            afterResponse: (input, requestSignal) =>
+              extensionHost?.afterProviderResponse?.(input, requestSignal),
+          },
+        });
+        return { model, modelInfo, thinking };
+      };
+      let selectedModel: Awaited<ReturnType<typeof resolveModel>> | undefined;
       const tools = new kernel.ToolRegistry();
       const overflowDirectory = join(stateDirectory, "tool-output", sessionId);
       if (profile !== "chat") {
@@ -521,15 +530,17 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             directory: join(axlHome, "extensions"),
             extensions: extensionEntries,
             cwd,
+            reason: boundary,
             tools,
             grantedAuthorities,
             signal,
             session: {
               ...extensionSession,
               info: async () => {
-                const [info, catalog] = await Promise.all([
+                const [info, catalog, extensions] = await Promise.all([
                   extensionSession.info(),
                   providers.listModels(),
+                  extensionRegistry.list(cwd),
                 ]);
                 return {
                   ...info,
@@ -537,8 +548,47 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
                     providerId,
                     modelId,
                   })),
+                  projectTrusted: extensions.project.trusted,
                 };
               },
+            },
+            shutdown: async () => {
+              setTimeout(() => void daemon.stop(), 0);
+            },
+            registerProvider: (extensionId, value) => {
+              const provider = value as Partial<ModelProvider>;
+              if (
+                typeof provider.id !== "string" ||
+                typeof provider.displayName !== "string" ||
+                !Array.isArray(provider.authMethods) ||
+                typeof provider.listModels !== "function" ||
+                typeof provider.stream !== "function"
+              ) {
+                throw new TypeError("Extension provider does not implement ModelProvider");
+              }
+              const existing = extensionProviders.get(provider.id);
+              if (existing !== undefined) {
+                if (existing.extensionId !== extensionId) {
+                  throw new Error(
+                    `Provider ${provider.id} is already owned by extension ${existing.extensionId}`,
+                  );
+                }
+                existing.references += 1;
+              } else {
+                extensionProviders.set(provider.id, {
+                  extensionId,
+                  references: 1,
+                  unregister: providers.register(provider as ModelProvider),
+                });
+              }
+              return async () => {
+                const registered = extensionProviders.get(provider.id as string);
+                if (registered === undefined || registered.extensionId !== extensionId) return;
+                registered.references -= 1;
+                if (registered.references > 0) return;
+                extensionProviders.delete(provider.id as string);
+                await registered.unregister();
+              };
             },
             reservedCommandNames,
             onFailure: (failure) => {
@@ -559,16 +609,17 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         for (const extension of daemonExtensions.extensions) {
           extensionRegistry.clearFailure(extension.id);
         }
-        const extensionResources =
-          contextResources === undefined
-            ? ((await daemonExtensions.host.discoverResources?.(signal)) ?? [])
-            : [];
-        if (extensionResources.length > 0) {
-          resources = [...resources, ...extensionResources];
-          instructions = kernel.agentsInstructionsFromResources(resources);
-        }
         const hosts: import("@axl/kernel").ExtensionHost[] = [daemonExtensions.host];
         try {
+          const extensionResources =
+            contextResources === undefined
+              ? ((await daemonExtensions.host.discoverResources?.(signal)) ?? [])
+              : [];
+          if (extensionResources.length > 0) {
+            resources = [...resources, ...extensionResources];
+            instructions = kernel.agentsInstructionsFromResources(resources);
+          }
+          selectedModel = await resolveModel();
           const capabilitySources: import("@axl/kernel").CapabilitySource[] = [
             { records: skillService.records, service: skillService },
             daemonCapabilities.source,
@@ -587,7 +638,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
                 sessionId,
                 stateDirectory: join(stateDirectory, "mcp"),
                 blobDirectory: join(stateDirectory, "blobs"),
-                model,
+                model: selectedModel.model,
                 modelId: active.modelId,
                 secretValues: [...mcpSecrets],
                 onSecrets: (values) => {
@@ -634,6 +685,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         }
       }
 
+      selectedModel ??= await resolveModel();
+      const { model, modelInfo, thinking } = selectedModel;
       const prompt = kernel.buildStablePrompt({
         cwd,
         tools: tools.declarations().map(({ name, description }) => ({ name, description })),

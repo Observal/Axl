@@ -671,14 +671,19 @@ export class AgentSession {
     }
   }
 
+  notifySettled(operationId: OperationId): void {
+    this.host.settled?.(operationId);
+  }
+
   extensionCommands() {
     return this.host.commands?.() ?? [];
   }
 
   extensionInfo() {
+    const systemPrompt = this.effectiveSystem();
     return {
       activeTools: this.tools.declarations().map((tool) => tool.name),
-      ...(this.system === undefined ? {} : { systemPrompt: this.system }),
+      ...(systemPrompt === undefined ? {} : { systemPrompt }),
       ...(this.contextUsage === undefined ? {} : { contextTokens: this.contextUsage.tokens }),
       idle: this.activeOperation === null,
       pending: {
@@ -789,10 +794,10 @@ export class AgentSession {
     return [this.system, ...capabilities].filter((value) => value !== undefined).join("\n\n");
   }
 
-  private estimatedInputTokens(): number {
-    return this.contextUsage === undefined
+  private estimatedInputTokens(system = this.effectiveSystem()): number {
+    return this.contextUsage === undefined || system !== this.effectiveSystem()
       ? estimateModelInputTokens({
-          system: this.effectiveSystem(),
+          system,
           messages: this.messages,
           tools: this.tools.declarations(),
         })
@@ -924,10 +929,17 @@ export class AgentSession {
     const appended: CanonicalEvent[] = [];
     try {
       await this.appendUserMessage(operationId, content, appended);
-      await this.appendExtensionContext("agent", operationId, appended, signal);
+      const agentSystem = await this.appendExtensionContext(
+        "agent",
+        operationId,
+        appended,
+        signal,
+        this.effectiveSystem() ?? "",
+      );
 
       const activity = { sequence: 0 };
       let overflowRetried = false;
+      let requestSystem: readonly string[] | undefined;
       while (true) {
         if (shouldCompact(this.estimatedInputTokens(), this.modelContextWindow, this.compaction)) {
           const compacted = await this.compactOwned("threshold", operationId, undefined, signal);
@@ -939,8 +951,32 @@ export class AgentSession {
             }
           }
         }
-        await this.appendExtensionContext("request", operationId, appended, signal);
-        const outcome = await this.modelTurn(operationId, activity, signal, appended);
+        const baseSystem = [this.effectiveSystem(), ...agentSystem].filter(Boolean).join("\n\n");
+        const messagesBeforeContext = this.messages.length;
+        const hadRequestContext = requestSystem !== undefined;
+        requestSystem ??= await this.appendExtensionContext(
+          "request",
+          operationId,
+          appended,
+          signal,
+          baseSystem,
+        );
+        const system = [baseSystem, ...requestSystem].filter(Boolean).join("\n\n");
+        if (
+          !hadRequestContext &&
+          (requestSystem.length > 0 || this.messages.length !== messagesBeforeContext) &&
+          shouldCompact(this.estimatedInputTokens(system), this.modelContextWindow, this.compaction)
+        ) {
+          const compacted = await this.compactOwned("threshold", operationId, undefined, signal);
+          if (compacted !== undefined) {
+            while (
+              await this.appendNextQueuedMessage(this.steeringMessages, operationId, appended)
+            ) {
+              // Steering received during summarization belongs before the resumed request.
+            }
+          }
+        }
+        const outcome = await this.modelTurn(operationId, activity, signal, appended, system);
         if (
           this.compaction.enabled &&
           !overflowRetried &&
@@ -998,6 +1034,7 @@ export class AgentSession {
             outcome.usage.cacheWriteTokens;
           if (tokens > 0) this.contextUsage = { tokens, messageCount: this.messages.length };
         }
+        requestSystem = undefined;
         if (outcome.stopReason === "tool_use") {
           if (outcome.toolCalls.length === 0) {
             appended.push(
@@ -1014,6 +1051,7 @@ export class AgentSession {
             outcome.toolCalls,
             appended,
             signal,
+            activity,
           );
           // Use the normal terminal-message path without dispatching another model request.
           if (aborted) continue;
@@ -1105,6 +1143,7 @@ export class AgentSession {
     activity: { sequence: number },
     signal: AbortSignal | undefined,
     appended: CanonicalEvent[],
+    system: string,
   ): Promise<TurnOutcome> {
     if (signal?.aborted) {
       return { content: [], toolCalls: [], stopReason: "aborted", exposedOutput: false };
@@ -1112,7 +1151,7 @@ export class AgentSession {
     const retry = this.retry;
     const maxAttempts = retry?.maxAttempts ?? 1;
     for (let attempt = 1; ; attempt += 1) {
-      const outcome = await this.modelAttempt(operationId, activity, signal, appended);
+      const outcome = await this.modelAttempt(operationId, activity, signal, appended, system);
       const error = outcome.error;
       if (
         retry === undefined ||
@@ -1167,6 +1206,7 @@ export class AgentSession {
     activity: { sequence: number },
     signal: AbortSignal | undefined,
     appended: CanonicalEvent[],
+    system: string,
   ): Promise<TurnOutcome> {
     let thinking = "";
     let text = "";
@@ -1182,7 +1222,7 @@ export class AgentSession {
         onRequestConfigured: async (configuration) => {
           appended.push(await this.append(operationId, "model.request_configured", configuration));
         },
-        system: this.effectiveSystem(),
+        system,
         messages: [...this.messages],
         tools: this.tools.declarations(),
         signal,
@@ -1264,30 +1304,36 @@ export class AgentSession {
     phase: "agent" | "request",
     operationId: OperationId,
     appended: CanonicalEvent[],
-    signal?: AbortSignal,
-  ): Promise<void> {
-    if (this.host.contributeContext === undefined) return;
+    signal: AbortSignal | undefined,
+    systemPrompt: string,
+  ): Promise<readonly string[]> {
+    if (this.host.contributeContext === undefined) return [];
     const contributions = await this.host.contributeContext(
       {
         phase,
-        systemPrompt: this.effectiveSystem() ?? "",
+        systemPrompt,
         messages: structuredClone(this.messages),
       },
       signal ?? new AbortController().signal,
     );
+    const system: string[] = [];
     for (const contribution of contributions) {
       const event = await this.append(operationId, "context.extension", contribution);
       appended.push(event);
-      this.messages.push({
-        role: "user",
-        content: [
-          {
-            type: "text",
-            text: `[extension:${contribution.extensionId}/${contribution.source}]\n${contribution.content}`,
-          },
-        ],
-      });
+      if (contribution.target === "system") system.push(contribution.content);
+      else {
+        this.messages.push({
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `[extension:${contribution.extensionId}/${contribution.source}]\n${contribution.content}`,
+            },
+          ],
+        });
+      }
     }
+    return system;
   }
 
   /** Appends daemon-owned compaction queue lifecycle state to the canonical session log. */
@@ -1358,6 +1404,7 @@ export class AgentSession {
     toolCalls: readonly ToolCallRequest[],
     appended: CanonicalEvent[],
     signal: AbortSignal | undefined,
+    activity: { sequence: number },
   ): Promise<boolean> {
     for (const requested of toolCalls) {
       const prepared = await this.interceptToolCall(requested, signal);
@@ -1371,7 +1418,7 @@ export class AgentSession {
       );
       const executed =
         prepared.blocked === undefined
-          ? await this.executeTool(call, signal)
+          ? await this.executeTool(call, signal, operationId, activity)
           : { result: prepared.blocked };
       const { result, violation } = {
         ...executed,
@@ -1482,6 +1529,8 @@ export class AgentSession {
   private async executeTool(
     call: ToolCallRequest,
     signal: AbortSignal | undefined,
+    operationId: OperationId,
+    activity: { sequence: number },
   ): Promise<{ result: ToolExecutionResult; violation?: SandboxViolationError }> {
     const tool = this.tools.get(call.name);
     if (tool === undefined) {
@@ -1496,6 +1545,15 @@ export class AgentSession {
     try {
       const result = await tool.execute(call.input, executionSignal, {
         activeCapabilities: new Set(this.activeCapabilityContent.keys()),
+        reportProgress: (progress) =>
+          this.publishActivity({
+            operationId,
+            sequence: ++activity.sequence,
+            type: "tool_progress",
+            callId: call.callId,
+            name: call.name,
+            progress,
+          }),
       });
       if (result.sessionEffects !== undefined && call.name !== "capability_search") {
         throw new Error(`Tool ${call.name} cannot emit session effects`);

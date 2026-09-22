@@ -73,6 +73,7 @@ interface RegistryEntry extends DiscoveredDaemonExtension {
   readonly source: ExtensionSourceKind;
   readonly version?: string;
   readonly packageName?: string;
+  readonly missing?: boolean;
 }
 
 type CommandRunner = (
@@ -336,18 +337,36 @@ export class DaemonExtensionRegistry {
         source: "global" as const,
       })),
       await Promise.all(
-        config.packages.map(async (item) => {
-          const entry = await packageEntry(join(this.packageDirectory, "node_modules", item.name));
-          if (entry.id !== item.id) {
-            throw new DaemonExtensionError(
-              entry.path,
-              `manifest id changed from ${item.id} to ${entry.id}`,
-            );
+        config.packages.map(async (item): Promise<RegistryEntry> => {
+          const path = join(this.packageDirectory, "node_modules", item.name);
+          try {
+            const entry = await packageEntry(path);
+            if (entry.id !== item.id) {
+              throw new DaemonExtensionError(
+                entry.path,
+                `manifest id changed from ${item.id} to ${entry.id}`,
+              );
+            }
+            return entry;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            this.failures.set(item.id, `Configured package ${item.name} is missing`);
+            return { id: item.id, path, source: "package", packageName: item.name, missing: true };
           }
-          return entry;
         }),
       ),
-      await Promise.all(config.paths.map((path) => pathEntry(path, "explicit"))),
+      await Promise.all(
+        config.paths.map(async (path): Promise<RegistryEntry> => {
+          try {
+            return await pathEntry(path, "explicit");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            const id = parseExtensionId(basename(path, extname(path)), "extension.id");
+            this.failures.set(id, `Configured extension path ${path} is missing`);
+            return { id, path, source: "explicit", missing: true };
+          }
+        }),
+      ),
     ];
     const root = await projectRoot(cwd);
     if (config.trustedProjects.includes(root)) {
@@ -359,7 +378,11 @@ export class DaemonExtensionRegistry {
       );
     }
     const selected = new Map<string, RegistryEntry>();
-    for (const group of groups) for (const entry of group) selected.set(entry.id, entry);
+    for (const group of groups) {
+      for (const entry of group) {
+        if (!entry.missing) selected.set(entry.id, entry);
+      }
+    }
     return {
       root,
       entries: [...selected.values()].sort((left, right) => left.id.localeCompare(right.id)),
@@ -369,7 +392,9 @@ export class DaemonExtensionRegistry {
   async entries(cwd: string): Promise<readonly RegistryEntry[]> {
     const config = await readConfiguration(this.configPath);
     const selected = await this.selectedEntries(cwd, config);
-    return selected.entries.filter((entry) => !config.disabled.includes(entry.id));
+    return selected.entries.filter(
+      (entry) => !entry.missing && !config.disabled.includes(entry.id),
+    );
   }
 
   async list(cwd: string): Promise<ExtensionListResult> {
@@ -384,7 +409,7 @@ export class DaemonExtensionRegistry {
           id: entry.id,
           path: entry.path,
           source: entry.source,
-          enabled: !config.disabled.includes(entry.id),
+          enabled: !entry.missing && !config.disabled.includes(entry.id),
           ...(entry.version === undefined ? {} : { version: entry.version }),
           ...(entry.packageName === undefined ? {} : { packageName: entry.packageName }),
           ...(error === undefined ? {} : { error }),
@@ -506,7 +531,11 @@ export class DaemonExtensionRegistry {
   private async pathsWithoutId(paths: readonly string[], id: string): Promise<readonly string[]> {
     const kept: string[] = [];
     for (const path of paths) {
-      if ((await pathEntry(path, "explicit")).id !== id) kept.push(path);
+      try {
+        if ((await pathEntry(path, "explicit")).id !== id) kept.push(path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
     return kept;
   }

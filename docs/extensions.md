@@ -108,10 +108,13 @@ The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, 
 ## API
 
 `registerTool(definition)`
-: Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal)` runs. Execution returns `{ content: [{ type: "text", text }], isError? }`. Registration and its returned disposer remain usable after factory activation for dynamic tool lifecycles.
+: Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal, context)` runs. `context.reportProgress(value)` publishes bounded transient progress. Execution returns `{ content: [{ type: "text", text }], isError? }`. Registration and its returned disposer remain usable after factory activation for dynamic tool lifecycles.
 
 `registerCommand(definition)`
-: Registers a daemon-owned command with a unique lowercase hyphenated name. Built-in names cannot be replaced. Every client can list and invoke the command through `extension.list` and `extension.command.invoke`, including the typed SDK methods.
+: Registers a daemon-owned command with a unique lowercase hyphenated name. Built-in names cannot be replaced. Every client can discover the command through `command.list` and invoke it through `extension.command.invoke`, including the typed SDK command controller.
+
+`registerProvider(provider)`
+: Registers an implementation of Axl's existing `ModelProvider` contract in the shared AI registry. Registrations are reference-counted across session extension instances and are removed after the last owning instance is disposed. Provider IDs cannot replace a built-in or another extension's provider.
 
 `state`
 : Provides namespaced `get`, `set`, and `delete` operations. Updates append `extension.state` events and reconstruct after daemon restart. Values must be bounded JSON.
@@ -132,13 +135,13 @@ The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, 
 : Intercepts client or extension-produced input before the agent loop. Return `{ action: "transform", content }`, `{ action: "handled" }`, or nothing. Transforms chain and are validated before admission.
 
 `on("before_agent_start", handler)` and `on("context", handler)`
-: Contribute bounded context before the turn and before each provider request. Contributions append `context.extension` before model dispatch, so reconstruction remains exact and the stable prompt prefix is unchanged.
+: Contribute bounded context before the turn and before each provider request. A contribution targets either `message` by default or the appended `system` suffix. Contributions append `context.extension` before model dispatch, so reconstruction remains exact and the stable prompt prefix is unchanged.
 
 `on("before_provider_headers", handler)`, `on("before_provider_request", handler)`, and `on("after_provider_response", handler)`
 : Run around model HTTP dispatch inside `packages/ai`. Header and JSON payload replacements chain in extension order. The response hook runs after headers arrive and before the response body is consumed. All receive the owning model request's cancellation signal.
 
 `on("command", handler)`
-: Runs before every built-in command. Return nothing to run it unchanged, `{ args }` to run it with replaced inputs, or `{ block: true, reason }` to refuse it. A thrown error refuses it. Replacements chain in load order; the first refusal wins. Refused commands fail with the `command_blocked` error and the reason, whoever triggered them: a client, the model, or the daemon itself. The daemon revalidates replaced inputs and refuses invalid ones.
+: Runs before every built-in command. Return nothing to run it unchanged, `{ args }` to run it with replaced inputs, or `{ block: true, reason }` to refuse it. A thrown error refuses it. Replacements chain in load order; the first refusal wins. Refused commands fail with the `command_blocked` error and the reason, whoever triggered them: a client, the model, or the daemon itself. The daemon revalidates replaced inputs and refuses invalid ones. `project_trust`, `session_before_fork`, `session_before_compact`, and `user_bash` are typed aliases scoped to their corresponding command.
 
   | `name` | `source` | `args` | Replaceable |
   | --- | --- | --- | --- |
@@ -161,6 +164,12 @@ Typed lifecycle notifications are also available for `session_start`, `session_i
 
 `track(disposer)`
 : Registers cleanup. Disposers run in reverse order when the session ends. Every registration also returns its own disposer.
+
+## Ordering and cancellation
+
+Factories and handlers run in resolved extension order. Input, command, provider-header, provider-payload, tool-input, and tool-result replacements chain so each handler sees the prior handler's value. The first explicit block stops an intercepted operation. Tool input and result replacements cross their normal validation boundaries before execution or persistence. Concurrent tool calls keep independent inputs and cancellation signals.
+
+The owning daemon operation's signal reaches activation, context discovery, input, command, provider, and tool handlers. Disposal also aborts the extension lifecycle signal. Observer and cleanup work is bounded during disposal, but active operation hooks do not receive a shorter extension-only deadline.
 
 ## Failure behavior
 

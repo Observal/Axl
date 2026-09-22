@@ -59,7 +59,7 @@ export interface CommandInvocationOptions {
 }
 
 export type CommandOutcome =
-  | { readonly state: "completed"; readonly command: string }
+  | { readonly state: "completed"; readonly command: string; readonly content?: string }
   | { readonly state: "queued"; readonly command: string }
   | {
       readonly state: "session-configured";
@@ -211,6 +211,21 @@ export class CommandController {
     }
     if (command.context === "session" && sessionId === undefined) {
       throw new AxlClientError("command_unavailable", "Open a session first");
+    }
+    if (command.extensionId !== undefined) {
+      const result = await this.client.invokeExtensionCommand(
+        {
+          sessionId: sessionId as SessionId,
+          name: command.name,
+          args: { ...(argument === undefined ? {} : { argument }) },
+        },
+        options,
+      );
+      return {
+        state: "completed",
+        command: command.name,
+        ...(result.content === undefined ? {} : { content: result.content }),
+      };
     }
 
     switch (command.name) {

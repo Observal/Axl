@@ -12,7 +12,7 @@ Status values:
 - **Missing**: no supported third-party equivalent exists.
 - **Excluded**: a maintainer approved the documented architectural difference.
 
-No rows are currently approved exclusions.
+Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are excluded by `client-boundaries.md`; their equivalents belong to the separate presentation extension hosts.
 
 ## Discovery, trust, and packaging
 
@@ -40,30 +40,30 @@ No rows are currently approved exclusions.
 | `resources_discover` | Done | Extensions contribute bounded canonical resources before prompt construction. |
 | `session_start` | Done | Typed activation notification runs with the owning cancellation signal. |
 | `session_info_changed` | Done | Canonical rename and configuration events project to the typed lifecycle notification. |
-| `session_before_switch` | Missing | Add cancellable pre-switch interception. |
-| `session_before_fork` | Missing | Existing command interception covers fork arguments only. |
-| `session_before_compact` | Partial | The command hook can replace a summary or block compaction; a dedicated lifecycle contract is missing. |
+| `session_before_switch` | Excluded | Axl has no daemon-global selected session; each client owns its attachment and switch intent under `client-boundaries.md`. |
+| `session_before_fork` | Done | The typed alias can replace the fork point or block before copy. |
+| `session_before_compact` | Done | The typed alias can replace instructions or summary, or block before compaction starts. |
 | `session_compact` | Done | Successful canonical compaction projects to a typed lifecycle notification. |
 | `session_compact_failed` | Done | Canonical compaction failure projects to a typed lifecycle notification. |
-| `session_before_tree` | Missing | Add pre-navigation interception. |
-| `session_tree` | Missing | Add post-navigation notification. |
+| `session_before_tree` | Excluded | Branch-tree navigation is a client projection operation and cannot be globally blocked by an in-process daemon extension. |
+| `session_tree` | Excluded | Presentation extensions observe client navigation locally; canonical branch changes remain visible through `session.event`. |
 | `session_shutdown` | Done | Typed shutdown handlers run within the cleanup budget before owned resources are disposed. |
 | `before_agent_start` | Done | Extensions append bounded canonical context before an agent operation starts. |
 | `agent_start` | Done | Canonical user-turn admission projects to a typed lifecycle notification. |
 | `agent_end` | Done | Final canonical assistant completion projects to a typed lifecycle notification. |
-| `agent_settled` | Partial | Final assistant completion is reported, but queue-drain settlement still needs a distinct signal. |
-| `ui_prompt_start` and `ui_prompt_end` | Missing | Add client prompt lifecycle through SDK projections. |
+| `agent_settled` | Done | The notification fires only after the active turn and transient and durable queued input are drained. |
+| `ui_prompt_start` and `ui_prompt_end` | Excluded | UI prompt lifecycle belongs to the separate TUI and web extension hosts, not the daemon host. |
 | `turn_start` and `turn_end` | Done | User and final assistant canonical events project typed turn boundaries. |
 | `message_start`, `message_update`, and `message_end` | Done | Bounded activity plus canonical assistant completion project typed message lifecycle events. |
 | `tool_execution_start` | Done | Effective canonical tool calls project a typed start event before execution. |
-| `tool_execution_update` | Partial | Tool-call stream activity is exposed; arbitrary tool progress remains to be projected. |
+| `tool_execution_update` | Done | Extension and built-in tools can publish bounded progress through transient activity frames. |
 | `tool_execution_end` | Done | Completion is observed and validated result patches are canonicalized. |
-| `context` | Partial | Extensions append canonical per-request context without rewriting the prompt-cache prefix; arbitrary message replacement is not exposed. |
-| `before_provider_headers` | Partial | Shared safe HTTP model transports support ordered header mutation; non-HTTP adapters remain. |
-| `before_provider_request` | Partial | Shared safe HTTP model transports support ordered JSON payload replacement; non-HTTP adapters remain. |
-| `after_provider_response` | Partial | Shared safe HTTP model transports report response metadata before body consumption; non-HTTP adapters remain. |
-| `model_select` | Partial | Model changes project typed notifications; pre-change interception remains. |
-| `thinking_level_select` | Partial | Thinking changes project typed notifications; pre-change interception remains. |
+| `context` | Done | Extensions append canonical message context or a system-prompt suffix per request without rewriting the stable prefix. |
+| `before_provider_headers` | Done | Shared HTTP model transports support ordered header mutation; adapter-managed transports expose no unavailable raw headers. |
+| `before_provider_request` | Done | Shared HTTP model transports support ordered provider-payload replacement before dispatch. |
+| `after_provider_response` | Done | Shared HTTP model transports report response metadata before body consumption and cancel bodies on handler failure. |
+| `model_select` | Done | Canonical model changes project typed notifications with previous state recoverable from prior events. |
+| `thinking_level_select` | Done | Canonical thinking-level changes project typed notifications. |
 | `tool_call` | Done | Extensions can allow, block, or chain input replacements before the effective call is written and validated. |
 | `tool_result` | Done | Result patches chain in load order and pass the canonical event validator. |
 | `user_bash` | Done | Daemon-owned shell intent passes through the cancellable command interceptor before execution. |
@@ -78,17 +78,17 @@ No rows are currently approved exclusions.
 | Lifecycle abort signal | Done | Factories, resource discovery, tool hooks, command hooks, and observers receive operation or disposal cancellation. |
 | Deterministic cleanup | Done | Registration rollback, reverse cleanup, asynchronous draining, and bounded disposal are tested. |
 | Working directory | Done | `DaemonExtensionApi.cwd` exposes the canonical session directory. |
-| Mode and UI availability | Missing | Define daemon, TUI, web, and headless entry-point contexts. |
-| Project trust query | Missing | Depends on project-trust storage and discovery. |
-| Session manager access | Partial | The public session facade exposes scoped operations without mutable kernel objects; remaining inspection methods are tracked below. |
+| Mode and UI availability | Done | Daemon entry points report `mode: "daemon"` and `uiAvailable: false`; presentation entry points remain separate. |
+| Project trust query | Done | `session.info()` reports the remembered canonical project-trust decision. |
+| Session manager access | Done | The public session facade exposes scoped operations and snapshots without mutable kernel objects. |
 | Model registry and selected model | Done | `session.info()` returns the available model identities and selection; setters route through daemon configuration. |
 | Idle, abort, and pending-message state | Done | The session facade exposes abort plus current operation and pending-message state. |
-| Shutdown | Missing | Add authorized daemon shutdown intent. |
-| Context usage | Missing | Add public SDK projection of current context usage. |
+| Shutdown | Done | Trusted daemon extensions can request asynchronous daemon shutdown through the scoped session facade. |
+| Context usage | Done | `session.info()` exposes the latest bounded context-token count when available. |
 | Compact | Done | The scoped session facade invokes daemon-owned compaction. |
 | Current system prompt | Done | Context handlers and `session.info()` expose the stable system prompt without mutable kernel access. |
 | New session | Done | The scoped session facade creates sessions through daemon ownership. |
-| Fork, clone, navigation, and switch | Partial | Scoped fork and clone are available; client presentation owns navigation and switching. |
+| Fork, clone, navigation, and switch | Done | Scoped fork and clone use daemon operations; navigation and switching remain client-owned by architecture. |
 | Runtime reload | Done | The scoped session facade and management RPC both use atomic daemon reload. |
 | Register tool | Done | Tools can register and unregister dynamically; collisions, including built-in overrides, fail explicitly. |
 | Send extension message | Done | Namespaced extension messages append canonical `context.extension` events and enter model context. |
@@ -97,12 +97,12 @@ No rows are currently approved exclusions.
 | Session name | Done | Scoped read and rename route through daemon-owned session state. |
 | Entry labels | Done | Namespaced labels append canonical `extension.label` events and rebuild after restart. |
 | Register shared command | Done | Commands register in the daemon and invoke through typed public SDK RPC. |
-| Enumerate commands | Partial | Public extension inventory lists extension commands; the extension context lacks a combined built-in catalog getter. |
+| Enumerate commands | Done | Extension commands appear in both extension inventory and the authoritative daemon command catalog. |
 | Execute subprocess | Done | Trusted daemon extensions use Node process APIs directly and receive lifecycle cancellation signals; no redundant process wrapper is added. |
 | Get and set active tools | Done | `session.info()` reads active tools and `activateTools()` uses the authority-checked capability service. |
 | Get and set model or thinking | Done | Scoped reads and setters route through daemon configuration. |
 | Shared extension event bus | Done | `emit()` appends bounded namespaced `extension.event` records visible through daemon and SDK event streams. |
-| Register and unregister provider | Missing | Implement global provider ownership through `packages/ai`; per-session extension factories cannot safely own shared providers. |
+| Register and unregister provider | Done | Ref-counted registrations use the existing `packages/ai` `ModelProvider` contract and registry, with cleanup after the last owning session. |
 | Persistent extension state | Done | Namespaced JSON state is canonical and rebuilt from `extension.state` events. |
 
 ## TUI presentation API

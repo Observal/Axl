@@ -1053,8 +1053,30 @@ export class AxlDaemon {
         controller?.abort();
         return { cancellationRequested: controller !== undefined };
       }
-      case "command.list":
-        return commandCatalog(state.grantedCapabilities, request.params.sessionId);
+      case "command.list": {
+        const catalog = commandCatalog(state.grantedCapabilities, request.params.sessionId);
+        if (request.params.sessionId === undefined) return catalog;
+        const extensions = await this.sessions.extensionCommands(request.params.sessionId);
+        if (extensions.length === 0) return catalog;
+        const commands = [
+          ...catalog.commands,
+          ...extensions.map((command) => ({
+            id: `extension:${command.extensionId}/${command.name}`,
+            name: command.name,
+            aliases: [],
+            description: command.description,
+            context: "session" as const,
+            argument: { required: false, hint: "arguments" },
+            requiredCapabilities: ["extension.command.invoke" as const],
+            availability: { state: "available" as const },
+            extensionId: command.extensionId,
+          })),
+        ].sort((left, right) => left.name.localeCompare(right.name));
+        return {
+          generation: createHash("sha256").update(JSON.stringify(commands)).digest("hex"),
+          commands,
+        };
+      }
       case "provider.list":
         return this.providers().list(request.params, signal);
       case "provider.catalog.refresh":

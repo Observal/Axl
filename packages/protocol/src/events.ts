@@ -186,6 +186,7 @@ export type EventPayloadMap = {
     readonly extensionId: string;
     readonly source: string;
     readonly content: string;
+    readonly target?: "message" | "system";
   };
   "capability.searched": {
     readonly query: string;
@@ -694,10 +695,13 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     return payload;
   },
   "context.extension": (payload, path) => {
-    exact(payload, path, ["extensionId", "source", "content"]);
+    exact(payload, path, ["extensionId", "source", "content"], ["target"]);
     string(payload.extensionId, `${path}.extensionId`);
     string(payload.source, `${path}.source`);
     string(payload.content, `${path}.content`, true);
+    if (payload.target !== undefined) {
+      choice(payload.target, `${path}.target`, ["message", "system"]);
+    }
     return payload;
   },
   "capability.searched": (payload, path) => {

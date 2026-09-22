@@ -730,6 +730,8 @@ export class ConversationProjector {
             sequence: frame.sequence,
             toolCalls: [...base.toolCalls, frame.call],
           };
+    } else if (frame.type === "tool_progress") {
+      this.activity = { ...base, sequence: frame.sequence };
     }
     return true;
   }

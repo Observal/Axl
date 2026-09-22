@@ -6,7 +6,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EventId, JsonObject, OperationId, SessionId } from "./event-envelope.ts";
+import type { EventId, JsonObject, JsonValue, OperationId, SessionId } from "./event-envelope.ts";
 import {
   ProtocolValidationError,
   parseEventId,
@@ -164,6 +164,14 @@ export type SessionActivityFrame =
       readonly sequence: number;
       readonly type: "tool_call";
       readonly call: TransientToolCall;
+    }
+  | {
+      readonly operationId: OperationId;
+      readonly sequence: number;
+      readonly type: "tool_progress";
+      readonly callId: string;
+      readonly name: string;
+      readonly progress: JsonValue;
     }
   | {
       readonly operationId: OperationId;
@@ -1571,6 +1579,24 @@ export function parseSessionActivityFrame(value: unknown): SessionActivityFrame 
       call: parseTransientToolCall(frame.call, "activity.frame.call"),
     };
   }
+  if (frame.type === "tool_progress") {
+    exact(frame, "activity.frame", [
+      "operationId",
+      "sequence",
+      "type",
+      "callId",
+      "name",
+      "progress",
+    ]);
+    return {
+      operationId,
+      sequence,
+      type: frame.type,
+      callId: boundedString(frame.callId, "activity.frame.callId", 256),
+      name: boundedString(frame.name, "activity.frame.name", 256),
+      progress: frame.progress as JsonValue,
+    };
+  }
   if (frame.type === "snapshot") {
     exact(frame, "activity.frame", [
       "operationId",
@@ -1603,7 +1629,7 @@ export function parseSessionActivityFrame(value: unknown): SessionActivityFrame 
   }
   throw new ProtocolValidationError(
     "activity.frame.type",
-    "must be text_delta, thinking_delta, tool_call, snapshot, or clear",
+    "must be text_delta, thinking_delta, tool_call, tool_progress, snapshot, or clear",
   );
 }
 

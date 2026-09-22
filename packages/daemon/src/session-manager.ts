@@ -172,6 +172,7 @@ export type SessionRuntimeFactory = (input: {
       readonly modelId?: string;
       readonly thinkingLevel?: string;
       readonly models: readonly { readonly providerId: string; readonly modelId: string }[];
+      readonly projectTrusted: boolean;
       readonly activeTools: readonly string[];
       readonly systemPrompt?: string;
       readonly contextTokens?: number;
@@ -609,7 +610,11 @@ export class SessionManager {
           const cloned = await this.clone(sessionId);
           return { sessionId: cloned.sessionId };
         },
-        info: async () => ({ ...(await this.extensionInfo(sessionId)), models: [] }),
+        info: async () => ({
+          ...(await this.extensionInfo(sessionId)),
+          models: [],
+          projectTrusted: false,
+        }),
       },
       readBlob: (reference) => this.blobs.readAll(sessionId, reference),
     });
@@ -2346,6 +2351,9 @@ export class SessionManager {
       ) {
         active.controller = new AbortController();
         result = (await managed.session.continueQueued(active.controller.signal)) ?? result;
+      }
+      if (!managed.session.hasQueuedMessages() && managed.queue.length === 0) {
+        managed.session.notifySettled(active.operationId);
       }
       return { operationId: active.operationId, stopReason: result.stopReason };
     } finally {

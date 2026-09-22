@@ -91,6 +91,7 @@ const LIFECYCLE_EVENTS = new Set<DaemonLifecycleEventName>([
   "tool_execution_end",
   "model_select",
   "thinking_level_select",
+  "extension_event",
 ]);
 
 export class DaemonExtensionError extends ExtensionHostError {
@@ -135,7 +136,7 @@ export interface DaemonExtensionFailure {
   readonly error: Error;
 }
 
-type BoundSessionMethod = "sendExtensionMessage" | "getEntryLabel" | "setEntryLabel";
+type BoundSessionMethod = "sendExtensionMessage" | "getEntryLabel" | "setEntryLabel" | "shutdown";
 type HostSessionControls = Omit<DaemonExtensionSession, BoundSessionMethod> &
   Partial<Pick<DaemonExtensionSession, BoundSessionMethod>>;
 
@@ -143,6 +144,7 @@ export interface LoadDaemonExtensionsOptions {
   /** Directory holding user extensions, normally `~/.axl/extensions`. */
   readonly directory: string;
   readonly cwd: string;
+  readonly reason?: string;
   readonly tools: ToolRegistry;
   readonly grantedAuthorities: ReadonlySet<string>;
   /** Pre-resolved extension entries. Defaults to discovery in `directory`. */
@@ -152,6 +154,8 @@ export interface LoadDaemonExtensionsOptions {
   /** Owning daemon operation. Aborting it cancels extension activation. */
   readonly signal?: AbortSignal;
   readonly session?: HostSessionControls;
+  readonly shutdown?: () => Promise<void>;
+  readonly registerProvider?: (extensionId: string, provider: object) => ExtensionDisposer;
   readonly reservedCommandNames?: ReadonlySet<string>;
   readonly cleanupTimeoutMs?: number;
   /** Receives handler failures that must not interrupt the session. */
@@ -282,6 +286,7 @@ function unavailableSession(): DaemonExtensionSession {
     compact: fail,
     reload: fail,
     abort: fail,
+    shutdown: fail,
     rename: fail,
     setModel: fail,
     setThinkingLevel: fail,
@@ -388,14 +393,16 @@ function kernelTool(definition: DaemonToolDefinition, path: string): KernelTool 
     name: definition.name,
     description: definition.description,
     inputSchema: definition.inputSchema as JsonObject,
-    async execute(input, signal) {
+    async execute(input, signal, context) {
       if (!validateInput(input)) {
         throw new ToolInputError(
           `${definition.name}: input does not match schema: ${validator.errorsText(validateInput.errors, { separator: "; " })}`,
         );
       }
       const result = validateToolResult(
-        await definition.execute(structuredClone(input), signal),
+        await definition.execute(structuredClone(input), signal, {
+          reportProgress: (progress) => context?.reportProgress?.(stateValue(progress)),
+        }),
         definition.name,
       );
       return { content: result.content, isError: result.isError ?? false };
@@ -411,6 +418,7 @@ interface LoadedExtensionState {
   readonly toolResultHandlers: DaemonToolResultHandler[];
   readonly commandHandlers: DaemonCommandHandler[];
   readonly commands: DaemonCommandDefinition[];
+  readonly providerIds: string[];
   readonly lifecycleHandlers: Map<DaemonLifecycleEventName, DaemonLifecycleEventHandler[]>;
   readonly resourceHandlers: DaemonResourceDiscoveryHandler[];
   readonly contextHandlers: Map<"agent" | "request", DaemonContextHandler[]>;
@@ -507,6 +515,7 @@ export async function loadDaemonExtensions(
         toolResultHandlers: [],
         commandHandlers: [],
         commands: [],
+        providerIds: [],
         lifecycleHandlers: new Map(),
         resourceHandlers: [],
         contextHandlers: new Map(),
@@ -536,6 +545,8 @@ export async function loadDaemonExtensions(
       };
       const api: DaemonExtensionApi = {
         extensionId: extension.id,
+        mode: "daemon",
+        uiAvailable: false,
         cwd: options.cwd,
         signal:
           options.signal === undefined
@@ -549,6 +560,7 @@ export async function loadDaemonExtensions(
         },
         session: {
           ...(options.session ?? unavailableSession()),
+          shutdown: options.shutdown ?? unavailableSession().shutdown,
           async sendExtensionMessage(source, content) {
             if (sessionBinding === undefined) {
               throw new Error("Extension messages are unavailable before session binding");
@@ -628,6 +640,38 @@ export async function loadDaemonExtensions(
             if (recordIndex >= 0) records.splice(recordIndex, 1);
             const toolIndex = state.tools.indexOf(valid.name);
             if (toolIndex >= 0) state.tools.splice(toolIndex, 1);
+          });
+        },
+        registerProvider(provider) {
+          if (state.lifecycle.signal.aborted) {
+            throw new DaemonExtensionError(
+              extension.path,
+              "registerProvider is unavailable after disposal",
+            );
+          }
+          if (options.registerProvider === undefined) {
+            throw new DaemonExtensionError(extension.path, "provider registration is unavailable");
+          }
+          if (
+            typeof provider !== "object" ||
+            provider === null ||
+            typeof (provider as { id?: unknown }).id !== "string"
+          ) {
+            throw new DaemonExtensionError(extension.path, "provider must expose a string id");
+          }
+          const providerId = (provider as { id: string }).id;
+          if (state.providerIds.includes(providerId)) {
+            throw new DaemonExtensionError(
+              extension.path,
+              `provider ${providerId} is already registered`,
+            );
+          }
+          const unregister = options.registerProvider(extension.id, provider);
+          state.providerIds.push(providerId);
+          return own(async () => {
+            await unregister();
+            const index = state.providerIds.indexOf(providerId);
+            if (index >= 0) state.providerIds.splice(index, 1);
           });
         },
         registerCommand(definition) {
@@ -918,7 +962,12 @@ export async function loadDaemonExtensions(
       const activationSignal = signal ?? new AbortController().signal;
       for (const state of lifecycleStates) {
         try {
-          await runLifecycle(state, "session_start", { cwd: options.cwd }, activationSignal);
+          await runLifecycle(
+            state,
+            "session_start",
+            { cwd: options.cwd, reason: options.reason ?? "session_start" },
+            activationSignal,
+          );
         } catch (cause) {
           throw new DaemonExtensionError(
             state.path,
@@ -1135,7 +1184,10 @@ export async function loadDaemonExtensions(
                     typeof value.source !== "string" ||
                     value.source.length === 0 ||
                     typeof value.content !== "string" ||
-                    textBytes(value.content) > MAX_TEXT_BYTES
+                    textBytes(value.content) > MAX_TEXT_BYTES ||
+                    (value.target !== undefined &&
+                      value.target !== "message" &&
+                      value.target !== "system")
                   ) {
                     throw new DaemonExtensionError(
                       state.path,
@@ -1146,6 +1198,7 @@ export async function loadDaemonExtensions(
                     extensionId: state.id,
                     source: value.source,
                     content: value.content,
+                    ...(value.target === undefined ? {} : { target: value.target }),
                   });
                 }
               }
@@ -1361,7 +1414,6 @@ export async function loadDaemonExtensions(
               if (event.payload.stopReason !== "tool_use") {
                 notifyLifecycle("turn_end", projected);
                 notifyLifecycle("agent_end", projected);
-                notifyLifecycle("agent_settled", projected);
               }
             }
             if (event.type === "tool.call") notifyLifecycle("tool_execution_start", projected);
@@ -1384,7 +1436,16 @@ export async function loadDaemonExtensions(
             }
             if (frame.type === "clear") activeMessages.delete(frame.operationId);
             else notifyLifecycle("message_update", frame);
-            if (frame.type === "tool_call") notifyLifecycle("tool_execution_update", frame);
+            if (frame.type === "tool_call" || frame.type === "tool_progress") {
+              notifyLifecycle("tool_execution_update", frame);
+            }
+          },
+        }),
+    ...(lifecycleStates.length === 0
+      ? {}
+      : {
+          settled(operationId) {
+            if (!disposed) notifyLifecycle("agent_settled", { operationId });
           },
         }),
   };

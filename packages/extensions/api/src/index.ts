@@ -114,6 +114,7 @@ export interface DaemonToolDefinition {
   execute(
     input: DaemonJsonObject,
     signal: AbortSignal,
+    context: { readonly reportProgress: (progress: unknown) => void },
   ): DaemonToolResult | Promise<DaemonToolResult>;
 }
 
@@ -244,6 +245,7 @@ export type DaemonResourceDiscoveryHandler = (event: {
 export interface DaemonContextContribution {
   readonly source: string;
   readonly content: string;
+  readonly target?: "message" | "system";
 }
 
 export type DaemonContextHandler = (event: {
@@ -307,7 +309,7 @@ export interface DaemonCommandDefinition {
   execute(
     args: DaemonJsonObject,
     context: { readonly signal: AbortSignal },
-  ): void | string | Promise<void | string>;
+  ): undefined | string | Promise<undefined | string>;
 }
 
 export interface DaemonExtensionSession {
@@ -316,6 +318,7 @@ export interface DaemonExtensionSession {
   compact(instructions?: string): Promise<unknown>;
   reload(): Promise<unknown>;
   abort(): Promise<boolean>;
+  shutdown(): Promise<void>;
   rename(title: string): Promise<unknown>;
   setModel(providerId: string, modelId: string): Promise<unknown>;
   setThinkingLevel(
@@ -332,6 +335,7 @@ export interface DaemonExtensionSession {
     readonly modelId?: string;
     readonly thinkingLevel?: string;
     readonly models: readonly { readonly providerId: string; readonly modelId: string }[];
+    readonly projectTrusted: boolean;
     readonly activeTools: readonly string[];
     readonly systemPrompt?: string;
     readonly contextTokens?: number;
@@ -351,6 +355,8 @@ export interface DaemonExtensionState {
 export interface DaemonExtensionApi {
   /** Stable identity derived from the extension file name. */
   readonly extensionId: string;
+  readonly mode: "daemon";
+  readonly uiAvailable: false;
   /** Session working directory. */
   readonly cwd: string;
   /** Aborted when activation is cancelled or this extension begins disposal. */
@@ -365,6 +371,8 @@ export interface DaemonExtensionApi {
   registerTool(definition: DaemonToolDefinition): ExtensionDisposer;
   /** Adds a daemon-owned command callable through the public SDK. */
   registerCommand(definition: DaemonCommandDefinition): ExtensionDisposer;
+  /** Registers an existing Axl ModelProvider implementation at daemon scope. */
+  registerProvider(provider: object): ExtensionDisposer;
   on(event: "tool.call", handler: DaemonToolCallHandler): ExtensionDisposer;
   on(event: "tool.result", handler: DaemonToolResultHandler): ExtensionDisposer;
   /** Intercepts every built-in command before the daemon runs it. */

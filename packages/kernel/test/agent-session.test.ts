@@ -25,6 +25,7 @@ import {
   type CompactionSettings,
   CompactionUnavailableError,
   JsonlEventLog,
+  type ExtensionHost,
   type ExtensionSessionBinding,
   type KernelTool,
   type ModelPort,
@@ -95,6 +96,7 @@ async function makeSession(
     compaction?: Partial<CompactionSettings>;
     modelContextWindow?: number;
     onActivity?: (frame: SessionActivityFrame) => void;
+    extensionHost?: ExtensionHost;
   } = {},
 ): Promise<{ session: AgentSession; path: string; tools: ToolRegistry }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-agent-session-"));
@@ -436,16 +438,35 @@ test("recovers one context overflow by compacting and retrying once", async (con
     say("## Goal\nRecovered context"),
     say("recovered"),
   ]);
+  let requestContexts = 0;
   const { session } = await makeSession(context, port, new ToolRegistry(), {
     compaction: { enabled: true, reserveTokens: 8, keepRecentTokens: 1 },
+    extensionHost: {
+      activate: () => undefined,
+      dispose: () => undefined,
+      contributeContext: (input) => {
+        if (input.phase !== "request") return [];
+        requestContexts += 1;
+        return [
+          {
+            extensionId: "test",
+            source: "request",
+            content: "request context",
+            target: "system" as const,
+          },
+        ];
+      },
+    },
   });
   await session.runTurn([{ type: "text", text: "old prompt" }]);
   await session.runTurn([{ type: "text", text: "recent prompt" }]);
+  requestContexts = 0;
 
   const result = await session.runTurn([{ type: "text", text: "overflow prompt" }]);
 
   assert.equal(result.stopReason, "stop");
   assert.equal(port.requests.length, 5);
+  assert.equal(requestContexts, 1);
   const events = (await session.log.read()).events;
   assert.equal(
     events.some(

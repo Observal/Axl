@@ -156,17 +156,19 @@ function projectContext(events: readonly CanonicalEvent[]): ProjectedContext {
       });
     } else if (event.type === "context.injected" || event.type === "context.extension") {
       toolCallingAssistant = undefined;
-      const source =
-        event.type === "context.extension"
-          ? `extension:${event.payload.extensionId}/${event.payload.source}`
-          : event.payload.source;
-      groups.push({
-        message: {
-          role: "user",
-          content: [{ type: "text", text: `[${source}]\n${event.payload.content}` }],
-        },
-        eventIds: [event.id],
-      });
+      if (event.type !== "context.extension" || event.payload.target !== "system") {
+        const source =
+          event.type === "context.extension"
+            ? `extension:${event.payload.extensionId}/${event.payload.source}`
+            : event.payload.source;
+        groups.push({
+          message: {
+            role: "user",
+            content: [{ type: "text", text: `[${source}]\n${event.payload.content}` }],
+          },
+          eventIds: [event.id],
+        });
+      }
     } else if (event.type === "context.compacted") toolCallingAssistant = undefined;
   }
 

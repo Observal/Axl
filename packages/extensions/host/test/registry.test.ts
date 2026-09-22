@@ -45,6 +45,13 @@ test("resolves global, explicit, and trusted project extensions with determinist
   const disabled = (await registry.list(project)).extensions[0];
   assert.equal(disabled?.enabled, false);
   assert.equal((await stat(registry.configPath)).mode & 0o777, 0o600);
+
+  await registry.trustProject(project, false);
+  await rm(explicit);
+  await registry.setEnabled("shared", true);
+  assert.equal((await registry.list(project)).extensions[0]?.source, "global");
+  await registry.remove("shared");
+  assert.equal((await registry.list(project)).extensions[0]?.source, "global");
 });
 
 test("installs, updates, loads, and removes package extensions", async (context) => {

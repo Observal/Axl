@@ -30,6 +30,7 @@ export interface ToolExecutionResult {
 
 export interface ToolExecutionContext {
   readonly activeCapabilities: ReadonlySet<string>;
+  readonly reportProgress?: (progress: JsonValue) => void;
 }
 
 /** A canonical tool: identity, schema, and execution. Dialect rendering is provider-side. */

@@ -173,14 +173,62 @@ test("tool input and result mutations chain before canonical persistence", async
   await session.dispose();
 });
 
+test("extension tools publish bounded progress to lifecycle observers", async (context) => {
+  const tools = new ToolRegistry();
+  tools.register({
+    name: "progress",
+    description: "Progress",
+    inputSchema: { type: "object" },
+    execute: async (_input, _signal, execution) => {
+      execution?.reportProgress?.({ percent: 50 });
+      return { content: [], isError: false };
+    },
+  });
+  const progress: unknown[] = [];
+  const session = await open(
+    context,
+    scripted([
+      [
+        { type: "tool_call", callId: "c1", name: "progress", input: {} },
+        { type: "completed", stopReason: "tool_use", usage },
+      ],
+      done,
+    ]),
+    tools,
+    {
+      activate: () => undefined,
+      dispose: () => undefined,
+      observeActivity: (frame) => {
+        if (frame.type === "tool_progress") progress.push(frame.progress);
+      },
+    },
+  );
+  await session.runTurn([{ type: "text", text: "go" }]);
+  assert.deepEqual(progress, [{ percent: 50 }]);
+  await session.dispose();
+});
+
 test("extension context is canonical and restored for provider requests", async (context) => {
   const tools = new ToolRegistry();
-  const port = scripted([done]);
+  let system: string | undefined;
+  const port: ModelPort = {
+    stream(request) {
+      system = request.system;
+      return (async function* () {
+        yield* done;
+      })();
+    },
+  };
   const session = await open(context, port, tools, {
     activate: () => undefined,
     dispose: () => undefined,
     contributeContext: (input) => [
-      { extensionId: "context", source: input.phase, content: `${input.phase} context` },
+      {
+        extensionId: "context",
+        source: input.phase,
+        content: `${input.phase} context`,
+        ...(input.phase === "request" ? { target: "system" as const } : {}),
+      },
     ],
   });
   const result = await session.runTurn([{ type: "text", text: "go" }]);
@@ -190,6 +238,7 @@ test("extension context is canonical and restored for provider requests", async 
       .map((event) => (event.type === "context.extension" ? event.payload.source : "")),
     ["agent", "request"],
   );
+  assert.equal(system, "request context");
   await session.dispose();
 });
 

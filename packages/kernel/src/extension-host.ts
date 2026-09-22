@@ -6,6 +6,7 @@ import type {
   ContextResource,
   JsonObject,
   JsonValue,
+  OperationId,
   SessionActivityFrame,
   UserContent,
 } from "@axl/protocol";
@@ -39,6 +40,7 @@ export interface ExtensionContextContribution {
   readonly extensionId: string;
   readonly source: string;
   readonly content: string;
+  readonly target?: "message" | "system";
 }
 
 export interface ModelContextInterception {
@@ -184,6 +186,8 @@ export interface ExtensionHost {
   observe?(event: CanonicalEvent): void;
   /** Receives bounded non-durable model activity. Must not throw. */
   observeActivity?(frame: SessionActivityFrame): void;
+  /** Reports that the complete agent and queued-input sequence is idle. */
+  settled?(operationId: OperationId): void;
 }
 
 /**
@@ -234,6 +238,7 @@ export function composeExtensionHosts(hosts: readonly ExtensionHost[]): Extensio
   const commandGates = hosts.filter((host) => host.beforeCommand !== undefined);
   const observers = hosts.filter((host) => host.observe !== undefined);
   const activityObservers = hosts.filter((host) => host.observeActivity !== undefined);
+  const settledObservers = hosts.filter((host) => host.settled !== undefined);
   return {
     bindSession(binding) {
       for (const host of hosts) host.bindSession?.(binding);
@@ -392,6 +397,13 @@ export function composeExtensionHosts(hosts: readonly ExtensionHost[]): Extensio
       : {
           observeActivity(frame) {
             for (const host of activityObservers) host.observeActivity?.(frame);
+          },
+        }),
+    ...(settledObservers.length === 0
+      ? {}
+      : {
+          settled(operationId) {
+            for (const host of settledObservers) host.settled?.(operationId);
           },
         }),
   };

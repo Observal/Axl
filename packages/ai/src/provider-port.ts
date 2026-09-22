@@ -225,7 +225,9 @@ function streamWithHooks(
   hooks: ProviderHttpHooks | undefined,
 ): AsyncIterable<ModelStreamEvent> {
   return (async function* () {
-    const iterator = await runWithProviderHooks(hooks, async () => create()[Symbol.asyncIterator]());
+    const iterator = await runWithProviderHooks(hooks, async () =>
+      create()[Symbol.asyncIterator](),
+    );
     try {
       for (;;) {
         const result = await runWithProviderHooks(hooks, () => iterator.next());

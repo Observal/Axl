@@ -70,6 +70,32 @@ test("provider hooks chain headers, JSON payloads, and responses around safe dis
   assert.deepEqual(observed, ["response:200"]);
 });
 
+test("provider response hook failure cancels the response body", async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    cancel() {
+      cancelled = true;
+    },
+  });
+  await assert.rejects(
+    runWithProviderHooks(
+      { afterResponse: () => Promise.reject(new Error("observer failed")) },
+      () =>
+        safeFetch(
+          "https://provider.example/v1/messages",
+          {},
+          {
+            label: "test provider",
+            resolve: async () => [{ address: "8.8.8.8", family: 4 }],
+            fetch: async () => new Response(body, { status: 200 }),
+          },
+        ),
+    ),
+    /observer failed/u,
+  );
+  assert.equal(cancelled, true);
+});
+
 test("trailing slash removal is linear and handles long non-matching input", () => {
   const value = `${"/".repeat(100_000)}x`;
   assert.equal(stripTrailingSlashes(value), value);

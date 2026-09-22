@@ -268,6 +268,45 @@ test("command controller loads, searches, and invokes typed operations", async (
   ]);
 });
 
+test("command controller invokes shared extension commands through typed RPC", async () => {
+  const requests: unknown[] = [];
+  const client = {
+    request: async (method: string) => {
+      if (method === "command.list") {
+        return {
+          generation: "extensions",
+          commands: [
+            {
+              id: "extension:example/hello",
+              name: "hello",
+              aliases: [],
+              description: "Say hello",
+              context: "session",
+              argument: { required: false, hint: "name" },
+              requiredCapabilities: ["extension.command.invoke"],
+              availability: { state: "available" },
+              extensionId: "example",
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+    invokeExtensionCommand: async (params: unknown) => {
+      requests.push(params);
+      return { content: "hello" };
+    },
+  } as unknown as AxlClient;
+  const commands = new CommandController(client);
+  await commands.refresh(sessionId);
+  assert.deepEqual(await commands.invoke("/hello world", sessionId), {
+    state: "completed",
+    command: "hello",
+    content: "hello",
+  });
+  assert.deepEqual(requests, [{ sessionId, name: "hello", args: { argument: "world" } }]);
+});
+
 test("command invocation rejects malformed names without ambiguous parsing", async () => {
   const commands = new CommandController({} as AxlClient);
   for (const input of ["/reload\nagain", "/bad--name", "/bad-", "/9bad", "/"]) {

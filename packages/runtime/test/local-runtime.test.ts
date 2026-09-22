@@ -575,6 +575,71 @@ test("assembles an authoritative local runtime without a presentation client", a
   }
 });
 
+test("shares extension-registered providers across daemon sessions", async (context) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-provider-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const axlHome = join(root, ".axl");
+  const workspace = join(root, "workspace");
+  const stateDirectory = join(axlHome, "unsafe");
+  const socketPath = join(stateDirectory, "axl.sock");
+  await mkdir(join(axlHome, "extensions"), { recursive: true });
+  await mkdir(workspace);
+  const sourceModel = getStaticModelCatalog("deepseek")[0];
+  if (sourceModel === undefined) throw new Error("DeepSeek catalog is empty");
+  const model = { ...sourceModel, providerId: "extension-provider", modelId: "extension-model" };
+  await writeFile(
+    join(axlHome, "extensions", "provider.js"),
+    `const model = ${JSON.stringify(model)};
+const provider = {
+  id: "extension-provider",
+  displayName: "Extension Provider",
+  authMethods: [],
+  listModels: async () => [model],
+  stream: async function* () {
+    yield { type: "text_delta", text: "extension provider reply" };
+    yield { type: "completed", stopReason: "stop", usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } };
+  }
+};
+export default (axl) => axl.registerProvider(provider);
+`,
+  );
+  const store = new FileCredentialStore(join(axlHome, "credentials.json"));
+  await store.modify("azure-openai", () =>
+    Promise.resolve({
+      type: "api_key",
+      key: "obviously-fake-runtime-test-key",
+      env: { AZURE_OPENAI_BASE_URL: "https://example.invalid/openai/v1" },
+    }),
+  );
+  const daemon = await startLocalDaemon({
+    axlHome,
+    stateDirectory,
+    socketPath,
+    defaults: { modelId: "gpt-5", thinkingLevel: "off" },
+    store,
+    unsafe: true,
+  });
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", {
+    cwd: workspace,
+    providerId: "extension-provider",
+    modelId: "extension-model",
+  });
+  const sent = await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "hello" }],
+  });
+  assert.equal(sent.stopReason, "stop");
+  const log = await readFile(
+    join(stateDirectory, "sessions", `${created.sessionId}.jsonl`),
+    "utf8",
+  );
+  assert.match(log, /extension provider reply/u);
+});
+
 test("disposes loaded daemon extensions when later runtime setup fails", async (context) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "axl-runtime-extension-cleanup-")));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -587,9 +652,8 @@ test("disposes loaded daemon extensions when later runtime setup fails", async (
   await mkdir(workspace);
   await writeFile(
     join(axlHome, "extensions", "cleanup.js"),
-    `import { appendFile } from "node:fs/promises";\nexport default (axl) => axl.track(() => appendFile(${JSON.stringify(marker)}, "disposed\\n"));\n`,
+    `import { appendFile } from "node:fs/promises";\nexport default (axl) => { axl.track(() => appendFile(${JSON.stringify(marker)}, "disposed\\n")); axl.on("resources_discover", () => { throw new Error("resource failure"); }); };\n`,
   );
-  await writeFile(join(axlHome, "mcp.json"), "{ invalid json\n");
   const daemon = await startLocalDaemon({
     axlHome,
     stateDirectory,
@@ -607,7 +671,7 @@ test("disposes loaded daemon extensions when later runtime setup fails", async (
 });
 
 test("manages global, explicit, and trusted project daemon extensions through the SDK", async (context) => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-runtime-extension-manager-")));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-")));
   context.after(() => rm(root, { recursive: true, force: true }));
   const axlHome = join(root, ".axl");
   const workspace = join(root, "workspace");
@@ -623,13 +687,21 @@ test("manages global, explicit, and trusted project daemon extensions through th
   await writeFile(join(workspace, ".axl", "extensions", "project.js"), source("project"));
   const explicitPath = join(root, "explicit.js");
   await writeFile(explicitPath, source("explicit"));
+  const store = new FileCredentialStore(join(axlHome, "credentials.json"));
+  await store.modify("azure-openai", () =>
+    Promise.resolve({
+      type: "api_key",
+      key: "obviously-fake-runtime-test-key",
+      env: { AZURE_OPENAI_BASE_URL: "https://example.invalid/openai/v1" },
+    }),
+  );
 
   const daemon = await startLocalDaemon({
     axlHome,
     stateDirectory,
     socketPath,
     defaults: { modelId: "gpt-5", thinkingLevel: "off" },
-    store: new FileCredentialStore(join(axlHome, "credentials.json")),
+    store,
     unsafe: true,
   });
   context.after(() => daemon.stop());
@@ -645,6 +717,12 @@ test("manages global, explicit, and trusted project daemon extensions through th
   assert.deepEqual(
     initialExtensions.commands.map((command) => command.name),
     ["global-command"],
+  );
+  assert.equal(
+    (await client.listCommands({ sessionId: opened.sessionId })).commands.some(
+      (command) => command.extensionId === "global" && command.name === "global-command",
+    ),
+    true,
   );
   assert.deepEqual(
     await client.invokeExtensionCommand({

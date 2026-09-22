@@ -13,7 +13,11 @@ export interface ProviderHttpHooks {
     signal: AbortSignal,
   ): unknown | Promise<unknown>;
   afterResponse?(
-    input: { readonly url: string; readonly status: number; readonly headers: Readonly<Record<string, string>> },
+    input: {
+      readonly url: string;
+      readonly status: number;
+      readonly headers: Readonly<Record<string, string>>;
+    },
     signal: AbortSignal,
   ): void | Promise<void>;
 }

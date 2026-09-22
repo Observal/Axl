@@ -271,49 +271,49 @@ export class AxlClient {
 
   enableExtension(
     params: RpcParams<"extension.enable">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.enable">> {
     return this.request("extension.enable", params, options);
   }
 
   disableExtension(
     params: RpcParams<"extension.disable">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.disable">> {
     return this.request("extension.disable", params, options);
   }
 
   reloadExtension(
     params: RpcParams<"extension.reload">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.reload">> {
     return this.request("extension.reload", params, options);
   }
 
   installExtension(
     params: RpcParams<"extension.install">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.install">> {
     return this.request("extension.install", params, options);
   }
 
   updateExtension(
     params: RpcParams<"extension.update">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.update">> {
     return this.request("extension.update", params, options);
   }
 
   removeExtension(
     params: RpcParams<"extension.remove">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.remove">> {
     return this.request("extension.remove", params, options);
   }
 
   trustExtensionProject(
     params: RpcParams<"extension.trust">,
-    options: Omit<RequestOptions, "idempotencyKey"> = {},
+    options: RequestOptions = {},
   ): Promise<RpcResult<"extension.trust">> {
     return this.request("extension.trust", params, options);
   }

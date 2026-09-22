@@ -401,7 +401,7 @@ test("projects typed lifecycle events from canonical and activity streams", asyn
     join(dir, "lifecycle.js"),
     `export default (axl) => {
   globalThis.__axlLifecycle = [];
-  for (const name of ["session_start", "agent_start", "turn_start", "message_start", "message_update", "message_end", "turn_end", "agent_end", "agent_settled", "session_shutdown"]) {
+  for (const name of ["session_start", "agent_start", "turn_start", "message_start", "message_update", "message_end", "turn_end", "agent_end", "agent_settled", "extension_event", "session_shutdown"]) {
     axl.on(name, (event) => { globalThis.__axlLifecycle.push(event.type); });
   }
   axl.on("resources_discover", () => [{ name: "rules", content: "Use extension rules." }]);
@@ -431,11 +431,18 @@ test("projects typed lifecycle events from canonical and activity streams", asyn
     text: "hello",
   } as never);
   host.observe?.({
+    id: "bus",
+    type: "extension.event",
+    timestamp: 2,
+    payload: { extensionId: "lifecycle", channel: "changed", value: true },
+  } as never);
+  host.observe?.({
     id: "e2",
     type: "assistant.message",
     timestamp: 2,
     payload: { content: [{ type: "text", text: "hello" }], stopReason: "stop" },
   } as never);
+  host.settled?.("00000000-0000-4000-8000-000000000001" as never);
   await host.dispose();
   assert.deepEqual((globalThis as { __axlLifecycle?: string[] }).__axlLifecycle, [
     "session_start",
@@ -443,6 +450,7 @@ test("projects typed lifecycle events from canonical and activity streams", asyn
     "turn_start",
     "message_start",
     "message_update",
+    "extension_event",
     "message_end",
     "turn_end",
     "agent_end",

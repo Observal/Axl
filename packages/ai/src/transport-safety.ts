@@ -260,14 +260,19 @@ export async function safeFetch(
         throw error;
       }
     }
-    await hooks?.afterResponse?.(
-      {
-        url: url.href,
-        status: response.status,
-        headers: Object.fromEntries(response.headers.entries()),
-      },
-      signal,
-    );
+    try {
+      await hooks?.afterResponse?.(
+        {
+          url: url.href,
+          status: response.status,
+          headers: Object.fromEntries(response.headers.entries()),
+        },
+        signal,
+      );
+    } catch (error) {
+      await response.body?.cancel().catch(() => undefined);
+      throw error;
+    }
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
     const location = response.headers.get("location");
     await response.body?.cancel();
