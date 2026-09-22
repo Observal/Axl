@@ -149,6 +149,30 @@ test("an allowing gate lets the tool run and the observer sees durable events", 
   await session.dispose();
 });
 
+test("tool input and result mutations chain before canonical persistence", async (context) => {
+  const tools = new ToolRegistry();
+  const { tool, calls } = echo();
+  tools.register(tool);
+  const session = await open(context, scripted([callEcho("c1", { value: 1 }), done]), tools, {
+    activate: () => undefined,
+    dispose: () => undefined,
+    beforeToolCall: (call) => ({ input: { ...call.input, value: 2 } }),
+    afterToolCall: () => ({
+      content: [{ type: "text", text: "rewritten" }],
+      isError: false,
+    }),
+  });
+  const result = await session.runTurn([{ type: "text", text: "go" }]);
+  assert.deepEqual(calls, [{ value: 2 }]);
+  const call = result.events.find((event) => event.type === "tool.call");
+  const toolResult = result.events.find((event) => event.type === "tool.result");
+  assert.deepEqual(call?.type === "tool.call" ? call.payload.input : undefined, { value: 2 });
+  assert.deepEqual(toolResult?.type === "tool.result" ? toolResult.payload.content : undefined, [
+    { type: "text", text: "rewritten" },
+  ]);
+  await session.dispose();
+});
+
 test("composeExtensionHosts orders lifecycle and returns the first block", async () => {
   const trace: string[] = [];
   const host = (name: string, decision?: { block: true; reason: string }): ExtensionHost => ({

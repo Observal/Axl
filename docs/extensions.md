@@ -74,7 +74,36 @@ export default function (axl: DaemonExtensionApi) {
 }
 ```
 
-The default export may be `async`. Registration is only allowed while the factory runs.
+The default export may be `async`. Event and resource handlers register while the factory runs. Tools may also register and unregister later while the extension remains active. `axl.signal` aborts if activation is cancelled or the extension begins disposal.
+
+## Discovery and packages
+
+Axl resolves daemon extensions in deterministic precedence order: global files, installed packages, explicit paths, then trusted project extensions. A later source replaces an earlier source with the same extension ID.
+
+- Global files remain under `~/.axl/extensions/` and are trusted by placement.
+- Explicit files or directories are added with `extension.install` using `{ type: "path", path }`.
+- Project files under `<project>/.axl/extensions/` load only after `extension.trust` records that canonical project root.
+- npm and pinned Git packages install under `~/.axl/extensions/.packages/`, where Node resolves their own dependencies normally.
+
+An installable package declares its entry points in `package.json`:
+
+```json
+{
+  "name": "@example/axl-tools",
+  "version": "1.0.0",
+  "axl": {
+    "id": "example-tools",
+    "apiVersion": 1,
+    "daemon": "./dist/daemon.js",
+    "tui": "./dist/tui.js",
+    "web": "./dist/web.js"
+  }
+}
+```
+
+The daemon entry is required for daemon installation and must resolve inside the package. TUI and web declarations are reserved for their separate presentation hosts. Installing a package or trusting a project grants its code full process authority.
+
+The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, `reloadExtension`, `installExtension`, `updateExtension`, `removeExtension`, and `trustExtensionProject`. Mutations rebuild the selected session through the same atomic runtime replacement used by `/reload`. Inventory results include source, enablement, package version, and the latest lifecycle diagnostic.
 
 ## API
 
@@ -82,7 +111,16 @@ The default export may be `async`. Registration is only allowed while the factor
 : Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal)` runs. Execution returns `{ content: [{ type: "text", text }], isError? }`.
 
 `on("tool.call", handler)`
-: Runs before every canonical tool call, including built-in tools such as `bash` and extension tools. Return `{ block: true, reason }` to stop the call. Return nothing to allow it. A thrown error also blocks the call. The first blocking decision wins. The handler receives a copy of the input and cannot rewrite it.
+: Runs before every canonical tool call, including built-in tools such as `bash` and extension tools. Return `{ block: true, reason }` to stop the call, `{ input }` to replace its arguments, or nothing to allow it unchanged. Replacements chain in load order and are validated by the selected tool before execution. The canonical `tool.call` records the effective input.
+
+`on("tool.result", handler)`
+: Runs after execution and before the canonical result is written. Return a partial patch containing `content`, `details`, or `isError`. Patches chain in load order and the effective result is validated at the canonical event boundary.
+
+`on("resources_discover", handler)`
+: Returns up to 32 named text resources before prompt construction. Resources are bounded, recorded in `context.resources`, and included in the stable prompt. Project-extension resources retain project scope.
+
+`on("input", handler)`
+: Intercepts client or extension-produced input before the agent loop. Return `{ action: "transform", content }`, `{ action: "handled" }`, or nothing. Transforms chain and are validated before admission.
 
 `on("command", handler)`
 : Runs before every built-in command. Return nothing to run it unchanged, `{ args }` to run it with replaced inputs, or `{ block: true, reason }` to refuse it. A thrown error refuses it. Replacements chain in load order; the first refusal wins. Refused commands fail with the `command_blocked` error and the reason, whoever triggered them: a client, the model, or the daemon itself. The daemon revalidates replaced inputs and refuses invalid ones.
@@ -104,6 +142,8 @@ The default export may be `async`. Registration is only allowed while the factor
 `on("session.event", handler)`
 : Receives `{ id, type, timestamp, payload, signal }` for every canonical event after it is written. Payloads are copies. The signal aborts when disposal starts. Disposal drains cooperative asynchronous observers before cleaning up their resources and reports handlers that exceed the cleanup deadline. A throwing observer is reported on the daemon's stderr and does not stop the session.
 
+Typed lifecycle notifications are also available for `session_start`, `session_info_changed`, `session_compact`, `session_compact_failed`, `session_shutdown`, `agent_start`, `agent_end`, `agent_settled`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `model_select`, and `thinking_level_select`. Durable notifications carry the canonical event projection. Streaming notifications carry the bounded activity frame.
+
 `track(disposer)`
 : Registers cleanup. Disposers run in reverse order when the session ends. Every registration also returns its own disposer.
 
@@ -117,4 +157,4 @@ The default export may be `async`. Registration is only allowed while the factor
 
 ## Scope
 
-Extensions load in the `standard` tool profile. Changed extension source is re-imported when a session runtime reloads. Registering new commands, user interface integration, providers, custom compaction, npm dependencies, enablement controls, and project-local directories are not part of this surface yet.
+Daemon extensions load in the `standard` tool profile. Changed source is re-imported when a session runtime reloads. Shared command registration, persistent namespaced state, provider hooks, and the independently loaded TUI and web entry points remain tracked in the extension parity matrix.

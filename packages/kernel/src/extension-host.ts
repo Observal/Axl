@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { CanonicalEvent, JsonObject } from "@axl/protocol";
+import type {
+  CanonicalEvent,
+  ContextResource,
+  JsonObject,
+  JsonValue,
+  SessionActivityFrame,
+  UserContent,
+} from "@axl/protocol";
 
 export interface ToolCallInterception {
   readonly callId: string;
@@ -9,9 +16,34 @@ export interface ToolCallInterception {
   readonly input: JsonObject;
 }
 
-export type ToolCallDecision = { readonly block: true; readonly reason: string } | undefined;
+export type ToolCallDecision =
+  | { readonly block: true; readonly reason: string }
+  | { readonly input: JsonObject }
+  | undefined;
+
+export interface ToolResultInterception extends ToolCallInterception {
+  readonly content: readonly UserContent[];
+  readonly isError: boolean;
+  readonly details?: JsonValue;
+}
+
+export interface ToolResultDecision {
+  readonly content?: readonly UserContent[];
+  readonly isError?: boolean;
+  readonly details?: JsonValue;
+}
 
 export type CommandSource = "client" | "model" | "automatic";
+
+export interface InputInterception {
+  readonly source: "client" | "extension";
+  readonly content: readonly UserContent[];
+}
+
+export type InputDecision =
+  | { readonly action: "transform"; readonly content: readonly UserContent[] }
+  | { readonly action: "handled" }
+  | undefined;
 
 export interface CommandInterception {
   readonly name: string;
@@ -55,7 +87,7 @@ export class CommandBlockedError extends Error {
  * command execution, while each registered tool retains its owner's policy.
  */
 export interface ExtensionHost {
-  activate(): void | Promise<void>;
+  activate(signal?: AbortSignal): void | Promise<void>;
   dispose(): void | Promise<void>;
   /**
    * Runs before a registered tool executes. Fails closed: a rejected promise
@@ -65,6 +97,18 @@ export interface ExtensionHost {
     call: ToolCallInterception,
     signal: AbortSignal,
   ): ToolCallDecision | Promise<ToolCallDecision>;
+  /** Contributes bounded, canonical context resources before prompt construction. */
+  discoverResources?(signal: AbortSignal): Promise<readonly ContextResource[]>;
+  /** Runs after tool execution and may replace canonical result fields. */
+  afterToolCall?(
+    result: ToolResultInterception,
+    signal: AbortSignal,
+  ): ToolResultDecision | undefined | Promise<ToolResultDecision | undefined>;
+  /** Runs before user or extension input is admitted to the agent loop. */
+  beforeInput?(
+    input: InputInterception,
+    signal: AbortSignal,
+  ): InputDecision | Promise<InputDecision>;
   /**
    * Runs before a built-in command executes. May replace the arguments or
    * refuse the command. Fails closed: a rejected promise refuses the command.
@@ -75,6 +119,8 @@ export interface ExtensionHost {
   ): CommandDecision | Promise<CommandDecision>;
   /** Receives every canonical event after it is durable. Must not throw. */
   observe?(event: CanonicalEvent): void;
+  /** Receives bounded non-durable model activity. Must not throw. */
+  observeActivity?(frame: SessionActivityFrame): void;
 }
 
 /**
@@ -113,25 +159,81 @@ export const NOOP_EXTENSION_HOST: ExtensionHost = {
  */
 export function composeExtensionHosts(hosts: readonly ExtensionHost[]): ExtensionHost {
   if (hosts.length === 1) return hosts[0] as ExtensionHost;
+  const resourceHosts = hosts.filter((host) => host.discoverResources !== undefined);
   const gates = hosts.filter((host) => host.beforeToolCall !== undefined);
+  const resultHandlers = hosts.filter((host) => host.afterToolCall !== undefined);
+  const inputHandlers = hosts.filter((host) => host.beforeInput !== undefined);
   const commandGates = hosts.filter((host) => host.beforeCommand !== undefined);
   const observers = hosts.filter((host) => host.observe !== undefined);
+  const activityObservers = hosts.filter((host) => host.observeActivity !== undefined);
   return {
-    async activate() {
-      for (const host of hosts) await host.activate();
+    async activate(signal) {
+      for (const host of hosts) await host.activate(signal);
     },
     async dispose() {
       for (const host of [...hosts].reverse()) await host.dispose();
     },
+    ...(resourceHosts.length === 0
+      ? {}
+      : {
+          async discoverResources(signal) {
+            const resources: ContextResource[] = [];
+            for (const host of resourceHosts) {
+              resources.push(...((await host.discoverResources?.(signal)) ?? []));
+            }
+            return resources;
+          },
+        }),
     ...(gates.length === 0
       ? {}
       : {
           async beforeToolCall(call, signal) {
+            let input = call.input;
+            let replaced = false;
             for (const host of gates) {
-              const decision = await host.beforeToolCall?.(call, signal);
-              if (decision?.block) return decision;
+              const decision = await host.beforeToolCall?.({ ...call, input }, signal);
+              if (decision === undefined) continue;
+              if ("block" in decision) return decision;
+              input = decision.input;
+              replaced = true;
             }
-            return undefined;
+            return replaced ? { input } : undefined;
+          },
+        }),
+    ...(resultHandlers.length === 0
+      ? {}
+      : {
+          async afterToolCall(result, signal) {
+            let current = result;
+            let changed = false;
+            for (const host of resultHandlers) {
+              const decision = await host.afterToolCall?.(current, signal);
+              if (decision === undefined) continue;
+              current = { ...current, ...decision };
+              changed = true;
+            }
+            if (!changed) return undefined;
+            return {
+              content: current.content,
+              isError: current.isError,
+              ...(current.details === undefined ? {} : { details: current.details }),
+            };
+          },
+        }),
+    ...(inputHandlers.length === 0
+      ? {}
+      : {
+          async beforeInput(input, signal) {
+            let content = input.content;
+            let changed = false;
+            for (const host of inputHandlers) {
+              const decision = await host.beforeInput?.({ ...input, content }, signal);
+              if (decision === undefined) continue;
+              if (decision.action === "handled") return decision;
+              content = decision.content;
+              changed = true;
+            }
+            return changed ? { action: "transform", content } : undefined;
           },
         }),
     ...(commandGates.length === 0
@@ -155,6 +257,13 @@ export function composeExtensionHosts(hosts: readonly ExtensionHost[]): Extensio
       : {
           observe(event) {
             for (const host of observers) host.observe?.(event);
+          },
+        }),
+    ...(activityObservers.length === 0
+      ? {}
+      : {
+          observeActivity(frame) {
+            for (const host of activityObservers) host.observeActivity?.(frame);
           },
         }),
   };

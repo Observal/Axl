@@ -13,6 +13,21 @@ import {
   parseOperationId,
   parseSessionId,
 } from "./event-envelope.ts";
+import {
+  type ExtensionIdParams,
+  type ExtensionInstallParams,
+  type ExtensionListParams,
+  type ExtensionListResult,
+  type ExtensionMutationResult,
+  type ExtensionReloadParams,
+  type ExtensionTrustParams,
+  parseExtensionIdParams,
+  parseExtensionInstallParams,
+  parseExtensionListParams,
+  parseExtensionListResult,
+  parseExtensionMutationResult,
+  parseExtensionTrustParams,
+} from "./extension-management.ts";
 import type {
   AssistantStopReason,
   BlobReference,
@@ -688,6 +703,14 @@ export const WIRE_CAPABILITIES = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  "extension.list",
+  "extension.enable",
+  "extension.disable",
+  "extension.reload",
+  "extension.install",
+  "extension.update",
+  "extension.remove",
+  "extension.trust",
   "mcp.config.list",
   "mcp.config.upsert",
   "mcp.config.batch",
@@ -804,6 +827,38 @@ export interface RpcMethodMap {
   readonly "provider.auth.logout": {
     readonly params: ProviderLogoutParams;
     readonly result: ProviderLogoutResult;
+  };
+  readonly "extension.list": {
+    readonly params: ExtensionListParams;
+    readonly result: ExtensionListResult;
+  };
+  readonly "extension.enable": {
+    readonly params: ExtensionIdParams;
+    readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.disable": {
+    readonly params: ExtensionIdParams;
+    readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.reload": {
+    readonly params: ExtensionReloadParams;
+    readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.install": {
+    readonly params: ExtensionInstallParams;
+    readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.update": {
+    readonly params: ExtensionIdParams;
+    readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.remove": {
+    readonly params: ExtensionIdParams;
+    readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.trust": {
+    readonly params: ExtensionTrustParams;
+    readonly result: ExtensionMutationResult;
   };
   readonly "mcp.config.list": {
     readonly params: Record<string, never>;
@@ -1047,6 +1102,13 @@ export type RpcMethod = keyof RpcMethodMap;
 export type RpcParams<Method extends RpcMethod> = RpcMethodMap[Method]["params"];
 
 export const RETRYABLE_MUTATION_METHODS = [
+  "extension.enable",
+  "extension.disable",
+  "extension.reload",
+  "extension.install",
+  "extension.update",
+  "extension.remove",
+  "extension.trust",
   "session.create",
   "session.fork",
   "session.clone",
@@ -1732,6 +1794,24 @@ export function parseWireRequest(value: unknown): WireRequest {
       method,
       params: { providerId: parseProviderIdParam(params.providerId, "request.params.providerId") },
     };
+  }
+  if (method === "extension.list") {
+    return { ...base, method, params: parseExtensionListParams(params) };
+  }
+  if (
+    method === "extension.enable" ||
+    method === "extension.disable" ||
+    method === "extension.reload" ||
+    method === "extension.update" ||
+    method === "extension.remove"
+  ) {
+    return { ...base, method, params: parseExtensionIdParams(params) };
+  }
+  if (method === "extension.install") {
+    return { ...base, method, params: parseExtensionInstallParams(params) };
+  }
+  if (method === "extension.trust") {
+    return { ...base, method, params: parseExtensionTrustParams(params) };
   }
   if (method === "mcp.config.list") {
     exact(params, "request.params", []);
@@ -2650,6 +2730,18 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseProviderAuthenticationStatusResult(value);
   } else if (method === "provider.auth.login" || method === "provider.auth.logout") {
     parsed = parseProviderAuthenticationStatus(value, path);
+  } else if (method === "extension.list") {
+    parsed = parseExtensionListResult(value);
+  } else if (
+    method === "extension.enable" ||
+    method === "extension.disable" ||
+    method === "extension.reload" ||
+    method === "extension.install" ||
+    method === "extension.update" ||
+    method === "extension.remove" ||
+    method === "extension.trust"
+  ) {
+    parsed = parseExtensionMutationResult(value);
   } else if (method === "mcp.config.list") {
     parsed = parseMcpConfigListResult(value);
   } else if (
@@ -3063,6 +3155,14 @@ export const RPC_METHODS = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  "extension.list",
+  "extension.enable",
+  "extension.disable",
+  "extension.reload",
+  "extension.install",
+  "extension.update",
+  "extension.remove",
+  "extension.trust",
   "mcp.config.list",
   "mcp.config.upsert",
   "mcp.config.batch",
@@ -3189,6 +3289,14 @@ export const RPC_METHOD_ERROR_CODES = {
     "authentication_unavailable",
     "authentication_failed",
   ],
+  "extension.list": ["unknown_session", "extension_failed"],
+  "extension.enable": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.disable": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.reload": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.install": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.update": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.remove": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.trust": ["unknown_session", "operation_active", "extension_failed"],
   "mcp.config.list": [],
   "mcp.config.upsert": [],
   "mcp.config.batch": [],
@@ -3339,6 +3447,7 @@ export const RPC_METHOD_ERROR_CODES = {
     ...SESSION_BASE_ERRORS,
     "operation_active",
     "idempotency_conflict",
+    "command_blocked",
     "content_too_large",
   ],
   "session.interrupt": [...SESSION_BASE_ERRORS, ...MUTATION_ERRORS],

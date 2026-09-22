@@ -8,6 +8,7 @@ export * from "./capability.ts";
 export * from "./compaction.ts";
 export * from "./event-envelope.ts";
 export * from "./events.ts";
+export * from "./extension-management.ts";
 export * from "./host-control.ts";
 export * from "./mcp-configuration.ts";
 export * from "./model-request.ts";

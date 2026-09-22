@@ -6,6 +6,7 @@ export type { WireEvent } from "@axl/protocol";
 export * from "./command-catalog.ts";
 export * from "./daemon.ts";
 export * from "./event-migration.ts";
+export * from "./extension-management.ts";
 export * from "./mcp-configuration.ts";
 export * from "./provider-management.ts";
 export * from "./session-manager.ts";

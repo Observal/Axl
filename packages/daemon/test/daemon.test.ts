@@ -4966,6 +4966,70 @@ test("failed runtime activation preserves the previous session without partial b
   assert.equal(lifecycle.includes("dispose:1"), false);
 });
 
+test("session disposal retries cleanup left by an atomic replacement", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-reload-cleanup-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const disposals = new Map<number, number>();
+  let generation = 0;
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: () => {
+      generation += 1;
+      const current = generation;
+      return {
+        model: replyPort(),
+        tools: new ToolRegistry(),
+        extensionHost: {
+          activate: () => undefined,
+          dispose: () => {
+            const attempts = (disposals.get(current) ?? 0) + 1;
+            disposals.set(current, attempts);
+            if (current === 1 && attempts === 1) throw new Error("cleanup failed once");
+          },
+        },
+      };
+    },
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: directory });
+
+  await assert.rejects(
+    client.request(
+      "session.reload",
+      { sessionId: created.sessionId },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000108" },
+    ),
+    AxlClientError,
+  );
+  assert.equal(
+    (
+      await client.request("session.send", {
+        sessionId: created.sessionId,
+        delivery: "prompt",
+        content: [{ type: "text", text: "new runtime" }],
+      })
+    ).stopReason,
+    "stop",
+  );
+  await client.request(
+    "session.dispose",
+    { sessionId: created.sessionId },
+    { idempotencyKey: "00000000-0000-4000-8000-000000000109" },
+  );
+  assert.deepEqual(
+    [...disposals],
+    [
+      [1, 2],
+      [2, 1],
+    ],
+  );
+});
+
 test("extensions replace or refuse built-in commands through command_blocked", async (context) => {
   const seen: string[] = [];
   const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {

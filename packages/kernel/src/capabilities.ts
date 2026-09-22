@@ -94,26 +94,25 @@ export class CompositeCapabilityService implements CapabilityService {
 /** Fixed built-in capabilities whose activation exposes registered native tools. */
 export class ToolCapabilityService implements CapabilityService {
   readonly records: readonly CapabilityRecord[];
-  private readonly recordsByIdentity: ReadonlyMap<string, CapabilityRecord>;
-  private readonly index: CapabilityIndex;
   private readonly grantedAuthorities: ReadonlySet<string>;
 
   constructor(records: readonly CapabilityRecord[], grantedAuthorities: ReadonlySet<string>) {
     this.records = records;
-    this.recordsByIdentity = new Map(records.map((record) => [record.identity, record]));
     this.grantedAuthorities = grantedAuthorities;
-    this.index = new CapabilityIndex(records, grantedAuthorities);
   }
 
   async search(query: string, limit: number): Promise<CapabilitySearchResult> {
-    return { results: this.index.search(query, limit) };
+    return {
+      results: new CapabilityIndex(this.records, this.grantedAuthorities).search(query, limit),
+    };
   }
 
   async activate(identities: readonly string[]): Promise<CapabilityActivationResult> {
+    const recordsByIdentity = new Map(this.records.map((record) => [record.identity, record]));
     const activated: CapabilityActivationResult["activated"][number][] = [];
     const denied: CapabilityActivationResult["denied"][number][] = [];
     for (const identity of identities) {
-      const record = this.recordsByIdentity.get(identity);
+      const record = recordsByIdentity.get(identity);
       if (record === undefined) {
         denied.push({ identity, reason: "capability is not indexed" });
       } else if (!record.enabled || !record.available || record.trust !== "trusted") {

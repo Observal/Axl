@@ -141,6 +141,8 @@ export type SessionRuntimeFactory = (input: {
   readonly cwd: string;
   readonly boundary: SessionRuntimeBoundary;
   readonly selection: SessionConfiguration;
+  /** Owning create, resume, or rebuild operation. */
+  readonly signal: AbortSignal;
   /** Canonical resources to reuse. Undefined only for first load and explicit reload. */
   readonly contextResources?: EventPayloadMap["context.resources"]["resources"];
   readonly interact: (
@@ -217,6 +219,7 @@ interface ManagedSession {
   readonly queue: QueuedTurn[];
   readonly queuedCompactions: QueuedCompaction[];
   readonly queuedReloads: QueuedReload[];
+  readonly pendingDisposals: AgentSession[];
   queueDraining: boolean;
   queueMutationActive: boolean;
   queueDrain?: Promise<void>;
@@ -523,6 +526,7 @@ export class SessionManager {
     selection: SessionConfiguration,
     boundaryOperationId?: OperationId,
     creationOperationId?: OperationId,
+    signal: AbortSignal = new AbortController().signal,
   ): Promise<AgentSession> {
     const previousResources = events.findLast((event) => event.type === "context.resources");
     const runtime = await this.options.runtime({
@@ -530,6 +534,7 @@ export class SessionManager {
       cwd,
       boundary,
       selection,
+      signal,
       ...(boundary === "reload" || previousResources?.type !== "context.resources"
         ? {}
         : { contextResources: previousResources.payload.resources }),
@@ -556,6 +561,7 @@ export class SessionManager {
         prepareOversizedEvent: (event) => this.externalizeOversizedContent(sessionId, event),
       },
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
+      activationSignal: signal,
       ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
       ...(runtime.modelContextWindow === undefined
         ? {}
@@ -609,6 +615,7 @@ export class SessionManager {
     selection: SessionConfiguration,
     creationOperationId?: OperationId,
     persistedEvents: readonly CanonicalEvent[] = [],
+    signal: AbortSignal = new AbortController().signal,
   ): Promise<ManagedSession> {
     const events: CanonicalEvent[] = [...persistedEvents];
     const listeners = new Set<(event: CanonicalEvent) => void>();
@@ -629,6 +636,7 @@ export class SessionManager {
       selection,
       undefined,
       creationOperationId,
+      signal,
     );
     const stored = await session.log.read();
     events.length = 0;
@@ -659,6 +667,7 @@ export class SessionManager {
       queue: [],
       queuedCompactions: [],
       queuedReloads: [],
+      pendingDisposals: [],
       queueDraining: false,
       queueMutationActive: false,
       disposing: false,
@@ -674,6 +683,7 @@ export class SessionManager {
     cwd: string,
     selection: SessionConfiguration = {},
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+    signal?: AbortSignal,
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     this.assertRunning();
     const canonicalCwd = await realpath(cwd).catch((cause: unknown) => {
@@ -696,7 +706,14 @@ export class SessionManager {
         );
       }
     }
-    const managed = await this.open(sessionId, canonicalCwd, selection, reservation?.operationId);
+    const managed = await this.open(
+      sessionId,
+      canonicalCwd,
+      selection,
+      reservation?.operationId,
+      [],
+      signal,
+    );
     return { sessionId, events: [...managed.events] };
   }
 
@@ -1138,6 +1155,7 @@ export class SessionManager {
     sessionId: unknown,
     fromEventId: unknown,
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+    signal?: AbortSignal,
   ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
@@ -1149,9 +1167,13 @@ export class SessionManager {
     if (source.activeTurn || source.rebuilding || source.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this session; fork after it");
     }
-    const decided = await this.interceptCommand(source, "fork", "client", {
-      fromEventId: parseEventId(fromEventId, "fromEventId"),
-    });
+    const decided = await this.interceptCommand(
+      source,
+      "fork",
+      "client",
+      { fromEventId: parseEventId(fromEventId, "fromEventId") },
+      signal,
+    );
     let eventId: EventId;
     try {
       eventId = parseEventId(decided.fromEventId, "extension.fork.fromEventId");
@@ -1167,12 +1189,13 @@ export class SessionManager {
     if (event.type !== "user.message") {
       throw new DaemonError("invalid_fork_point", "A fork must start from a user message");
     }
-    return this.copySession(sourceId, eventId, false, userMessageText(event), reservation);
+    return this.copySession(sourceId, eventId, false, userMessageText(event), reservation, signal);
   }
 
   async clone(
     sessionId: unknown,
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+    signal?: AbortSignal,
   ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
@@ -1184,17 +1207,18 @@ export class SessionManager {
     if (source.activeTurn || source.rebuilding || source.interruptDelivery !== undefined) {
       throw new DaemonError("operation_active", "An operation owns this session; clone after it");
     }
-    await this.interceptCommand(source, "clone", "client", {});
+    await this.interceptCommand(source, "clone", "client", {}, signal);
     const tip = source.events.at(-1)?.id;
     if (tip === undefined)
       throw new DaemonError("empty_session", "Session has no history to clone");
-    return this.copySession(sourceId, tip, true, undefined, reservation);
+    return this.copySession(sourceId, tip, true, undefined, reservation, signal);
   }
 
   async rename(
     sessionId: unknown,
     title: string,
     operationId?: OperationId,
+    signal?: AbortSignal,
   ): Promise<{ readonly title: string; readonly eventId: EventId }> {
     if (operationId === undefined) {
       throw new DaemonError("internal_error", "Rename operation ID is missing");
@@ -1211,7 +1235,7 @@ export class SessionManager {
     if (existing?.type === "session.renamed") {
       return { title: existing.payload.title, eventId: existing.id };
     }
-    const decided = await this.interceptCommand(managed, "rename", "client", { title });
+    const decided = await this.interceptCommand(managed, "rename", "client", { title }, signal);
     if (typeof decided.title !== "string") {
       throw new DaemonError("command_blocked", "Extension returned a non-string rename title");
     }
@@ -1229,8 +1253,15 @@ export class SessionManager {
     return { title: event.payload.title, eventId: event.id };
   }
 
+  async cwd(sessionId: unknown): Promise<string> {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    await this.resume(parsed);
+    return this.managed(parsed).cwd;
+  }
+
   async resume(
     sessionId: unknown,
+    signal?: AbortSignal,
   ): Promise<{ sessionId: SessionId; events: readonly CanonicalEvent[] }> {
     const parsed = parseSessionId(sessionId, "sessionId");
     this.assertNotQuarantined(parsed);
@@ -1242,7 +1273,7 @@ export class SessionManager {
       return { sessionId: parsed, events: [...managed.events] };
     }
 
-    const opening = this.resumeFromLog(parsed);
+    const opening = this.resumeFromLog(parsed, signal);
     this.opening.set(parsed, opening);
     try {
       const managed = await opening;
@@ -1258,6 +1289,7 @@ export class SessionManager {
     includeTarget: boolean,
     selectedText?: string,
     reservation?: { readonly sessionId: SessionId; readonly operationId: OperationId },
+    signal?: AbortSignal,
   ): Promise<{
     readonly sessionId: SessionId;
     readonly events: readonly CanonicalEvent[];
@@ -1309,6 +1341,7 @@ export class SessionManager {
           source.selection,
           undefined,
           existing.events,
+          signal,
         );
         return {
           sessionId,
@@ -1400,7 +1433,14 @@ export class SessionManager {
           await directory.close();
         }
       }
-      const managed = await this.open(sessionId, source.cwd, source.selection, undefined, copied);
+      const managed = await this.open(
+        sessionId,
+        source.cwd,
+        source.selection,
+        undefined,
+        copied,
+        signal,
+      );
       return {
         sessionId,
         events: [...managed.events],
@@ -1413,7 +1453,7 @@ export class SessionManager {
     }
   }
 
-  private async resumeFromLog(sessionId: SessionId): Promise<ManagedSession> {
+  private async resumeFromLog(sessionId: SessionId, signal?: AbortSignal): Promise<ManagedSession> {
     this.assertNotQuarantined(sessionId);
     const path = this.logPath(sessionId);
     try {
@@ -1465,6 +1505,7 @@ export class SessionManager {
       },
       undefined,
       events,
+      signal,
     );
   }
 
@@ -1477,9 +1518,10 @@ export class SessionManager {
     name: string,
     source: CommandSource,
     args: JsonObject,
+    signal?: AbortSignal,
   ): Promise<JsonObject> {
     try {
-      return await managed.session.interceptCommand(name, source, args);
+      return await managed.session.interceptCommand(name, source, args, signal);
     } catch (error) {
       if (error instanceof CommandBlockedError) {
         throw new DaemonError("command_blocked", error.message, {
@@ -1496,7 +1538,13 @@ export class SessionManager {
     readonly operationId: OperationId;
   }> {
     const managed = this.managed(sessionId);
-    await this.interceptCommand(managed, "reload", "model", {});
+    await this.interceptCommand(
+      managed,
+      "reload",
+      "model",
+      {},
+      managed.activeTurn?.controller.signal,
+    );
     const operationId = parseOperationId(randomUUID(), "operationId");
     if (managed.activeTurn?.kind === "turn" && !managed.rebuilding) {
       managed.queuedReloads.push({ operationId });
@@ -1512,6 +1560,7 @@ export class SessionManager {
   async reload(
     sessionId: unknown,
     operationId?: OperationId,
+    signal?: AbortSignal,
   ): Promise<{ boundaryEventIds: readonly EventId[] }> {
     const managed = this.managed(sessionId);
     if (managed.activeTurn || managed.rebuilding || managed.interruptDelivery !== undefined) {
@@ -1523,9 +1572,9 @@ export class SessionManager {
         return { boundaryEventIds: recovered.map((event) => event.id) };
       }
     }
-    await this.interceptCommand(managed, "reload", "client", {});
+    await this.interceptCommand(managed, "reload", "client", {}, signal);
     const before = managed.events.length;
-    await this.rebuild(managed, "reload", managed.selection, operationId);
+    await this.rebuild(managed, "reload", managed.selection, operationId, signal);
     return { boundaryEventIds: managed.events.slice(before).map((event) => event.id) };
   }
 
@@ -1533,6 +1582,7 @@ export class SessionManager {
     sessionId: unknown,
     update: SessionConfiguration,
     operationId?: OperationId,
+    signal?: AbortSignal,
   ): Promise<{
     providerId: string;
     modelId: string;
@@ -1561,6 +1611,7 @@ export class SessionManager {
       configureCommandName(update),
       "client",
       update as unknown as JsonObject,
+      signal,
     );
     if (decided !== (update as unknown as JsonObject)) {
       try {
@@ -1615,7 +1666,7 @@ export class SessionManager {
           ? "tool_change"
           : "config_change";
     const before = managed.events.length;
-    await this.rebuild(managed, boundary, selection, operationId);
+    await this.rebuild(managed, boundary, selection, operationId, signal);
     const boundaryEvents = managed.events.slice(before);
     const configuredProvider = boundaryEvents.findLast((event) => event.type === "config.provider");
     const configuredModel = boundaryEvents.findLast((event) => event.type === "config.model");
@@ -2142,6 +2193,18 @@ export class SessionManager {
     managed.activeTurn = active;
     if (managed.pendingInterrupts.delete(active.operationId)) active.controller.abort();
     try {
+      const intercepted = await managed.session.interceptInput(
+        content,
+        "client",
+        active.controller.signal,
+      );
+      if (intercepted.handled) return { operationId: active.operationId, stopReason: "stop" };
+      content = intercepted.content;
+      for (const item of content) {
+        if (item.type === "blob") {
+          await this.blobs.assertOwned(managed.session.log.sessionId, item.blob);
+        }
+      }
       try {
         await this.captureWorkspaceCheckpoint(managed, active.controller.signal);
       } catch (error) {
@@ -2425,13 +2488,23 @@ export class SessionManager {
       } catch (error) {
         if (!active.controller.signal.aborted) throw error;
       }
-      const event = await managed.session.runShell(
-        command,
-        excluded,
-        active.controller.signal,
-        active.operationId,
-      );
-      return { operationId, isError: event.payload.isError, resultEventId: event.id };
+      try {
+        const event = await managed.session.runShell(
+          command,
+          excluded,
+          active.controller.signal,
+          active.operationId,
+        );
+        return { operationId, isError: event.payload.isError, resultEventId: event.id };
+      } catch (error) {
+        if (error instanceof CommandBlockedError) {
+          throw new DaemonError("command_blocked", error.message, {
+            cause: error,
+            details: { command: error.command, reason: error.reason },
+          });
+        }
+        throw error;
+      }
     } finally {
       if (managed.activeTurn === active) delete managed.activeTurn;
       active.finish();
@@ -2783,6 +2856,7 @@ export class SessionManager {
     boundary: SessionRuntimeBoundary,
     selection: SessionConfiguration,
     operationId?: OperationId,
+    signal?: AbortSignal,
   ): Promise<void> {
     const previous = managed.session;
     const rebuilding = (async () => {
@@ -2796,9 +2870,16 @@ export class SessionManager {
         boundary,
         selection,
         operationId,
+        undefined,
+        signal,
       );
       managed.session = next;
-      await previous.dispose();
+      try {
+        await previous.dispose();
+      } catch (error) {
+        managed.pendingDisposals.push(previous);
+        throw error;
+      }
     })();
     managed.rebuilding = rebuilding;
     this.options.onSessionMetadataChange?.();
@@ -2882,10 +2963,17 @@ export class SessionManager {
     ) {
       await managed.session.close(operationId);
     }
-    await managed.session.dispose();
+    const disposals = await Promise.allSettled([
+      managed.session.dispose(),
+      ...managed.pendingDisposals.map((session) => session.dispose()),
+    ]);
     await this.blobs.disposeSession(parsed);
     this.sessions.delete(parsed);
     this.options.onSessionMetadataChange?.();
+    const failures = disposals.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) throw new AggregateError(failures, "Session cleanup failed");
   }
 
   private applyActivity(

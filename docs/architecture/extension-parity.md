@@ -19,55 +19,55 @@ No rows are currently approved exclusions.
 | Pi capability | Axl status | Axl evidence or remaining work |
 | --- | --- | --- |
 | Global extension directory | Done | `~/.axl/extensions/` discovers `.ts`, `.mts`, `.js`, and `.mjs` entries deterministically. |
-| Explicit extension paths | Missing | Add trusted CLI and daemon configuration with deterministic precedence. |
-| Project-local extensions | Missing | Add hierarchical discovery after an explicit remembered project-trust decision. |
-| Package-provided extensions | Missing | Define package manifests and daemon, TUI, and web entry points. |
-| npm package installation | Missing | Add daemon-owned install, update, remove, and version reporting. |
-| Git package installation | Missing | Add pinned source acquisition, provenance, update, and removal. |
-| Extension-owned dependencies | Missing | Resolve package dependencies outside monorepo-only workspace behavior. |
+| Explicit extension paths | Done | `extension.install` records canonical local paths with precedence above global and package sources. |
+| Project-local extensions | Done | `<project>/.axl/extensions/` loads only after a remembered canonical-root trust decision. |
+| Package-provided extensions | Partial | The versioned package manifest declares daemon, TUI, and web entry points; daemon loading is complete and presentation hosts remain. |
+| npm package installation | Done | Daemon-owned install, update, remove, exact version reporting, and SDK methods use a private package root. |
+| Git package installation | Done | Git installs require credential-free HTTPS plus a full commit hash. |
+| Extension-owned dependencies | Done | Installed package entries load from their package directory and use native Node dependency resolution. |
 | TypeScript authoring declarations | Done | Releases export `@observal/axl/extension-api`. |
 | JavaScript and TypeScript loading | Done | The daemon host loads both forms through Node. |
-| Extension list and inspection | Missing | Add typed daemon RPC and SDK methods with source, state, compatibility, and failures. |
-| Per-extension enable and disable | Missing | Persist global state and remove every contribution while disabled. |
-| Per-extension reload | Missing | Reload one extension without replacing unrelated instances. |
+| Extension list and inspection | Done | Typed daemon RPC and SDK inventory includes source, state, package metadata, and lifecycle diagnostics. |
+| Per-extension enable and disable | Done | Enablement is persisted and disabled IDs are removed before import. The selected session reloads atomically. |
+| Per-extension reload | Partial | A typed per-extension reload control exists, but it currently rebuilds the complete selected session runtime. |
 | Atomic replacement | Done | Replacement activation completes before the runtime swap; failed activation leaves the prior runtime active and writes no partial boundary. |
 
 ## Lifecycle and interception events
 
 | Pi capability | Axl status | Axl evidence or remaining work |
 | --- | --- | --- |
-| `project_trust` | Missing | Resolve trust before project code discovery or execution. |
-| `resources_discover` | Missing | Add bounded resource contribution before prompt construction. |
-| `session_start` | Partial | Factories run for each session, but no typed session-start event exists. |
-| `session_info_changed` | Missing | Add typed metadata-change observation. |
+| `project_trust` | Done | Trust is resolved and persisted before project extension discovery or import. |
+| `resources_discover` | Done | Extensions contribute bounded canonical resources before prompt construction. |
+| `session_start` | Done | Typed activation notification runs with the owning cancellation signal. |
+| `session_info_changed` | Done | Canonical rename and configuration events project to the typed lifecycle notification. |
 | `session_before_switch` | Missing | Add cancellable pre-switch interception. |
 | `session_before_fork` | Missing | Existing command interception covers fork arguments only. |
 | `session_before_compact` | Partial | The command hook can replace a summary or block compaction; a dedicated lifecycle contract is missing. |
-| `session_compact` | Missing | Add successful compaction notification. |
-| `session_compact_failed` | Missing | Add failed compaction notification. |
+| `session_compact` | Done | Successful canonical compaction projects to a typed lifecycle notification. |
+| `session_compact_failed` | Done | Canonical compaction failure projects to a typed lifecycle notification. |
 | `session_before_tree` | Missing | Add pre-navigation interception. |
 | `session_tree` | Missing | Add post-navigation notification. |
-| `session_shutdown` | Partial | Tracked cleanup runs, but no typed shutdown event exists. |
+| `session_shutdown` | Done | Typed shutdown handlers run within the cleanup budget before owned resources are disposed. |
 | `before_agent_start` | Missing | Add mutable prompt/context behavior before an agent operation starts. |
-| `agent_start` | Missing | Add operation lifecycle notification. |
-| `agent_end` | Missing | Add operation completion notification. |
-| `agent_settled` | Missing | Add post-queue settled notification. |
+| `agent_start` | Done | Canonical user-turn admission projects to a typed lifecycle notification. |
+| `agent_end` | Done | Final canonical assistant completion projects to a typed lifecycle notification. |
+| `agent_settled` | Partial | Final assistant completion is reported, but queue-drain settlement still needs a distinct signal. |
 | `ui_prompt_start` and `ui_prompt_end` | Missing | Add client prompt lifecycle through SDK projections. |
-| `turn_start` and `turn_end` | Missing | Add typed turn lifecycle events. |
-| `message_start`, `message_update`, and `message_end` | Missing | Add typed streamed-message lifecycle events. |
-| `tool_execution_start` | Partial | `tool.call` runs before execution but exposes only gate behavior. |
-| `tool_execution_update` | Missing | Add progress observation. |
-| `tool_execution_end` | Missing | Add completion observation and validated result mutation. |
+| `turn_start` and `turn_end` | Done | User and final assistant canonical events project typed turn boundaries. |
+| `message_start`, `message_update`, and `message_end` | Done | Bounded activity plus canonical assistant completion project typed message lifecycle events. |
+| `tool_execution_start` | Done | Effective canonical tool calls project a typed start event before execution. |
+| `tool_execution_update` | Partial | Tool-call stream activity is exposed; arbitrary tool progress remains to be projected. |
+| `tool_execution_end` | Done | Completion is observed and validated result patches are canonicalized. |
 | `context` | Missing | Add mutable per-request context with canonical reconstruction. |
 | `before_provider_headers` | Missing | Add provider-boundary header mutation outside the kernel. |
 | `before_provider_request` | Missing | Add validated provider payload mutation outside the kernel. |
 | `after_provider_response` | Missing | Add provider response observation outside the kernel. |
-| `model_select` | Missing | Add model-change interception and notification. |
-| `thinking_level_select` | Missing | Add thinking-level interception and notification. |
-| `tool_call` | Partial | Extensions can allow or block tool calls in deterministic order; input replacement is not exposed. |
-| `tool_result` | Missing | Add validated tool-result mutation. |
-| `user_bash` | Missing | Add interception around daemon-owned direct shell intent. |
-| `input` | Missing | Add continue, transform, and handled outcomes for user and extension-produced input. |
+| `model_select` | Partial | Model changes project typed notifications; pre-change interception remains. |
+| `thinking_level_select` | Partial | Thinking changes project typed notifications; pre-change interception remains. |
+| `tool_call` | Done | Extensions can allow, block, or chain input replacements before the effective call is written and validated. |
+| `tool_result` | Done | Result patches chain in load order and pass the canonical event validator. |
+| `user_bash` | Done | Daemon-owned shell intent passes through the cancellable command interceptor before execution. |
+| `input` | Done | Input handlers chain continue, validated transform, and handled outcomes before admission. |
 | Durable canonical event observation | Done | `session.event` receives cloned durable events and an abortable lifecycle signal. |
 
 ## Extension context and control API
@@ -75,7 +75,7 @@ No rows are currently approved exclusions.
 | Pi capability | Axl status | Axl evidence or remaining work |
 | --- | --- | --- |
 | Async factory | Done | The daemon awaits asynchronous default exports. |
-| Lifecycle abort signal | Partial | Event callbacks receive a disposal signal; factory activation cannot yet be cancelled. |
+| Lifecycle abort signal | Done | Factories, resource discovery, tool hooks, command hooks, and observers receive operation or disposal cancellation. |
 | Deterministic cleanup | Done | Registration rollback, reverse cleanup, asynchronous draining, and bounded disposal are tested. |
 | Working directory | Done | `DaemonExtensionApi.cwd` exposes the canonical session directory. |
 | Mode and UI availability | Missing | Define daemon, TUI, web, and headless entry-point contexts. |
@@ -90,7 +90,7 @@ No rows are currently approved exclusions.
 | New session | Missing | Add scoped creation through daemon RPC. |
 | Fork, clone, navigation, and switch | Missing | Existing client RPCs are not exposed through the extension API. |
 | Runtime reload | Partial | A session can reload, but extensions lack a direct scoped method and per-extension reload. |
-| Register tool | Partial | Factory-time registration works; dynamic registration and explicit override policy are missing. |
+| Register tool | Done | Tools can register and unregister dynamically; collisions, including built-in overrides, fail explicitly. |
 | Send extension message | Missing | Add namespaced canonical extension messages. |
 | Send user message | Missing | Add defined prompt, steer, and follow-up semantics. |
 | Append custom entry | Missing | Add bounded namespaced canonical extension state and replay. |

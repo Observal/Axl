@@ -293,6 +293,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
   const { AxlDaemon, installDaemonCommandCapabilities, McpProbeFailedError } = await import(
     "@axl/daemon"
   );
+  const { DaemonExtensionRegistry } = await import("@axl/extension-host");
+  const extensionRegistry = new DaemonExtensionRegistry(axlHome);
   const {
     McpConfigStore,
     mcpCapabilityCachePath,
@@ -381,11 +383,20 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       remove: ({ name }) => mcpConfigurationStore.remove(name),
       probe: probeMcpConfiguration,
     },
+    extensionManagement: {
+      list: (cwd) => extensionRegistry.list(cwd),
+      setEnabled: (extensionId, enabled) => extensionRegistry.setEnabled(extensionId, enabled),
+      install: (source, signal) => extensionRegistry.install(source, signal),
+      update: (extensionId, signal) => extensionRegistry.update(extensionId, signal),
+      remove: (extensionId, signal) => extensionRegistry.remove(extensionId, signal),
+      trustProject: (path, trusted) => extensionRegistry.trustProject(path, trusted),
+    },
     runtime: async ({
       sessionId,
       cwd,
       boundary,
       selection,
+      signal,
       contextResources,
       interact,
       compact,
@@ -394,13 +405,13 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
       const profile = selection.profile ?? "standard";
-      const resources =
+      let resources =
         contextResources ??
         (await kernel.loadAgentsResources({
           cwd,
           globalPath: join(axlHome, "AGENTS.md"),
         }));
-      const instructions = kernel.agentsInstructionsFromResources(resources);
+      let instructions = kernel.agentsInstructionsFromResources(resources);
       const active = {
         providerId: selection.providerId ?? defaults.providerId ?? "azure-openai-responses",
         modelId: selection.modelId ?? defaults.modelId,
@@ -490,17 +501,42 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           ...daemonCapabilities.grantedAuthorities,
         ]);
         const skillService = new SkillCapabilityService(skills, { grantedAuthorities });
-        const daemonExtensions = await loadDaemonExtensions({
-          directory: join(axlHome, "extensions"),
-          cwd,
-          tools,
-          grantedAuthorities,
-          onFailure: (failure) => {
-            console.error(
-              `Axl extension ${failure.extensionId} ${failure.event} handler failed: ${failure.error.message}`,
-            );
-          },
-        });
+        const extensionEntries = await extensionRegistry.entries(cwd);
+        let daemonExtensions: Awaited<ReturnType<typeof loadDaemonExtensions>>;
+        try {
+          daemonExtensions = await loadDaemonExtensions({
+            directory: join(axlHome, "extensions"),
+            extensions: extensionEntries,
+            cwd,
+            tools,
+            grantedAuthorities,
+            signal,
+            onFailure: (failure) => {
+              extensionRegistry.recordFailure(failure.extensionId, failure.error);
+              console.error(
+                `Axl extension ${failure.extensionId} ${failure.event} handler failed: ${failure.error.message}`,
+              );
+            },
+          });
+        } catch (error) {
+          if (error instanceof kernel.ExtensionHostError) {
+            const extensionId = error.details.extensionId;
+            if (typeof extensionId === "string")
+              extensionRegistry.recordFailure(extensionId, error);
+          }
+          throw error;
+        }
+        for (const extension of daemonExtensions.extensions) {
+          extensionRegistry.clearFailure(extension.id);
+        }
+        const extensionResources =
+          contextResources === undefined
+            ? ((await daemonExtensions.host.discoverResources?.(signal)) ?? [])
+            : [];
+        if (extensionResources.length > 0) {
+          resources = [...resources, ...extensionResources];
+          instructions = kernel.agentsInstructionsFromResources(resources);
+        }
         const hosts: import("@axl/kernel").ExtensionHost[] = [daemonExtensions.host];
         try {
           const capabilitySources: import("@axl/kernel").CapabilitySource[] = [

@@ -13,10 +13,15 @@ import type {
   DaemonCommandHandler,
   DaemonExtensionApi,
   DaemonExtensionFactory,
+  DaemonInputHandler,
+  DaemonLifecycleEventHandler,
+  DaemonLifecycleEventName,
+  DaemonResourceDiscoveryHandler,
   DaemonSessionEventHandler,
   DaemonToolCallHandler,
   DaemonToolDefinition,
   DaemonToolResult,
+  DaemonToolResultHandler,
   ExtensionDisposer,
 } from "@axl/extension-api";
 import {
@@ -29,18 +34,49 @@ import {
   type ToolCallDecision,
   type ToolCallInterception,
   ToolCapabilityService,
+  type ToolResultDecision,
+  type ToolResultInterception,
   ToolInputError,
   type ToolRegistry,
 } from "@axl/kernel";
-import type { CanonicalEvent, CapabilityRecord, JsonObject } from "@axl/protocol";
+import type {
+  CanonicalEvent,
+  CapabilityRecord,
+  ContextResource,
+  JsonObject,
+  UserContent,
+} from "@axl/protocol";
+import { parseUserContent } from "@axl/protocol";
 
 export const DAEMON_EXTENSION_AUTHORITY = "extensions.tool";
+export { DaemonExtensionRegistry } from "./registry.ts";
 
 const EXTENSION_ID = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
+const RESOURCE_NAME = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 const ENTRY_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
 const MAX_TEXT_BYTES = 1_000_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
+const LIFECYCLE_EVENTS = new Set<DaemonLifecycleEventName>([
+  "session_start",
+  "session_info_changed",
+  "session_compact",
+  "session_compact_failed",
+  "session_shutdown",
+  "agent_start",
+  "agent_end",
+  "agent_settled",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "model_select",
+  "thinking_level_select",
+]);
 
 export class DaemonExtensionError extends ExtensionHostError {
   readonly path: string;
@@ -69,11 +105,18 @@ export interface DiscoveredDaemonExtension {
   readonly id: string;
   /** Canonical path of the module to import. */
   readonly path: string;
+  readonly source?: "global" | "explicit" | "project" | "package";
 }
 
 export interface DaemonExtensionFailure {
   readonly extensionId: string;
-  readonly event: "tool.call" | "command" | "session.event" | "dispose";
+  readonly event:
+    | "tool.call"
+    | "tool.result"
+    | "command"
+    | "session.event"
+    | "lifecycle"
+    | "dispose";
   readonly error: Error;
 }
 
@@ -83,8 +126,12 @@ export interface LoadDaemonExtensionsOptions {
   readonly cwd: string;
   readonly tools: ToolRegistry;
   readonly grantedAuthorities: ReadonlySet<string>;
+  /** Pre-resolved extension entries. Defaults to discovery in `directory`. */
+  readonly extensions?: readonly DiscoveredDaemonExtension[];
   /** Extension IDs excluded before their modules are imported. */
   readonly disabledExtensionIds?: ReadonlySet<string>;
+  /** Owning daemon operation. Aborting it cancels extension activation. */
+  readonly signal?: AbortSignal;
   readonly cleanupTimeoutMs?: number;
   /** Receives handler failures that must not interrupt the session. */
   readonly onFailure: (failure: DaemonExtensionFailure) => void;
@@ -296,8 +343,13 @@ function kernelTool(definition: DaemonToolDefinition, path: string): KernelTool 
 interface LoadedExtensionState {
   readonly id: string;
   readonly path: string;
+  readonly source?: DiscoveredDaemonExtension["source"];
   readonly toolCallHandlers: DaemonToolCallHandler[];
+  readonly toolResultHandlers: DaemonToolResultHandler[];
   readonly commandHandlers: DaemonCommandHandler[];
+  readonly lifecycleHandlers: Map<DaemonLifecycleEventName, DaemonLifecycleEventHandler[]>;
+  readonly resourceHandlers: DaemonResourceDiscoveryHandler[];
+  readonly inputHandlers: DaemonInputHandler[];
   readonly sessionEventHandlers: DaemonSessionEventHandler[];
   readonly lifecycle: AbortController;
   readonly pendingEvents: Set<Promise<void>>;
@@ -320,9 +372,9 @@ export async function loadDaemonExtensions(
       "cleanupTimeoutMs must be a positive integer",
     );
   }
-  const discovered = (await discoverDaemonExtensions(options.directory)).filter(
-    (extension) => !options.disabledExtensionIds?.has(extension.id),
-  );
+  const discovered = (
+    options.extensions ?? (await discoverDaemonExtensions(options.directory))
+  ).filter((extension) => !options.disabledExtensionIds?.has(extension.id));
   const states: LoadedExtensionState[] = [];
   const records: CapabilityRecord[] = [];
   const disposeStates = async (selected: readonly LoadedExtensionState[]) => {
@@ -375,12 +427,19 @@ export async function loadDaemonExtensions(
   };
   try {
     for (const extension of discovered) {
+      options.signal?.throwIfAborted();
       const factory = await importFactory(extension.path);
+      options.signal?.throwIfAborted();
       const state: LoadedExtensionState = {
         id: extension.id,
         path: extension.path,
+        ...(extension.source === undefined ? {} : { source: extension.source }),
         toolCallHandlers: [],
+        toolResultHandlers: [],
         commandHandlers: [],
+        lifecycleHandlers: new Map(),
+        resourceHandlers: [],
+        inputHandlers: [],
         sessionEventHandlers: [],
         lifecycle: new AbortController(),
         pendingEvents: new Set(),
@@ -404,8 +463,17 @@ export async function loadDaemonExtensions(
       const api: DaemonExtensionApi = {
         extensionId: extension.id,
         cwd: options.cwd,
+        signal:
+          options.signal === undefined
+            ? state.lifecycle.signal
+            : AbortSignal.any([options.signal, state.lifecycle.signal]),
         registerTool(definition) {
-          assertLoading("registerTool");
+          if (state.lifecycle.signal.aborted) {
+            throw new DaemonExtensionError(
+              extension.path,
+              "registerTool is unavailable after disposal",
+            );
+          }
           const valid = validateToolDefinition(definition, extension.path);
           const identity = `extension:${extension.id}/${valid.name}`;
           const tool = kernelTool(valid, extension.path);
@@ -425,9 +493,25 @@ export async function loadDaemonExtensions(
             requiredAuthority: [DAEMON_EXTENSION_AUTHORITY],
           });
           state.tools.push(valid.name);
-          return own(unregister);
+          return own(() => {
+            unregister();
+            const recordIndex = records.findIndex((record) => record.identity === identity);
+            if (recordIndex >= 0) records.splice(recordIndex, 1);
+            const toolIndex = state.tools.indexOf(valid.name);
+            if (toolIndex >= 0) state.tools.splice(toolIndex, 1);
+          });
         },
-        on(event: "tool.call" | "command" | "session.event", handler: unknown) {
+        on(
+          event:
+            | "tool.call"
+            | "tool.result"
+            | "command"
+            | "session.event"
+            | "resources_discover"
+            | "input"
+            | DaemonLifecycleEventName,
+          handler: unknown,
+        ) {
           assertLoading("on");
           if (typeof handler !== "function") {
             throw new DaemonExtensionError(extension.path, `on(${event}) requires a function`);
@@ -440,6 +524,14 @@ export async function loadDaemonExtensions(
               if (index >= 0) list.splice(index, 1);
             });
           }
+          if (event === "tool.result") {
+            const list = state.toolResultHandlers;
+            list.push(handler as DaemonToolResultHandler);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonToolResultHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
           if (event === "command") {
             const list = state.commandHandlers;
             list.push(handler as DaemonCommandHandler);
@@ -448,11 +540,37 @@ export async function loadDaemonExtensions(
               if (index >= 0) list.splice(index, 1);
             });
           }
+          if (event === "input") {
+            const list = state.inputHandlers;
+            list.push(handler as DaemonInputHandler);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonInputHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
+          if (event === "resources_discover") {
+            const list = state.resourceHandlers;
+            list.push(handler as DaemonResourceDiscoveryHandler);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonResourceDiscoveryHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
           if (event === "session.event") {
             const list = state.sessionEventHandlers;
             list.push(handler as DaemonSessionEventHandler);
             return own(() => {
               const index = list.indexOf(handler as DaemonSessionEventHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
+          if (LIFECYCLE_EVENTS.has(event as DaemonLifecycleEventName)) {
+            const name = event as DaemonLifecycleEventName;
+            const list = state.lifecycleHandlers.get(name) ?? [];
+            list.push(handler as DaemonLifecycleEventHandler);
+            state.lifecycleHandlers.set(name, list);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonLifecycleEventHandler);
               if (index >= 0) list.splice(index, 1);
             });
           }
@@ -468,6 +586,7 @@ export async function loadDaemonExtensions(
       };
       try {
         await factory(api);
+        options.signal?.throwIfAborted();
       } catch (cause) {
         if (cause instanceof DaemonExtensionError) throw cause;
         throw new DaemonExtensionError(
@@ -484,18 +603,134 @@ export async function loadDaemonExtensions(
     throw error;
   }
 
+  const resourceStates = states.filter((state) => state.resourceHandlers.length > 0);
   const gates = states.filter((state) => state.toolCallHandlers.length > 0);
+  const resultHandlers = states.filter((state) => state.toolResultHandlers.length > 0);
+  const inputStates = states.filter((state) => state.inputHandlers.length > 0);
   const commandGates = states.filter((state) => state.commandHandlers.length > 0);
   const observers = states.filter((state) => state.sessionEventHandlers.length > 0);
+  const lifecycleStates = states.filter((state) => state.lifecycleHandlers.size > 0);
+  const activeMessages = new Set<string>();
   let disposed = false;
 
+  const runLifecycle = async (
+    state: LoadedExtensionState,
+    type: DaemonLifecycleEventName,
+    payload: unknown,
+    signal: AbortSignal,
+  ) => {
+    for (const handler of [...(state.lifecycleHandlers.get(type) ?? [])]) {
+      await handler({ type, payload: structuredClone(payload), signal });
+    }
+  };
+  const scheduleLifecycle = (
+    state: LoadedExtensionState,
+    type: DaemonLifecycleEventName,
+    payload: unknown,
+  ) => {
+    if (!state.lifecycleHandlers.has(type)) return;
+    const task = runLifecycle(state, type, payload, state.lifecycle.signal).catch(
+      (cause: unknown) => {
+        options.onFailure({
+          extensionId: state.id,
+          event: "lifecycle",
+          error: cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      },
+    );
+    state.pendingEvents.add(task);
+    void task.finally(() => state.pendingEvents.delete(task));
+  };
+  const notifyLifecycle = (type: DaemonLifecycleEventName, payload: unknown) => {
+    for (const state of lifecycleStates) scheduleLifecycle(state, type, payload);
+  };
+
   const host: ExtensionHost = {
-    activate: () => undefined,
+    async activate(signal) {
+      const activationSignal = signal ?? new AbortController().signal;
+      for (const state of lifecycleStates) {
+        try {
+          await runLifecycle(state, "session_start", { cwd: options.cwd }, activationSignal);
+        } catch (cause) {
+          throw new DaemonExtensionError(
+            state.path,
+            `session_start handler failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            { cause, extensionId: state.id, phase: "activate" },
+          );
+        }
+      }
+    },
     async dispose() {
       if (disposed) return;
       disposed = true;
+      for (const state of [...lifecycleStates].reverse()) {
+        try {
+          await withinCleanupBudget(
+            [runLifecycle(state, "session_shutdown", {}, state.lifecycle.signal)],
+            cleanupTimeoutMs,
+          );
+        } catch (cause) {
+          options.onFailure({
+            extensionId: state.id,
+            event: "lifecycle",
+            error: cause instanceof Error ? cause : new Error(String(cause)),
+          });
+        }
+      }
       await disposeStates([...states].reverse());
     },
+    ...(resourceStates.length === 0
+      ? {}
+      : {
+          async discoverResources(signal: AbortSignal) {
+            const resources: ContextResource[] = [];
+            for (const state of resourceStates) {
+              for (const handler of [...state.resourceHandlers]) {
+                let discovered: Awaited<ReturnType<DaemonResourceDiscoveryHandler>>;
+                try {
+                  discovered = await handler({
+                    cwd: options.cwd,
+                    signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                  });
+                } catch (cause) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    `resources_discover handler failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+                    { cause, extensionId: state.id, phase: "resources_discover" },
+                  );
+                }
+                if (!Array.isArray(discovered) || discovered.length > 32) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    "resources_discover must return at most 32 resources",
+                  );
+                }
+                for (const resource of discovered) {
+                  if (
+                    typeof resource !== "object" ||
+                    resource === null ||
+                    typeof resource.name !== "string" ||
+                    !RESOURCE_NAME.test(resource.name) ||
+                    typeof resource.content !== "string" ||
+                    textBytes(resource.content) > MAX_TEXT_BYTES
+                  ) {
+                    throw new DaemonExtensionError(
+                      state.path,
+                      "resource requires a valid name and bounded string content",
+                    );
+                  }
+                  resources.push({
+                    kind: "extension" as const,
+                    scope: state.source === "project" ? ("project" as const) : ("global" as const),
+                    path: `extension:${state.id}/${resource.name}`,
+                    content: resource.content,
+                  });
+                }
+              }
+            }
+            return resources;
+          },
+        }),
     ...(gates.length === 0
       ? {}
       : {
@@ -503,6 +738,8 @@ export async function loadDaemonExtensions(
             call: ToolCallInterception,
             signal: AbortSignal,
           ): Promise<ToolCallDecision> {
+            let input = call.input;
+            let replaced = false;
             for (const state of gates) {
               for (const handler of [...state.toolCallHandlers]) {
                 let decision: Awaited<ReturnType<DaemonToolCallHandler>>;
@@ -510,8 +747,8 @@ export async function loadDaemonExtensions(
                   decision = await handler({
                     callId: call.callId,
                     name: call.name,
-                    input: structuredClone(call.input),
-                    signal,
+                    input: structuredClone(input),
+                    signal: AbortSignal.any([signal, state.lifecycle.signal]),
                   });
                 } catch (cause) {
                   throw new DaemonExtensionError(
@@ -520,22 +757,120 @@ export async function loadDaemonExtensions(
                     { cause },
                   );
                 }
-                if (decision !== undefined) {
-                  if (
-                    typeof decision !== "object" ||
-                    decision.block !== true ||
-                    typeof decision.reason !== "string"
-                  ) {
+                if (decision === undefined) continue;
+                if (typeof decision !== "object" || decision === null) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    "tool.call handler must return undefined, { input }, or { block: true, reason }",
+                  );
+                }
+                if ("block" in decision) {
+                  if (decision.block !== true || typeof decision.reason !== "string") {
                     throw new DaemonExtensionError(
                       state.path,
-                      "tool.call handler must return undefined or { block: true, reason }",
+                      "tool.call block decision requires { block: true, reason }",
                     );
                   }
                   return { block: true, reason: `${state.id}: ${decision.reason}` };
                 }
+                if (
+                  typeof decision.input !== "object" ||
+                  decision.input === null ||
+                  Array.isArray(decision.input)
+                ) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    "tool.call input replacement must be an object",
+                  );
+                }
+                input = structuredClone(decision.input) as JsonObject;
+                replaced = true;
               }
             }
-            return undefined;
+            return replaced ? { input } : undefined;
+          },
+        }),
+    ...(resultHandlers.length === 0
+      ? {}
+      : {
+          async afterToolCall(
+            result: ToolResultInterception,
+            signal: AbortSignal,
+          ): Promise<ToolResultDecision | undefined> {
+            let current = result;
+            let changed = false;
+            for (const state of resultHandlers) {
+              for (const handler of [...state.toolResultHandlers]) {
+                let decision: Awaited<ReturnType<DaemonToolResultHandler>>;
+                try {
+                  decision = await handler({
+                    ...structuredClone(current),
+                    signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                  });
+                } catch (cause) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    `tool.result handler failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+                    { cause },
+                  );
+                }
+                if (decision === undefined) continue;
+                if (typeof decision !== "object" || decision === null) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    "tool.result handler must return undefined or a result patch",
+                  );
+                }
+                current = { ...current, ...structuredClone(decision) } as ToolResultInterception;
+                changed = true;
+              }
+            }
+            if (!changed) return undefined;
+            return {
+              content: current.content,
+              isError: current.isError,
+              ...(current.details === undefined ? {} : { details: current.details }),
+            };
+          },
+        }),
+    ...(inputStates.length === 0
+      ? {}
+      : {
+          async beforeInput(input, signal) {
+            let content = input.content;
+            for (const state of inputStates) {
+              for (const handler of [...state.inputHandlers]) {
+                let decision: Awaited<ReturnType<DaemonInputHandler>>;
+                try {
+                  decision = await handler({
+                    source: input.source,
+                    content: structuredClone(content),
+                    signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                  });
+                } catch (cause) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    `input handler failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+                    { cause },
+                  );
+                }
+                if (decision === undefined) continue;
+                if (typeof decision !== "object" || decision === null) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    "input handler must return undefined, transform, or handled",
+                  );
+                }
+                if (decision.action === "handled") return { action: "handled" as const };
+                if (decision.action !== "transform") {
+                  throw new DaemonExtensionError(state.path, "input handler action is invalid");
+                }
+                content = parseUserContent(decision.content, "extension.input.content");
+              }
+            }
+            return content === input.content
+              ? undefined
+              : { action: "transform" as const, content: content as readonly UserContent[] };
           },
         }),
     ...(commandGates.length === 0
@@ -555,7 +890,7 @@ export async function loadDaemonExtensions(
                     name: command.name,
                     source: command.source,
                     args: structuredClone(args),
-                    signal,
+                    signal: AbortSignal.any([signal, state.lifecycle.signal]),
                   });
                 } catch (cause) {
                   throw new DaemonExtensionError(
@@ -597,7 +932,7 @@ export async function loadDaemonExtensions(
             return replaced ? { args } : undefined;
           },
         }),
-    ...(observers.length === 0
+    ...(observers.length === 0 && lifecycleStates.length === 0
       ? {}
       : {
           observe(event: CanonicalEvent) {
@@ -631,6 +966,45 @@ export async function loadDaemonExtensions(
                 }
               }
             }
+            if (event.type === "session.renamed" || event.type.startsWith("config.")) {
+              notifyLifecycle("session_info_changed", projected);
+            }
+            if (event.type === "context.compacted") notifyLifecycle("session_compact", projected);
+            if (event.type === "compaction.failed") {
+              notifyLifecycle("session_compact_failed", projected);
+            }
+            if (event.type === "user.message") {
+              notifyLifecycle("agent_start", projected);
+              notifyLifecycle("turn_start", projected);
+            }
+            if (event.type === "assistant.message") {
+              notifyLifecycle("message_end", projected);
+              if (event.payload.stopReason !== "tool_use") {
+                notifyLifecycle("turn_end", projected);
+                notifyLifecycle("agent_end", projected);
+                notifyLifecycle("agent_settled", projected);
+              }
+            }
+            if (event.type === "tool.call") notifyLifecycle("tool_execution_start", projected);
+            if (event.type === "tool.result") notifyLifecycle("tool_execution_end", projected);
+            if (event.type === "config.model") notifyLifecycle("model_select", projected);
+            if (event.type === "config.thinking") {
+              notifyLifecycle("thinking_level_select", projected);
+            }
+          },
+        }),
+    ...(lifecycleStates.length === 0
+      ? {}
+      : {
+          observeActivity(frame) {
+            if (disposed) return;
+            if (frame.type !== "clear" && !activeMessages.has(frame.operationId)) {
+              activeMessages.add(frame.operationId);
+              notifyLifecycle("message_start", frame);
+            }
+            if (frame.type === "clear") activeMessages.delete(frame.operationId);
+            else notifyLifecycle("message_update", frame);
+            if (frame.type === "tool_call") notifyLifecycle("tool_execution_update", frame);
           },
         }),
   };

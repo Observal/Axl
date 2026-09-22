@@ -124,8 +124,30 @@ export interface DaemonToolCallEvent {
   readonly signal: AbortSignal;
 }
 
-/** Return `{ block: true, reason }` to stop the call. Any thrown error also blocks it. */
-export type DaemonToolCallDecision = { readonly block: true; readonly reason: string } | undefined;
+/** Return a block or replacement input. Any thrown error also blocks the call. */
+export type DaemonToolCallDecision =
+  | { readonly block: true; readonly reason: string }
+  | { readonly input: DaemonJsonObject }
+  | undefined;
+
+export interface DaemonToolResultEvent {
+  readonly callId: string;
+  readonly name: string;
+  readonly input: DaemonJsonObject;
+  readonly content: readonly (
+    | { readonly type: "text"; readonly text: string }
+    | { readonly type: "blob"; readonly blob: DaemonJsonObject }
+  )[];
+  readonly isError: boolean;
+  readonly details?: unknown;
+  readonly signal: AbortSignal;
+}
+
+export interface DaemonToolResultDecision {
+  readonly content?: DaemonToolResultEvent["content"];
+  readonly isError?: boolean;
+  readonly details?: unknown;
+}
 
 export interface DaemonSessionEvent {
   readonly id: string;
@@ -168,19 +190,82 @@ export type DaemonToolCallHandler = (
   event: DaemonToolCallEvent,
 ) => DaemonToolCallDecision | Promise<DaemonToolCallDecision>;
 
+export type DaemonToolResultHandler = (
+  event: DaemonToolResultEvent,
+) => DaemonToolResultDecision | undefined | Promise<DaemonToolResultDecision | undefined>;
+
 export type DaemonSessionEventHandler = (event: DaemonSessionEvent) => void | Promise<void>;
+
+export type DaemonLifecycleEventName =
+  | "session_start"
+  | "session_info_changed"
+  | "session_compact"
+  | "session_compact_failed"
+  | "session_shutdown"
+  | "agent_start"
+  | "agent_end"
+  | "agent_settled"
+  | "turn_start"
+  | "turn_end"
+  | "message_start"
+  | "message_update"
+  | "message_end"
+  | "tool_execution_start"
+  | "tool_execution_update"
+  | "tool_execution_end"
+  | "model_select"
+  | "thinking_level_select";
+
+export interface DaemonLifecycleEvent {
+  readonly type: DaemonLifecycleEventName;
+  readonly payload: unknown;
+  readonly signal: AbortSignal;
+}
+
+export type DaemonLifecycleEventHandler = (event: DaemonLifecycleEvent) => void | Promise<void>;
+
+export interface DaemonContextResource {
+  readonly name: string;
+  readonly content: string;
+}
+
+export type DaemonResourceDiscoveryHandler = (event: {
+  readonly cwd: string;
+  readonly signal: AbortSignal;
+}) => readonly DaemonContextResource[] | Promise<readonly DaemonContextResource[]>;
+
+export interface DaemonInputEvent {
+  readonly source: "client" | "extension";
+  readonly content: readonly unknown[];
+  readonly signal: AbortSignal;
+}
+
+export type DaemonInputDecision =
+  | { readonly action: "transform"; readonly content: readonly unknown[] }
+  | { readonly action: "handled" }
+  | undefined;
+
+export type DaemonInputHandler = (
+  event: DaemonInputEvent,
+) => DaemonInputDecision | Promise<DaemonInputDecision>;
 
 export interface DaemonExtensionApi {
   /** Stable identity derived from the extension file name. */
   readonly extensionId: string;
   /** Session working directory. */
   readonly cwd: string;
+  /** Aborted when activation is cancelled or this extension begins disposal. */
+  readonly signal: AbortSignal;
   /** Adds a tool the model can discover through `capability_search` and activate for the session. */
   registerTool(definition: DaemonToolDefinition): ExtensionDisposer;
   on(event: "tool.call", handler: DaemonToolCallHandler): ExtensionDisposer;
+  on(event: "tool.result", handler: DaemonToolResultHandler): ExtensionDisposer;
   /** Intercepts every built-in command before the daemon runs it. */
   on(event: "command", handler: DaemonCommandHandler): ExtensionDisposer;
   on(event: "session.event", handler: DaemonSessionEventHandler): ExtensionDisposer;
+  on(event: DaemonLifecycleEventName, handler: DaemonLifecycleEventHandler): ExtensionDisposer;
+  on(event: "resources_discover", handler: DaemonResourceDiscoveryHandler): ExtensionDisposer;
+  on(event: "input", handler: DaemonInputHandler): ExtensionDisposer;
   /** Registers cleanup that runs when the session ends. */
   track(disposer: ExtensionDisposer): ExtensionDisposer;
 }

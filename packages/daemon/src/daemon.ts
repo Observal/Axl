@@ -53,6 +53,7 @@ import {
 } from "@axl/protocol";
 
 import { commandCatalog } from "./command-catalog.ts";
+import { findExtension, type ExtensionManagementService } from "./extension-management.ts";
 import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
 import { DataDirectoryLock } from "./data-directory-lock.ts";
 import type { McpConfigurationService } from "./mcp-configuration.ts";
@@ -76,6 +77,7 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly presenceTimeoutMs?: number;
   readonly providerManagement?: ProviderManagementService;
   readonly mcpConfiguration?: McpConfigurationService;
+  readonly extensionManagement?: ExtensionManagementService;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -212,6 +214,7 @@ export class AxlDaemon {
   private readonly presenceTimeoutMs: number;
   private readonly providerManagement: ProviderManagementService | undefined;
   private readonly mcpConfiguration: McpConfigurationService | undefined;
+  private readonly extensionManagement: ExtensionManagementService | undefined;
   private readonly capabilities: readonly string[];
   private readonly hostOptions: Pick<
     DaemonOptions,
@@ -251,10 +254,12 @@ export class AxlDaemon {
     this.presenceTimeoutMs = options.presenceTimeoutMs ?? PRESENCE_TIMEOUT_MS;
     this.providerManagement = options.providerManagement;
     this.mcpConfiguration = options.mcpConfiguration;
+    this.extensionManagement = options.extensionManagement;
     this.capabilities = WIRE_CAPABILITIES.filter(
       (capability) =>
         (this.providerManagement !== undefined || !capability.startsWith("provider.")) &&
-        (this.mcpConfiguration !== undefined || !capability.startsWith("mcp.config.")),
+        (this.mcpConfiguration !== undefined || !capability.startsWith("mcp.config.")) &&
+        (this.extensionManagement !== undefined || !capability.startsWith("extension.")),
     );
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
@@ -808,7 +813,21 @@ export class AxlDaemon {
         request.method === "provider.auth.status" ||
         request.method === "provider.auth.login" ||
         request.method === "provider.auth.logout" ||
+        request.method === "extension.enable" ||
+        request.method === "extension.disable" ||
+        request.method === "extension.reload" ||
+        request.method === "extension.install" ||
+        request.method === "extension.update" ||
+        request.method === "extension.remove" ||
+        request.method === "extension.trust" ||
         request.method === "mcp.config.probe" ||
+        request.method === "session.create" ||
+        request.method === "session.resume" ||
+        request.method === "session.fork" ||
+        request.method === "session.clone" ||
+        request.method === "session.rename" ||
+        request.method === "session.reload" ||
+        request.method === "session.configure" ||
         request.method === "session.history" ||
         request.method === "session.workspace.list" ||
         request.method === "session.workspace.read" ||
@@ -1045,6 +1064,18 @@ export class AxlDaemon {
         return this.providers().login(request.params, signal);
       case "provider.auth.logout":
         return this.providers().logout(request.params, signal);
+      case "extension.list": {
+        const cwd = await this.sessions.cwd(request.params.sessionId);
+        return this.extensionManagementService().list(cwd);
+      }
+      case "extension.enable":
+      case "extension.disable":
+      case "extension.reload":
+      case "extension.install":
+      case "extension.update":
+      case "extension.remove":
+      case "extension.trust":
+        return this.mutateExtension(request, this.mutationOperationId(acceptance), signal);
       case "mcp.config.list":
         return this.mcpConfigurationService().list();
       case "mcp.config.upsert":
@@ -1081,11 +1112,12 @@ export class AxlDaemon {
             profile: profile ?? "standard",
           },
           reservation,
+          signal,
         );
         return this.sessions.describe(created.sessionId);
       }
       case "session.resume":
-        await this.sessions.resume(request.params.sessionId);
+        await this.sessions.resume(request.params.sessionId, signal);
         return this.sessions.describe(request.params.sessionId);
       case "session.list":
         return this.listSessions(state, request.params);
@@ -1100,6 +1132,7 @@ export class AxlDaemon {
           request.params.sessionId,
           request.params.fromEventId,
           this.creationReservation(acceptance),
+          signal,
         );
         return {
           ...this.sessions.describe(forked.sessionId),
@@ -1110,6 +1143,7 @@ export class AxlDaemon {
         const cloned = await this.sessions.clone(
           request.params.sessionId,
           this.creationReservation(acceptance),
+          signal,
         );
         return {
           ...this.sessions.describe(cloned.sessionId),
@@ -1121,6 +1155,7 @@ export class AxlDaemon {
           request.params.sessionId,
           request.params.title,
           this.mutationOperationId(acceptance),
+          signal,
         );
       case "session.delete":
         await this.sessions.delete(request.params.sessionId);
@@ -1211,7 +1246,11 @@ export class AxlDaemon {
             : parseOperationId(acceptance.affectedOperationId, "affectedOperationId"),
         );
       case "session.reload":
-        return this.sessions.reload(request.params.sessionId, this.mutationOperationId(acceptance));
+        return this.sessions.reload(
+          request.params.sessionId,
+          this.mutationOperationId(acceptance),
+          signal,
+        );
       case "session.configure": {
         const {
           sessionId,
@@ -1237,6 +1276,7 @@ export class AxlDaemon {
             ...(profile === undefined ? {} : { profile }),
           },
           this.mutationOperationId(acceptance),
+          signal,
         );
       }
       case "session.interaction.respond": {
@@ -1300,6 +1340,84 @@ export class AxlDaemon {
         await this.sessions.dispose(request.params.sessionId, this.mutationOperationId(acceptance));
         return { disposed: true, historyPreserved: true };
     }
+  }
+
+  private async mutateExtension(
+    request: Extract<
+      WireRequest,
+      {
+        readonly method:
+          | "extension.enable"
+          | "extension.disable"
+          | "extension.reload"
+          | "extension.install"
+          | "extension.update"
+          | "extension.remove"
+          | "extension.trust";
+      }
+    >,
+    operationId: ReturnType<typeof parseOperationId> | undefined,
+    signal?: AbortSignal,
+  ) {
+    if (operationId === undefined) {
+      throw new DaemonError("internal_error", "Extension operation ID is missing");
+    }
+    const service = this.extensionManagementService();
+    const cwd = await this.sessions.cwd(request.params.sessionId);
+    let extensionId: string | undefined;
+    try {
+      if (request.method === "extension.enable") {
+        extensionId = request.params.extensionId;
+        if (findExtension(await service.list(cwd), extensionId) === undefined) {
+          throw new Error(`Extension ${extensionId} was not found`);
+        }
+        await service.setEnabled(extensionId, true);
+      } else if (request.method === "extension.disable") {
+        extensionId = request.params.extensionId;
+        if (findExtension(await service.list(cwd), extensionId) === undefined) {
+          throw new Error(`Extension ${extensionId} was not found`);
+        }
+        await service.setEnabled(extensionId, false);
+      } else if (request.method === "extension.install") {
+        extensionId = await service.install(request.params.source, signal);
+      } else if (request.method === "extension.update") {
+        extensionId = request.params.extensionId;
+        await service.update(extensionId, signal);
+      } else if (request.method === "extension.remove") {
+        extensionId = request.params.extensionId;
+        await service.remove(extensionId, signal);
+      } else if (request.method === "extension.trust") {
+        await service.trustProject(cwd, request.params.trusted);
+      } else {
+        extensionId = request.params.extensionId;
+        const current = findExtension(await service.list(cwd), extensionId);
+        if (current === undefined || !current.enabled) {
+          throw new Error(`Enabled extension ${extensionId} was not found`);
+        }
+      }
+      const reloaded = await this.sessions.reload(request.params.sessionId, operationId, signal);
+      return {
+        ...(await service.list(cwd)),
+        ...(extensionId === undefined ? {} : { changedExtensionId: extensionId }),
+        boundaryEventIds: reloaded.boundaryEventIds,
+      };
+    } catch (error) {
+      if (error instanceof DaemonError || error instanceof ExtensionHostError) throw error;
+      throw new ExtensionHostError(error instanceof Error ? error.message : String(error), {
+        ...(extensionId === undefined ? {} : { extensionId }),
+        phase: request.method,
+      });
+    }
+  }
+
+  private extensionManagementService(): ExtensionManagementService {
+    if (this.extensionManagement === undefined) {
+      throw new DaemonError(
+        "unsupported_capability",
+        "Extension management is not available in this daemon",
+      );
+    }
+    return this.extensionManagement;
   }
 
   private mcpConfigurationService(): McpConfigurationService {

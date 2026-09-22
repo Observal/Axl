@@ -44,6 +44,7 @@ import {
   withFileSections,
 } from "./compaction.ts";
 import {
+  CommandBlockedError,
   type CommandSource,
   type ExtensionHost,
   interceptCommand,
@@ -197,6 +198,7 @@ export interface AgentSessionOptions {
   readonly recordPromptSnapshot?: boolean;
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
+  readonly activationSignal?: AbortSignal;
   readonly retry?: ModelRetryOptions | false;
   readonly compaction?: Partial<CompactionSettings>;
   readonly modelContextWindow?: number;
@@ -362,7 +364,7 @@ export class AgentSession {
     const tip = opened.events.at(-1)?.id;
     const lineage = tip === undefined ? [] : tree.lineage(tip);
     const session = new AgentSession(opened.log, lineage, options);
-    await session.host.activate();
+    await session.host.activate(options.activationSignal ?? new AbortController().signal);
     for (const compaction of unfinishedCompactions(lineage)) {
       await session.append(compaction.operationId, "compaction.failed", {
         reason: compaction.reason,
@@ -409,7 +411,9 @@ export class AgentSession {
       await session.append(options.boundaryOperationId, "context.resources", {
         resources: options.contextResources ?? [],
       });
-      // Prompt sections are a canonical snapshot at every explicit runtime boundary.
+    }
+    const hasPromptSnapshot = opened.events.some((event) => event.type === "prompt.section");
+    if (fresh || options.recordPromptSnapshot === true || !hasPromptSnapshot) {
       for (const section of options.prompt?.sections ?? []) {
         await session.append(options.boundaryOperationId, "prompt.section", section);
       }
@@ -560,6 +564,17 @@ export class AgentSession {
     const operationId = requestedOperationId ?? parseOperationId(randomUUID(), "operationId");
     this.activeOperation = operationId;
     try {
+      const decided = await this.interceptCommand(
+        "user_bash",
+        "client",
+        { command, excluded },
+        signal,
+      );
+      if (typeof decided.command !== "string" || typeof decided.excluded !== "boolean") {
+        throw new CommandBlockedError("user_bash", "extension returned invalid shell arguments");
+      }
+      command = decided.command;
+      excluded = decided.excluded;
       const result = await shell.execute({ command }, signal ?? new AbortController().signal);
       const event = await this.append(operationId, "user.shell", {
         command,
@@ -574,6 +589,20 @@ export class AgentSession {
     } finally {
       this.activeOperation = null;
     }
+  }
+
+  async interceptInput(
+    content: readonly UserContent[],
+    source: "client" | "extension",
+    signal: AbortSignal,
+  ): Promise<{ readonly content: readonly UserContent[]; readonly handled: boolean }> {
+    if (this.host.beforeInput === undefined) return { content, handled: false };
+    const decision = await this.host.beforeInput({ source, content }, signal);
+    if (decision?.action === "handled") return { content: [], handled: true };
+    return {
+      content: decision?.action === "transform" ? decision.content : content,
+      handled: false,
+    };
   }
 
   /**
@@ -818,7 +847,7 @@ export class AgentSession {
             toolCalls: outcome.toolCalls,
           });
         }
-        this.onActivity?.({
+        this.publishActivity({
           operationId,
           sequence: ++activity.sequence,
           type: "clear",
@@ -1027,7 +1056,7 @@ export class AgentSession {
         if (event.type === "text_delta") {
           exposedOutput = true;
           text += event.text;
-          this.onActivity?.({
+          this.publishActivity({
             operationId,
             sequence: ++activity.sequence,
             type: "text_delta",
@@ -1036,7 +1065,7 @@ export class AgentSession {
         } else if (event.type === "thinking_delta") {
           exposedOutput = true;
           thinking += event.text;
-          this.onActivity?.({
+          this.publishActivity({
             operationId,
             sequence: ++activity.sequence,
             type: "thinking_delta",
@@ -1045,7 +1074,7 @@ export class AgentSession {
         } else if (event.type === "tool_call") {
           exposedOutput = true;
           toolCalls.push({ callId: event.callId, name: event.name, input: event.input });
-          this.onActivity?.({
+          this.publishActivity({
             operationId,
             sequence: ++activity.sequence,
             type: "tool_call",
@@ -1166,7 +1195,9 @@ export class AgentSession {
     appended: CanonicalEvent[],
     signal: AbortSignal | undefined,
   ): Promise<boolean> {
-    for (const call of toolCalls) {
+    for (const requested of toolCalls) {
+      const prepared = await this.interceptToolCall(requested, signal);
+      const call = prepared.call;
       appended.push(
         await this.append(operationId, "tool.call", {
           callId: call.callId,
@@ -1174,7 +1205,14 @@ export class AgentSession {
           input: call.input,
         }),
       );
-      const { result, violation } = await this.executeTool(call, signal);
+      const executed =
+        prepared.blocked === undefined
+          ? await this.executeTool(call, signal)
+          : { result: prepared.blocked };
+      const { result, violation } = {
+        ...executed,
+        result: await this.interceptToolResult(call, executed.result, signal),
+      };
       if (violation !== undefined) {
         appended.push(
           await this.append(operationId, "sandbox.violation", {
@@ -1217,13 +1255,72 @@ export class AgentSession {
     return false;
   }
 
+  private async interceptToolCall(
+    call: ToolCallRequest,
+    signal: AbortSignal | undefined,
+  ): Promise<{ readonly call: ToolCallRequest; readonly blocked?: ToolExecutionResult }> {
+    if (this.host.beforeToolCall === undefined) return { call };
+    let decision: ToolCallDecision;
+    try {
+      decision = await this.host.beforeToolCall(
+        { callId: call.callId, name: call.name, input: call.input },
+        signal ?? new AbortController().signal,
+      );
+    } catch (error) {
+      decision = {
+        block: true,
+        reason: error instanceof Error ? error.message : "extension tool gate failed",
+      };
+    }
+    if (decision === undefined) return { call };
+    if ("input" in decision) return { call: { ...call, input: decision.input } };
+    return {
+      call,
+      blocked: {
+        content: [{ type: "text", text: `Tool ${call.name} was blocked: ${decision.reason}` }],
+        isError: true,
+      },
+    };
+  }
+
+  private async interceptToolResult(
+    call: ToolCallRequest,
+    result: ToolExecutionResult,
+    signal: AbortSignal | undefined,
+  ): Promise<ToolExecutionResult> {
+    if (this.host.afterToolCall === undefined) return result;
+    try {
+      const decision = await this.host.afterToolCall(
+        {
+          callId: call.callId,
+          name: call.name,
+          input: call.input,
+          content: result.content,
+          isError: result.isError,
+          ...(result.details === undefined ? {} : { details: result.details }),
+        },
+        signal ?? new AbortController().signal,
+      );
+      return decision === undefined ? result : { ...result, ...decision };
+    } catch (error) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: error instanceof Error ? error.message : "extension tool result hook failed",
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+
   private async executeTool(
     call: ToolCallRequest,
     signal: AbortSignal | undefined,
   ): Promise<{ result: ToolExecutionResult; violation?: SandboxViolationError }> {
     const tool = this.tools.get(call.name);
     if (tool === undefined) {
-      // Authority is registry membership: an unregistered name is not executable.
       return {
         result: {
           content: [{ type: "text", text: `Tool ${call.name} is not registered` }],
@@ -1232,28 +1329,6 @@ export class AgentSession {
       };
     }
     const executionSignal = signal ?? new AbortController().signal;
-    if (this.host.beforeToolCall !== undefined) {
-      let decision: ToolCallDecision;
-      try {
-        decision = await this.host.beforeToolCall(
-          { callId: call.callId, name: call.name, input: call.input },
-          executionSignal,
-        );
-      } catch (error) {
-        decision = {
-          block: true,
-          reason: error instanceof Error ? error.message : "extension tool gate failed",
-        };
-      }
-      if (decision?.block) {
-        return {
-          result: {
-            content: [{ type: "text", text: `Tool ${call.name} was blocked: ${decision.reason}` }],
-            isError: true,
-          },
-        };
-      }
-    }
     try {
       const result = await tool.execute(call.input, executionSignal, {
         activeCapabilities: new Set(this.activeCapabilityContent.keys()),
@@ -1275,6 +1350,15 @@ export class AgentSession {
       if (error instanceof SandboxViolationError) return { result: failure, violation: error };
       return { result: failure };
     }
+  }
+
+  private publishActivity(frame: SessionActivityFrame): void {
+    try {
+      this.host.observeActivity?.(frame);
+    } catch {
+      // Presentation activity is advisory and cannot fail the agent operation.
+    }
+    this.onActivity?.(frame);
   }
 
   private async append<Type extends EventType>(

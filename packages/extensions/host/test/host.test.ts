@@ -24,13 +24,18 @@ async function directory(context: TestContext): Promise<string> {
   return path;
 }
 
-async function load(dir: string, tools = new ToolRegistry()) {
+async function load(
+  dir: string,
+  tools = new ToolRegistry(),
+  options: { readonly signal?: AbortSignal } = {},
+) {
   const failures: DaemonExtensionFailure[] = [];
   const loaded = await loadDaemonExtensions({
     directory: dir,
     cwd: "/workspace",
     tools,
     grantedAuthorities: new Set([DAEMON_EXTENSION_AUTHORITY]),
+    ...options,
     onFailure: (failure) => failures.push(failure),
   });
   return { ...loaded, tools, failures };
@@ -224,6 +229,72 @@ test("tool.call handlers block in load order, prefix the extension id, and fail 
   );
 });
 
+test("tool input and result handlers chain in extension order", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "a.js"),
+    `export default (axl) => {
+  axl.on("tool.call", (event) => ({ input: { ...event.input, first: true } }));
+  axl.on("tool.result", (event) => ({ content: [...event.content, { type: "text", text: "a" }] }));
+};\n`,
+  );
+  await writeFile(
+    join(dir, "b.js"),
+    `export default (axl) => {
+  axl.on("tool.call", (event) => ({ input: { ...event.input, second: event.input.first } }));
+  axl.on("tool.result", (event) => ({ content: [...event.content, { type: "text", text: "b" }] }));
+};\n`,
+  );
+  const { host } = await load(dir);
+  const signal = new AbortController().signal;
+  assert.deepEqual(await host.beforeToolCall?.({ callId: "1", name: "echo", input: {} }, signal), {
+    input: { first: true, second: true },
+  });
+  assert.deepEqual(
+    await host.afterToolCall?.(
+      { callId: "1", name: "echo", input: {}, content: [], isError: false },
+      signal,
+    ),
+    {
+      content: [
+        { type: "text", text: "a" },
+        { type: "text", text: "b" },
+      ],
+      isError: false,
+    },
+  );
+  await host.dispose();
+});
+
+test("input handlers transform or handle input in extension order", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "input.js"),
+    `export default (axl) => axl.on("input", (event) => {
+  const text = event.content[0]?.text;
+  if (text === "handled") return { action: "handled" };
+  return { action: "transform", content: [{ type: "text", text: String(text) + " transformed" }] };
+});\n`,
+  );
+  const { host } = await load(dir);
+  const signal = new AbortController().signal;
+  assert.deepEqual(
+    await host.beforeInput?.(
+      { source: "client", content: [{ type: "text", text: "hello" }] },
+      signal,
+    ),
+    { action: "transform", content: [{ type: "text", text: "hello transformed" }] },
+  );
+  assert.deepEqual(
+    await host.beforeInput?.(
+      { source: "client", content: [{ type: "text", text: "handled" }] },
+      signal,
+    ),
+    { action: "handled" },
+  );
+  await host.dispose();
+});
+
 test("session.event observers receive projected events and their failures are reported", async (context) => {
   const dir = await directory(context);
   await writeFile(
@@ -255,6 +326,63 @@ test("session.event observers receive projected events and their failures are re
   assert.equal(failures.length, 1);
   assert.equal(failures[0]?.extensionId, "watch");
   assert.match(failures[0]?.error.message ?? "", /observer bug/);
+});
+
+test("projects typed lifecycle events from canonical and activity streams", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "lifecycle.js"),
+    `export default (axl) => {
+  globalThis.__axlLifecycle = [];
+  for (const name of ["session_start", "agent_start", "turn_start", "message_start", "message_update", "message_end", "turn_end", "agent_end", "agent_settled", "session_shutdown"]) {
+    axl.on(name, (event) => { globalThis.__axlLifecycle.push(event.type); });
+  }
+  axl.on("resources_discover", () => [{ name: "rules", content: "Use extension rules." }]);
+};\n`,
+  );
+  const { host } = await load(dir);
+  const signal = new AbortController().signal;
+  await host.activate(signal);
+  assert.deepEqual(await host.discoverResources?.(signal), [
+    {
+      kind: "extension",
+      scope: "global",
+      path: "extension:lifecycle/rules",
+      content: "Use extension rules.",
+    },
+  ]);
+  host.observe?.({
+    id: "e1",
+    type: "user.message",
+    timestamp: 1,
+    payload: { content: [{ type: "text", text: "go" }] },
+  } as never);
+  host.observeActivity?.({
+    operationId: "00000000-0000-4000-8000-000000000001",
+    sequence: 1,
+    type: "text_delta",
+    text: "hello",
+  } as never);
+  host.observe?.({
+    id: "e2",
+    type: "assistant.message",
+    timestamp: 2,
+    payload: { content: [{ type: "text", text: "hello" }], stopReason: "stop" },
+  } as never);
+  await host.dispose();
+  assert.deepEqual((globalThis as { __axlLifecycle?: string[] }).__axlLifecycle, [
+    "session_start",
+    "agent_start",
+    "turn_start",
+    "message_start",
+    "message_update",
+    "message_end",
+    "turn_end",
+    "agent_end",
+    "agent_settled",
+    "session_shutdown",
+  ]);
+  delete (globalThis as { __axlLifecycle?: string[] }).__axlLifecycle;
 });
 
 test("disposal drains pending session.event handlers before cleanup", async (context) => {
@@ -342,6 +470,19 @@ test("disposal aborts observers and bounds uncooperative handlers", async (conte
   assert.match(failures[0]?.error.message ?? "", /cleanup exceeded 10ms/);
 });
 
+test("activation receives and honors the owning operation signal", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "cancelled.js"),
+    `export default async (axl) => { await new Promise((resolve, reject) => { axl.signal.addEventListener("abort", () => reject(axl.signal.reason), { once: true }); }); };\n`,
+  );
+  const controller = new AbortController();
+  const loading = load(dir, new ToolRegistry(), { signal: controller.signal });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  controller.abort(new DOMException("Cancelled", "AbortError"));
+  await assert.rejects(loading, { name: "DaemonExtensionError" });
+});
+
 test("invalid extensions fail the whole load and unwind registrations", async (context) => {
   const dir = await directory(context);
   await writeFile(
@@ -405,21 +546,25 @@ test("a failing factory rolls back its own resources and preserves its error", a
   });
 });
 
-test("rejects bad tool definitions, late registrations, and duplicate names", async (context) => {
+test("supports dynamic tools and rejects bad definitions and duplicate names", async (context) => {
   const dir = await directory(context);
   await writeFile(
-    join(dir, "late.js"),
+    join(dir, "dynamic.js"),
     `export default (axl) => {
-  axl.on("tool.call", () => { axl.registerTool({ name: "x", description: "x", inputSchema: {}, execute: () => ({ content: [] }) }); });
+  globalThis.__axlRegisterDynamic = () => axl.registerTool({ name: "dynamic", description: "dynamic", inputSchema: {}, execute: () => ({ content: [] }) });
 };
 `,
   );
-  const { host } = await load(dir);
-  await assert.rejects(
-    async () =>
-      host.beforeToolCall?.({ callId: "1", name: "echo", input: {} }, new AbortController().signal),
-    /only allowed while the extension factory runs/,
-  );
+  const loaded = await load(dir);
+  assert.equal((await loaded.source.service.search("dynamic", 5)).results.length, 0);
+  const unregister = (
+    globalThis as { __axlRegisterDynamic?: () => () => void }
+  ).__axlRegisterDynamic?.();
+  assert.equal((await loaded.source.service.search("dynamic", 5)).results[0]?.name, "dynamic");
+  unregister?.();
+  assert.equal((await loaded.source.service.search("dynamic", 5)).results.length, 0);
+  await loaded.host.dispose();
+  delete (globalThis as { __axlRegisterDynamic?: () => () => void }).__axlRegisterDynamic;
 
   const bad = await directory(context);
   await writeFile(

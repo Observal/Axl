@@ -605,3 +605,83 @@ test("disposes loaded daemon extensions when later runtime setup fails", async (
   await assert.rejects(client.request("session.create", { cwd: workspace }), AxlClientError);
   assert.equal(await readFile(marker, "utf8"), "disposed\n");
 });
+
+test("manages global, explicit, and trusted project daemon extensions through the SDK", async (context) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-runtime-extension-manager-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const axlHome = join(root, ".axl");
+  const workspace = join(root, "workspace");
+  const stateDirectory = join(axlHome, "unsafe");
+  const socketPath = join(stateDirectory, "axl.sock");
+  const marker = join(root, "loaded.txt");
+  await mkdir(join(axlHome, "extensions"), { recursive: true });
+  await mkdir(join(workspace, ".git"), { recursive: true });
+  await mkdir(join(workspace, ".axl", "extensions"), { recursive: true });
+  const source = (name: string) =>
+    `import { appendFile } from "node:fs/promises";\nexport default async (axl) => { await appendFile(${JSON.stringify(marker)}, ${JSON.stringify(`${name}\n`)}); axl.on("resources_discover", () => [{ name: "${name}-rules", content: "${name} rules" }]); axl.registerTool({ name: ${JSON.stringify(`${name}_tool`)}, description: ${JSON.stringify(name)}, inputSchema: { type: "object" }, execute: () => ({ content: [] }) }); };\n`;
+  await writeFile(join(axlHome, "extensions", "global.js"), source("global"));
+  await writeFile(join(workspace, ".axl", "extensions", "project.js"), source("project"));
+  const explicitPath = join(root, "explicit.js");
+  await writeFile(explicitPath, source("explicit"));
+
+  const daemon = await startLocalDaemon({
+    axlHome,
+    stateDirectory,
+    socketPath,
+    defaults: { modelId: "gpt-5", thinkingLevel: "off" },
+    store: new FileCredentialStore(join(axlHome, "credentials.json")),
+    unsafe: true,
+  });
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const opened = await client.request("session.create", { cwd: workspace });
+
+  assert.deepEqual(
+    (await client.listExtensions({ sessionId: opened.sessionId })).extensions.map(
+      (item) => item.id,
+    ),
+    ["global"],
+  );
+  const initial = await client.request("session.subscribe", { sessionId: opened.sessionId });
+  assert.equal(
+    initial.snapshot?.page.events.some(
+      (event) =>
+        event.type === "context.resources" &&
+        event.payload.resources.some(
+          (resource) => resource.path === "extension:global/global-rules",
+        ),
+    ),
+    true,
+  );
+  const trusted = await client.trustExtensionProject({
+    sessionId: opened.sessionId,
+    trusted: true,
+  });
+  assert.equal(trusted.project.trusted, true);
+  assert.deepEqual(
+    trusted.extensions.map((item) => item.id),
+    ["global", "project"],
+  );
+  const disabled = await client.disableExtension({
+    sessionId: opened.sessionId,
+    extensionId: "project",
+  });
+  assert.equal(disabled.extensions.find((item) => item.id === "project")?.enabled, false);
+  await client.enableExtension({ sessionId: opened.sessionId, extensionId: "project" });
+  const installed = await client.installExtension({
+    sessionId: opened.sessionId,
+    source: { type: "path", path: explicitPath },
+  });
+  assert.equal(installed.changedExtensionId, "explicit");
+  await client.reloadExtension({ sessionId: opened.sessionId, extensionId: "explicit" });
+  const removed = await client.removeExtension({
+    sessionId: opened.sessionId,
+    extensionId: "explicit",
+  });
+  assert.equal(
+    removed.extensions.some((item) => item.id === "explicit"),
+    false,
+  );
+  assert.match(await readFile(marker, "utf8"), /global\nproject\n/u);
+});

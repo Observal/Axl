@@ -67,7 +67,7 @@ export type RestoredQueueItem = {
 };
 
 export type ContextResource = {
-  readonly kind: "agents";
+  readonly kind: "agents" | "extension";
   readonly scope: "global" | "project";
   readonly path: string;
   readonly content: string;
@@ -639,7 +639,7 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
       const resourcePath = `${path}.resources[${index}]`;
       const resource = object(value, resourcePath);
       exact(resource, resourcePath, ["kind", "scope", "path", "content"]);
-      choice(resource.kind, `${resourcePath}.kind`, ["agents"]);
+      choice(resource.kind, `${resourcePath}.kind`, ["agents", "extension"]);
       choice(resource.scope, `${resourcePath}.scope`, ["global", "project"]);
       string(resource.path, `${resourcePath}.path`);
       string(resource.content, `${resourcePath}.content`, true);

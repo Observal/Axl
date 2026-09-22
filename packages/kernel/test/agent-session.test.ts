@@ -155,6 +155,51 @@ test("runs a plain turn and persists the canonical events", async (context) => {
   await session.dispose();
 });
 
+test("restores a missing prompt snapshot independently of context resources", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-agent-session-prompt-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "session.jsonl");
+  const opened = await JsonlEventLog.open(path, sessionId);
+  const created = parseEvent({
+    version: EVENT_FORMAT_VERSION,
+    id: "00000000-0000-4000-8000-000000000201",
+    sessionId,
+    parentId: null,
+    timestamp: 1,
+    type: "session.created",
+    payload: { cwd: "/workspace" },
+  });
+  await opened.log.append(created);
+  await opened.log.append(
+    parseEvent({
+      version: EVENT_FORMAT_VERSION,
+      id: "00000000-0000-4000-8000-000000000202",
+      sessionId,
+      parentId: created.id,
+      timestamp: 2,
+      type: "context.resources",
+      payload: { resources: [] },
+    }),
+  );
+
+  const session = await AgentSession.open(path, sessionId, {
+    model: makePort([]),
+    tools: new ToolRegistry(),
+    cwd: "/workspace",
+    prompt: {
+      text: "System instructions",
+      sections: [{ name: "system", source: "built-in", content: "System instructions" }],
+    },
+  });
+  assert.deepEqual(
+    (await session.log.read()).events
+      .filter((item) => item.type === "prompt.section")
+      .map((item) => (item.type === "prompt.section" ? item.payload.content : "")),
+    ["System instructions"],
+  );
+  await session.dispose();
+});
+
 test("manual compaction replaces old model context without deleting history", async (context) => {
   const port = makePort([
     say("old answer"),
