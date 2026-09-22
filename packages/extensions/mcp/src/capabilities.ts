@@ -327,7 +327,7 @@ export async function loadMcpCapabilities(input: {
         now - entry.discoveredAt <= CACHE_MAX_AGE_MS,
     );
     let metadata: CacheServer;
-    if (hit !== undefined) metadata = hit;
+    if (hit !== undefined) metadata = { ...hit, definitionFingerprint };
     else {
       try {
         const discovered = await input.manager.discoverTools(server.name);

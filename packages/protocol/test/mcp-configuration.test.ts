@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  parseMcpConfigBatchParams,
   parseMcpConfigListResult,
   parseMcpConfigProbeResult,
   parseMcpServerDefinition,
@@ -109,6 +110,28 @@ test("probe results contain only compact tool summaries", () => {
         protocolVersion: "2025-11-25",
         tools: [],
         authorization: "maybe",
+      }),
+    ProtocolValidationError,
+  );
+});
+
+test("batch updates validate every server and reject duplicate names", () => {
+  assert.deepEqual(
+    parseMcpConfigBatchParams({
+      servers: [
+        { name: "docs", definition },
+        { name: "local", definition: { command: "example-mcp" } },
+      ],
+    }).servers.map((server) => server.name),
+    ["docs", "local"],
+  );
+  assert.throws(
+    () =>
+      parseMcpConfigBatchParams({
+        servers: [
+          { name: "docs", definition },
+          { name: "docs", definition },
+        ],
       }),
     ProtocolValidationError,
   );

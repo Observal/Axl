@@ -11,6 +11,10 @@ test("classifies provider context overflow without broad invalid-request matchin
   assert.equal(isContextLimitError("invalid_request_error", "prompt is too long"), true);
   assert.equal(isContextLimitError("http_413", "payload too large", 413), true);
   assert.equal(isContextLimitError("invalid_request_error", "temperature is invalid", 400), false);
+  assert.equal(
+    isContextLimitError("invalid_request_error", "maximum number of tokens is 4096", 400),
+    false,
+  );
 });
 
 test("classifies bounded HTTP error payloads used before streaming starts", async () => {

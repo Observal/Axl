@@ -247,6 +247,12 @@ test("validates every request shape", () => {
     },
     {
       kind: "request",
+      id: 81,
+      method: "session.configure",
+      params: { sessionId, userQuestions: false },
+    },
+    {
+      kind: "request",
       id: 9,
       method: "session.create",
       params: {

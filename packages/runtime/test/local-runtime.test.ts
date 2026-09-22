@@ -308,14 +308,17 @@ test("assembles an authoritative local runtime without a presentation client", a
   );
   assert.deepEqual(
     (
-      await client.upsertMcpServer({
-        name: "docs",
-        definition: { url: "https://mcp.example.com/mcp" },
+      await client.batchUpsertMcpServers({
+        servers: [
+          { name: "docs", definition: { url: "https://mcp.example.com/mcp" } },
+          { name: "local", definition: { command: "example-mcp", enabled: false } },
+        ],
       })
     ).servers.map((server) => server.name),
-    ["broken", "docs", "fixture"],
+    ["broken", "docs", "fixture", "local"],
   );
   assert.equal((await client.removeMcpServer({ name: "docs" })).changed, true);
+  assert.equal((await client.removeMcpServer({ name: "local" })).changed, true);
   const probed = await client.probeMcpServer({
     name: "fixture",
     definition: {
@@ -570,4 +573,35 @@ test("assembles an authoritative local runtime without a presentation client", a
       expectedTools,
     );
   }
+});
+
+test("disposes loaded daemon extensions when later runtime setup fails", async (context) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "axl-runtime-extension-cleanup-")));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const axlHome = join(root, ".axl");
+  const workspace = join(root, "workspace");
+  const stateDirectory = join(axlHome, "unsafe");
+  const socketPath = join(stateDirectory, "axl.sock");
+  const marker = join(root, "cleanup.txt");
+  await mkdir(join(axlHome, "extensions"), { recursive: true });
+  await mkdir(workspace);
+  await writeFile(
+    join(axlHome, "extensions", "cleanup.js"),
+    `import { appendFile } from "node:fs/promises";\nexport default (axl) => axl.track(() => appendFile(${JSON.stringify(marker)}, "disposed\\n"));\n`,
+  );
+  await writeFile(join(axlHome, "mcp.json"), "{ invalid json\n");
+  const daemon = await startLocalDaemon({
+    axlHome,
+    stateDirectory,
+    socketPath,
+    defaults: { modelId: "gpt-5", thinkingLevel: "off" },
+    store: new FileCredentialStore(join(axlHome, "credentials.json")),
+    unsafe: true,
+  });
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+
+  await assert.rejects(client.request("session.create", { cwd: workspace }), AxlClientError);
+  assert.equal(await readFile(marker, "utf8"), "disposed\n");
 });

@@ -582,23 +582,33 @@ export class McpManager implements ExtensionHost {
           await candidate.oauth.close();
           throw new Error(`MCP server ${server.name} requires authorization`);
         }
-        if (!(candidate.transport instanceof StreamableHTTPClientTransport)) {
-          throw new Error("OAuth is only valid for Streamable HTTP transports");
+        try {
+          if (!(candidate.transport instanceof StreamableHTTPClientTransport)) {
+            throw new Error("OAuth is only valid for Streamable HTTP transports");
+          }
+          await candidate.transport.finishAuth(code);
+          const retried = await this.transport(server, signal, candidate.oauth);
+          try {
+            await client.connect(
+              retried.transport as unknown as Transport,
+              this.requestOptions(server.config, signal, logs),
+            );
+          } catch (retryError) {
+            await Promise.allSettled([retried.cleanup?.()]);
+            throw retryError;
+          }
+          return {
+            client,
+            transport: retried.transport,
+            oauth: candidate.oauth,
+            ...(retried.cleanup === undefined ? {} : { cleanup: retried.cleanup }),
+            taskStore,
+            logs,
+          };
+        } catch (retryError) {
+          await Promise.allSettled([candidate.oauth.close(), candidate.cleanup?.()]);
+          throw retryError;
         }
-        await candidate.transport.finishAuth(code);
-        const retried = await this.transport(server, signal, candidate.oauth);
-        await client.connect(
-          retried.transport as unknown as Transport,
-          this.requestOptions(server.config, signal, logs),
-        );
-        return {
-          client,
-          transport: retried.transport,
-          oauth: candidate.oauth,
-          ...(retried.cleanup === undefined ? {} : { cleanup: retried.cleanup }),
-          taskStore,
-          logs,
-        };
       }
       return {
         client,

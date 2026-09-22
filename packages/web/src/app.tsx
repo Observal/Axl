@@ -1930,39 +1930,50 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   /** Probe first, save only when the server answers, then reload. Errors surface in the form. */
   const addMcpServer = async (name: string, definition: McpServerDefinition): Promise<void> => {
     if (client === undefined) throw new Error("The daemon connection is unavailable");
+    setMcpBusy(true);
     setMcpError(undefined);
-    const probed = await client.probeMcpServer({ name, definition });
-    await client.upsertMcpServer({ name, definition });
-    await reloadAfterMcpChange(
-      probed.authorization === "required"
-        ? `MCP server ${name} added · authorize it in your browser when prompted`
-        : `MCP server ${name} added · ${probed.tools.length} tool${probed.tools.length === 1 ? "" : "s"}`,
-    );
+    try {
+      const probed = await client.probeMcpServer({ name, definition });
+      await client.upsertMcpServer({ name, definition });
+      await reloadAfterMcpChange(
+        probed.authorization === "required"
+          ? `MCP server ${name} added · authorize it in your browser when prompted`
+          : `MCP server ${name} added · ${probed.tools.length} tool${probed.tools.length === 1 ? "" : "s"}`,
+      );
+    } finally {
+      setMcpBusy(false);
+    }
   };
 
   const importMcpServers = async (
     servers: readonly { readonly name: string; readonly definition: McpServerDefinition }[],
   ): Promise<void> => {
     if (client === undefined) throw new Error("The daemon connection is unavailable");
+    setMcpBusy(true);
     setMcpError(undefined);
-    let tools = 0;
-    const needsAuthorization: string[] = [];
-    for (const server of servers) {
-      try {
-        const probed = await client.probeMcpServer(server);
-        tools += probed.tools.length;
-        if (probed.authorization === "required") needsAuthorization.push(server.name);
-      } catch (cause) {
-        throw new Error(`${server.name}: ${cause instanceof Error ? cause.message : "connection failed"}`);
+    try {
+      let tools = 0;
+      const needsAuthorization: string[] = [];
+      for (const server of servers) {
+        try {
+          const probed = await client.probeMcpServer(server);
+          tools += probed.tools.length;
+          if (probed.authorization === "required") needsAuthorization.push(server.name);
+        } catch (cause) {
+          throw new Error(`${server.name}: ${cause instanceof Error ? cause.message : "connection failed"}`);
+        }
       }
+      await client.batchUpsertMcpServers({ servers });
+      const subject =
+        servers.length === 1 ? `MCP server ${servers[0]?.name}` : `${servers.length} MCP servers`;
+      await reloadAfterMcpChange(
+        needsAuthorization.length > 0
+          ? `${subject} added · ${needsAuthorization.join(", ")}: authorize in your browser when prompted`
+          : `${subject} added · ${tools} tool${tools === 1 ? "" : "s"}`,
+      );
+    } finally {
+      setMcpBusy(false);
     }
-    for (const server of servers) await client.upsertMcpServer(server);
-    const subject = servers.length === 1 ? `MCP server ${servers[0]?.name}` : `${servers.length} MCP servers`;
-    await reloadAfterMcpChange(
-      needsAuthorization.length > 0
-        ? `${subject} added · ${needsAuthorization.join(", ")}: authorize in your browser when prompted`
-        : `${subject} added · ${tools} tool${tools === 1 ? "" : "s"}`,
-    );
   };
 
   const mutateMcpServer = async (notice: string, action: () => Promise<unknown>): Promise<void> => {

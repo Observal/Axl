@@ -604,8 +604,12 @@ export class ConversationProjector {
         this.updateOperation(event.operationId, "running");
         break;
       case "compaction.failed":
-        this.updateOperation(event.operationId, "failed");
-        this.clearActivity(event.operationId);
+        if (event.payload.willRetry || event.payload.reason !== "manual") {
+          this.updateOperation(event.operationId, "running");
+        } else {
+          this.updateOperation(event.operationId, "failed");
+          this.clearActivity(event.operationId);
+        }
         break;
       case "context.compacted":
         this.usage = addUsage(this.usage, event.payload.usage);

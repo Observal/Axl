@@ -58,6 +58,22 @@ Follow [details](references/details.md).
   assert.match(skill.instructions, /Release check/);
 });
 
+test("frontmatter discovery tolerates a UTF-8 character split at the probe boundary", async (context) => {
+  const prefix = "---\nname: boundary\ndescription: boundary\n---\n";
+  const source = `${prefix}${"a".repeat(65_535 - Buffer.byteLength(prefix))}😀\n`;
+  const directory = await fixture("boundary", source);
+  context.after(() => rm(join(directory, ".."), { recursive: true, force: true }));
+  assert.equal(
+    (
+      await discoverSkills({
+        cwd: join(directory, ".."),
+        globalDirectories: [join(directory, "..")],
+      })
+    )[0]?.record.name,
+    "boundary",
+  );
+});
+
 test("rejects invalid names and directory mismatches", async (context) => {
   const directory = await fixture("wrong-directory", "---\nname: Bad_Name\ndescription: no\n---\n");
   context.after(() => rm(join(directory, ".."), { recursive: true, force: true }));

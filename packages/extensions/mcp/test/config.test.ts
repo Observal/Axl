@@ -67,7 +67,15 @@ test("configuration store atomically adds and removes private global servers", a
   assert.deepEqual(JSON.parse(await readFile(join(root, "mcp.json"), "utf8")), {
     mcpServers: { context7: { url: "https://mcp.context7.com/mcp" } },
   });
-  assert.equal((await store.remove("context7")).servers.length, 0);
+  const batch = await store.upsertMany([
+    { name: "docs", definition: { url: "https://docs.example.com/mcp" } },
+    { name: "local", definition: { command: "example-mcp" } },
+  ]);
+  assert.deepEqual(
+    batch.servers.map((server) => server.name),
+    ["context7", "docs", "local"],
+  );
+  assert.equal((await store.remove("context7")).servers.length, 2);
 
   await rm(join(root, "mcp.json"));
   await writeFile(join(root, "target.json"), '{"mcpServers":{}}');

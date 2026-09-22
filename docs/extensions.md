@@ -82,7 +82,7 @@ The default export may be `async`. Registration is only allowed while the factor
 : Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal)` runs. Execution returns `{ content: [{ type: "text", text }], isError? }`.
 
 `on("tool.call", handler)`
-: Runs before every registered tool executes. Return `{ block: true, reason }` to stop the call. Return nothing to allow it. A thrown error also blocks the call. The first blocking decision wins. The handler receives a copy of the input and cannot rewrite it.
+: Runs before every canonical tool call, including built-in tools such as `bash` and extension tools. Return `{ block: true, reason }` to stop the call. Return nothing to allow it. A thrown error also blocks the call. The first blocking decision wins. The handler receives a copy of the input and cannot rewrite it.
 
 `on("command", handler)`
 : Runs before every built-in command. Return nothing to run it unchanged, `{ args }` to run it with replaced inputs, or `{ block: true, reason }` to refuse it. A thrown error refuses it. Replacements chain in load order; the first refusal wins. Refused commands fail with the `command_blocked` error and the reason, whoever triggered them: a client, the model, or the daemon itself. The daemon revalidates replaced inputs and refuses invalid ones.

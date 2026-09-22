@@ -25,12 +25,14 @@ import type {
 } from "./events.ts";
 import { parseBlobReference, parseEvent, parseUserContent } from "./events.ts";
 import {
+  type McpConfigBatchParams,
   type McpConfigListResult,
   type McpConfigMutationResult,
   type McpConfigProbeParams,
   type McpConfigProbeResult,
   type McpConfigRemoveParams,
   type McpConfigUpsertParams,
+  parseMcpConfigBatchParams,
   parseMcpConfigListResult,
   parseMcpConfigMutationResult,
   parseMcpConfigProbeResult,
@@ -688,6 +690,7 @@ export const WIRE_CAPABILITIES = [
   "provider.auth.logout",
   "mcp.config.list",
   "mcp.config.upsert",
+  "mcp.config.batch",
   "mcp.config.remove",
   "mcp.config.probe",
 ] as const satisfies readonly CapabilityId[];
@@ -808,6 +811,10 @@ export interface RpcMethodMap {
   };
   readonly "mcp.config.upsert": {
     readonly params: McpConfigUpsertParams;
+    readonly result: McpConfigMutationResult;
+  };
+  readonly "mcp.config.batch": {
+    readonly params: McpConfigBatchParams;
     readonly result: McpConfigMutationResult;
   };
   readonly "mcp.config.remove": {
@@ -1608,11 +1615,12 @@ export function parseSessionConfiguration(value: unknown, path: string): Session
     configured.thinkingLevel === undefined &&
     configured.webFetch === undefined &&
     configured.webSearch === undefined &&
+    configured.userQuestions === undefined &&
     profile === undefined
   ) {
     throw new ProtocolValidationError(
       path,
-      "must include providerId, modelId, thinkingLevel, requestSettings, webFetch, webSearch, or profile",
+      "must include providerId, modelId, thinkingLevel, requestSettings, webFetch, webSearch, userQuestions, or profile",
     );
   }
   return { ...configured, ...(profile === undefined ? {} : { profile }) };
@@ -1739,6 +1747,9 @@ export function parseWireRequest(value: unknown): WireRequest {
         definition: parseMcpServerDefinition(params.definition, "request.params.definition"),
       },
     };
+  }
+  if (method === "mcp.config.batch") {
+    return { ...base, method, params: parseMcpConfigBatchParams(params) };
   }
   if (method === "mcp.config.remove") {
     exact(params, "request.params", ["name"]);
@@ -2641,7 +2652,11 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseProviderAuthenticationStatus(value, path);
   } else if (method === "mcp.config.list") {
     parsed = parseMcpConfigListResult(value);
-  } else if (method === "mcp.config.upsert" || method === "mcp.config.remove") {
+  } else if (
+    method === "mcp.config.upsert" ||
+    method === "mcp.config.batch" ||
+    method === "mcp.config.remove"
+  ) {
     parsed = parseMcpConfigMutationResult(value);
   } else if (method === "mcp.config.probe") {
     parsed = parseMcpConfigProbeResult(value);
@@ -3050,6 +3065,7 @@ export const RPC_METHODS = [
   "provider.auth.logout",
   "mcp.config.list",
   "mcp.config.upsert",
+  "mcp.config.batch",
   "mcp.config.remove",
   "mcp.config.probe",
   "session.create",
@@ -3175,6 +3191,7 @@ export const RPC_METHOD_ERROR_CODES = {
   ],
   "mcp.config.list": [],
   "mcp.config.upsert": [],
+  "mcp.config.batch": [],
   "mcp.config.remove": [],
   "mcp.config.probe": ["mcp_probe_failed"],
   "session.create": [

@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
+  McpConfigBatchParams,
   McpConfigListResult,
   McpConfigMutationResult,
   McpConfigProbeParams,
@@ -16,6 +17,7 @@ import { DaemonError } from "./session-manager.ts";
 export interface McpConfigurationService {
   list(): Promise<McpConfigListResult>;
   upsert(params: McpConfigUpsertParams): Promise<McpConfigMutationResult>;
+  batch(params: McpConfigBatchParams): Promise<McpConfigMutationResult>;
   remove(params: McpConfigRemoveParams): Promise<McpConfigMutationResult>;
   /** Connects to a definition and lists its tools without persisting anything. */
   probe(params: McpConfigProbeParams, signal?: AbortSignal): Promise<McpConfigProbeResult>;

@@ -65,6 +65,10 @@ export interface McpConfigRemoveParams {
   readonly name: string;
 }
 
+export interface McpConfigBatchParams {
+  readonly servers: readonly McpConfigUpsertParams[];
+}
+
 export interface McpConfigProbeParams {
   readonly name: string;
   readonly definition: McpServerDefinition;
@@ -231,6 +235,31 @@ export function parseMcpServerName(value: unknown, path: string): string {
     throw new ProtocolValidationError(path, "must be a valid MCP server name");
   }
   return value;
+}
+
+export function parseMcpConfigBatchParams(value: unknown): McpConfigBatchParams {
+  const input = object(value, "request.params");
+  exact(input, "request.params", ["servers"]);
+  if (!Array.isArray(input.servers) || input.servers.length > MCP_CONFIG_LIMITS.servers) {
+    throw new ProtocolValidationError(
+      "request.params.servers",
+      `must be an array of at most ${MCP_CONFIG_LIMITS.servers} servers`,
+    );
+  }
+  const names = new Set<string>();
+  const servers = input.servers.map((value, index) => {
+    const path = `request.params.servers[${index}]`;
+    const server = object(value, path);
+    exact(server, path, ["name", "definition"]);
+    const name = parseMcpServerName(server.name, `${path}.name`);
+    if (names.has(name)) throw new ProtocolValidationError(`${path}.name`, "must be unique");
+    names.add(name);
+    return {
+      name,
+      definition: parseMcpServerDefinition(server.definition, `${path}.definition`),
+    };
+  });
+  return { servers };
 }
 
 function parseToolSummaries(value: unknown, path: string): readonly McpServerToolSummary[] {

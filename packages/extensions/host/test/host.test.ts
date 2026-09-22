@@ -133,6 +133,24 @@ export default function (axl: DaemonExtensionApi): void {
   });
 });
 
+test("schema identifiers are isolated across extensions and reloads", async (context) => {
+  const dir = await directory(context);
+  for (const name of ["first", "second"]) {
+    await writeFile(
+      join(dir, `${name}.js`),
+      `export default (axl) => { axl.registerTool({ name: "${name}", description: "${name}", inputSchema: { $id: "shared", type: "object" }, execute: () => ({ content: [] }) }); };\n`,
+    );
+  }
+  for (let loadIndex = 0; loadIndex < 2; loadIndex += 1) {
+    const loaded = await load(dir, new ToolRegistry());
+    assert.deepEqual(
+      loaded.extensions.map((extension) => extension.id),
+      ["first", "second"],
+    );
+    await loaded.host.dispose();
+  }
+});
+
 test("reload imports changed extension source instead of the cached module", async (context) => {
   const dir = await directory(context);
   const path = join(dir, "version.js");

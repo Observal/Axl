@@ -338,6 +338,31 @@ test("replaces activity by operation and clears it on canonical completion", () 
   assert.equal(projector.state.activity, undefined);
 });
 
+test("keeps activity live after a retryable automatic compaction failure", () => {
+  const projector = new ConversationProjector(sessionId);
+  const operationId = parseOperationId("00000000-0000-4000-8000-000000000101");
+  projector.applyActivity({ operationId, sequence: 1, type: "text_delta", text: "before" });
+  projector.applyEvent(
+    event(
+      "compaction.failed",
+      {
+        reason: "overflow",
+        code: "summarization_failed",
+        message: "retrying",
+        willRetry: true,
+      },
+      null,
+      operationId,
+    ),
+  );
+  projector.applyActivity({ operationId, sequence: 2, type: "text_delta", text: " after" });
+  assert.equal(projector.state.activity?.text, "before after");
+  assert.equal(
+    projector.state.operations.find((operation) => operation.operationId === operationId)?.status,
+    "running",
+  );
+});
+
 test("derives canonical queue lifecycle state", () => {
   const projector = new ConversationProjector(sessionId);
   const operationId = parseOperationId("00000000-0000-4000-8000-000000000077");

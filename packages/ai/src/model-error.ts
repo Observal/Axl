@@ -15,7 +15,6 @@ export function isContextLimitError(code: string, message: string, status?: numb
     "prompt too long",
     "input is too long",
     "too many input tokens",
-    "maximum number of tokens",
   ].some((marker) => value.includes(marker));
 }
 

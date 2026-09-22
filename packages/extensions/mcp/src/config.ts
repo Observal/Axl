@@ -445,12 +445,24 @@ export class McpConfigStore {
   }
 
   upsert(name: string, definition: McpServerDefinition): Promise<McpConfigMutationResult> {
+    return this.upsertMany([{ name, definition }]);
+  }
+
+  upsertMany(
+    servers: readonly { readonly name: string; readonly definition: McpServerDefinition }[],
+  ): Promise<McpConfigMutationResult> {
     return this.mutate(async (configured) => {
-      parseMcpServerName(name, "name");
-      const parsed = parseMcpServerDefinition(definition, "definition");
-      serverConfig(parsed, `mcpServers.${name}`, this.cwd);
-      const changed = JSON.stringify(configured[name]) !== JSON.stringify(parsed);
-      configured[name] = parsed;
+      const parsed = servers.map(({ name, definition }) => {
+        parseMcpServerName(name, "name");
+        const value = parseMcpServerDefinition(definition, "definition");
+        serverConfig(value, `mcpServers.${name}`, this.cwd);
+        return { name, definition: value };
+      });
+      let changed = false;
+      for (const server of parsed) {
+        changed ||= JSON.stringify(configured[server.name]) !== JSON.stringify(server.definition);
+        configured[server.name] = server.definition;
+      }
       return changed;
     });
   }

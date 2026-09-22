@@ -275,6 +275,13 @@ export class AxlClient {
     return this.request("mcp.config.upsert", params, options);
   }
 
+  batchUpsertMcpServers(
+    params: RpcParams<"mcp.config.batch">,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"mcp.config.batch">> {
+    return this.request("mcp.config.batch", params, options);
+  }
+
   removeMcpServer(
     params: RpcParams<"mcp.config.remove">,
     options: Omit<RequestOptions, "idempotencyKey"> = {},

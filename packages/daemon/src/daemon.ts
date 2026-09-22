@@ -808,6 +808,7 @@ export class AxlDaemon {
         request.method === "provider.auth.status" ||
         request.method === "provider.auth.login" ||
         request.method === "provider.auth.logout" ||
+        request.method === "mcp.config.probe" ||
         request.method === "session.history" ||
         request.method === "session.workspace.list" ||
         request.method === "session.workspace.read" ||
@@ -1048,6 +1049,8 @@ export class AxlDaemon {
         return this.mcpConfigurationService().list();
       case "mcp.config.upsert":
         return this.mcpConfigurationService().upsert(request.params);
+      case "mcp.config.batch":
+        return this.mcpConfigurationService().batch(request.params);
       case "mcp.config.remove":
         return this.mcpConfigurationService().remove(request.params);
       case "mcp.config.probe":

@@ -191,7 +191,17 @@ function parseFrontmatter(source: string, skillPath: string): SkillFrontmatter {
 async function readFrontmatter(handle: FileHandle, path: string): Promise<SkillFrontmatter> {
   const buffer = Buffer.alloc(MAX_FRONTMATTER_BYTES);
   const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-  return parseFrontmatter(decodeUtf8(buffer.subarray(0, bytesRead), path), path);
+  const bytes = buffer.subarray(0, bytesRead);
+  if (bytes.includes(0)) throw new SkillValidationError(path, "must be text, not binary data");
+  try {
+    return parseFrontmatter(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream: true }),
+      path,
+    );
+  } catch (cause) {
+    if (cause instanceof SkillValidationError) throw cause;
+    throw new SkillValidationError(path, `must be valid UTF-8: ${String(cause)}`);
+  }
 }
 
 async function validateOptionalDirectories(directory: string): Promise<void> {

@@ -80,6 +80,7 @@ import {
   commandCatalog,
   DaemonError,
   installDaemonCommandCapabilities,
+  type McpConfigurationService,
   normalizeDaemonRpcErrorCode,
 } from "../src/index.ts";
 import { decodeGit, GitExecutionError, runGit } from "../src/workspace-git.ts";
@@ -163,6 +164,7 @@ async function startDaemon(
     readonly modelContextWindow?: number;
     readonly tools?: (sessionId: SessionId, dataDirectory: string) => ToolRegistry;
     readonly extensionHost?: ExtensionHost;
+    readonly mcpConfiguration?: McpConfigurationService;
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
@@ -622,6 +624,46 @@ test("cancels attachment-owned read requests without cancelling session operatio
   assert.equal(
     (await client.request("session.interrupt", { sessionId: created.sessionId })).interrupted,
     false,
+  );
+});
+
+test("cancels an in-flight MCP probe", async (context) => {
+  let started!: () => void;
+  const probeStarted = new Promise<void>((resolvePromise) => {
+    started = resolvePromise;
+  });
+  const empty = { path: "/tmp/mcp.json", servers: [], changed: false } as const;
+  const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
+    mcpConfiguration: {
+      list: async () => empty,
+      upsert: async () => empty,
+      batch: async () => empty,
+      remove: async () => empty,
+      probe: async (_params, signal) => {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      },
+    },
+  });
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const controller = new AbortController();
+  const pending = client.probeMcpServer(
+    { name: "docs", definition: { url: "https://mcp.example.com/mcp" } },
+    { signal: controller.signal },
+  );
+  await probeStarted;
+  controller.abort();
+  await assert.rejects(
+    pending,
+    (error) => error instanceof AxlClientError && error.code === "cancelled",
   );
 });
 
@@ -4934,6 +4976,7 @@ test("extensions replace or refuse built-in commands through command_blocked", a
         seen.push(`${command.source}:${command.name}`);
         if (command.name === "rename") {
           if (command.args.title === "secret") return { block: true, reason: "no secrets" };
+          if (command.args.title === "invalid") return { args: { title: "" } };
           return { args: { title: `${String(command.args.title)} (reviewed)` } };
         }
         if (command.name === "thinking") return { args: { thinkingLevel: "bogus" } };
@@ -4962,6 +5005,17 @@ test("extensions replace or refuse built-in commands through command_blocked", a
     { idempotencyKey: "00000000-0000-4000-8000-000000000302" },
   );
   assert.equal(renamed.title, "Plan (reviewed)");
+  await assert.rejects(
+    client.request(
+      "session.rename",
+      { sessionId: created.sessionId, title: "invalid" },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000304" },
+    ),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "command_blocked" &&
+      /invalid/.test(error.message),
+  );
 
   await assert.rejects(
     client.request(
@@ -4974,5 +5028,5 @@ test("extensions replace or refuse built-in commands through command_blocked", a
       error.code === "command_blocked" &&
       /thinkingLevel/.test(error.message),
   );
-  assert.deepEqual(seen, ["client:rename", "client:rename", "client:thinking"]);
+  assert.deepEqual(seen, ["client:rename", "client:rename", "client:rename", "client:thinking"]);
 });

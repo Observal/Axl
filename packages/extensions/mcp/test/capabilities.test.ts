@@ -18,6 +18,7 @@ import {
   McpManager,
   type McpManagerOptions,
   mcpCanonicalToolName,
+  mcpDefinitionFingerprint,
   mcpDiscoveryStateReader,
   McpProbeError,
   type NamedMcpServerConfig,
@@ -126,6 +127,24 @@ test("indexes MCP tools as inactive capabilities and reuses a private cache", as
     cachePath,
   });
   assert.equal(cached.service.records.length, 3);
+
+  const explicitDefaults = {
+    ...config,
+    definition: { ...config.definition, enabled: true, requestTimeoutMs: 5_000 },
+  };
+  await loadMcpCapabilities({
+    servers: [explicitDefaults],
+    manager: cachedManager,
+    tools: new ToolRegistry(),
+    cachePath,
+  });
+  const refreshedCache = JSON.parse(await readFile(cachePath, "utf8")) as {
+    servers: { definitionFingerprint: string }[];
+  };
+  assert.equal(
+    refreshedCache.servers[0]?.definitionFingerprint,
+    mcpDefinitionFingerprint(explicitDefaults.definition),
+  );
 });
 
 const passthroughStdio: McpManagerOptions["wrapStdio"] = (process) => ({

@@ -1215,7 +1215,17 @@ export class SessionManager {
     if (typeof decided.title !== "string") {
       throw new DaemonError("command_blocked", "Extension returned a non-string rename title");
     }
-    const event = await managed.session.rename(operationId, decided.title);
+    let event: CanonicalEvent<"session.renamed">;
+    try {
+      event = await managed.session.rename(operationId, decided.title);
+    } catch (error) {
+      if (error instanceof ProtocolValidationError) {
+        throw new DaemonError("command_blocked", `Extension returned invalid ${error.message}`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
     return { title: event.payload.title, eventId: event.id };
   }
 

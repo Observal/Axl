@@ -377,6 +377,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     mcpConfiguration: {
       list: () => mcpConfigurationStore.list(),
       upsert: ({ name, definition }) => mcpConfigurationStore.upsert(name, definition),
+      batch: ({ servers }) => mcpConfigurationStore.upsertMany(servers),
       remove: ({ name }) => mcpConfigurationStore.remove(name),
       probe: probeMcpConfiguration,
     },
@@ -501,65 +502,70 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           },
         });
         const hosts: import("@axl/kernel").ExtensionHost[] = [daemonExtensions.host];
-        const capabilitySources: import("@axl/kernel").CapabilitySource[] = [
-          { records: skillService.records, service: skillService },
-          daemonCapabilities.source,
-          daemonExtensions.source,
-        ];
-        if (await exists(join(axlHome, "mcp.json"))) {
-          const { loadMcpCapabilities, loadMcpConfig, McpManager, updateMcpCapabilityCache } =
-            await import("@axl/extension-mcp");
-          const servers = await loadMcpConfig({ cwd, globalDirectory: axlHome });
-          for (const value of mcpSecretValuesOf(servers)) mcpSecrets.add(value);
-          if (servers.length > 0) {
-            const cachePath = mcpCachePath;
-            const manager = new McpManager({
-              servers,
-              cwd,
-              sessionId,
-              stateDirectory: join(stateDirectory, "mcp"),
-              blobDirectory: join(stateDirectory, "blobs"),
-              model,
-              modelId: active.modelId,
-              secretValues: [...mcpSecrets],
-              onSecrets: (values) => {
-                for (const value of values) mcpSecrets.add(value);
-              },
-              onToolListChanged: (server, discovery) =>
-                updateMcpCapabilityCache({ cachePath, server, discovery }),
-              interact: async (request, signal) => {
-                const response = await interact(request, signal);
-                if (
-                  response.action !== "accept" &&
-                  response.action !== "decline" &&
-                  response.action !== "cancel"
-                ) {
-                  throw new Error(`Unsupported MCP interaction response ${response.action}`);
-                }
-                return {
-                  action: response.action,
-                  ...(response.content ? { content: response.content } : {}),
-                };
-              },
-              wrapStdio: (input) => sandbox.wrapProcess({ ...input, policy }),
-            });
-            const mcp = await loadMcpCapabilities({
-              servers,
-              manager,
-              tools,
-              cachePath,
-            });
-            grantedAuthorities.add(mcp.authority);
-            capabilitySources.push({ records: mcp.service.records, service: mcp.service });
-            hosts.push(manager);
+        try {
+          const capabilitySources: import("@axl/kernel").CapabilitySource[] = [
+            { records: skillService.records, service: skillService },
+            daemonCapabilities.source,
+            daemonExtensions.source,
+          ];
+          if (await exists(join(axlHome, "mcp.json"))) {
+            const { loadMcpCapabilities, loadMcpConfig, McpManager, updateMcpCapabilityCache } =
+              await import("@axl/extension-mcp");
+            const servers = await loadMcpConfig({ cwd, globalDirectory: axlHome });
+            for (const value of mcpSecretValuesOf(servers)) mcpSecrets.add(value);
+            if (servers.length > 0) {
+              const cachePath = mcpCachePath;
+              const manager = new McpManager({
+                servers,
+                cwd,
+                sessionId,
+                stateDirectory: join(stateDirectory, "mcp"),
+                blobDirectory: join(stateDirectory, "blobs"),
+                model,
+                modelId: active.modelId,
+                secretValues: [...mcpSecrets],
+                onSecrets: (values) => {
+                  for (const value of values) mcpSecrets.add(value);
+                },
+                onToolListChanged: (server, discovery) =>
+                  updateMcpCapabilityCache({ cachePath, server, discovery }),
+                interact: async (request, signal) => {
+                  const response = await interact(request, signal);
+                  if (
+                    response.action !== "accept" &&
+                    response.action !== "decline" &&
+                    response.action !== "cancel"
+                  ) {
+                    throw new Error(`Unsupported MCP interaction response ${response.action}`);
+                  }
+                  return {
+                    action: response.action,
+                    ...(response.content ? { content: response.content } : {}),
+                  };
+                },
+                wrapStdio: (input) => sandbox.wrapProcess({ ...input, policy }),
+              });
+              const mcp = await loadMcpCapabilities({
+                servers,
+                manager,
+                tools,
+                cachePath,
+              });
+              grantedAuthorities.add(mcp.authority);
+              capabilitySources.push({ records: mcp.service.records, service: mcp.service });
+              hosts.push(manager);
+            }
           }
+          extensionHost = kernel.composeExtensionHosts(hosts);
+          tools.register(
+            kernel.makeCapabilitySearchTool(
+              new kernel.CompositeCapabilityService(capabilitySources, grantedAuthorities),
+            ),
+          );
+        } catch (error) {
+          await Promise.allSettled([...hosts].reverse().map((host) => host.dispose()));
+          throw error;
         }
-        extensionHost = kernel.composeExtensionHosts(hosts);
-        tools.register(
-          kernel.makeCapabilitySearchTool(
-            new kernel.CompositeCapabilityService(capabilitySources, grantedAuthorities),
-          ),
-        );
       }
 
       const prompt = kernel.buildStablePrompt({

@@ -7,4 +7,4 @@
 export const EVENT_FORMAT_VERSION = 1 as const;
 
 /** Version negotiated by local daemon clients. */
-export const WIRE_PROTOCOL_VERSION = 25 as const;
+export const WIRE_PROTOCOL_VERSION = 26 as const;

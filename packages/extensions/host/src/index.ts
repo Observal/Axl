@@ -41,7 +41,6 @@ const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
 const ENTRY_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
 const MAX_TEXT_BYTES = 1_000_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
-const JSON_SCHEMA_VALIDATOR = new Ajv({ allErrors: true, strict: false });
 
 export class DaemonExtensionError extends ExtensionHostError {
   readonly path: string;
@@ -264,9 +263,10 @@ function validateToolResult(value: unknown, toolName: string): DaemonToolResult 
 }
 
 function kernelTool(definition: DaemonToolDefinition, path: string): KernelTool {
+  const validator = new Ajv({ allErrors: true, strict: false });
   let validateInput: ValidateFunction;
   try {
-    validateInput = JSON_SCHEMA_VALIDATOR.compile(definition.inputSchema);
+    validateInput = validator.compile(definition.inputSchema);
   } catch (cause) {
     throw new DaemonExtensionError(
       path,
@@ -281,7 +281,7 @@ function kernelTool(definition: DaemonToolDefinition, path: string): KernelTool 
     async execute(input, signal) {
       if (!validateInput(input)) {
         throw new ToolInputError(
-          `${definition.name}: input does not match schema: ${JSON_SCHEMA_VALIDATOR.errorsText(validateInput.errors, { separator: "; " })}`,
+          `${definition.name}: input does not match schema: ${validator.errorsText(validateInput.errors, { separator: "; " })}`,
         );
       }
       const result = validateToolResult(

@@ -277,6 +277,12 @@ const params = {
       headers: { Authorization: "Bearer ${DOCS_TOKEN}" },
     },
   },
+  "mcp.config.batch": {
+    servers: [
+      { name: "docs", definition: { url: "https://mcp.example.com/mcp" } },
+      { name: "local", definition: { command: "example-mcp-server" } },
+    ],
+  },
   "mcp.config.remove": { name: "docs" },
   "mcp.config.probe": {
     name: "docs",
@@ -486,6 +492,24 @@ const results = {
           url: "https://mcp.example.com/mcp",
           headers: { Authorization: "DOCS_TOKEN" },
         },
+        status: "pending",
+        tools: [],
+      },
+    ],
+    changed: true,
+  },
+  "mcp.config.batch": {
+    path: "/home/user/.axl/mcp.json",
+    servers: [
+      {
+        name: "docs",
+        definition: { url: "https://mcp.example.com/mcp" },
+        status: "pending",
+        tools: [],
+      },
+      {
+        name: "local",
+        definition: { command: "example-mcp-server" },
         status: "pending",
         tools: [],
       },
