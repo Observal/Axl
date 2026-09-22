@@ -59,6 +59,33 @@ test("discovers files and index directories in name order and skips other entrie
   );
 });
 
+test("disabled extensions contribute nothing and are not imported", async (context) => {
+  const dir = await directory(context);
+  await writeFile(join(dir, "disabled.js"), `throw new Error("must not import");\n`);
+  await writeFile(
+    join(dir, "enabled.js"),
+    `export default (axl) => { axl.registerTool({ name: "active", description: "active", inputSchema: { type: "object" }, execute: () => ({ content: [] }) }); };\n`,
+  );
+  const tools = new ToolRegistry();
+  const loaded = await loadDaemonExtensions({
+    directory: dir,
+    cwd: "/workspace",
+    tools,
+    grantedAuthorities: new Set([DAEMON_EXTENSION_AUTHORITY]),
+    disabledExtensionIds: new Set(["disabled"]),
+    onFailure: () => undefined,
+  });
+  assert.deepEqual(
+    loaded.extensions.map((extension) => extension.id),
+    ["enabled"],
+  );
+  assert.deepEqual(
+    loaded.source.records.map((record) => record.identity),
+    ["extension:enabled/active"],
+  );
+  await loaded.host.dispose();
+});
+
 test("registers TypeScript extension tools into the capability index and runs them", async (context) => {
   const dir = await directory(context);
   await writeFile(

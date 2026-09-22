@@ -4858,6 +4858,72 @@ test("reload rebuilds the runtime as a logged boundary with live subscriptions",
   assert.equal(sent.stopReason, "stop");
 });
 
+test("failed runtime activation preserves the previous session without partial boundary events", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-atomic-reload-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const lifecycle: string[] = [];
+  let runtimeGeneration = 0;
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: () => {
+      runtimeGeneration += 1;
+      const generation = runtimeGeneration;
+      return {
+        model: replyPort(),
+        tools: new ToolRegistry(),
+        extensionHost: {
+          activate: () => {
+            lifecycle.push(`activate:${generation}`);
+            if (generation === 2) {
+              throw new ExtensionHostError("replacement activation failed", {
+                extensionId: "broken",
+                phase: "activate",
+              });
+            }
+          },
+          dispose: () => {
+            lifecycle.push(`dispose:${generation}`);
+          },
+        },
+      };
+    },
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: directory });
+  const before = await subscribeAll(client, created.sessionId);
+
+  await assert.rejects(
+    client.request(
+      "session.reload",
+      { sessionId: created.sessionId },
+      { idempotencyKey: "00000000-0000-4000-8000-000000000107" },
+    ),
+    (error) =>
+      error instanceof AxlClientError &&
+      error.code === "extension_failed" &&
+      /replacement activation failed/.test(error.message),
+  );
+
+  const after = await subscribeAll(client, created.sessionId);
+  assert.deepEqual(
+    after.events.map((event) => event.id),
+    before.events.map((event) => event.id),
+  );
+  assert.deepEqual(lifecycle, ["activate:1", "activate:2", "dispose:2"]);
+  const sent = await client.request("session.send", {
+    sessionId: created.sessionId,
+    delivery: "prompt",
+    content: [{ type: "text", text: "still active" }],
+  });
+  assert.equal(sent.stopReason, "stop");
+  assert.equal(lifecycle.includes("dispose:1"), false);
+});
+
 test("extensions replace or refuse built-in commands through command_blocked", async (context) => {
   const seen: string[] = [];
   const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {

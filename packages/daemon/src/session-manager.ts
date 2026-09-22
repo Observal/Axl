@@ -2787,8 +2787,8 @@ export class SessionManager {
         selection,
         operationId,
       );
-      await previous.dispose();
       managed.session = next;
+      await previous.dispose();
     })();
     managed.rebuilding = rebuilding;
     this.options.onSessionMetadataChange?.();

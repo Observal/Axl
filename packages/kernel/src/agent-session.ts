@@ -362,6 +362,7 @@ export class AgentSession {
     const tip = opened.events.at(-1)?.id;
     const lineage = tip === undefined ? [] : tree.lineage(tip);
     const session = new AgentSession(opened.log, lineage, options);
+    await session.host.activate();
     for (const compaction of unfinishedCompactions(lineage)) {
       await session.append(compaction.operationId, "compaction.failed", {
         reason: compaction.reason,
@@ -449,7 +450,6 @@ export class AgentSession {
     if (options.configDialect !== undefined) {
       await session.append(options.boundaryOperationId, "config.dialect", options.configDialect);
     }
-    await session.host.activate();
     return session;
   }
 

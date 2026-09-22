@@ -24,6 +24,7 @@ import {
   AgentSession,
   type CompactionSettings,
   CompactionUnavailableError,
+  JsonlEventLog,
   type KernelTool,
   type ModelPort,
   type ModelRetryOptions,
@@ -1329,12 +1330,13 @@ test("the extension host seam activates and disposes with the session", async (c
   assert.deepEqual(lifecycle, ["activate", "dispose"]);
 });
 
-test("a failed session open disposes its extension host", async (context) => {
+test("a failed session open disposes its extension host without appending events", async (context) => {
   const lifecycle: string[] = [];
   const directory = await mkdtemp(join(tmpdir(), "axl-agent-session-"));
+  const path = join(directory, "session.jsonl");
   context.after(() => rm(directory, { recursive: true, force: true }));
   await assert.rejects(
-    AgentSession.open(join(directory, "session.jsonl"), sessionId, {
+    AgentSession.open(path, sessionId, {
       model: makePort([]),
       tools: new ToolRegistry(),
       cwd: "/workspace",
@@ -1351,6 +1353,7 @@ test("a failed session open disposes its extension host", async (context) => {
     /activation failed/,
   );
   assert.deepEqual(lifecycle, ["activate", "dispose"]);
+  assert.deepEqual((await JsonlEventLog.open(path, sessionId)).events, []);
 });
 
 test("records effective request configuration before each model dispatch", async (context) => {

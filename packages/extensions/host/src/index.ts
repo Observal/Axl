@@ -84,6 +84,8 @@ export interface LoadDaemonExtensionsOptions {
   readonly cwd: string;
   readonly tools: ToolRegistry;
   readonly grantedAuthorities: ReadonlySet<string>;
+  /** Extension IDs excluded before their modules are imported. */
+  readonly disabledExtensionIds?: ReadonlySet<string>;
   readonly cleanupTimeoutMs?: number;
   /** Receives handler failures that must not interrupt the session. */
   readonly onFailure: (failure: DaemonExtensionFailure) => void;
@@ -318,7 +320,9 @@ export async function loadDaemonExtensions(
       "cleanupTimeoutMs must be a positive integer",
     );
   }
-  const discovered = await discoverDaemonExtensions(options.directory);
+  const discovered = (await discoverDaemonExtensions(options.directory)).filter(
+    (extension) => !options.disabledExtensionIds?.has(extension.id),
+  );
   const states: LoadedExtensionState[] = [];
   const records: CapabilityRecord[] = [];
   const disposeStates = async (selected: readonly LoadedExtensionState[]) => {

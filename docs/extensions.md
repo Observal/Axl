@@ -5,6 +5,8 @@
 
 A daemon extension is a TypeScript or JavaScript file you put in `~/.axl/extensions/`. The daemon loads it at session start and runs it inside its own process with the daemon's permissions. Placing a file there is the trust decision. Axl does not sandbox extension code.
 
+Full Pi-level coverage is tracked in the [extension parity matrix](architecture/extension-parity.md).
+
 Extensions can:
 
 - add tools the model can discover and activate through `capability_search`;
@@ -109,6 +111,7 @@ The default export may be `async`. Registration is only allowed while the factor
 
 - A missing `~/.axl/extensions/` directory loads nothing.
 - A file without a default function export, an invalid tool definition, a duplicate name, or a factory that throws fails session start with the file path and reason. No extension is skipped silently.
+- Reload activates the complete replacement runtime before swapping it in. Failed activation disposes the replacement, leaves the previous runtime active, and appends no partial reload boundary events.
 - Blocked tool calls appear in the session log as an error `tool.result` naming the extension.
 - Refused commands return the `command_blocked` RPC error to the caller. A refused automatic compaction fails the turn that needed it.
 
