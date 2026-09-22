@@ -1329,6 +1329,30 @@ test("the extension host seam activates and disposes with the session", async (c
   assert.deepEqual(lifecycle, ["activate", "dispose"]);
 });
 
+test("a failed session open disposes its extension host", async (context) => {
+  const lifecycle: string[] = [];
+  const directory = await mkdtemp(join(tmpdir(), "axl-agent-session-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  await assert.rejects(
+    AgentSession.open(join(directory, "session.jsonl"), sessionId, {
+      model: makePort([]),
+      tools: new ToolRegistry(),
+      cwd: "/workspace",
+      extensionHost: {
+        activate: () => {
+          lifecycle.push("activate");
+          throw new Error("activation failed");
+        },
+        dispose: () => {
+          lifecycle.push("dispose");
+        },
+      },
+    }),
+    /activation failed/,
+  );
+  assert.deepEqual(lifecycle, ["activate", "dispose"]);
+});
+
 test("records effective request configuration before each model dispatch", async (context) => {
   const configurations = [
     {

@@ -118,7 +118,7 @@ Every shipped feature outside the kernel is a native extension that can be enabl
 - A disabled feature contributes no prompt tokens, UI, or background work.
 - The kernel (section 2.3) is not a plugin. DSH allows its model adapter, session log, and agent loop to be replaced, but Axl keeps them fixed for these reasons:
   - **The guarantees live there.** One fixed event log supports log authority, append-only cache behavior, tool call/result integrity, and deterministic replay. A replaceable log would make those guarantees installation-specific.
-  - **Security sits below extensions.** Permissions and sandbox enforcement cannot be plugins because plugins must not replace their own security boundary.
+  - **Security for model-selected built-ins sits below extensions.** Permissions and sandbox enforcement cannot be plugins because plugins must not replace those boundaries. Installed in-process extension code is trusted host code and is not confined by the model tool sandbox.
   - **Everything meets at the kernel.** Clients, SDKs, the viewer, insights, imports, and compaction depend on one event format and one loop.
   - **Axl is a product, not a framework kit.** A replaceable core would burden users with more combinations, harder debugging, and setup choices.
 
@@ -963,7 +963,7 @@ A provider reports which controls from section 10.2 it can enforce and at what s
 
 #### 10.4 Extension trust
 
-Daemon extensions are trusted by placement. Code the user puts in `~/.axl/extensions/` runs inside the daemon process with the daemon's permissions. Axl does not sandbox that code; installing a file there is the trust decision. Extensions can only narrow behavior through the extension seam: they may block tool calls and add tools, and they cannot widen sandbox or policy limits because enforcement sits below the seam (section 2.6).
+Daemon extensions are trusted by placement. Code the user puts in `~/.axl/extensions/` runs inside the daemon process with the daemon's permissions. Axl does not sandbox that code; installing a file there is the trust decision. Extension code can use host filesystem, network, environment, and process authority directly. Sandbox and policy limits continue to govern model-invoked built-in tools and sandboxed MCP processes, not the extension implementation itself.
 
 Project-local extension directories are not loaded until a project trust decision exists. Local MCP servers remain separate processes under the selected sandbox because they are foreign programs, not user-authored extension code.
 
@@ -1591,7 +1591,7 @@ Resolve these before implementation because they affect irreversible boundaries.
 - [x] Define the first local wire protocol version as `1`, with exact-version compatibility before the first stable release.
 - [x] Confirm Apache-2.0 for Axl and establish the attribution process for behavior or fixtures derived from external projects.
 - [x] Record external reference revisions used during implementation.
-- [x] Keep third-party extensions out of the daemon process in v1. Only trusted first-party extensions may run in process.
+- [x] Treat global daemon extensions as trusted by placement and run them in process with daemon authority. Require explicit project trust before loading project-local executable extensions.
 - [x] Keep capability search local and lexical. V1 uses BM25, not embeddings or provider-native tool search.
 - [x] Record TypeScript definitions as the current implementation and defer code generation until a non-TypeScript client creates a concrete need.
 

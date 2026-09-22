@@ -29,6 +29,7 @@ export interface ReleasePackageManifest {
   readonly description: string;
   readonly type: "module";
   readonly bin: Readonly<Record<"axl", string>>;
+  readonly exports: Readonly<Record<"./extension-api", Readonly<Record<"types", string>>>>;
   readonly engines: Readonly<Record<"node", string>>;
   readonly files: readonly string[];
   readonly license: "Apache-2.0";
@@ -70,6 +71,7 @@ export function publicManifest(
     description: String(source.description),
     type: "module",
     bin: { axl: "dist/axl.js" },
+    exports: { "./extension-api": { types: "./dist/extension-api.d.ts" } },
     engines: { node: "^22.19.0 || >=24.0.0" },
     files: ["dist", "LICENSE", "LICENSES", "NOTICE", "README.md"],
     license: "Apache-2.0",
@@ -131,6 +133,10 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
     writeFileSync(executable, bundled);
   }
   chmodSync(executable, 0o755);
+  copyFileSync(
+    join(ROOT, "packages", "extensions", "api", "dist", "index.d.ts"),
+    join(STAGE, "dist", "extension-api.d.ts"),
+  );
   cpSync(join(ROOT, "packages", "web", "dist"), join(STAGE, "dist", "web"), {
     recursive: true,
   });

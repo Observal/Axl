@@ -1,10 +1,13 @@
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { readdir, realpath, stat } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+
+import { Ajv, type ValidateFunction } from "ajv";
 
 import type {
   DaemonCommandHandler,
@@ -21,10 +24,12 @@ import {
   type CommandDecision,
   type CommandInterception,
   type ExtensionHost,
+  ExtensionHostError,
   type KernelTool,
   type ToolCallDecision,
   type ToolCallInterception,
   ToolCapabilityService,
+  ToolInputError,
   type ToolRegistry,
 } from "@axl/kernel";
 import type { CanonicalEvent, CapabilityRecord, JsonObject } from "@axl/protocol";
@@ -35,12 +40,26 @@ const EXTENSION_ID = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
 const ENTRY_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
 const MAX_TEXT_BYTES = 1_000_000;
+const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
+const JSON_SCHEMA_VALIDATOR = new Ajv({ allErrors: true, strict: false });
 
-export class DaemonExtensionError extends Error {
+export class DaemonExtensionError extends ExtensionHostError {
   readonly path: string;
 
-  constructor(path: string, message: string, options?: ErrorOptions) {
-    super(`${path}: ${message}`, options);
+  constructor(
+    path: string,
+    message: string,
+    options?: ErrorOptions & { readonly extensionId?: string; readonly phase?: string },
+  ) {
+    super(
+      `${path}: ${message}`,
+      {
+        path,
+        phase: options?.phase ?? "load",
+        ...(options?.extensionId === undefined ? {} : { extensionId: options.extensionId }),
+      },
+      options,
+    );
     this.name = "DaemonExtensionError";
     this.path = path;
   }
@@ -65,6 +84,7 @@ export interface LoadDaemonExtensionsOptions {
   readonly cwd: string;
   readonly tools: ToolRegistry;
   readonly grantedAuthorities: ReadonlySet<string>;
+  readonly cleanupTimeoutMs?: number;
   /** Receives handler failures that must not interrupt the session. */
   readonly onFailure: (failure: DaemonExtensionFailure) => void;
 }
@@ -156,7 +176,14 @@ export async function discoverDaemonExtensions(
 async function importFactory(path: string): Promise<DaemonExtensionFactory> {
   let module: unknown;
   try {
-    module = await import(pathToFileURL(path).href);
+    const url = pathToFileURL(path);
+    url.searchParams.set(
+      "source",
+      createHash("sha256")
+        .update(await readFile(path))
+        .digest("hex"),
+    );
+    module = await import(url.href);
   } catch (cause) {
     throw new DaemonExtensionError(path, `cannot import extension: ${String(cause)}`, { cause });
   }
@@ -169,6 +196,22 @@ async function importFactory(path: string): Promise<DaemonExtensionFactory> {
 
 function textBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
+}
+
+async function withinCleanupBudget(tasks: readonly Promise<void>[], milliseconds: number) {
+  if (tasks.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Extension cleanup exceeded ${milliseconds}ms`)),
+      milliseconds,
+    );
+  });
+  try {
+    await Promise.race([Promise.all(tasks), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function validateToolDefinition(definition: unknown, path: string): DaemonToolDefinition {
@@ -218,12 +261,27 @@ function validateToolResult(value: unknown, toolName: string): DaemonToolResult 
   return { content, ...(isError === undefined ? {} : { isError }) };
 }
 
-function kernelTool(definition: DaemonToolDefinition): KernelTool {
+function kernelTool(definition: DaemonToolDefinition, path: string): KernelTool {
+  let validateInput: ValidateFunction;
+  try {
+    validateInput = JSON_SCHEMA_VALIDATOR.compile(definition.inputSchema);
+  } catch (cause) {
+    throw new DaemonExtensionError(
+      path,
+      `tool ${definition.name} has invalid inputSchema: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
   return {
     name: definition.name,
     description: definition.description,
     inputSchema: definition.inputSchema as JsonObject,
     async execute(input, signal) {
+      if (!validateInput(input)) {
+        throw new ToolInputError(
+          `${definition.name}: input does not match schema: ${JSON_SCHEMA_VALIDATOR.errorsText(validateInput.errors, { separator: "; " })}`,
+        );
+      }
       const result = validateToolResult(
         await definition.execute(structuredClone(input), signal),
         definition.name,
@@ -239,6 +297,8 @@ interface LoadedExtensionState {
   readonly toolCallHandlers: DaemonToolCallHandler[];
   readonly commandHandlers: DaemonCommandHandler[];
   readonly sessionEventHandlers: DaemonSessionEventHandler[];
+  readonly lifecycle: AbortController;
+  readonly pendingEvents: Set<Promise<void>>;
   readonly disposers: ExtensionDisposer[];
   readonly tools: string[];
 }
@@ -251,15 +311,63 @@ interface LoadedExtensionState {
 export async function loadDaemonExtensions(
   options: LoadDaemonExtensionsOptions,
 ): Promise<LoadedDaemonExtensions> {
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
+  if (!Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs < 1) {
+    throw new DaemonExtensionError(
+      options.directory,
+      "cleanupTimeoutMs must be a positive integer",
+    );
+  }
   const discovered = await discoverDaemonExtensions(options.directory);
   const states: LoadedExtensionState[] = [];
   const records: CapabilityRecord[] = [];
-  const registrations: (() => void)[] = [];
-  const unwind = async () => {
-    for (const unregister of registrations.reverse()) unregister();
-    for (const state of [...states].reverse()) {
-      for (const dispose of state.disposers.reverse()) await dispose();
+  const disposeStates = async (selected: readonly LoadedExtensionState[]) => {
+    const failures: DaemonExtensionFailure[] = [];
+    for (const state of selected) state.lifecycle.abort();
+    for (const state of selected) {
+      try {
+        await withinCleanupBudget([...state.pendingEvents], cleanupTimeoutMs);
+      } catch (cause) {
+        failures.push({
+          extensionId: state.id,
+          event: "dispose",
+          error: cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      }
+      const pending: Promise<void>[] = [];
+      for (const dispose of [...state.disposers].reverse()) {
+        try {
+          const result = dispose();
+          if (result !== undefined) {
+            pending.push(
+              Promise.resolve(result).catch((cause: unknown) => {
+                failures.push({
+                  extensionId: state.id,
+                  event: "dispose",
+                  error: cause instanceof Error ? cause : new Error(String(cause)),
+                });
+              }),
+            );
+          }
+        } catch (cause) {
+          failures.push({
+            extensionId: state.id,
+            event: "dispose",
+            error: cause instanceof Error ? cause : new Error(String(cause)),
+          });
+        }
+      }
+      try {
+        await withinCleanupBudget(pending, cleanupTimeoutMs);
+      } catch (cause) {
+        failures.push({
+          extensionId: state.id,
+          event: "dispose",
+          error: cause instanceof Error ? cause : new Error(String(cause)),
+        });
+      }
     }
+    for (const failure of failures) options.onFailure(failure);
   };
   try {
     for (const extension of discovered) {
@@ -270,9 +378,12 @@ export async function loadDaemonExtensions(
         toolCallHandlers: [],
         commandHandlers: [],
         sessionEventHandlers: [],
+        lifecycle: new AbortController(),
+        pendingEvents: new Set(),
         disposers: [],
         tools: [],
       };
+      states.push(state);
       let loading = true;
       const assertLoading = (operation: string) => {
         if (!loading) {
@@ -293,9 +404,8 @@ export async function loadDaemonExtensions(
           assertLoading("registerTool");
           const valid = validateToolDefinition(definition, extension.path);
           const identity = `extension:${extension.id}/${valid.name}`;
-          const tool = kernelTool(valid);
+          const tool = kernelTool(valid, extension.path);
           const unregister = options.tools.registerCapability(identity, tool);
-          registrations.push(unregister);
           records.push({
             identity,
             kind: "tool",
@@ -359,15 +469,14 @@ export async function loadDaemonExtensions(
         throw new DaemonExtensionError(
           extension.path,
           `extension factory failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-          { cause },
+          { cause, extensionId: state.id, phase: "activate" },
         );
       } finally {
         loading = false;
       }
-      states.push(state);
     }
   } catch (error) {
-    await unwind();
+    await disposeStates([...states].reverse());
     throw error;
   }
 
@@ -381,21 +490,7 @@ export async function loadDaemonExtensions(
     async dispose() {
       if (disposed) return;
       disposed = true;
-      const failures: DaemonExtensionFailure[] = [];
-      for (const state of [...states].reverse()) {
-        for (const dispose of [...state.disposers].reverse()) {
-          try {
-            await dispose();
-          } catch (cause) {
-            failures.push({
-              extensionId: state.id,
-              event: "dispose",
-              error: cause instanceof Error ? cause : new Error(String(cause)),
-            });
-          }
-        }
-      }
-      for (const failure of failures) options.onFailure(failure);
+      await disposeStates([...states].reverse());
     },
     ...(gates.length === 0
       ? {}
@@ -502,6 +597,7 @@ export async function loadDaemonExtensions(
       ? {}
       : {
           observe(event: CanonicalEvent) {
+            if (disposed) return;
             const projected = {
               id: event.id,
               type: event.type,
@@ -517,8 +613,15 @@ export async function loadDaemonExtensions(
                     error: cause instanceof Error ? cause : new Error(String(cause)),
                   });
                 try {
-                  const outcome = handler(projected);
-                  if (outcome instanceof Promise) outcome.catch(report);
+                  const outcome = handler({ ...projected, signal: state.lifecycle.signal });
+                  if (outcome instanceof Promise) {
+                    const task = outcome.then(
+                      () => undefined,
+                      (cause: unknown) => report(cause),
+                    );
+                    state.pendingEvents.add(task);
+                    void task.finally(() => state.pendingEvents.delete(task));
+                  }
                 } catch (cause) {
                   report(cause);
                 }

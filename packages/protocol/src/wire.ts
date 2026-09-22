@@ -1188,6 +1188,7 @@ export const RPC_ERROR_CODES = [
   "provider_configuration_required",
   "mcp_probe_failed",
   "command_blocked",
+  "extension_failed",
 ] as const;
 
 export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number] | (string & {});
@@ -3109,6 +3110,7 @@ export const UNIVERSAL_RPC_ERROR_CODES = [
 ] as const satisfies readonly KnownRpcErrorCode[];
 
 const SESSION_BASE_ERRORS = ["unknown_session", "event_migration_required"] as const;
+const EXTENSION_ERRORS = ["extension_failed"] as const;
 const MUTATION_ERRORS = ["invalid_idempotency_key", "idempotency_conflict"] as const;
 const WORKSPACE_BASE_ERRORS = [
   ...SESSION_BASE_ERRORS,
@@ -3191,6 +3193,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "region_required",
     "region_unsupported",
     "provider_configuration_required",
+    ...EXTENSION_ERRORS,
   ],
   "session.resume": [
     "unknown_session",
@@ -3207,6 +3210,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "region_required",
     "region_unsupported",
     "provider_configuration_required",
+    ...EXTENSION_ERRORS,
   ],
   "session.list": ["invalid_cwd", "unknown_cursor"],
   "session.history": ["unknown_cursor", "snapshot_required", "event_migration_required"],
@@ -3220,6 +3224,7 @@ export const RPC_METHOD_ERROR_CODES = {
     ...MUTATION_ERRORS,
     "content_too_large",
     "command_blocked",
+    ...EXTENSION_ERRORS,
   ],
   "session.clone": [
     ...SESSION_BASE_ERRORS,
@@ -3229,6 +3234,7 @@ export const RPC_METHOD_ERROR_CODES = {
     ...MUTATION_ERRORS,
     "content_too_large",
     "command_blocked",
+    ...EXTENSION_ERRORS,
   ],
   "session.rename": [
     ...SESSION_BASE_ERRORS,
@@ -3337,6 +3343,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "region_unsupported",
     "provider_configuration_required",
     "command_blocked",
+    ...EXTENSION_ERRORS,
   ],
   "session.configure": [
     ...SESSION_BASE_ERRORS,
@@ -3356,6 +3363,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "region_unsupported",
     "provider_configuration_required",
     "command_blocked",
+    ...EXTENSION_ERRORS,
   ],
   "session.interaction.respond": [
     ...SESSION_BASE_ERRORS,

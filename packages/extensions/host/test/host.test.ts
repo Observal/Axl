@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { CompositeCapabilityService, ToolRegistry } from "@axl/kernel";
+import { CompositeCapabilityService, ToolInputError, ToolRegistry } from "@axl/kernel";
 import type { CanonicalEvent } from "@axl/protocol";
 
 import {
@@ -92,11 +92,46 @@ export default function (axl: DaemonExtensionApi): void {
   const activation = await catalog.activate(["extension:greeter/greet"]);
   assert.equal(activation.activated.length, 1);
   assert.ok(tools.activateCapability("extension:greeter/greet"));
-  const result = await tools.get("greet")?.execute({ name: "Ada" }, new AbortController().signal);
+  const greet = tools.get("greet");
+  assert.ok(greet);
+  await assert.rejects(
+    greet.execute({}, new AbortController().signal),
+    (error: unknown) =>
+      error instanceof ToolInputError && /required property 'name'/.test(error.message),
+  );
+  const result = await greet.execute({ name: "Ada" }, new AbortController().signal);
   assert.deepEqual(result, {
     content: [{ type: "text", text: "hello Ada from /workspace" }],
     isError: false,
   });
+});
+
+test("reload imports changed extension source instead of the cached module", async (context) => {
+  const dir = await directory(context);
+  const path = join(dir, "version.js");
+  const source = (version: string) => `export default (axl) => {
+  axl.registerTool({ name: "version", description: "version", inputSchema: { type: "object" }, execute: () => ({ content: [{ type: "text", text: "${version}" }] }) });
+};
+`;
+  await writeFile(path, source("v1"));
+  const first = await load(dir);
+  first.tools.activateCapability("extension:version/version");
+  const firstResult = await first.tools.get("version")?.execute({}, new AbortController().signal);
+  assert.deepEqual(firstResult, {
+    content: [{ type: "text", text: "v1" }],
+    isError: false,
+  });
+  await first.host.dispose();
+
+  await writeFile(path, source("v2"));
+  const second = await load(dir);
+  second.tools.activateCapability("extension:version/version");
+  const secondResult = await second.tools.get("version")?.execute({}, new AbortController().signal);
+  assert.deepEqual(secondResult, {
+    content: [{ type: "text", text: "v2" }],
+    isError: false,
+  });
+  await second.host.dispose();
 });
 
 test("tool.call handlers block in load order, prefix the extension id, and fail closed", async (context) => {
@@ -177,6 +212,91 @@ test("session.event observers receive projected events and their failures are re
   assert.match(failures[0]?.error.message ?? "", /observer bug/);
 });
 
+test("disposal drains pending session.event handlers before cleanup", async (context) => {
+  const dir = await directory(context);
+  let release: (() => void) | undefined;
+  (globalThis as { __axlObserverWait?: Promise<void> }).__axlObserverWait = new Promise<void>(
+    (resolve) => {
+      release = resolve;
+    },
+  );
+  await writeFile(
+    join(dir, "watch.js"),
+    `export default (axl) => {
+  globalThis.__axlObserverOrder = [];
+  axl.on("session.event", async () => {
+    globalThis.__axlObserverOrder.push("started");
+    await globalThis.__axlObserverWait;
+    globalThis.__axlObserverOrder.push("finished");
+  });
+  axl.track(() => { globalThis.__axlObserverOrder.push("cleanup"); });
+};
+`,
+  );
+  const { host } = await load(dir);
+  host.observe?.({ id: "e1", type: "user.message", timestamp: 1, payload: {} } as never);
+  const disposing = host.dispose();
+  await Promise.resolve();
+  assert.deepEqual((globalThis as { __axlObserverOrder?: string[] }).__axlObserverOrder, [
+    "started",
+  ]);
+  release?.();
+  await disposing;
+  assert.deepEqual((globalThis as { __axlObserverOrder?: string[] }).__axlObserverOrder, [
+    "started",
+    "finished",
+    "cleanup",
+  ]);
+});
+
+test("disposal aborts observers and bounds uncooperative handlers", async (context) => {
+  const aborting = await directory(context);
+  await writeFile(
+    join(aborting, "watch.js"),
+    `export default (axl) => {
+  globalThis.__axlObserverAbort = [];
+  axl.on("session.event", async (event) => {
+    await new Promise((resolve) => event.signal.addEventListener("abort", resolve, { once: true }));
+    globalThis.__axlObserverAbort.push("aborted");
+  });
+  axl.track(() => { globalThis.__axlObserverAbort.push("cleanup"); });
+};
+`,
+  );
+  const { host } = await load(aborting);
+  host.observe?.({ id: "e1", type: "user.message", timestamp: 1, payload: {} } as never);
+  await host.dispose();
+  assert.deepEqual((globalThis as { __axlObserverAbort?: string[] }).__axlObserverAbort, [
+    "aborted",
+    "cleanup",
+  ]);
+
+  const hanging = await directory(context);
+  await writeFile(
+    join(hanging, "watch.js"),
+    `export default (axl) => {
+  globalThis.__axlTimedCleanup = false;
+  axl.on("session.event", () => new Promise(() => {}));
+  axl.track(() => { globalThis.__axlTimedCleanup = true; });
+};
+`,
+  );
+  const failures: DaemonExtensionFailure[] = [];
+  const loaded = await loadDaemonExtensions({
+    directory: hanging,
+    cwd: "/workspace",
+    tools: new ToolRegistry(),
+    grantedAuthorities: new Set([DAEMON_EXTENSION_AUTHORITY]),
+    cleanupTimeoutMs: 10,
+    onFailure: (failure) => failures.push(failure),
+  });
+  loaded.host.observe?.({ id: "e1", type: "user.message", timestamp: 1, payload: {} } as never);
+  await loaded.host.dispose();
+  assert.equal((globalThis as { __axlTimedCleanup?: boolean }).__axlTimedCleanup, true);
+  assert.equal(failures.length, 1);
+  assert.match(failures[0]?.error.message ?? "", /cleanup exceeded 10ms/);
+});
+
 test("invalid extensions fail the whole load and unwind registrations", async (context) => {
   const dir = await directory(context);
   await writeFile(
@@ -194,6 +314,46 @@ test("invalid extensions fail the whole load and unwind registrations", async (c
   // The good extension's tool was unregistered, so the name is free again.
   tools.registerCapability("extension:probe/ok", {
     name: "ok",
+    description: "probe",
+    inputSchema: { type: "object" },
+    execute: async () => ({ content: [], isError: false }),
+  });
+});
+
+test("a failing factory rolls back its own resources and preserves its error", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "broken.js"),
+    `export default (axl) => {
+  globalThis.__axlFactoryDisposed = [];
+  axl.registerTool({ name: "temporary", description: "temporary", inputSchema: { type: "object" }, execute: () => ({ content: [] }) });
+  axl.track(() => { globalThis.__axlFactoryDisposed.push("first"); });
+  axl.track(() => { throw new Error("cleanup bug"); });
+  axl.track(() => { globalThis.__axlFactoryDisposed.push("third"); });
+  throw new Error("factory bug");
+};
+`,
+  );
+  const tools = new ToolRegistry();
+  const failures: DaemonExtensionFailure[] = [];
+  await assert.rejects(
+    loadDaemonExtensions({
+      directory: dir,
+      cwd: "/workspace",
+      tools,
+      grantedAuthorities: new Set([DAEMON_EXTENSION_AUTHORITY]),
+      onFailure: (failure) => failures.push(failure),
+    }),
+    (error: unknown) => error instanceof DaemonExtensionError && /factory bug/.test(error.message),
+  );
+  assert.deepEqual((globalThis as { __axlFactoryDisposed?: string[] }).__axlFactoryDisposed, [
+    "third",
+    "first",
+  ]);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]?.event, "dispose");
+  tools.registerCapability("extension:probe/temporary", {
+    name: "temporary",
     description: "probe",
     inputSchema: { type: "object" },
     execute: async () => ({ content: [], isError: false }),
@@ -222,6 +382,13 @@ test("rejects bad tool definitions, late registrations, and duplicate names", as
     `export default (axl) => { axl.registerTool({ name: "Bad Name", description: "x", inputSchema: {}, execute: () => ({ content: [] }) }); };\n`,
   );
   await assert.rejects(load(bad), /tool name must match/);
+
+  const badSchema = await directory(context);
+  await writeFile(
+    join(badSchema, "bad-schema.js"),
+    `export default (axl) => { axl.registerTool({ name: "broken", description: "x", inputSchema: { type: "wat" }, execute: () => ({ content: [] }) }); };\n`,
+  );
+  await assert.rejects(load(badSchema), /invalid inputSchema/);
 
   const clash = await directory(context);
   await writeFile(

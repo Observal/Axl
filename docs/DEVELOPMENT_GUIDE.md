@@ -604,11 +604,12 @@ Responsibilities:
 
 - discovery of user daemon extensions in `~/.axl/extensions/`;
 - importing `.ts` and `.js` extension modules into the daemon process;
-- the `DaemonExtensionApi` implementation: `registerTool`, `on("tool.call")`, `on("session.event")`, and `track`;
+- the `DaemonExtensionApi` implementation: `registerTool`, `on("tool.call")`, `on("command")`, `on("session.event")`, and `track`;
+- JSON Schema validation before extension tool execution;
 - indexing extension tools as capabilities behind `capability_search`; and
-- one kernel `ExtensionHost` that gates tool calls, forwards durable events, and disposes tracked resources.
+- one kernel `ExtensionHost` that gates tool and command calls, forwards durable events, drains asynchronous observers, and disposes tracked resources.
 
-Extensions run with the daemon's permissions and are trusted by placement. An invalid extension fails session start with its path and reason. A gate that throws blocks the tool call. See [`docs/extensions.md`](extensions.md).
+Extensions run with the daemon's permissions and are trusted by placement. An invalid extension fails session start with its path and reason. A gate that throws blocks the tool call. Changed source is re-imported at the next runtime reload. See [`docs/extensions.md`](extensions.md).
 
 Focused check:
 

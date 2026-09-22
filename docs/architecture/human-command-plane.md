@@ -287,19 +287,18 @@ Disable or reload aborts active handlers, awaits bounded cleanup, removes every 
 
 ### Daemon extensions
 
-The public daemon extension API is not implemented yet. When its first consumer exists, it may register a shared command only with:
+The public daemon extension API can observe and intercept built-in commands, but it cannot register new shared commands yet. Shared command registration requires:
 
 - a stable extension-qualified command ID
 - bounded metadata
-- declared daemon capabilities
 - an argument parser and validator
 - an execution handler using public daemon extension operations
 - cancellation behavior
 - cleanup ownership
 
-It receives no kernel or daemon internals. Third-party executable extensions remain out of process under the selected sandbox. Registration changes invalidate the daemon catalog.
+Extensions receive no kernel or daemon objects through the API. Global extension files are trusted by placement and run in process with the daemon's host authority. Project-local executable extensions require a separate explicit project-trust decision before loading. Registration changes invalidate the daemon catalog.
 
-A first-party command uses the same registration path after that public daemon API exists. Until then, built-in daemon commands may use an internal registry that implements the same descriptor and invocation contract without pretending third-party registration exists.
+A first-party command must use the same public registration path as a third-party command after registration exists. Until then, built-in daemon commands may use the internal registry that implements the descriptor and invocation contract.
 
 ## Command classification
 

@@ -12,6 +12,7 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
+import { ExtensionHostError } from "@axl/kernel";
 import {
   type AttachmentPresence,
   type CanonicalEvent,
@@ -840,11 +841,13 @@ export class AxlDaemon {
       const reportedCode =
         error instanceof DaemonError || error instanceof CommandJournalError
           ? error.code
-          : error instanceof CanonicalEventSizeError
-            ? "content_too_large"
-            : error instanceof DOMException && error.name === "AbortError"
-              ? "cancelled"
-              : "internal_error";
+          : error instanceof ExtensionHostError
+            ? "extension_failed"
+            : error instanceof CanonicalEventSizeError
+              ? "content_too_large"
+              : error instanceof DOMException && error.name === "AbortError"
+                ? "cancelled"
+                : "internal_error";
       const code = normalizeDaemonRpcErrorCode(request.method, reportedCode);
       send({
         kind: "error",
@@ -862,15 +865,17 @@ export class AxlDaemon {
           ...((error instanceof DaemonError || error instanceof CommandJournalError) &&
           error.details !== undefined
             ? { details: error.details }
-            : error instanceof CanonicalEventSizeError
-              ? {
-                  details: {
-                    field: "canonicalEvent",
-                    encodedBytes: error.encodedBytes,
-                    maximumBytes: error.maximumBytes,
-                  },
-                }
-              : {}),
+            : error instanceof ExtensionHostError
+              ? { details: error.details }
+              : error instanceof CanonicalEventSizeError
+                ? {
+                    details: {
+                      field: "canonicalEvent",
+                      encodedBytes: error.encodedBytes,
+                      maximumBytes: error.maximumBytes,
+                    },
+                  }
+                : {}),
         },
       });
     } finally {

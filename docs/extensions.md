@@ -12,7 +12,7 @@ Extensions can:
 - replace the inputs of, or refuse, any built-in command before the daemon runs it; and
 - observe every canonical event as it becomes durable.
 
-They cannot widen sandbox or policy limits. Enforcement sits below the extension seam.
+Extension code is trusted host code and can use the daemon process's filesystem, network, environment, and process authority directly. Sandbox and policy limits still govern model-invoked built-in tools and sandboxed MCP processes, but they do not confine the extension implementation itself. Install only extensions you trust as fully as Axl.
 
 ## Locations
 
@@ -23,12 +23,12 @@ They cannot widen sandbox or policy limits. Enforcement sits below the extension
 
 Names must match `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`. Entries starting with `.` and files with other extensions are ignored. Discovery is one level deep and sorted by name; handlers run in that order. Project-local extension directories are not loaded yet.
 
-TypeScript files load through Node's built-in type stripping. Use `import type` for `@axl/extension-api`; there is no runtime module to import.
+TypeScript files load through Node's built-in type stripping. Installed releases expose the authoring declarations at `@observal/axl/extension-api`; use `import type` because there is no runtime module to import. Repository-local development may import the private workspace package `@axl/extension-api` instead.
 
 ## Writing an extension
 
 ```ts
-import type { DaemonExtensionApi } from "@axl/extension-api";
+import type { DaemonExtensionApi } from "@observal/axl/extension-api";
 
 export default function (axl: DaemonExtensionApi) {
   axl.registerTool({
@@ -77,7 +77,7 @@ The default export may be `async`. Registration is only allowed while the factor
 ## API
 
 `registerTool(definition)`
-: Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. `execute(input, signal)` returns `{ content: [{ type: "text", text }], isError? }`.
+: Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal)` runs. Execution returns `{ content: [{ type: "text", text }], isError? }`.
 
 `on("tool.call", handler)`
 : Runs before every registered tool executes. Return `{ block: true, reason }` to stop the call. Return nothing to allow it. A thrown error also blocks the call. The first blocking decision wins. The handler receives a copy of the input and cannot rewrite it.
@@ -100,7 +100,7 @@ The default export may be `async`. Registration is only allowed while the factor
   Commands that are not bound to an active session (`providers`, `login`, `logout`, `refresh`, `mcp`, `resume`, `attach`, `delete`, `dispose`, `export`, `import`, `requeue`, `review`) do not reach extensions yet.
 
 `on("session.event", handler)`
-: Receives `{ id, type, timestamp, payload }` for every canonical event after it is written. Payloads are copies. A throwing observer is reported on the daemon's stderr and does not stop the session.
+: Receives `{ id, type, timestamp, payload, signal }` for every canonical event after it is written. Payloads are copies. The signal aborts when disposal starts. Disposal drains cooperative asynchronous observers before cleaning up their resources and reports handlers that exceed the cleanup deadline. A throwing observer is reported on the daemon's stderr and does not stop the session.
 
 `track(disposer)`
 : Registers cleanup. Disposers run in reverse order when the session ends. Every registration also returns its own disposer.
@@ -114,4 +114,4 @@ The default export may be `async`. Registration is only allowed while the factor
 
 ## Scope
 
-Extensions load in the `standard` tool profile. Commands, user interface, providers, custom compaction, npm dependencies, `/reload` of extension code, and project-local directories are not part of this surface.
+Extensions load in the `standard` tool profile. Changed extension source is re-imported when a session runtime reloads. Registering new commands, user interface integration, providers, custom compaction, npm dependencies, enablement controls, and project-local directories are not part of this surface yet.

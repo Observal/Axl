@@ -32,6 +32,7 @@ import {
   buildStablePrompt,
   type CompactionSettings,
   type ExtensionHost,
+  ExtensionHostError,
   JsonlEventLog,
   type ModelPort,
   type ModelRetryOptions,
@@ -411,6 +412,32 @@ test("internal RPC failures do not expose subsystem messages", async (context) =
       error.message === "Request failed" &&
       !error.message.includes(fixture.dataDirectory),
   );
+});
+
+test("returns actionable extension failures without exposing unrelated internals", async (context) => {
+  const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
+    extensionHost: {
+      activate: () => {
+        throw new ExtensionHostError("/home/user/.axl/extensions/broken.ts: factory failed", {
+          extensionId: "broken",
+          path: "/home/user/.axl/extensions/broken.ts",
+          phase: "activate",
+        });
+      },
+      dispose: () => undefined,
+    },
+  });
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  await assert.rejects(client.request("session.create", { cwd: fixture.cwd }), (error) => {
+    assert.ok(error instanceof AxlClientError);
+    assert.equal(error.code, "extension_failed");
+    assert.match(error.message, /broken\.ts: factory failed/);
+    assert.equal(error.details?.extensionId, "broken");
+    assert.equal(error.details.path, "/home/user/.axl/extensions/broken.ts");
+    assert.equal(error.details.phase, "activate");
+    return true;
+  });
 });
 
 test("requires current-version initialization before session access", async (context) => {

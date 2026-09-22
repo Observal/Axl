@@ -336,6 +336,26 @@ export class AgentSession {
     sessionId: unknown,
     options: AgentSessionOptions,
   ): Promise<AgentSession> {
+    try {
+      return await AgentSession.openOwned(path, sessionId, options);
+    } catch (error) {
+      try {
+        await options.extensionHost?.dispose();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Session open and extension cleanup failed",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private static async openOwned(
+    path: string,
+    sessionId: unknown,
+    options: AgentSessionOptions,
+  ): Promise<AgentSession> {
     const opened = await JsonlEventLog.open(path, sessionId, options.log ?? {});
     const tree = SessionTree.fromEvents(opened.log.sessionId, opened.events);
     verifyToolCallIntegrity(tree);

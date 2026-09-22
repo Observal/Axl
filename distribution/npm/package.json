@@ -7,6 +7,11 @@
   "bin": {
     "axl": "dist/axl.js"
   },
+  "exports": {
+    "./extension-api": {
+      "types": "./dist/extension-api.d.ts"
+    }
+  },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },

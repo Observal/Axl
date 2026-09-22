@@ -24,6 +24,18 @@ export type CommandDecision =
   | { readonly block: true; readonly reason: string }
   | undefined;
 
+/** A safe extension failure that may cross the daemon RPC boundary. */
+export class ExtensionHostError extends Error {
+  readonly code = "extension_failed";
+  readonly details: JsonObject;
+
+  constructor(message: string, details: JsonObject = {}, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ExtensionHostError";
+    this.details = details;
+  }
+}
+
 /** A built-in command refused by an extension. */
 export class CommandBlockedError extends Error {
   readonly command: string;
@@ -39,8 +51,8 @@ export class CommandBlockedError extends Error {
 
 /**
  * Extension-host lifecycle seam. The kernel owns when hosts start and stop;
- * extension behavior stays behind this boundary. Hosts may narrow what a tool
- * call does; they can never widen policy or sandbox limits.
+ * extension behavior stays behind this boundary. The host may gate tool and
+ * command execution, while each registered tool retains its owner's policy.
  */
 export interface ExtensionHost {
   activate(): void | Promise<void>;

@@ -132,6 +132,8 @@ export interface DaemonSessionEvent {
   readonly type: string;
   readonly timestamp: number;
   readonly payload: unknown;
+  /** Aborted when the owning extension begins disposal. */
+  readonly signal: AbortSignal;
 }
 
 export type DaemonCommandSource = "client" | "model" | "automatic";
