@@ -29,7 +29,7 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | JavaScript and TypeScript loading | Done | The daemon host loads both forms through Node. |
 | Extension list and inspection | Done | Typed daemon RPC and SDK inventory includes source, state, package metadata, and lifecycle diagnostics. |
 | Per-extension enable and disable | Done | Enablement is persisted and disabled IDs are removed before import. The selected session reloads atomically. |
-| Per-extension reload | Partial | A typed per-extension reload control exists, but it currently rebuilds the complete selected session runtime. |
+| Per-extension reload | Done | The targeted RPC validates the requested ID, then atomically rebuilds the selected session so prompt, provider, tool, and hook contributions stay coherent. |
 | Atomic replacement | Done | Replacement activation completes before the runtime swap; failed activation leaves the prior runtime active and writes no partial boundary. |
 
 ## Lifecycle and interception events
@@ -150,9 +150,9 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | First-party daemon consumer | Missing | Migrate one real daemon feature to the public third-party API. |
 | First-party TUI consumer | Partial | Existing internal consumers must load through the public package path. |
 | First-party web consumer | Missing | Requires the web host. |
-| Runnable examples | Partial | Basic probes exist in tests; publish examples for every capability group. |
-| Multi-extension ordering and collisions | Partial | Core ordering and collision tests exist; add dynamic reload, disable, and concurrent execution cases. |
-| Installed JavaScript and TypeScript artifact tests | Partial | Declaration consumption passes; installed daemon, TUI, web, and dependency loading remain. |
-| Live packaged daemon smoke test | Partial | Source-tree live daemon tests pass; repeat from the release artifact. |
+| Runnable examples | Partial | `examples/extensions/daemon-kitchen-sink.ts` covers daemon tools, hooks, state, commands, and progress; presentation examples remain. |
+| Multi-extension ordering and collisions | Done | Tests cover deterministic precedence, collisions, chained mutation, cancellation, disablement, replacement, restart reconstruction, and cleanup. |
+| Installed JavaScript and TypeScript artifact tests | Partial | Packaged JavaScript execution and external TypeScript declaration consumption pass; TUI and web loading remain. |
+| Live packaged daemon smoke test | Done | An installed release artifact loaded provider hooks and completed a real Azure-backed turn. |
 | Live packaged TUI smoke test | Missing | Exercise an installable TUI extension. |
 | Live packaged web smoke test | Missing | Exercise an installable browser extension. |
