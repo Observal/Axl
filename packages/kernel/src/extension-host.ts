@@ -35,6 +35,49 @@ export interface ToolResultDecision {
 
 export type CommandSource = "client" | "model" | "automatic";
 
+export interface ExtensionContextContribution {
+  readonly extensionId: string;
+  readonly source: string;
+  readonly content: string;
+}
+
+export interface ModelContextInterception {
+  readonly phase: "agent" | "request";
+  readonly systemPrompt: string;
+  readonly messages: readonly unknown[];
+}
+
+export interface ExtensionCommandDescriptor {
+  readonly extensionId: string;
+  readonly name: string;
+  readonly description: string;
+}
+
+export interface ExtensionSessionBinding {
+  getState(extensionId: string, key: string): JsonValue | undefined;
+  setState(extensionId: string, key: string, value: JsonValue | null): Promise<void>;
+  sendExtensionMessage(extensionId: string, source: string, content: string): Promise<void>;
+  getEntryLabel(extensionId: string, eventId: string): string | undefined;
+  setEntryLabel(extensionId: string, eventId: string, label: string | null): Promise<void>;
+  emit(extensionId: string, channel: string, value: JsonValue): Promise<void>;
+}
+
+export interface ProviderHeadersInterception {
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
+export interface ProviderRequestInterception {
+  readonly url: string;
+  readonly payload: unknown;
+}
+
+export interface ProviderResponseObservation {
+  readonly url: string;
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string>>;
+}
+
 export interface InputInterception {
   readonly source: "client" | "extension";
   readonly content: readonly UserContent[];
@@ -87,6 +130,9 @@ export class CommandBlockedError extends Error {
  * command execution, while each registered tool retains its owner's policy.
  */
 export interface ExtensionHost {
+  bindSession?(binding: ExtensionSessionBinding): void;
+  commands?(): readonly ExtensionCommandDescriptor[];
+  invokeCommand?(name: string, args: JsonObject, signal: AbortSignal): Promise<string | undefined>;
   activate(signal?: AbortSignal): void | Promise<void>;
   dispose(): void | Promise<void>;
   /**
@@ -104,6 +150,23 @@ export interface ExtensionHost {
     result: ToolResultInterception,
     signal: AbortSignal,
   ): ToolResultDecision | undefined | Promise<ToolResultDecision | undefined>;
+  /** Appends canonical extension context before an agent or provider request. */
+  contributeContext?(
+    input: ModelContextInterception,
+    signal: AbortSignal,
+  ): readonly ExtensionContextContribution[] | Promise<readonly ExtensionContextContribution[]>;
+  beforeProviderHeaders?(
+    input: ProviderHeadersInterception,
+    signal: AbortSignal,
+  ): Readonly<Record<string, string>> | Promise<Readonly<Record<string, string>>>;
+  beforeProviderRequest?(
+    input: ProviderRequestInterception,
+    signal: AbortSignal,
+  ): unknown | Promise<unknown>;
+  afterProviderResponse?(
+    input: ProviderResponseObservation,
+    signal: AbortSignal,
+  ): void | Promise<void>;
   /** Runs before user or extension input is admitted to the agent loop. */
   beforeInput?(
     input: InputInterception,
@@ -159,14 +222,37 @@ export const NOOP_EXTENSION_HOST: ExtensionHost = {
  */
 export function composeExtensionHosts(hosts: readonly ExtensionHost[]): ExtensionHost {
   if (hosts.length === 1) return hosts[0] as ExtensionHost;
+  const commandHosts = hosts.filter((host) => host.commands !== undefined);
   const resourceHosts = hosts.filter((host) => host.discoverResources !== undefined);
   const gates = hosts.filter((host) => host.beforeToolCall !== undefined);
   const resultHandlers = hosts.filter((host) => host.afterToolCall !== undefined);
+  const contextHosts = hosts.filter((host) => host.contributeContext !== undefined);
+  const headerHosts = hosts.filter((host) => host.beforeProviderHeaders !== undefined);
+  const requestHosts = hosts.filter((host) => host.beforeProviderRequest !== undefined);
+  const responseHosts = hosts.filter((host) => host.afterProviderResponse !== undefined);
   const inputHandlers = hosts.filter((host) => host.beforeInput !== undefined);
   const commandGates = hosts.filter((host) => host.beforeCommand !== undefined);
   const observers = hosts.filter((host) => host.observe !== undefined);
   const activityObservers = hosts.filter((host) => host.observeActivity !== undefined);
   return {
+    bindSession(binding) {
+      for (const host of hosts) host.bindSession?.(binding);
+    },
+    ...(commandHosts.length === 0
+      ? {}
+      : {
+          commands() {
+            return commandHosts.flatMap((host) => host.commands?.() ?? []);
+          },
+          async invokeCommand(name, args, signal) {
+            for (const host of commandHosts) {
+              if (host.commands?.().some((command) => command.name === name)) {
+                return host.invokeCommand?.(name, args, signal);
+              }
+            }
+            throw new Error(`Unknown extension command ${name}`);
+          },
+        }),
     async activate(signal) {
       for (const host of hosts) await host.activate(signal);
     },
@@ -218,6 +304,48 @@ export function composeExtensionHosts(hosts: readonly ExtensionHost[]): Extensio
               isError: current.isError,
               ...(current.details === undefined ? {} : { details: current.details }),
             };
+          },
+        }),
+    ...(contextHosts.length === 0
+      ? {}
+      : {
+          async contributeContext(input, signal) {
+            const contributions: ExtensionContextContribution[] = [];
+            for (const host of contextHosts) {
+              contributions.push(...((await host.contributeContext?.(input, signal)) ?? []));
+            }
+            return contributions;
+          },
+        }),
+    ...(headerHosts.length === 0
+      ? {}
+      : {
+          async beforeProviderHeaders(input, signal) {
+            let headers = input.headers;
+            for (const host of headerHosts) {
+              headers =
+                (await host.beforeProviderHeaders?.({ ...input, headers }, signal)) ?? headers;
+            }
+            return headers;
+          },
+        }),
+    ...(requestHosts.length === 0
+      ? {}
+      : {
+          async beforeProviderRequest(input, signal) {
+            let payload = input.payload;
+            for (const host of requestHosts) {
+              payload =
+                (await host.beforeProviderRequest?.({ ...input, payload }, signal)) ?? payload;
+            }
+            return payload;
+          },
+        }),
+    ...(responseHosts.length === 0
+      ? {}
+      : {
+          async afterProviderResponse(input, signal) {
+            for (const host of responseHosts) await host.afterProviderResponse?.(input, signal);
           },
         }),
     ...(inputHandlers.length === 0

@@ -820,6 +820,7 @@ export class AxlDaemon {
         request.method === "extension.update" ||
         request.method === "extension.remove" ||
         request.method === "extension.trust" ||
+        request.method === "extension.command.invoke" ||
         request.method === "mcp.config.probe" ||
         request.method === "session.create" ||
         request.method === "session.resume" ||
@@ -1064,10 +1065,8 @@ export class AxlDaemon {
         return this.providers().login(request.params, signal);
       case "provider.auth.logout":
         return this.providers().logout(request.params, signal);
-      case "extension.list": {
-        const cwd = await this.sessions.cwd(request.params.sessionId);
-        return this.extensionManagementService().list(cwd);
-      }
+      case "extension.list":
+        return this.extensionInventory(request.params.sessionId);
       case "extension.enable":
       case "extension.disable":
       case "extension.reload":
@@ -1076,6 +1075,13 @@ export class AxlDaemon {
       case "extension.remove":
       case "extension.trust":
         return this.mutateExtension(request, this.mutationOperationId(acceptance), signal);
+      case "extension.command.invoke":
+        return this.sessions.invokeExtensionCommand(
+          request.params.sessionId,
+          request.params.name,
+          request.params.args,
+          signal,
+        );
       case "mcp.config.list":
         return this.mcpConfigurationService().list();
       case "mcp.config.upsert":
@@ -1342,6 +1348,14 @@ export class AxlDaemon {
     }
   }
 
+  private async extensionInventory(sessionId: SessionId) {
+    const cwd = await this.sessions.cwd(sessionId);
+    return {
+      ...(await this.extensionManagementService().list(cwd)),
+      commands: await this.sessions.extensionCommands(sessionId),
+    };
+  }
+
   private async mutateExtension(
     request: Extract<
       WireRequest,
@@ -1387,7 +1401,16 @@ export class AxlDaemon {
         extensionId = request.params.extensionId;
         await service.remove(extensionId, signal);
       } else if (request.method === "extension.trust") {
-        await service.trustProject(cwd, request.params.trusted);
+        const decided = await this.sessions.interceptExtensionCommand(
+          request.params.sessionId,
+          "project_trust",
+          { trusted: request.params.trusted, path: cwd },
+          signal,
+        );
+        if (typeof decided.trusted !== "boolean") {
+          throw new Error("project_trust handler returned an invalid trust decision");
+        }
+        await service.trustProject(cwd, decided.trusted);
       } else {
         extensionId = request.params.extensionId;
         const current = findExtension(await service.list(cwd), extensionId);
@@ -1398,6 +1421,7 @@ export class AxlDaemon {
       const reloaded = await this.sessions.reload(request.params.sessionId, operationId, signal);
       return {
         ...(await service.list(cwd)),
+        commands: await this.sessions.extensionCommands(request.params.sessionId),
         ...(extensionId === undefined ? {} : { changedExtensionId: extensionId }),
         boundaryEventIds: reloaded.boundaryEventIds,
       };

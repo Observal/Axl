@@ -318,6 +318,13 @@ export class AxlClient {
     return this.request("extension.trust", params, options);
   }
 
+  invokeExtensionCommand(
+    params: RpcParams<"extension.command.invoke">,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"extension.command.invoke">> {
+    return this.request("extension.command.invoke", params, options);
+  }
+
   listMcpServers(
     options: Omit<RequestOptions, "idempotencyKey"> = {},
   ): Promise<RpcResult<"mcp.config.list">> {

@@ -6,6 +6,8 @@ import { isIP } from "node:net";
 
 import { Agent, fetch as undiciFetch } from "undici";
 
+import { currentProviderHooks } from "./provider-hooks.ts";
+
 export const MAX_ENDPOINT_LENGTH = 4_096;
 export const MAX_JSON_RESPONSE_BYTES = 4 * 1024 * 1024;
 
@@ -206,7 +208,30 @@ export async function safeFetch(
     const addresses = await validatedAddresses(url, options);
     const pinned = addresses[0];
     if (pinned === undefined) throw new TypeError(`${options.label} has no approved destination`);
-    const requestInit = { ...init, redirect: "manual" as const };
+    const hooks = currentProviderHooks();
+    const signal = init.signal ?? new AbortController().signal;
+    let requestInit = { ...init, redirect: "manual" as const };
+    if (hooks?.beforeHeaders !== undefined) {
+      const headers = await hooks.beforeHeaders(
+        { url: url.href, headers: Object.fromEntries(new Headers(requestInit.headers).entries()) },
+        signal,
+      );
+      requestInit = { ...requestInit, headers };
+    }
+    if (hooks?.beforeRequest !== undefined && typeof requestInit.body === "string") {
+      try {
+        const payload = JSON.parse(requestInit.body) as unknown;
+        requestInit = {
+          ...requestInit,
+          body: JSON.stringify(await hooks.beforeRequest({ url: url.href, payload }, signal)),
+        };
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          throw new TypeError(`${options.label} request body is not valid JSON`, { cause: error });
+        }
+        throw error;
+      }
+    }
     let response: Response;
     if (options.fetch !== undefined) {
       response = await options.fetch(url, requestInit);
@@ -235,6 +260,14 @@ export async function safeFetch(
         throw error;
       }
     }
+    await hooks?.afterResponse?.(
+      {
+        url: url.href,
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+      },
+      signal,
+    );
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
     const location = response.headers.get("location");
     await response.body?.cancel();

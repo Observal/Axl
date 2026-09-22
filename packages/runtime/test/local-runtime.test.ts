@@ -618,7 +618,7 @@ test("manages global, explicit, and trusted project daemon extensions through th
   await mkdir(join(workspace, ".git"), { recursive: true });
   await mkdir(join(workspace, ".axl", "extensions"), { recursive: true });
   const source = (name: string) =>
-    `import { appendFile } from "node:fs/promises";\nexport default async (axl) => { await appendFile(${JSON.stringify(marker)}, ${JSON.stringify(`${name}\n`)}); axl.on("resources_discover", () => [{ name: "${name}-rules", content: "${name} rules" }]); axl.registerTool({ name: ${JSON.stringify(`${name}_tool`)}, description: ${JSON.stringify(name)}, inputSchema: { type: "object" }, execute: () => ({ content: [] }) }); };\n`;
+    `import { appendFile } from "node:fs/promises";\nexport default async (axl) => { await appendFile(${JSON.stringify(marker)}, ${JSON.stringify(`${name}\n`)}); axl.on("resources_discover", () => [{ name: "${name}-rules", content: "${name} rules" }]); axl.registerCommand({ name: "${name}-command", description: "${name} command", execute: async (args) => { if (args.action === "info") return JSON.stringify(await axl.session.info()); if (args.action === "activate") return JSON.stringify(await axl.session.activateTools(["extension:${name}/${name}_tool"])); const calls = Number(axl.state.get("calls") ?? 0) + 1; await axl.state.set("calls", calls); await axl.emit("command", { calls }); return "${name}:" + String(args.value) + ":" + calls; } }); axl.registerTool({ name: ${JSON.stringify(`${name}_tool`)}, description: ${JSON.stringify(name)}, inputSchema: { type: "object" }, execute: () => ({ content: [] }) }); };\n`;
   await writeFile(join(axlHome, "extensions", "global.js"), source("global"));
   await writeFile(join(workspace, ".axl", "extensions", "project.js"), source("project"));
   const explicitPath = join(root, "explicit.js");
@@ -637,12 +637,35 @@ test("manages global, explicit, and trusted project daemon extensions through th
   context.after(() => client.close());
   const opened = await client.request("session.create", { cwd: workspace });
 
+  const initialExtensions = await client.listExtensions({ sessionId: opened.sessionId });
   assert.deepEqual(
-    (await client.listExtensions({ sessionId: opened.sessionId })).extensions.map(
-      (item) => item.id,
-    ),
+    initialExtensions.extensions.map((item) => item.id),
     ["global"],
   );
+  assert.deepEqual(
+    initialExtensions.commands.map((command) => command.name),
+    ["global-command"],
+  );
+  assert.deepEqual(
+    await client.invokeExtensionCommand({
+      sessionId: opened.sessionId,
+      name: "global-command",
+      args: { value: 1 },
+    }),
+    { content: "global:1:1" },
+  );
+  const info = await client.invokeExtensionCommand({
+    sessionId: opened.sessionId,
+    name: "global-command",
+    args: { action: "info" },
+  });
+  assert.equal(JSON.parse(info.content ?? "{}").modelId, "gpt-5");
+  const activated = await client.invokeExtensionCommand({
+    sessionId: opened.sessionId,
+    name: "global-command",
+    args: { action: "activate" },
+  });
+  assert.equal(JSON.parse(activated.content ?? "[]").includes("global_tool"), true);
   const initial = await client.request("session.subscribe", { sessionId: opened.sessionId });
   assert.equal(
     initial.snapshot?.page.events.some(
@@ -662,6 +685,14 @@ test("manages global, explicit, and trusted project daemon extensions through th
   assert.deepEqual(
     trusted.extensions.map((item) => item.id),
     ["global", "project"],
+  );
+  assert.deepEqual(
+    await client.invokeExtensionCommand({
+      sessionId: opened.sessionId,
+      name: "global-command",
+      args: { value: 2 },
+    }),
+    { content: "global:2:2" },
   );
   const disabled = await client.disableExtension({
     sessionId: opened.sessionId,
@@ -684,4 +715,7 @@ test("manages global, explicit, and trusted project daemon extensions through th
     false,
   );
   assert.match(await readFile(marker, "utf8"), /global\nproject\n/u);
+  const log = await readFile(join(stateDirectory, "sessions", `${opened.sessionId}.jsonl`), "utf8");
+  assert.match(log, /"type":"extension.state"/u);
+  assert.match(log, /"type":"extension.event"/u);
 });

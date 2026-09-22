@@ -14,6 +14,8 @@ import {
   parseSessionId,
 } from "./event-envelope.ts";
 import {
+  type ExtensionCommandInvokeParams,
+  type ExtensionCommandInvokeResult,
   type ExtensionIdParams,
   type ExtensionInstallParams,
   type ExtensionListParams,
@@ -21,6 +23,8 @@ import {
   type ExtensionMutationResult,
   type ExtensionReloadParams,
   type ExtensionTrustParams,
+  parseExtensionCommandInvokeParams,
+  parseExtensionCommandInvokeResult,
   parseExtensionIdParams,
   parseExtensionInstallParams,
   parseExtensionListParams,
@@ -711,6 +715,7 @@ export const WIRE_CAPABILITIES = [
   "extension.update",
   "extension.remove",
   "extension.trust",
+  "extension.command.invoke",
   "mcp.config.list",
   "mcp.config.upsert",
   "mcp.config.batch",
@@ -859,6 +864,10 @@ export interface RpcMethodMap {
   readonly "extension.trust": {
     readonly params: ExtensionTrustParams;
     readonly result: ExtensionMutationResult;
+  };
+  readonly "extension.command.invoke": {
+    readonly params: ExtensionCommandInvokeParams;
+    readonly result: ExtensionCommandInvokeResult;
   };
   readonly "mcp.config.list": {
     readonly params: Record<string, never>;
@@ -1813,6 +1822,9 @@ export function parseWireRequest(value: unknown): WireRequest {
   if (method === "extension.trust") {
     return { ...base, method, params: parseExtensionTrustParams(params) };
   }
+  if (method === "extension.command.invoke") {
+    return { ...base, method, params: parseExtensionCommandInvokeParams(params) };
+  }
   if (method === "mcp.config.list") {
     exact(params, "request.params", []);
     return { ...base, method, params: {} };
@@ -2732,6 +2744,8 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseProviderAuthenticationStatus(value, path);
   } else if (method === "extension.list") {
     parsed = parseExtensionListResult(value);
+  } else if (method === "extension.command.invoke") {
+    parsed = parseExtensionCommandInvokeResult(value);
   } else if (
     method === "extension.enable" ||
     method === "extension.disable" ||
@@ -3163,6 +3177,7 @@ export const RPC_METHODS = [
   "extension.update",
   "extension.remove",
   "extension.trust",
+  "extension.command.invoke",
   "mcp.config.list",
   "mcp.config.upsert",
   "mcp.config.batch",
@@ -3297,6 +3312,7 @@ export const RPC_METHOD_ERROR_CODES = {
   "extension.update": ["unknown_session", "operation_active", "extension_failed"],
   "extension.remove": ["unknown_session", "operation_active", "extension_failed"],
   "extension.trust": ["unknown_session", "operation_active", "extension_failed"],
+  "extension.command.invoke": ["unknown_session", "operation_active", "extension_failed"],
   "mcp.config.list": [],
   "mcp.config.upsert": [],
   "mcp.config.batch": [],

@@ -25,6 +25,7 @@ import {
   type CompactionSettings,
   CompactionUnavailableError,
   JsonlEventLog,
+  type ExtensionSessionBinding,
   type KernelTool,
   type ModelPort,
   type ModelRetryOptions,
@@ -1399,6 +1400,52 @@ test("a failed session open disposes its extension host without appending events
   );
   assert.deepEqual(lifecycle, ["activate", "dispose"]);
   assert.deepEqual((await JsonlEventLog.open(path, sessionId)).events, []);
+});
+
+test("rebuilds namespaced extension state from canonical events", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-agent-session-state-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "session.jsonl");
+  let binding: ExtensionSessionBinding | undefined;
+  const currentBinding = (): ExtensionSessionBinding => {
+    if (binding === undefined) throw new Error("session was not bound");
+    return binding;
+  };
+  const host = {
+    bindSession(value: ExtensionSessionBinding) {
+      binding = value;
+    },
+    activate: () => undefined,
+    dispose: () => undefined,
+  };
+  const session = await AgentSession.open(path, sessionId, {
+    model: makePort([]),
+    tools: new ToolRegistry(),
+    cwd: "/workspace",
+    extensionHost: host,
+  });
+  await currentBinding().setState("example", "count", 2);
+  assert.equal(currentBinding().getState("example", "count"), 2);
+  const stateEvent = (await session.log.read()).events.findLast(
+    (event) => event.type === "extension.state",
+  );
+  assert.ok(stateEvent);
+  await currentBinding().setEntryLabel("example", stateEvent.id, "important");
+  assert.equal(currentBinding().getEntryLabel("example", stateEvent.id), "important");
+  await session.dispose();
+
+  binding = undefined;
+  const reopened = await AgentSession.open(path, sessionId, {
+    model: makePort([]),
+    tools: new ToolRegistry(),
+    cwd: "/workspace",
+    extensionHost: host,
+  });
+  assert.equal(currentBinding().getState("example", "count"), 2);
+  assert.equal(currentBinding().getEntryLabel("example", stateEvent.id), "important");
+  await currentBinding().setState("example", "count", null);
+  assert.equal(currentBinding().getState("example", "count"), undefined);
+  await reopened.dispose();
 });
 
 test("records effective request configuration before each model dispatch", async (context) => {

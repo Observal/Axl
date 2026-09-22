@@ -298,6 +298,9 @@ export class SessionView {
       case "context.resources":
       case "prompt.section":
       case "tool.schema":
+      case "extension.state":
+      case "extension.label":
+      case "extension.event":
       case "context.extension":
       case "capability.searched":
       case "capability.activated":

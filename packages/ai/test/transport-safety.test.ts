@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   MAX_JSON_RESPONSE_BYTES,
   readBoundedJson,
+  runWithProviderHooks,
   safeEndpoint,
   safeFetch,
   stripTrailingSlashes,
@@ -38,6 +39,35 @@ test("endpoint policy permits HTTPS and explicit loopback HTTP only", () => {
       expectedOrigin: "https://example.com/catalog",
     }),
   );
+});
+
+test("provider hooks chain headers, JSON payloads, and responses around safe dispatch", async () => {
+  const observed: string[] = [];
+  const response = await runWithProviderHooks(
+    {
+      beforeHeaders: ({ headers }) => ({ ...headers, "x-extension": "yes" }),
+      beforeRequest: ({ payload }) => ({ ...(payload as object), extension: true }),
+      afterResponse: ({ status }) => {
+        observed.push(`response:${status}`);
+      },
+    },
+    () =>
+      safeFetch(
+        "https://provider.example/v1/messages",
+        { method: "POST", headers: { "content-type": "application/json" }, body: '{"a":1}' },
+        {
+          label: "test provider",
+          resolve: async () => [{ address: "8.8.8.8", family: 4 }],
+          fetch: async (_url, init) => {
+            assert.equal(new Headers(init?.headers).get("x-extension"), "yes");
+            assert.deepEqual(JSON.parse(String(init?.body)), { a: 1, extension: true });
+            return new Response("ok", { status: 200, headers: { "x-response": "yes" } });
+          },
+        },
+      ),
+  );
+  assert.equal(await response.text(), "ok");
+  assert.deepEqual(observed, ["response:200"]);
 });
 
 test("trailing slash removal is linear and handles long non-matching input", () => {

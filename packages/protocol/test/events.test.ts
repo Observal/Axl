@@ -128,6 +128,9 @@ const validPayloads = {
     inputSchema: { type: "object", required: ["path"] },
   },
   "context.injected": { source: "skill", content: "Follow this procedure." },
+  "extension.state": { extensionId: "example", key: "count", value: 1 },
+  "extension.label": { extensionId: "example", eventId, label: "important" },
+  "extension.event": { extensionId: "example", channel: "changed", value: { count: 1 } },
   "context.extension": {
     extensionId: "example",
     source: "hook",

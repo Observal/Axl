@@ -25,7 +25,9 @@ import {
   type ModelStreamError,
   type OperationId,
   type JsonObject,
+  type JsonValue,
   parseEvent,
+  parseEventId,
   parseOperationId,
   type SessionActivityFrame,
   type TerminalModelStreamEvent,
@@ -43,6 +45,7 @@ import {
   summarizeCompaction,
   withFileSections,
 } from "./compaction.ts";
+import type { CapabilityService } from "./capabilities.ts";
 import {
   CommandBlockedError,
   type CommandSource,
@@ -198,6 +201,7 @@ export interface AgentSessionOptions {
   readonly recordPromptSnapshot?: boolean;
   readonly cwd: string;
   readonly extensionHost?: ExtensionHost;
+  readonly capabilityService?: CapabilityService;
   readonly activationSignal?: AbortSignal;
   readonly retry?: ModelRetryOptions | false;
   readonly compaction?: Partial<CompactionSettings>;
@@ -269,6 +273,7 @@ export class AgentSession {
   private readonly model: ModelPort;
   private readonly tools: ToolRegistry;
   private readonly host: ExtensionHost;
+  private readonly capabilityService: CapabilityService | undefined;
   private readonly onEvent: ((event: CanonicalEvent) => void) | undefined;
   private readonly onActivity: ((frame: SessionActivityFrame) => void) | undefined;
   private readonly system: string | undefined;
@@ -284,6 +289,9 @@ export class AgentSession {
   private readonly steeringMessages: Array<readonly UserContent[]> = [];
   private readonly followUpMessages: Array<readonly UserContent[]> = [];
   private readonly activeCapabilityContent = new Map<string, string>();
+  private readonly extensionState = new Map<string, JsonValue>();
+  private readonly extensionLabels = new Map<string, string>();
+  private readonly knownEventIds: Set<EventId>;
 
   private constructor(
     log: JsonlEventLog,
@@ -294,6 +302,7 @@ export class AgentSession {
     this.model = options.model;
     this.tools = options.tools;
     this.host = options.extensionHost ?? NOOP_EXTENSION_HOST;
+    this.capabilityService = options.capabilityService;
     this.onEvent = options.onEvent;
     this.onActivity = options.onActivity;
     this.system = options.prompt?.text ?? options.system;
@@ -319,11 +328,20 @@ export class AgentSession {
       throw new TypeError("modelContextWindow must be a positive safe integer");
     }
     this.tip = events.at(-1)?.id ?? null;
+    this.knownEventIds = new Set(events.map((event) => event.id));
     this.messages = [...messagesFromLineage(events)];
     for (const event of events) {
       if (event.type === "capability.activated") {
         this.activeCapabilityContent.set(event.payload.capability.identity, event.payload.content);
         this.tools.activateCapability(event.payload.capability.identity);
+      } else if (event.type === "extension.state") {
+        const key = `${event.payload.extensionId}\0${event.payload.key}`;
+        if (event.payload.value === null) this.extensionState.delete(key);
+        else this.extensionState.set(key, structuredClone(event.payload.value));
+      } else if (event.type === "extension.label") {
+        const key = `${event.payload.extensionId}\0${event.payload.eventId}`;
+        if (event.payload.label === null) this.extensionLabels.delete(key);
+        else this.extensionLabels.set(key, event.payload.label);
       }
     }
   }
@@ -364,6 +382,68 @@ export class AgentSession {
     const tip = opened.events.at(-1)?.id;
     const lineage = tip === undefined ? [] : tree.lineage(tip);
     const session = new AgentSession(opened.log, lineage, options);
+    session.host.bindSession?.({
+      getState(extensionId, key) {
+        const value = session.extensionState.get(`${extensionId}\0${key}`);
+        return value === undefined ? undefined : structuredClone(value);
+      },
+      async setState(extensionId, key, value) {
+        if (session.tip === null)
+          throw new Error("Extension state is unavailable before session start");
+        await session.append(session.activeOperation ?? undefined, "extension.state", {
+          extensionId,
+          key,
+          value,
+        });
+        const stateKey = `${extensionId}\0${key}`;
+        if (value === null) session.extensionState.delete(stateKey);
+        else session.extensionState.set(stateKey, structuredClone(value));
+      },
+      getEntryLabel(extensionId, eventId) {
+        return session.extensionLabels.get(`${extensionId}\0${eventId}`);
+      },
+      async setEntryLabel(extensionId, eventId, label) {
+        if (!session.knownEventIds.has(parseEventId(eventId, "eventId"))) {
+          throw new Error(`Unknown session event ${eventId}`);
+        }
+        await session.append(session.activeOperation ?? undefined, "extension.label", {
+          extensionId,
+          eventId: parseEventId(eventId, "eventId"),
+          label,
+        });
+        const key = `${extensionId}\0${eventId}`;
+        if (label === null) session.extensionLabels.delete(key);
+        else session.extensionLabels.set(key, label);
+      },
+      async emit(extensionId, channel, value) {
+        if (session.tip === null)
+          throw new Error("Extension events are unavailable before session start");
+        await session.append(session.activeOperation ?? undefined, "extension.event", {
+          extensionId,
+          channel,
+          value,
+        });
+      },
+      async sendExtensionMessage(extensionId, source, content) {
+        if (session.tip === null) {
+          throw new Error("Extension messages are unavailable before session start");
+        }
+        const event = await session.append(
+          session.activeOperation ?? undefined,
+          "context.extension",
+          { extensionId, source, content },
+        );
+        session.messages.push({
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `[extension:${event.payload.extensionId}/${event.payload.source}]\n${event.payload.content}`,
+            },
+          ],
+        });
+      },
+    });
     await session.host.activate(options.activationSignal ?? new AbortController().signal);
     for (const compaction of unfinishedCompactions(lineage)) {
       await session.append(compaction.operationId, "compaction.failed", {
@@ -591,6 +671,58 @@ export class AgentSession {
     }
   }
 
+  extensionCommands() {
+    return this.host.commands?.() ?? [];
+  }
+
+  extensionInfo() {
+    return {
+      activeTools: this.tools.declarations().map((tool) => tool.name),
+      ...(this.system === undefined ? {} : { systemPrompt: this.system }),
+      ...(this.contextUsage === undefined ? {} : { contextTokens: this.contextUsage.tokens }),
+      idle: this.activeOperation === null,
+      pending: {
+        steering: this.steeringMessages.length,
+        followUp: this.followUpMessages.length,
+      },
+    };
+  }
+
+  async activateCapabilities(identities: readonly string[]): Promise<readonly string[]> {
+    if (this.activeOperation !== null) {
+      throw new OperationConflictError(
+        `Operation ${this.activeOperation} owns this branch; activate tools after it`,
+      );
+    }
+    if (this.capabilityService === undefined) {
+      throw new Error("Capability activation is unavailable in this session");
+    }
+    const operationId = parseOperationId(randomUUID(), "operationId");
+    const result = await this.capabilityService.activate(identities);
+    for (const activated of result.activated) {
+      await this.append(operationId, "capability.activated", activated);
+      this.activeCapabilityContent.set(activated.capability.identity, activated.content);
+      const declaration = this.tools.activateCapability(activated.capability.identity);
+      if (declaration !== undefined) await this.append(operationId, "tool.schema", declaration);
+    }
+    for (const denied of result.denied) {
+      await this.append(operationId, "capability.denied", denied);
+    }
+    this.contextUsage = undefined;
+    return this.tools.declarations().map((tool) => tool.name);
+  }
+
+  invokeExtensionCommand(
+    name: string,
+    args: JsonObject,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    if (this.host.invokeCommand === undefined) {
+      return Promise.reject(new Error(`Unknown extension command ${name}`));
+    }
+    return this.host.invokeCommand(name, args, signal);
+  }
+
   async interceptInput(
     content: readonly UserContent[],
     source: "client" | "extension",
@@ -792,6 +924,7 @@ export class AgentSession {
     const appended: CanonicalEvent[] = [];
     try {
       await this.appendUserMessage(operationId, content, appended);
+      await this.appendExtensionContext("agent", operationId, appended, signal);
 
       const activity = { sequence: 0 };
       let overflowRetried = false;
@@ -806,6 +939,7 @@ export class AgentSession {
             }
           }
         }
+        await this.appendExtensionContext("request", operationId, appended, signal);
         const outcome = await this.modelTurn(operationId, activity, signal, appended);
         if (
           this.compaction.enabled &&
@@ -1126,6 +1260,36 @@ export class AgentSession {
     return { content, toolCalls: [], stopReason: "error", error: terminal, exposedOutput };
   }
 
+  private async appendExtensionContext(
+    phase: "agent" | "request",
+    operationId: OperationId,
+    appended: CanonicalEvent[],
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.host.contributeContext === undefined) return;
+    const contributions = await this.host.contributeContext(
+      {
+        phase,
+        systemPrompt: this.effectiveSystem() ?? "",
+        messages: structuredClone(this.messages),
+      },
+      signal ?? new AbortController().signal,
+    );
+    for (const contribution of contributions) {
+      const event = await this.append(operationId, "context.extension", contribution);
+      appended.push(event);
+      this.messages.push({
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: `[extension:${contribution.extensionId}/${contribution.source}]\n${contribution.content}`,
+          },
+        ],
+      });
+    }
+  }
+
   /** Appends daemon-owned compaction queue lifecycle state to the canonical session log. */
   recordCompactionQueued(
     operationId: OperationId,
@@ -1378,6 +1542,7 @@ export class AgentSession {
     });
     const stored = await this.log.append(event);
     this.tip = stored.id;
+    this.knownEventIds.add(stored.id);
     this.onEvent?.(stored);
     this.host.observe?.(stored);
     return stored as CanonicalEvent<Type>;

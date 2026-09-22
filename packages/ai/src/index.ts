@@ -43,6 +43,7 @@ export * from "./openai-codex-responses.ts";
 export * from "./openai-responses.ts";
 export * from "./openrouter-images.ts";
 export * from "./provider.ts";
+export * from "./provider-hooks.ts";
 export * from "./provider-port.ts";
 export * from "./qwen-token-plan.ts";
 export * from "./qwen-token-plan-cn.ts";

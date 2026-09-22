@@ -143,6 +143,9 @@ const eventPayloads = {
     inputSchema: { type: "object", required: ["path"] },
   },
   "context.injected": { source: "skill", content: "Follow this procedure." },
+  "extension.state": { extensionId: "example", key: "count", value: 1 },
+  "extension.label": { extensionId: "example", eventId, label: "important" },
+  "extension.event": { extensionId: "example", channel: "changed", value: { count: 1 } },
   "context.extension": {
     extensionId: "example",
     source: "hook",
@@ -277,6 +280,7 @@ const params = {
   "extension.update": { sessionId, extensionId: "example" },
   "extension.remove": { sessionId, extensionId: "example" },
   "extension.trust": { sessionId, trusted: true },
+  "extension.command.invoke": { sessionId, name: "example-command", args: { value: 1 } },
   "mcp.config.list": {},
   "mcp.config.upsert": {
     name: "docs",
@@ -379,6 +383,10 @@ const entry = {
   binary: false,
   submodule: false,
 } as const;
+const extensionCommands = [
+  { extensionId: "example", name: "example-command", description: "Example command" },
+];
+
 const results = {
   "daemon.info": { securityMode: "sandboxed", sandboxProvider: "bubblewrap" },
   "connection.initialize": {
@@ -502,11 +510,13 @@ const results = {
         enabled: true,
       },
     ],
+    commands: extensionCommands,
   },
   "extension.enable": {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: false },
     extensions: [],
+    commands: extensionCommands,
     changedExtensionId: "example",
     boundaryEventIds: [eventId],
   },
@@ -514,6 +524,7 @@ const results = {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: false },
     extensions: [],
+    commands: extensionCommands,
     changedExtensionId: "example",
     boundaryEventIds: [eventId],
   },
@@ -521,6 +532,7 @@ const results = {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: false },
     extensions: [],
+    commands: extensionCommands,
     changedExtensionId: "example",
     boundaryEventIds: [eventId],
   },
@@ -528,6 +540,7 @@ const results = {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: false },
     extensions: [],
+    commands: extensionCommands,
     changedExtensionId: "example",
     boundaryEventIds: [eventId],
   },
@@ -535,6 +548,7 @@ const results = {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: false },
     extensions: [],
+    commands: extensionCommands,
     changedExtensionId: "example",
     boundaryEventIds: [eventId],
   },
@@ -542,6 +556,7 @@ const results = {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: false },
     extensions: [],
+    commands: extensionCommands,
     changedExtensionId: "example",
     boundaryEventIds: [eventId],
   },
@@ -549,8 +564,10 @@ const results = {
     configPath: "/home/user/.axl/extensions.json",
     project: { root: "/workspace", trusted: true },
     extensions: [],
+    commands: extensionCommands,
     boundaryEventIds: [eventId],
   },
+  "extension.command.invoke": { content: "done" },
   "mcp.config.upsert": {
     path: "/home/user/.axl/mcp.json",
     servers: [

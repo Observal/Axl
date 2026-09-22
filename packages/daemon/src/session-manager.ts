@@ -19,6 +19,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   AgentSession,
+  type CapabilityService,
   CommandBlockedError,
   type CommandSource,
   type CompactionSettings,
@@ -103,6 +104,7 @@ export interface SessionRuntime {
   readonly contextResources?: EventPayloadMap["context.resources"]["resources"];
   readonly log?: EventLogOptions;
   readonly extensionHost?: ExtensionHost;
+  readonly capabilityService?: CapabilityService;
   readonly compaction?: Partial<CompactionSettings>;
   readonly modelContextWindow?: number;
   readonly retry?: ModelRetryOptions | false;
@@ -151,6 +153,32 @@ export type SessionRuntimeFactory = (input: {
   ) => Promise<SessionInteractionResponse>;
   readonly compact: (instructions?: string) => Promise<unknown>;
   readonly reload: () => Promise<unknown>;
+  readonly extensionSession: {
+    send(content: readonly UserContent[], delivery: "steer" | "follow_up"): Promise<void>;
+    compact(instructions?: string): Promise<unknown>;
+    reload(): Promise<unknown>;
+    abort(): Promise<boolean>;
+    rename(title: string): Promise<unknown>;
+    setModel(providerId: string, modelId: string): Promise<unknown>;
+    setThinkingLevel(level: NonNullable<SessionConfiguration["thinkingLevel"]>): Promise<unknown>;
+    activateTools(identities: readonly string[]): Promise<readonly string[]>;
+    newSession(cwd?: string): Promise<{ readonly sessionId: string }>;
+    fork(fromEventId: string): Promise<{ readonly sessionId: string }>;
+    clone(): Promise<{ readonly sessionId: string }>;
+    info(): Promise<{
+      readonly sessionId: string;
+      readonly cwd: string;
+      readonly name?: string;
+      readonly modelId?: string;
+      readonly thinkingLevel?: string;
+      readonly models: readonly { readonly providerId: string; readonly modelId: string }[];
+      readonly activeTools: readonly string[];
+      readonly systemPrompt?: string;
+      readonly contextTokens?: number;
+      readonly idle: boolean;
+      readonly pending: { readonly steering: number; readonly followUp: number };
+    }>;
+  };
   readonly readBlob: (reference: BlobReference) => Promise<Uint8Array>;
 }) => SessionRuntime | Promise<SessionRuntime>;
 
@@ -541,6 +569,48 @@ export class SessionManager {
       interact: (request, signal) => this.interact(sessionId, request, signal),
       compact: (instructions) => this.compact(sessionId, instructions, undefined, "model"),
       reload: () => this.queueReload(sessionId),
+      extensionSession: {
+        send: async (content, delivery) => {
+          const current = this.managed(sessionId);
+          const signal = current.activeTurn?.controller.signal ?? new AbortController().signal;
+          const intercepted = await current.session.interceptInput(content, "extension", signal);
+          if (intercepted.handled) return;
+          if (delivery === "steer") await this.steer(sessionId, intercepted.content);
+          else await this.followUp(sessionId, intercepted.content);
+        },
+        compact: (instructions) => this.compact(sessionId, instructions, undefined, "client"),
+        reload: () => this.queueReload(sessionId),
+        abort: async () => this.interrupt(sessionId).interrupted,
+        rename: (title) =>
+          this.rename(sessionId, title, parseOperationId(randomUUID(), "operationId")),
+        setModel: (providerId, modelId) =>
+          this.configure(
+            sessionId,
+            { providerId, modelId },
+            parseOperationId(randomUUID(), "operationId"),
+          ),
+        setThinkingLevel: (thinkingLevel) =>
+          this.configure(
+            sessionId,
+            { thinkingLevel },
+            parseOperationId(randomUUID(), "operationId"),
+          ),
+        activateTools: (identities) =>
+          this.managed(sessionId).session.activateCapabilities(identities),
+        newSession: async (targetCwd = cwd) => {
+          const created = await this.create(targetCwd, selection);
+          return { sessionId: created.sessionId };
+        },
+        fork: async (fromEventId) => {
+          const forked = await this.fork(sessionId, fromEventId);
+          return { sessionId: forked.sessionId };
+        },
+        clone: async () => {
+          const cloned = await this.clone(sessionId);
+          return { sessionId: cloned.sessionId };
+        },
+        info: async () => ({ ...(await this.extensionInfo(sessionId)), models: [] }),
+      },
       readBlob: (reference) => this.blobs.readAll(sessionId, reference),
     });
     return AgentSession.open(this.logPath(sessionId), sessionId, {
@@ -561,6 +631,9 @@ export class SessionManager {
         prepareOversizedEvent: (event) => this.externalizeOversizedContent(sessionId, event),
       },
       ...(runtime.extensionHost === undefined ? {} : { extensionHost: runtime.extensionHost }),
+      ...(runtime.capabilityService === undefined
+        ? {}
+        : { capabilityService: runtime.capabilityService }),
       activationSignal: signal,
       ...(runtime.compaction === undefined ? {} : { compaction: runtime.compaction }),
       ...(runtime.modelContextWindow === undefined
@@ -1251,6 +1324,56 @@ export class SessionManager {
       throw error;
     }
     return { title: event.payload.title, eventId: event.id };
+  }
+
+  async interceptExtensionCommand(
+    sessionId: unknown,
+    name: string,
+    args: JsonObject,
+    signal?: AbortSignal,
+  ): Promise<JsonObject> {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    await this.resume(parsed, signal);
+    return this.interceptCommand(this.managed(parsed), name, "client", args, signal);
+  }
+
+  async extensionInfo(sessionId: unknown) {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    await this.resume(parsed);
+    const managed = this.managed(parsed);
+    const renamed = managed.events.findLast((event) => event.type === "session.renamed");
+    return {
+      sessionId: parsed,
+      cwd: managed.cwd,
+      ...(renamed?.type === "session.renamed" ? { name: renamed.payload.title } : {}),
+      ...(managed.selection.modelId === undefined ? {} : { modelId: managed.selection.modelId }),
+      ...(managed.selection.thinkingLevel === undefined
+        ? {}
+        : { thinkingLevel: managed.selection.thinkingLevel }),
+      ...managed.session.extensionInfo(),
+    };
+  }
+
+  async extensionCommands(sessionId: unknown) {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    await this.resume(parsed);
+    return this.managed(parsed).session.extensionCommands();
+  }
+
+  async invokeExtensionCommand(
+    sessionId: unknown,
+    name: string,
+    args: JsonObject,
+    signal?: AbortSignal,
+  ): Promise<{ readonly content?: string }> {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    await this.resume(parsed, signal);
+    const content = await this.managed(parsed).session.invokeExtensionCommand(
+      name,
+      args,
+      signal ?? new AbortController().signal,
+    );
+    return content === undefined ? {} : { content };
   }
 
   async cwd(sessionId: unknown): Promise<string> {

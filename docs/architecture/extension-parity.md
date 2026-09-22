@@ -48,7 +48,7 @@ No rows are currently approved exclusions.
 | `session_before_tree` | Missing | Add pre-navigation interception. |
 | `session_tree` | Missing | Add post-navigation notification. |
 | `session_shutdown` | Done | Typed shutdown handlers run within the cleanup budget before owned resources are disposed. |
-| `before_agent_start` | Missing | Add mutable prompt/context behavior before an agent operation starts. |
+| `before_agent_start` | Done | Extensions append bounded canonical context before an agent operation starts. |
 | `agent_start` | Done | Canonical user-turn admission projects to a typed lifecycle notification. |
 | `agent_end` | Done | Final canonical assistant completion projects to a typed lifecycle notification. |
 | `agent_settled` | Partial | Final assistant completion is reported, but queue-drain settlement still needs a distinct signal. |
@@ -58,10 +58,10 @@ No rows are currently approved exclusions.
 | `tool_execution_start` | Done | Effective canonical tool calls project a typed start event before execution. |
 | `tool_execution_update` | Partial | Tool-call stream activity is exposed; arbitrary tool progress remains to be projected. |
 | `tool_execution_end` | Done | Completion is observed and validated result patches are canonicalized. |
-| `context` | Missing | Add mutable per-request context with canonical reconstruction. |
-| `before_provider_headers` | Missing | Add provider-boundary header mutation outside the kernel. |
-| `before_provider_request` | Missing | Add validated provider payload mutation outside the kernel. |
-| `after_provider_response` | Missing | Add provider response observation outside the kernel. |
+| `context` | Partial | Extensions append canonical per-request context without rewriting the prompt-cache prefix; arbitrary message replacement is not exposed. |
+| `before_provider_headers` | Partial | Shared safe HTTP model transports support ordered header mutation; non-HTTP adapters remain. |
+| `before_provider_request` | Partial | Shared safe HTTP model transports support ordered JSON payload replacement; non-HTTP adapters remain. |
+| `after_provider_response` | Partial | Shared safe HTTP model transports report response metadata before body consumption; non-HTTP adapters remain. |
 | `model_select` | Partial | Model changes project typed notifications; pre-change interception remains. |
 | `thinking_level_select` | Partial | Thinking changes project typed notifications; pre-change interception remains. |
 | `tool_call` | Done | Extensions can allow, block, or chain input replacements before the effective call is written and validated. |
@@ -80,30 +80,30 @@ No rows are currently approved exclusions.
 | Working directory | Done | `DaemonExtensionApi.cwd` exposes the canonical session directory. |
 | Mode and UI availability | Missing | Define daemon, TUI, web, and headless entry-point contexts. |
 | Project trust query | Missing | Depends on project-trust storage and discovery. |
-| Session manager access | Missing | Add scoped daemon operations instead of exposing mutable kernel objects. |
-| Model registry and selected model | Missing | Add read-only registry access and typed model changes through daemon RPC. |
-| Idle, abort, and pending-message state | Missing | Add scoped operation state and cancellation. |
+| Session manager access | Partial | The public session facade exposes scoped operations without mutable kernel objects; remaining inspection methods are tracked below. |
+| Model registry and selected model | Done | `session.info()` returns the available model identities and selection; setters route through daemon configuration. |
+| Idle, abort, and pending-message state | Done | The session facade exposes abort plus current operation and pending-message state. |
 | Shutdown | Missing | Add authorized daemon shutdown intent. |
 | Context usage | Missing | Add public SDK projection of current context usage. |
-| Compact | Partial | Model and clients can compact through daemon commands; extensions lack a direct scoped method. |
-| Current system prompt | Missing | Add reconstructable prompt input and rendered-prompt access. |
-| New session | Missing | Add scoped creation through daemon RPC. |
-| Fork, clone, navigation, and switch | Missing | Existing client RPCs are not exposed through the extension API. |
-| Runtime reload | Partial | A session can reload, but extensions lack a direct scoped method and per-extension reload. |
+| Compact | Done | The scoped session facade invokes daemon-owned compaction. |
+| Current system prompt | Done | Context handlers and `session.info()` expose the stable system prompt without mutable kernel access. |
+| New session | Done | The scoped session facade creates sessions through daemon ownership. |
+| Fork, clone, navigation, and switch | Partial | Scoped fork and clone are available; client presentation owns navigation and switching. |
+| Runtime reload | Done | The scoped session facade and management RPC both use atomic daemon reload. |
 | Register tool | Done | Tools can register and unregister dynamically; collisions, including built-in overrides, fail explicitly. |
-| Send extension message | Missing | Add namespaced canonical extension messages. |
-| Send user message | Missing | Add defined prompt, steer, and follow-up semantics. |
-| Append custom entry | Missing | Add bounded namespaced canonical extension state and replay. |
-| Session name | Missing | Add read and update methods through daemon ownership. |
-| Entry labels | Missing | Add canonical label operations. |
-| Register shared command | Missing | Implement OBS-923 with typed SDK invocation from every client. |
-| Enumerate commands | Missing | Expose the authoritative daemon command catalog to extensions. |
-| Execute subprocess | Missing | Define whether trusted daemon code uses Node directly or a cancellable Axl helper. |
-| Get and set active tools | Missing | Preserve capability authority and progressive-disclosure invariants. |
-| Get and set model or thinking | Missing | Route changes through existing daemon configuration operations. |
-| Shared extension event bus | Missing | Add namespaced cross-entry-point events with bounded payloads. |
-| Register and unregister provider | Missing | Implement through `packages/ai` and daemon boundaries, never the kernel. |
-| Persistent extension state | Missing | Persist namespaced canonical state and reconstruct it after restart. |
+| Send extension message | Done | Namespaced extension messages append canonical `context.extension` events and enter model context. |
+| Send user message | Done | The scoped session facade supports validated steering and follow-up delivery. |
+| Append custom entry | Done | Bounded namespaced `extension.state` events provide canonical custom state. |
+| Session name | Done | Scoped read and rename route through daemon-owned session state. |
+| Entry labels | Done | Namespaced labels append canonical `extension.label` events and rebuild after restart. |
+| Register shared command | Done | Commands register in the daemon and invoke through typed public SDK RPC. |
+| Enumerate commands | Partial | Public extension inventory lists extension commands; the extension context lacks a combined built-in catalog getter. |
+| Execute subprocess | Done | Trusted daemon extensions use Node process APIs directly and receive lifecycle cancellation signals; no redundant process wrapper is added. |
+| Get and set active tools | Done | `session.info()` reads active tools and `activateTools()` uses the authority-checked capability service. |
+| Get and set model or thinking | Done | Scoped reads and setters route through daemon configuration. |
+| Shared extension event bus | Done | `emit()` appends bounded namespaced `extension.event` records visible through daemon and SDK event streams. |
+| Register and unregister provider | Missing | Implement global provider ownership through `packages/ai`; per-session extension factories cannot safely own shared providers. |
+| Persistent extension state | Done | Namespaced JSON state is canonical and rebuilt from `extension.state` events. |
 
 ## TUI presentation API
 

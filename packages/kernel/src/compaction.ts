@@ -154,12 +154,16 @@ function projectContext(events: readonly CanonicalEvent[]): ProjectedContext {
         },
         eventIds: [event.id],
       });
-    } else if (event.type === "context.injected") {
+    } else if (event.type === "context.injected" || event.type === "context.extension") {
       toolCallingAssistant = undefined;
+      const source =
+        event.type === "context.extension"
+          ? `extension:${event.payload.extensionId}/${event.payload.source}`
+          : event.payload.source;
       groups.push({
         message: {
           role: "user",
-          content: [{ type: "text", text: `[${event.payload.source}]\n${event.payload.content}` }],
+          content: [{ type: "text", text: `[${source}]\n${event.payload.content}` }],
         },
         eventIds: [event.id],
       });

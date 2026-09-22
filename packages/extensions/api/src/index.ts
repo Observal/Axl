@@ -186,6 +186,12 @@ export type DaemonCommandHandler = (
   event: DaemonCommandEvent,
 ) => DaemonCommandDecision | Promise<DaemonCommandDecision>;
 
+export type DaemonInterceptionEventName =
+  | "project_trust"
+  | "session_before_fork"
+  | "session_before_compact"
+  | "user_bash";
+
 export type DaemonToolCallHandler = (
   event: DaemonToolCallEvent,
 ) => DaemonToolCallDecision | Promise<DaemonToolCallDecision>;
@@ -214,7 +220,8 @@ export type DaemonLifecycleEventName =
   | "tool_execution_update"
   | "tool_execution_end"
   | "model_select"
-  | "thinking_level_select";
+  | "thinking_level_select"
+  | "extension_event";
 
 export interface DaemonLifecycleEvent {
   readonly type: DaemonLifecycleEventName;
@@ -234,6 +241,51 @@ export type DaemonResourceDiscoveryHandler = (event: {
   readonly signal: AbortSignal;
 }) => readonly DaemonContextResource[] | Promise<readonly DaemonContextResource[]>;
 
+export interface DaemonContextContribution {
+  readonly source: string;
+  readonly content: string;
+}
+
+export type DaemonContextHandler = (event: {
+  readonly systemPrompt: string;
+  readonly messages: readonly unknown[];
+  readonly signal: AbortSignal;
+}) => readonly DaemonContextContribution[] | Promise<readonly DaemonContextContribution[]>;
+
+export interface DaemonProviderHeadersEvent {
+  readonly url: string;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly signal: AbortSignal;
+}
+
+export type DaemonProviderHeadersHandler = (
+  event: DaemonProviderHeadersEvent,
+) =>
+  | Readonly<Record<string, string>>
+  | undefined
+  | Promise<Readonly<Record<string, string>> | undefined>;
+
+export interface DaemonProviderRequestEvent {
+  readonly url: string;
+  readonly payload: unknown;
+  readonly signal: AbortSignal;
+}
+
+export type DaemonProviderRequestHandler = (
+  event: DaemonProviderRequestEvent,
+) => unknown | Promise<unknown>;
+
+export interface DaemonProviderResponseEvent {
+  readonly url: string;
+  readonly status: number;
+  readonly headers: Readonly<Record<string, string>>;
+  readonly signal: AbortSignal;
+}
+
+export type DaemonProviderResponseHandler = (
+  event: DaemonProviderResponseEvent,
+) => void | Promise<void>;
+
 export interface DaemonInputEvent {
   readonly source: "client" | "extension";
   readonly content: readonly unknown[];
@@ -249,6 +301,53 @@ export type DaemonInputHandler = (
   event: DaemonInputEvent,
 ) => DaemonInputDecision | Promise<DaemonInputDecision>;
 
+export interface DaemonCommandDefinition {
+  readonly name: string;
+  readonly description: string;
+  execute(
+    args: DaemonJsonObject,
+    context: { readonly signal: AbortSignal },
+  ): void | string | Promise<void | string>;
+}
+
+export interface DaemonExtensionSession {
+  send(content: readonly unknown[], delivery: "steer" | "follow_up"): Promise<void>;
+  sendExtensionMessage(source: string, content: string): Promise<void>;
+  compact(instructions?: string): Promise<unknown>;
+  reload(): Promise<unknown>;
+  abort(): Promise<boolean>;
+  rename(title: string): Promise<unknown>;
+  setModel(providerId: string, modelId: string): Promise<unknown>;
+  setThinkingLevel(
+    level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max",
+  ): Promise<unknown>;
+  activateTools(identities: readonly string[]): Promise<readonly string[]>;
+  newSession(cwd?: string): Promise<{ readonly sessionId: string }>;
+  fork(fromEventId: string): Promise<{ readonly sessionId: string }>;
+  clone(): Promise<{ readonly sessionId: string }>;
+  info(): Promise<{
+    readonly sessionId: string;
+    readonly cwd: string;
+    readonly name?: string;
+    readonly modelId?: string;
+    readonly thinkingLevel?: string;
+    readonly models: readonly { readonly providerId: string; readonly modelId: string }[];
+    readonly activeTools: readonly string[];
+    readonly systemPrompt?: string;
+    readonly contextTokens?: number;
+    readonly idle: boolean;
+    readonly pending: { readonly steering: number; readonly followUp: number };
+  }>;
+  getEntryLabel(eventId: string): Promise<string | undefined>;
+  setEntryLabel(eventId: string, label?: string): Promise<void>;
+}
+
+export interface DaemonExtensionState {
+  get(key: string): unknown;
+  set(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<void>;
+}
+
 export interface DaemonExtensionApi {
   /** Stable identity derived from the extension file name. */
   readonly extensionId: string;
@@ -256,16 +355,29 @@ export interface DaemonExtensionApi {
   readonly cwd: string;
   /** Aborted when activation is cancelled or this extension begins disposal. */
   readonly signal: AbortSignal;
+  /** Namespaced canonical state reconstructed from the session log. */
+  readonly state: DaemonExtensionState;
+  /** Publishes a namespaced canonical event to daemon and presentation extensions. */
+  emit(channel: string, payload: unknown): Promise<void>;
+  /** Scoped daemon-owned session operations. */
+  readonly session: DaemonExtensionSession;
   /** Adds a tool the model can discover through `capability_search` and activate for the session. */
   registerTool(definition: DaemonToolDefinition): ExtensionDisposer;
+  /** Adds a daemon-owned command callable through the public SDK. */
+  registerCommand(definition: DaemonCommandDefinition): ExtensionDisposer;
   on(event: "tool.call", handler: DaemonToolCallHandler): ExtensionDisposer;
   on(event: "tool.result", handler: DaemonToolResultHandler): ExtensionDisposer;
   /** Intercepts every built-in command before the daemon runs it. */
   on(event: "command", handler: DaemonCommandHandler): ExtensionDisposer;
+  on(event: DaemonInterceptionEventName, handler: DaemonCommandHandler): ExtensionDisposer;
   on(event: "session.event", handler: DaemonSessionEventHandler): ExtensionDisposer;
   on(event: DaemonLifecycleEventName, handler: DaemonLifecycleEventHandler): ExtensionDisposer;
   on(event: "resources_discover", handler: DaemonResourceDiscoveryHandler): ExtensionDisposer;
+  on(event: "before_agent_start" | "context", handler: DaemonContextHandler): ExtensionDisposer;
   on(event: "input", handler: DaemonInputHandler): ExtensionDisposer;
+  on(event: "before_provider_headers", handler: DaemonProviderHeadersHandler): ExtensionDisposer;
+  on(event: "before_provider_request", handler: DaemonProviderRequestHandler): ExtensionDisposer;
+  on(event: "after_provider_response", handler: DaemonProviderResponseHandler): ExtensionDisposer;
   /** Registers cleanup that runs when the session ends. */
   track(disposer: ExtensionDisposer): ExtensionDisposer;
 }

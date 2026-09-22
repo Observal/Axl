@@ -390,6 +390,7 @@ export class DaemonExtensionRegistry {
           ...(error === undefined ? {} : { error }),
         };
       }),
+      commands: [],
     };
   }
 

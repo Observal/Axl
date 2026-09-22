@@ -10,12 +10,19 @@ import { pathToFileURL } from "node:url";
 import { Ajv, type ValidateFunction } from "ajv";
 
 import type {
+  DaemonCommandDefinition,
   DaemonCommandHandler,
+  DaemonContextHandler,
   DaemonExtensionApi,
   DaemonExtensionFactory,
+  DaemonExtensionSession,
   DaemonInputHandler,
+  DaemonInterceptionEventName,
   DaemonLifecycleEventHandler,
   DaemonLifecycleEventName,
+  DaemonProviderHeadersHandler,
+  DaemonProviderRequestHandler,
+  DaemonProviderResponseHandler,
   DaemonResourceDiscoveryHandler,
   DaemonSessionEventHandler,
   DaemonToolCallHandler,
@@ -28,9 +35,14 @@ import {
   type CapabilitySource,
   type CommandDecision,
   type CommandInterception,
+  type ExtensionContextContribution,
   type ExtensionHost,
+  type ExtensionSessionBinding,
   ExtensionHostError,
   type KernelTool,
+  type ProviderHeadersInterception,
+  type ProviderRequestInterception,
+  type ProviderResponseObservation,
   type ToolCallDecision,
   type ToolCallInterception,
   ToolCapabilityService,
@@ -44,6 +56,7 @@ import type {
   CapabilityRecord,
   ContextResource,
   JsonObject,
+  JsonValue,
   UserContent,
 } from "@axl/protocol";
 import { parseUserContent } from "@axl/protocol";
@@ -53,7 +66,9 @@ export { DaemonExtensionRegistry } from "./registry.ts";
 
 const EXTENSION_ID = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const TOOL_NAME = /^[a-z][a-z0-9_]*$/;
+const COMMAND_NAME = /^[a-z][a-z0-9-]*$/;
 const RESOURCE_NAME = /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+const STATE_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const ENTRY_EXTENSIONS = new Set([".ts", ".mts", ".js", ".mjs"]);
 const MAX_TEXT_BYTES = 1_000_000;
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
@@ -120,6 +135,10 @@ export interface DaemonExtensionFailure {
   readonly error: Error;
 }
 
+type BoundSessionMethod = "sendExtensionMessage" | "getEntryLabel" | "setEntryLabel";
+type HostSessionControls = Omit<DaemonExtensionSession, BoundSessionMethod> &
+  Partial<Pick<DaemonExtensionSession, BoundSessionMethod>>;
+
 export interface LoadDaemonExtensionsOptions {
   /** Directory holding user extensions, normally `~/.axl/extensions`. */
   readonly directory: string;
@@ -132,6 +151,8 @@ export interface LoadDaemonExtensionsOptions {
   readonly disabledExtensionIds?: ReadonlySet<string>;
   /** Owning daemon operation. Aborting it cancels extension activation. */
   readonly signal?: AbortSignal;
+  readonly session?: HostSessionControls;
+  readonly reservedCommandNames?: ReadonlySet<string>;
   readonly cleanupTimeoutMs?: number;
   /** Receives handler failures that must not interrupt the session. */
   readonly onFailure: (failure: DaemonExtensionFailure) => void;
@@ -246,6 +267,48 @@ function textBytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
 
+function stateKey(value: string): string {
+  if (!STATE_KEY.test(value)) throw new TypeError("Extension state key is invalid");
+  return value;
+}
+
+function unavailableSession(): DaemonExtensionSession {
+  const fail = (): never => {
+    throw new Error("Daemon session controls are unavailable in this host");
+  };
+  return {
+    send: fail,
+    sendExtensionMessage: fail,
+    compact: fail,
+    reload: fail,
+    abort: fail,
+    rename: fail,
+    setModel: fail,
+    setThinkingLevel: fail,
+    activateTools: fail,
+    newSession: fail,
+    fork: fail,
+    clone: fail,
+    info: fail,
+    getEntryLabel: fail,
+    setEntryLabel: fail,
+  };
+}
+
+function stateValue(value: unknown): JsonValue {
+  if (value === undefined) throw new TypeError("Extension state value must be JSON");
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined || Buffer.byteLength(encoded) > MAX_TEXT_BYTES) {
+      throw new TypeError("Extension state value must be bounded JSON");
+    }
+    return JSON.parse(encoded) as JsonValue;
+  } catch (cause) {
+    if (cause instanceof TypeError && cause.message.startsWith("Extension state")) throw cause;
+    throw new TypeError("Extension state value must be JSON", { cause });
+  }
+}
+
 async function withinCleanupBudget(tasks: readonly Promise<void>[], milliseconds: number) {
   if (tasks.length === 0) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -347,8 +410,13 @@ interface LoadedExtensionState {
   readonly toolCallHandlers: DaemonToolCallHandler[];
   readonly toolResultHandlers: DaemonToolResultHandler[];
   readonly commandHandlers: DaemonCommandHandler[];
+  readonly commands: DaemonCommandDefinition[];
   readonly lifecycleHandlers: Map<DaemonLifecycleEventName, DaemonLifecycleEventHandler[]>;
   readonly resourceHandlers: DaemonResourceDiscoveryHandler[];
+  readonly contextHandlers: Map<"agent" | "request", DaemonContextHandler[]>;
+  readonly providerHeaderHandlers: DaemonProviderHeadersHandler[];
+  readonly providerRequestHandlers: DaemonProviderRequestHandler[];
+  readonly providerResponseHandlers: DaemonProviderResponseHandler[];
   readonly inputHandlers: DaemonInputHandler[];
   readonly sessionEventHandlers: DaemonSessionEventHandler[];
   readonly lifecycle: AbortController;
@@ -377,6 +445,7 @@ export async function loadDaemonExtensions(
   ).filter((extension) => !options.disabledExtensionIds?.has(extension.id));
   const states: LoadedExtensionState[] = [];
   const records: CapabilityRecord[] = [];
+  let sessionBinding: ExtensionSessionBinding | undefined;
   const disposeStates = async (selected: readonly LoadedExtensionState[]) => {
     const failures: DaemonExtensionFailure[] = [];
     for (const state of selected) state.lifecycle.abort();
@@ -437,8 +506,13 @@ export async function loadDaemonExtensions(
         toolCallHandlers: [],
         toolResultHandlers: [],
         commandHandlers: [],
+        commands: [],
         lifecycleHandlers: new Map(),
         resourceHandlers: [],
+        contextHandlers: new Map(),
+        providerHeaderHandlers: [],
+        providerRequestHandlers: [],
+        providerResponseHandlers: [],
         inputHandlers: [],
         sessionEventHandlers: [],
         lifecycle: new AbortController(),
@@ -467,6 +541,61 @@ export async function loadDaemonExtensions(
           options.signal === undefined
             ? state.lifecycle.signal
             : AbortSignal.any([options.signal, state.lifecycle.signal]),
+        async emit(channel, value) {
+          if (sessionBinding === undefined) {
+            throw new Error("Extension events are unavailable before session binding");
+          }
+          await sessionBinding.emit(extension.id, stateKey(channel), stateValue(value));
+        },
+        session: {
+          ...(options.session ?? unavailableSession()),
+          async sendExtensionMessage(source, content) {
+            if (sessionBinding === undefined) {
+              throw new Error("Extension messages are unavailable before session binding");
+            }
+            if (
+              typeof source !== "string" ||
+              source.length === 0 ||
+              typeof content !== "string" ||
+              textBytes(content) > MAX_TEXT_BYTES
+            ) {
+              throw new TypeError("Extension message requires bounded source and content strings");
+            }
+            await sessionBinding.sendExtensionMessage(extension.id, source, content);
+          },
+          async getEntryLabel(eventId) {
+            if (sessionBinding === undefined) {
+              throw new Error("Extension labels are unavailable before session binding");
+            }
+            return sessionBinding.getEntryLabel(extension.id, eventId);
+          },
+          async setEntryLabel(eventId, label) {
+            if (sessionBinding === undefined) {
+              throw new Error("Extension labels are unavailable before session binding");
+            }
+            if (label !== undefined && (typeof label !== "string" || label.length > 512)) {
+              throw new TypeError("Extension label must be at most 512 characters");
+            }
+            await sessionBinding.setEntryLabel(extension.id, eventId, label ?? null);
+          },
+        },
+        state: {
+          get(key) {
+            return sessionBinding?.getState(extension.id, stateKey(key));
+          },
+          async set(key, value) {
+            if (sessionBinding === undefined) {
+              throw new Error("Extension state is unavailable before session binding");
+            }
+            await sessionBinding.setState(extension.id, stateKey(key), stateValue(value));
+          },
+          async delete(key) {
+            if (sessionBinding === undefined) {
+              throw new Error("Extension state is unavailable before session binding");
+            }
+            await sessionBinding.setState(extension.id, stateKey(key), null);
+          },
+        },
         registerTool(definition) {
           if (state.lifecycle.signal.aborted) {
             throw new DaemonExtensionError(
@@ -501,6 +630,44 @@ export async function loadDaemonExtensions(
             if (toolIndex >= 0) state.tools.splice(toolIndex, 1);
           });
         },
+        registerCommand(definition) {
+          if (state.lifecycle.signal.aborted) {
+            throw new DaemonExtensionError(
+              extension.path,
+              "registerCommand is unavailable after disposal",
+            );
+          }
+          if (
+            typeof definition !== "object" ||
+            definition === null ||
+            typeof definition.name !== "string" ||
+            !COMMAND_NAME.test(definition.name) ||
+            typeof definition.description !== "string" ||
+            definition.description.trim().length === 0 ||
+            typeof definition.execute !== "function"
+          ) {
+            throw new DaemonExtensionError(
+              extension.path,
+              "registerCommand received an invalid definition",
+            );
+          }
+          if (
+            options.reservedCommandNames?.has(definition.name) ||
+            states.some((candidate) =>
+              candidate.commands.some((command) => command.name === definition.name),
+            )
+          ) {
+            throw new DaemonExtensionError(
+              extension.path,
+              `command ${definition.name} is already registered`,
+            );
+          }
+          state.commands.push(definition);
+          return own(() => {
+            const index = state.commands.indexOf(definition);
+            if (index >= 0) state.commands.splice(index, 1);
+          });
+        },
         on(
           event:
             | "tool.call"
@@ -508,7 +675,13 @@ export async function loadDaemonExtensions(
             | "command"
             | "session.event"
             | "resources_discover"
+            | "before_agent_start"
+            | "context"
             | "input"
+            | "before_provider_headers"
+            | "before_provider_request"
+            | "after_provider_response"
+            | DaemonInterceptionEventName
             | DaemonLifecycleEventName,
           handler: unknown,
         ) {
@@ -532,11 +705,63 @@ export async function loadDaemonExtensions(
               if (index >= 0) list.splice(index, 1);
             });
           }
-          if (event === "command") {
+          if (
+            event === "command" ||
+            event === "project_trust" ||
+            event === "session_before_fork" ||
+            event === "session_before_compact" ||
+            event === "user_bash"
+          ) {
+            const names: Partial<Record<DaemonInterceptionEventName, string>> = {
+              project_trust: "project_trust",
+              session_before_fork: "fork",
+              session_before_compact: "compact",
+              user_bash: "user_bash",
+            };
+            const expected = event === "command" ? undefined : names[event];
+            const registered = handler as DaemonCommandHandler;
+            const wrapped: DaemonCommandHandler = (input) =>
+              expected === undefined || input.name === expected
+                ? registered({ ...input, name: expected === undefined ? input.name : event })
+                : undefined;
             const list = state.commandHandlers;
-            list.push(handler as DaemonCommandHandler);
+            list.push(wrapped);
             return own(() => {
-              const index = list.indexOf(handler as DaemonCommandHandler);
+              const index = list.indexOf(wrapped);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
+          if (event === "before_provider_headers") {
+            const list = state.providerHeaderHandlers;
+            list.push(handler as DaemonProviderHeadersHandler);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonProviderHeadersHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
+          if (event === "before_provider_request") {
+            const list = state.providerRequestHandlers;
+            list.push(handler as DaemonProviderRequestHandler);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonProviderRequestHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
+          if (event === "after_provider_response") {
+            const list = state.providerResponseHandlers;
+            list.push(handler as DaemonProviderResponseHandler);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonProviderResponseHandler);
+              if (index >= 0) list.splice(index, 1);
+            });
+          }
+          if (event === "before_agent_start" || event === "context") {
+            const phase = event === "before_agent_start" ? "agent" : "request";
+            const list = state.contextHandlers.get(phase) ?? [];
+            list.push(handler as DaemonContextHandler);
+            state.contextHandlers.set(phase, list);
+            return own(() => {
+              const index = list.indexOf(handler as DaemonContextHandler);
               if (index >= 0) list.splice(index, 1);
             });
           }
@@ -606,6 +831,12 @@ export async function loadDaemonExtensions(
   const resourceStates = states.filter((state) => state.resourceHandlers.length > 0);
   const gates = states.filter((state) => state.toolCallHandlers.length > 0);
   const resultHandlers = states.filter((state) => state.toolResultHandlers.length > 0);
+  const contextStates = states.filter((state) => state.contextHandlers.size > 0);
+  const providerHeaderStates = states.filter((state) => state.providerHeaderHandlers.length > 0);
+  const providerRequestStates = states.filter((state) => state.providerRequestHandlers.length > 0);
+  const providerResponseStates = states.filter(
+    (state) => state.providerResponseHandlers.length > 0,
+  );
   const inputStates = states.filter((state) => state.inputHandlers.length > 0);
   const commandGates = states.filter((state) => state.commandHandlers.length > 0);
   const observers = states.filter((state) => state.sessionEventHandlers.length > 0);
@@ -646,6 +877,43 @@ export async function loadDaemonExtensions(
   };
 
   const host: ExtensionHost = {
+    bindSession(binding) {
+      sessionBinding = binding;
+    },
+    commands() {
+      return states.flatMap((state) =>
+        state.commands.map((command) => ({
+          extensionId: state.id,
+          name: command.name,
+          description: command.description,
+        })),
+      );
+    },
+    async invokeCommand(name, args, signal) {
+      for (const state of states) {
+        const command = state.commands.find((candidate) => candidate.name === name);
+        if (command === undefined) continue;
+        try {
+          const result = await command.execute(structuredClone(args), {
+            signal: AbortSignal.any([signal, state.lifecycle.signal]),
+          });
+          if (result !== undefined && typeof result !== "string") {
+            throw new TypeError("command result must be a string or undefined");
+          }
+          if (result !== undefined && textBytes(result) > MAX_TEXT_BYTES) {
+            throw new TypeError(`command result exceeds ${MAX_TEXT_BYTES} bytes`);
+          }
+          return typeof result === "string" ? result : undefined;
+        } catch (cause) {
+          throw new DaemonExtensionError(
+            state.path,
+            `command ${name} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            { cause, extensionId: state.id, phase: "command" },
+          );
+        }
+      }
+      throw new DaemonExtensionError(options.directory, `unknown extension command ${name}`);
+    },
     async activate(signal) {
       const activationSignal = signal ?? new AbortController().signal;
       for (const state of lifecycleStates) {
@@ -833,6 +1101,117 @@ export async function loadDaemonExtensions(
             };
           },
         }),
+    ...(contextStates.length === 0
+      ? {}
+      : {
+          async contributeContext(input, signal) {
+            const contributions: ExtensionContextContribution[] = [];
+            for (const state of contextStates) {
+              for (const handler of [...(state.contextHandlers.get(input.phase) ?? [])]) {
+                let values: Awaited<ReturnType<DaemonContextHandler>>;
+                try {
+                  values = await handler({
+                    systemPrompt: input.systemPrompt,
+                    messages: structuredClone(input.messages),
+                    signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                  });
+                } catch (cause) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    `${input.phase === "agent" ? "before_agent_start" : "context"} handler failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+                    { cause },
+                  );
+                }
+                if (!Array.isArray(values) || values.length > 32) {
+                  throw new DaemonExtensionError(
+                    state.path,
+                    "context handler returned too many values",
+                  );
+                }
+                for (const value of values) {
+                  if (
+                    typeof value !== "object" ||
+                    value === null ||
+                    typeof value.source !== "string" ||
+                    value.source.length === 0 ||
+                    typeof value.content !== "string" ||
+                    textBytes(value.content) > MAX_TEXT_BYTES
+                  ) {
+                    throw new DaemonExtensionError(
+                      state.path,
+                      "context contribution requires bounded source and content strings",
+                    );
+                  }
+                  contributions.push({
+                    extensionId: state.id,
+                    source: value.source,
+                    content: value.content,
+                  });
+                }
+              }
+            }
+            return contributions;
+          },
+        }),
+    ...(providerHeaderStates.length === 0
+      ? {}
+      : {
+          async beforeProviderHeaders(input: ProviderHeadersInterception, signal: AbortSignal) {
+            let headers = input.headers;
+            for (const state of providerHeaderStates) {
+              for (const handler of [...state.providerHeaderHandlers]) {
+                const replacement = await handler({
+                  ...input,
+                  headers: structuredClone(headers),
+                  signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                });
+                if (replacement === undefined) continue;
+                if (
+                  typeof replacement !== "object" ||
+                  replacement === null ||
+                  Array.isArray(replacement) ||
+                  Object.values(replacement).some((value) => typeof value !== "string")
+                ) {
+                  throw new DaemonExtensionError(state.path, "provider headers must be strings");
+                }
+                headers = structuredClone(replacement);
+              }
+            }
+            return headers;
+          },
+        }),
+    ...(providerRequestStates.length === 0
+      ? {}
+      : {
+          async beforeProviderRequest(input: ProviderRequestInterception, signal: AbortSignal) {
+            let payload = input.payload;
+            for (const state of providerRequestStates) {
+              for (const handler of [...state.providerRequestHandlers]) {
+                const replacement = await handler({
+                  ...input,
+                  payload: structuredClone(payload),
+                  signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                });
+                if (replacement !== undefined) payload = stateValue(replacement);
+              }
+            }
+            return payload;
+          },
+        }),
+    ...(providerResponseStates.length === 0
+      ? {}
+      : {
+          async afterProviderResponse(input: ProviderResponseObservation, signal: AbortSignal) {
+            for (const state of providerResponseStates) {
+              for (const handler of [...state.providerResponseHandlers]) {
+                await handler({
+                  ...structuredClone(input),
+                  signal: AbortSignal.any([signal, state.lifecycle.signal]),
+                });
+              }
+            }
+          },
+        }),
     ...(inputStates.length === 0
       ? {}
       : {
@@ -991,6 +1370,7 @@ export async function loadDaemonExtensions(
             if (event.type === "config.thinking") {
               notifyLifecycle("thinking_level_select", projected);
             }
+            if (event.type === "extension.event") notifyLifecycle("extension_event", projected);
           },
         }),
     ...(lifecycleStates.length === 0

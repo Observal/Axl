@@ -47,6 +47,7 @@ test("validates extension inventory and mutation results", () => {
         enabled: true,
       },
     ],
+    commands: [{ extensionId: "example", name: "example-command", description: "Example command" }],
   } as const;
   assert.deepEqual(parseExtensionListResult(listed), listed);
   assert.throws(

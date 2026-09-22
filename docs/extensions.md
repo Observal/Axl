@@ -108,7 +108,16 @@ The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, 
 ## API
 
 `registerTool(definition)`
-: Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal)` runs. Execution returns `{ content: [{ type: "text", text }], isError? }`.
+: Adds a tool under identity `extension:<name>/<tool>`. The tool is indexed for `capability_search` and stays out of the prompt until the model activates it. Tool names must match `^[a-z][a-z0-9_]*$` and must not shadow a built-in tool. A valid JSON Schema is required, and input is validated against it before `execute(input, signal)` runs. Execution returns `{ content: [{ type: "text", text }], isError? }`. Registration and its returned disposer remain usable after factory activation for dynamic tool lifecycles.
+
+`registerCommand(definition)`
+: Registers a daemon-owned command with a unique lowercase hyphenated name. Built-in names cannot be replaced. Every client can list and invoke the command through `extension.list` and `extension.command.invoke`, including the typed SDK methods.
+
+`state`
+: Provides namespaced `get`, `set`, and `delete` operations. Updates append `extension.state` events and reconstruct after daemon restart. Values must be bounded JSON.
+
+`session`
+: Provides scoped daemon operations for steering or follow-up input, namespaced extension messages, compaction, reload, abort, rename, model and thinking-level changes, capability activation, new sessions, forks, and clones. `info()` returns the current name, model, thinking level, active tools, system prompt, context usage, and pending-message counts. Entry labels are namespaced and persisted through canonical `extension.label` events. Operations retain the daemon's ordinary ownership, validation, canonical logging, and cancellation rules.
 
 `on("tool.call", handler)`
 : Runs before every canonical tool call, including built-in tools such as `bash` and extension tools. Return `{ block: true, reason }` to stop the call, `{ input }` to replace its arguments, or nothing to allow it unchanged. Replacements chain in load order and are validated by the selected tool before execution. The canonical `tool.call` records the effective input.
@@ -121,6 +130,12 @@ The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, 
 
 `on("input", handler)`
 : Intercepts client or extension-produced input before the agent loop. Return `{ action: "transform", content }`, `{ action: "handled" }`, or nothing. Transforms chain and are validated before admission.
+
+`on("before_agent_start", handler)` and `on("context", handler)`
+: Contribute bounded context before the turn and before each provider request. Contributions append `context.extension` before model dispatch, so reconstruction remains exact and the stable prompt prefix is unchanged.
+
+`on("before_provider_headers", handler)`, `on("before_provider_request", handler)`, and `on("after_provider_response", handler)`
+: Run around model HTTP dispatch inside `packages/ai`. Header and JSON payload replacements chain in extension order. The response hook runs after headers arrive and before the response body is consumed. All receive the owning model request's cancellation signal.
 
 `on("command", handler)`
 : Runs before every built-in command. Return nothing to run it unchanged, `{ args }` to run it with replaced inputs, or `{ block: true, reason }` to refuse it. A thrown error refuses it. Replacements chain in load order; the first refusal wins. Refused commands fail with the `command_blocked` error and the reason, whoever triggered them: a client, the model, or the daemon itself. The daemon revalidates replaced inputs and refuses invalid ones.
@@ -142,7 +157,7 @@ The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, 
 `on("session.event", handler)`
 : Receives `{ id, type, timestamp, payload, signal }` for every canonical event after it is written. Payloads are copies. The signal aborts when disposal starts. Disposal drains cooperative asynchronous observers before cleaning up their resources and reports handlers that exceed the cleanup deadline. A throwing observer is reported on the daemon's stderr and does not stop the session.
 
-Typed lifecycle notifications are also available for `session_start`, `session_info_changed`, `session_compact`, `session_compact_failed`, `session_shutdown`, `agent_start`, `agent_end`, `agent_settled`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `model_select`, and `thinking_level_select`. Durable notifications carry the canonical event projection. Streaming notifications carry the bounded activity frame.
+Typed lifecycle notifications are also available for `session_start`, `session_info_changed`, `session_compact`, `session_compact_failed`, `session_shutdown`, `agent_start`, `agent_end`, `agent_settled`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `model_select`, `thinking_level_select`, and `extension_event`. Durable notifications carry the canonical event projection. Streaming notifications carry the bounded activity frame. `emit(channel, value)` publishes a bounded namespaced `extension.event` through the same canonical stream.
 
 `track(disposer)`
 : Registers cleanup. Disposers run in reverse order when the session ends. Every registration also returns its own disposer.

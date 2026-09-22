@@ -266,6 +266,36 @@ test("tool input and result handlers chain in extension order", async (context) 
   await host.dispose();
 });
 
+test("provider hooks chain headers and payloads and observe responses", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "provider.js"),
+    `export default (axl) => {
+  globalThis.__axlProviderStatus = 0;
+  axl.on("before_provider_headers", (event) => ({ ...event.headers, "x-extension": "yes" }));
+  axl.on("before_provider_request", (event) => ({ ...event.payload, extension: true }));
+  axl.on("after_provider_response", (event) => { globalThis.__axlProviderStatus = event.status; });
+};\n`,
+  );
+  const { host } = await load(dir);
+  const signal = new AbortController().signal;
+  assert.deepEqual(
+    await host.beforeProviderHeaders?.({ url: "https://example.com", headers: {} }, signal),
+    { "x-extension": "yes" },
+  );
+  assert.deepEqual(
+    await host.beforeProviderRequest?.({ url: "https://example.com", payload: {} }, signal),
+    { extension: true },
+  );
+  await host.afterProviderResponse?.(
+    { url: "https://example.com", status: 201, headers: {} },
+    signal,
+  );
+  assert.equal((globalThis as { __axlProviderStatus?: number }).__axlProviderStatus, 201);
+  await host.dispose();
+  delete (globalThis as { __axlProviderStatus?: number }).__axlProviderStatus;
+});
+
 test("input handlers transform or handle input in extension order", async (context) => {
   const dir = await directory(context);
   await writeFile(
@@ -293,6 +323,43 @@ test("input handlers transform or handle input in extension order", async (conte
     { action: "handled" },
   );
   await host.dispose();
+});
+
+test("extension state is namespaced through the bound session", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "state.js"),
+    `export default (axl) => { globalThis.__axlState = axl.state; };\n`,
+  );
+  const { host } = await load(dir);
+  const values = new Map<string, unknown>();
+  host.bindSession?.({
+    getState: (extensionId, key) => values.get(`${extensionId}:${key}`) as never,
+    setState: async (extensionId, key, value) => {
+      if (value === null) values.delete(`${extensionId}:${key}`);
+      else values.set(`${extensionId}:${key}`, value);
+    },
+    sendExtensionMessage: async () => undefined,
+    getEntryLabel: () => undefined,
+    setEntryLabel: async () => undefined,
+    emit: async () => undefined,
+  });
+  const state = (
+    globalThis as {
+      __axlState?: {
+        get(key: string): unknown;
+        set(key: string, value: unknown): Promise<void>;
+        delete(key: string): Promise<void>;
+      };
+    }
+  ).__axlState;
+  await state?.set("count", 1);
+  assert.equal(state?.get("count"), 1);
+  await state?.delete("count");
+  assert.equal(state?.get("count"), undefined);
+  await assert.rejects(() => state?.set("bad key", 1), /state key/u);
+  await host.dispose();
+  delete (globalThis as { __axlState?: unknown }).__axlState;
 });
 
 test("session.event observers receive projected events and their failures are reported", async (context) => {
@@ -613,6 +680,47 @@ test("disposes tracked resources in reverse order and reports disposer failures"
   assert.deepEqual((globalThis as { __axlDisposed?: string[] }).__axlDisposed, ["third", "first"]);
   assert.equal(failures.length, 1);
   assert.equal(failures[0]?.event, "dispose");
+});
+
+test("registers shared daemon commands and rejects reserved names", async (context) => {
+  const dir = await directory(context);
+  await writeFile(
+    join(dir, "commands.js"),
+    `export default (axl) => axl.registerCommand({ name: "hello", description: "Say hello", execute: (args) => "hello " + String(args.name) });\n`,
+  );
+  const loaded = await loadDaemonExtensions({
+    directory: dir,
+    cwd: "/workspace",
+    tools: new ToolRegistry(),
+    grantedAuthorities: new Set([DAEMON_EXTENSION_AUTHORITY]),
+    reservedCommandNames: new Set(["reload"]),
+    onFailure: () => undefined,
+  });
+  assert.deepEqual(loaded.host.commands?.(), [
+    { extensionId: "commands", name: "hello", description: "Say hello" },
+  ]);
+  assert.equal(
+    await loaded.host.invokeCommand?.("hello", { name: "Axl" }, new AbortController().signal),
+    "hello Axl",
+  );
+  await loaded.host.dispose();
+
+  const clash = await directory(context);
+  await writeFile(
+    join(clash, "bad.js"),
+    `export default (axl) => axl.registerCommand({ name: "reload", description: "bad", execute: () => undefined });\n`,
+  );
+  await assert.rejects(
+    loadDaemonExtensions({
+      directory: clash,
+      cwd: "/workspace",
+      tools: new ToolRegistry(),
+      grantedAuthorities: new Set([DAEMON_EXTENSION_AUTHORITY]),
+      reservedCommandNames: new Set(["reload"]),
+      onFailure: () => undefined,
+    }),
+    /already registered/u,
+  );
 });
 
 test("command handlers chain argument replacements, block with a prefixed reason, and fail closed", async (context) => {

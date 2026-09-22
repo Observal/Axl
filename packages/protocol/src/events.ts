@@ -167,6 +167,21 @@ export type EventPayloadMap = {
     readonly inputSchema: JsonObject;
   };
   "context.injected": { readonly source: string; readonly content: string };
+  "extension.state": {
+    readonly extensionId: string;
+    readonly key: string;
+    readonly value: JsonValue | null;
+  };
+  "extension.label": {
+    readonly extensionId: string;
+    readonly eventId: EventId;
+    readonly label: string | null;
+  };
+  "extension.event": {
+    readonly extensionId: string;
+    readonly channel: string;
+    readonly value: JsonValue;
+  };
   "context.extension": {
     readonly extensionId: string;
     readonly source: string;
@@ -657,6 +672,25 @@ const payloadParsers: { readonly [Type in EventType]: PayloadParser } = {
     exact(payload, path, ["source", "content"]);
     string(payload.source, `${path}.source`);
     string(payload.content, `${path}.content`, true);
+    return payload;
+  },
+  "extension.state": (payload, path) => {
+    exact(payload, path, ["extensionId", "key", "value"]);
+    string(payload.extensionId, `${path}.extensionId`);
+    string(payload.key, `${path}.key`);
+    return payload;
+  },
+  "extension.label": (payload, path) => {
+    exact(payload, path, ["extensionId", "eventId", "label"]);
+    string(payload.extensionId, `${path}.extensionId`);
+    parseEventId(payload.eventId, `${path}.eventId`);
+    if (payload.label !== null) string(payload.label, `${path}.label`);
+    return payload;
+  },
+  "extension.event": (payload, path) => {
+    exact(payload, path, ["extensionId", "channel", "value"]);
+    string(payload.extensionId, `${path}.extensionId`);
+    string(payload.channel, `${path}.channel`);
     return payload;
   },
   "context.extension": (payload, path) => {

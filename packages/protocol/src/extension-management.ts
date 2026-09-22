@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EventId, SessionId } from "./event-envelope.ts";
+import type { EventId, JsonObject, SessionId } from "./event-envelope.ts";
 import { ProtocolValidationError, parseEventId, parseSessionId } from "./event-envelope.ts";
 
 export type ExtensionSourceKind = "global" | "explicit" | "project" | "package";
@@ -20,10 +20,17 @@ export interface ExtensionListParams {
   readonly sessionId: SessionId;
 }
 
+export interface ExtensionCommandRecord {
+  readonly extensionId: string;
+  readonly name: string;
+  readonly description: string;
+}
+
 export interface ExtensionListResult {
   readonly configPath: string;
   readonly project: { readonly root: string; readonly trusted: boolean };
   readonly extensions: readonly ExtensionRecord[];
+  readonly commands: readonly ExtensionCommandRecord[];
 }
 
 export interface ExtensionSetEnabledParams extends ExtensionListParams {
@@ -50,6 +57,15 @@ export interface ExtensionIdParams extends ExtensionListParams {
 
 export interface ExtensionTrustParams extends ExtensionListParams {
   readonly trusted: boolean;
+}
+
+export interface ExtensionCommandInvokeParams extends ExtensionListParams {
+  readonly name: string;
+  readonly args: JsonObject;
+}
+
+export interface ExtensionCommandInvokeResult {
+  readonly content?: string;
 }
 
 export interface ExtensionMutationResult extends ExtensionListResult {
@@ -154,6 +170,24 @@ export function parseExtensionInstallParams(value: unknown): ExtensionInstallPar
   throw new ProtocolValidationError("request.params.source.type", "must be path, npm, or git");
 }
 
+export function parseExtensionCommandInvokeParams(value: unknown): ExtensionCommandInvokeParams {
+  const input = object(value, "request.params");
+  exact(input, "request.params", ["sessionId", "name", "args"]);
+  return {
+    sessionId: parseSessionId(input.sessionId, "request.params.sessionId"),
+    name: text(input.name, "request.params.name", 128),
+    args: object(input.args, "request.params.args") as JsonObject,
+  };
+}
+
+export function parseExtensionCommandInvokeResult(value: unknown): ExtensionCommandInvokeResult {
+  const input = object(value, "result");
+  exact(input, "result", ["content"]);
+  return input.content === undefined
+    ? {}
+    : { content: text(input.content, "result.content", 1_000_000) };
+}
+
 export function parseExtensionTrustParams(value: unknown): ExtensionTrustParams {
   const input = object(value, "request.params");
   exact(input, "request.params", ["sessionId", "trusted"]);
@@ -192,7 +226,7 @@ function parseExtensionRecord(value: unknown, path: string): ExtensionRecord {
 
 export function parseExtensionListResult(value: unknown): ExtensionListResult {
   const input = object(value, "result");
-  exact(input, "result", ["configPath", "project", "extensions"]);
+  exact(input, "result", ["configPath", "project", "extensions", "commands"]);
   const project = object(input.project, "result.project");
   exact(project, "result.project", ["root", "trusted"]);
   if (typeof project.trusted !== "boolean") {
@@ -204,12 +238,29 @@ export function parseExtensionListResult(value: unknown): ExtensionListResult {
       "must be an array of at most 1000 extensions",
     );
   }
+  if (!Array.isArray(input.commands) || input.commands.length > 1_000) {
+    throw new ProtocolValidationError(
+      "result.commands",
+      "must be an array of at most 1000 commands",
+    );
+  }
+  const commands = input.commands.map((value, index): ExtensionCommandRecord => {
+    const path = `result.commands[${index}]`;
+    const command = object(value, path);
+    exact(command, path, ["extensionId", "name", "description"]);
+    return {
+      extensionId: parseExtensionId(command.extensionId, `${path}.extensionId`),
+      name: text(command.name, `${path}.name`, 128),
+      description: text(command.description, `${path}.description`, 4_096),
+    };
+  });
   return {
     configPath: text(input.configPath, "result.configPath"),
     project: { root: text(project.root, "result.project.root"), trusted: project.trusted },
     extensions: input.extensions.map((item, index) =>
       parseExtensionRecord(item, `result.extensions[${index}]`),
     ),
+    commands,
   };
 }
 
@@ -219,6 +270,7 @@ export function parseExtensionMutationResult(value: unknown): ExtensionMutationR
     "configPath",
     "project",
     "extensions",
+    "commands",
     "changedExtensionId",
     "boundaryEventIds",
   ]);
@@ -226,6 +278,7 @@ export function parseExtensionMutationResult(value: unknown): ExtensionMutationR
     configPath: input.configPath,
     project: input.project,
     extensions: input.extensions,
+    commands: input.commands,
   });
   if (
     !Array.isArray(input.boundaryEventIds) ||

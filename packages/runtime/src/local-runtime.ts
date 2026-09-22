@@ -18,6 +18,7 @@ import {
   resolveCompactionSettings,
   type SessionSummary,
   type ThinkingLevel,
+  WIRE_CAPABILITIES,
 } from "@axl/protocol";
 
 import {
@@ -290,8 +291,10 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
   // Sandboxed startup fails closed before listening. Unsafe startup may listen
   // first because its lack of isolation is already explicit and logged.
   const initialAssembly = unsafe ? undefined : await loadAssembly();
-  const { AxlDaemon, installDaemonCommandCapabilities, McpProbeFailedError } = await import(
-    "@axl/daemon"
+  const { AxlDaemon, commandCatalog, installDaemonCommandCapabilities, McpProbeFailedError } =
+    await import("@axl/daemon");
+  const reservedCommandNames = new Set(
+    commandCatalog(new Set(WIRE_CAPABILITIES)).commands.map((command) => command.name),
   );
   const { DaemonExtensionRegistry } = await import("@axl/extension-host");
   const extensionRegistry = new DaemonExtensionRegistry(axlHome);
@@ -401,6 +404,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       interact,
       compact,
       reload,
+      extensionSession,
       readBlob,
     }) => {
       const { ai, kernel, sandbox, providers } = await loadAssembly();
@@ -440,6 +444,8 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         selection.requestSettings ?? defaults.requestSettings ?? DEFAULT_MODEL_REQUEST_SETTINGS,
       );
       const providerSecrets = new Set<string>();
+      let extensionHost: import("@axl/kernel").ExtensionHost | undefined;
+      let capabilityService: import("@axl/kernel").CapabilityService | undefined;
       const model = ai.modelPortForRegistry(providers, {
         providerId: active.providerId,
         requestSettings,
@@ -448,6 +454,14 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         readBlob,
         onResolvedSecrets: (values) => {
           for (const value of values) providerSecrets.add(value);
+        },
+        providerHooks: {
+          beforeHeaders: (input, requestSignal) =>
+            extensionHost?.beforeProviderHeaders?.(input, requestSignal) ?? input.headers,
+          beforeRequest: (input, requestSignal) =>
+            extensionHost?.beforeProviderRequest?.(input, requestSignal) ?? input.payload,
+          afterResponse: (input, requestSignal) =>
+            extensionHost?.afterProviderResponse?.(input, requestSignal),
         },
       });
       const tools = new kernel.ToolRegistry();
@@ -474,7 +488,6 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
         );
       }
       if (active.userQuestions) tools.register(kernel.makeAskUserQuestionTool(interact));
-      let extensionHost: import("@axl/kernel").ExtensionHost | undefined;
       const mcpSecrets = new Set<string>();
       if (profile === "standard") {
         const { discoverSkills, SkillCapabilityService } = await import("@axl/extension-skills");
@@ -511,6 +524,23 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             tools,
             grantedAuthorities,
             signal,
+            session: {
+              ...extensionSession,
+              info: async () => {
+                const [info, catalog] = await Promise.all([
+                  extensionSession.info(),
+                  providers.listModels(),
+                ]);
+                return {
+                  ...info,
+                  models: catalog.models.map(({ providerId, modelId }) => ({
+                    providerId,
+                    modelId,
+                  })),
+                };
+              },
+            },
+            reservedCommandNames,
             onFailure: (failure) => {
               extensionRegistry.recordFailure(failure.extensionId, failure.error);
               console.error(
@@ -593,11 +623,11 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             }
           }
           extensionHost = kernel.composeExtensionHosts(hosts);
-          tools.register(
-            kernel.makeCapabilitySearchTool(
-              new kernel.CompositeCapabilityService(capabilitySources, grantedAuthorities),
-            ),
+          capabilityService = new kernel.CompositeCapabilityService(
+            capabilitySources,
+            grantedAuthorities,
           );
+          tools.register(kernel.makeCapabilitySearchTool(capabilityService));
         } catch (error) {
           await Promise.allSettled([...hosts].reverse().map((host) => host.dispose()));
           throw error;
@@ -634,6 +664,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           ],
         },
         ...(extensionHost === undefined ? {} : { extensionHost }),
+        ...(capabilityService === undefined ? {} : { capabilityService }),
         sandbox: sandbox.configuredPayload(),
         configProvider: { providerId: active.providerId },
         configModel: { modelId: active.modelId },

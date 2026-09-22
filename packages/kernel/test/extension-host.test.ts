@@ -173,6 +173,26 @@ test("tool input and result mutations chain before canonical persistence", async
   await session.dispose();
 });
 
+test("extension context is canonical and restored for provider requests", async (context) => {
+  const tools = new ToolRegistry();
+  const port = scripted([done]);
+  const session = await open(context, port, tools, {
+    activate: () => undefined,
+    dispose: () => undefined,
+    contributeContext: (input) => [
+      { extensionId: "context", source: input.phase, content: `${input.phase} context` },
+    ],
+  });
+  const result = await session.runTurn([{ type: "text", text: "go" }]);
+  assert.deepEqual(
+    result.events
+      .filter((event) => event.type === "context.extension")
+      .map((event) => (event.type === "context.extension" ? event.payload.source : "")),
+    ["agent", "request"],
+  );
+  await session.dispose();
+});
+
 test("composeExtensionHosts orders lifecycle and returns the first block", async () => {
   const trace: string[] = [];
   const host = (name: string, decision?: { block: true; reason: string }): ExtensionHost => ({
