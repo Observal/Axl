@@ -19,6 +19,11 @@ use tls_codec::Serialize as _;
 use crate::{
     Clock, CoreProvider, Daemon, ENVELOPE_MAX_BYTES, Error, Identity, MessageClass, PairContext,
     Phone, Role, SUITE, SUITE_VALUE, TransactionOutcome,
+    pairing::PairingCredential,
+    witness::{
+        WitnessError, WitnessLineage,
+        browser::{BrowserTransition, BrowserTransitionMaterial},
+    },
 };
 
 struct FixedClock(u64);
@@ -821,5 +826,112 @@ mod tests {
         assert_eq!(evidence.identity_mismatch, "invalid_identity");
         assert_eq!(evidence.profile_mismatch, "wrong_profile");
         assert_eq!(evidence.competing_commit, "competing_commit");
+    }
+}
+
+/// Test-only browser lineage: a deterministic UUIDv7-shaped identity with a fresh endpoint signer.
+/// It produces finalizable transitions for the browser barrier tests. The transient production
+/// endpoint that will own real inner state is a later slice; this fixture never ships.
+pub struct TestBrowserLineage {
+    lineage: WitnessLineage,
+    credential: PairingCredential,
+    provider: CoreProvider,
+    signer_public: Vec<u8>,
+}
+
+/// The confirmed head the test transition builds on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestConfirmedHead {
+    pub counter: u64,
+    pub commitment: [u8; 48],
+    pub previous_certificate_hash: [u8; 48],
+}
+
+fn test_uuid_v7(seed: u8) -> [u8; 16] {
+    let mut value = [seed; 16];
+    value[6] = 0x70 | (seed & 0x0f);
+    value[8] = 0x80 | (seed & 0x3f);
+    value
+}
+
+impl TestBrowserLineage {
+    pub fn new(seed: u8, device: bool) -> Result<Self, WitnessError> {
+        let account_id = test_uuid_v7(seed);
+        let installation_id = test_uuid_v7(seed.wrapping_add(1));
+        let crypto_session_id = test_uuid_v7(seed.wrapping_add(2));
+        let identity = if device {
+            Identity::device(
+                account_id,
+                installation_id,
+                test_uuid_v7(seed.wrapping_add(3)),
+            )
+            .map_err(|_| WitnessError::LineageMismatch)?
+        } else {
+            Identity::daemon(account_id, installation_id)
+        };
+        let provider = CoreProvider::new().map_err(|_| WitnessError::Crypto)?;
+        let signer =
+            SignatureKeyPair::new(SUITE.signature_algorithm()).map_err(|_| WitnessError::Crypto)?;
+        signer
+            .store(provider.storage())
+            .map_err(|_| WitnessError::Crypto)?;
+        let credential =
+            PairingCredential::new(identity.clone(), &signer).map_err(|_| WitnessError::Crypto)?;
+        let lineage = WitnessLineage::from_identity(&identity, crypto_session_id)?;
+        Ok(Self {
+            lineage,
+            credential,
+            provider,
+            signer_public: signer.public().to_vec(),
+        })
+    }
+
+    pub fn lineage(&self) -> &WitnessLineage {
+        &self.lineage
+    }
+
+    pub fn credential(&self) -> &PairingCredential {
+        &self.credential
+    }
+
+    /// Prepare the next transition after the given confirmed head. Generation follows the counter
+    /// and the epoch fields are fixed because this fixture carries no OpenMLS group.
+    pub fn transition(
+        &self,
+        confirmed: TestConfirmedHead,
+        operation_id: [u8; 16],
+        fingerprint: [u8; 48],
+        inner_state: &[u8],
+        exact_result: &[u8],
+    ) -> Result<BrowserTransition, WitnessError> {
+        let TestConfirmedHead {
+            counter: confirmed_counter,
+            commitment: confirmed_commitment,
+            previous_certificate_hash,
+        } = confirmed;
+        let signer = SignatureKeyPair::read(
+            self.provider.storage(),
+            &self.signer_public,
+            SUITE.signature_algorithm(),
+        )
+        .ok_or(WitnessError::Crypto)?;
+        let counter = confirmed_counter
+            .checked_add(1)
+            .ok_or(WitnessError::BoundExceeded)?;
+        BrowserTransition::prepare(BrowserTransitionMaterial {
+            lineage: self.lineage.clone(),
+            counter,
+            generation: counter,
+            epoch: 0,
+            epoch_authenticator: [0; 48],
+            predecessor_commitment: confirmed_commitment,
+            previous_certificate_hash,
+            operation_id,
+            fingerprint,
+            inner_state,
+            exact_result,
+            credential: &self.credential,
+            signer,
+        })
     }
 }

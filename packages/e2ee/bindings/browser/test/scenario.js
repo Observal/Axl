@@ -841,12 +841,22 @@ export async function runPersistenceScenario() {
   };
 }
 
+export async function runProductionBarrierScenario() {
+  const worker = testWorker();
+  try {
+    return await worker.requestData({ operation: "production_barrier_scenario" });
+  } finally {
+    worker.close();
+  }
+}
+
 export async function runAllScenarios() {
   return {
     lifecycle: await runLifecycleScenario(),
     negativeOpenMls: await runNegativeOpenMlsScenario(),
     boundaries: await runBoundaryScenario(),
     state: await runStateScenario(),
+    productionBarrier: await runProductionBarrierScenario(),
     persistence: await runPersistenceScenario(),
   };
 }

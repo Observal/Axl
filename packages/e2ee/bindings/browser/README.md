@@ -14,18 +14,26 @@ subsequent calls fail with `endpoint_closed`. A malformed worker response or wor
 terminal and cannot transparently start a replacement worker.
 
 Production endpoint creation and opening fail with `rollback_anchor_unavailable`. The production
-worker now contains a private persistence module with one lifetime Web Lock, one versioned IndexedDB
-database, a non-extractable AES-KW wrapping key, wrapped AES-GCM state keys, separately bound inner
-and outer envelopes, exact pending witness requests, strict generation-compare commits, certificate
-continuation, restart recovery, and buffer clearing. It is not reachable through the page protocol
-and cannot be constructed until private WASM finalization and pinned production witness trust are
-wired. The separate test artifact implements the broader prepare-and-compare feasibility protocol
-with real IndexedDB, Web Locks, WebCrypto, and disposable WASM endpoints. It covers
-close/reopen, exact-byte retry, operation conflicts, strict transaction faults, worker and document
-termination, lock contention, key reconciliation, corruption, schema handling, quota failure, and
-state loss. Test-only constructors and the explicitly test-only anchor remain inside the dedicated
-worker and never accept keys, DEKs, or counters from page JavaScript. See
-[`../../BROWSER_STORAGE.md`](../../BROWSER_STORAGE.md).
+worker contains a private persistence module with one lifetime Web Lock, one version 2 IndexedDB
+database, a non-extractable AES-KW wrapping key, wrapped AES-GCM state keys, and the canonical
+committed-transition record shared with the native endpoint. WebCrypto seals and unseals; private
+WASM finalization owns the header, nonces, AADs, key ID, commitment over the exact sealed bytes,
+signed witness request, and record. The store accepts only a Rust-finalized `BrowserTransition`, a
+Rust-owned `BrowserLineage`, and Rust-owned `BrowserReplicaTrust`; none has a JavaScript
+constructor, and the page protocol never receives any of them. The successor key commits as
+`prepared` and activates only after the commit completes; continuation verifies the certificate in
+WASM, rechecks the successor key, erases and observes the obsolete key absent, and only then
+releases the exact result from Rust. Version 1 and unknown newer databases fail closed with
+`unsupported_schema`. No page protocol operation constructs the store, and production replica
+trust is not pinned yet, so no production endpoint path exists. The separate test artifact drives
+the byte-identical store from inside the dedicated test worker with a fixture lineage and an
+in-WASM deterministic three-replica witness, and additionally implements the broader
+prepare-and-compare feasibility protocol with real IndexedDB, Web Locks, WebCrypto, and disposable
+WASM endpoints. It covers close/reopen, exact-byte retry, operation conflicts, strict transaction
+faults, worker and document termination, lock contention, key reconciliation, corruption, schema
+handling, quota failure, and state loss. Test-only constructors and the explicitly test-only anchor
+remain inside the dedicated worker and never accept keys, DEKs, or counters from page JavaScript.
+See [`../../BROWSER_STORAGE.md`](../../BROWSER_STORAGE.md).
 
 The test artifact also executes a fresh in-memory OpenMLS lifecycle covering KeyPackage creation,
 Welcome join, pair activation, bidirectional application protection, a device self-Update proposal,
