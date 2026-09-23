@@ -21,6 +21,7 @@ import {
   WIRE_CAPABILITIES,
 } from "@axl/protocol";
 
+import { extensionDiagnosticsExtension } from "./core-daemon-extension.ts";
 import {
   createProviderManagementService,
   type TrustedProviderLoginAdapter,
@@ -529,6 +530,14 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
           daemonExtensions = await loadDaemonExtensions({
             directory: join(axlHome, "extensions"),
             extensions: extensionEntries,
+            builtinExtensions: [
+              {
+                id: "axl-core",
+                path: "builtin:extension-diagnostics",
+                source: "builtin",
+                factory: extensionDiagnosticsExtension,
+              },
+            ],
             cwd,
             reason: boundary,
             tools,
@@ -536,6 +545,10 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
             signal,
             session: {
               ...extensionSession,
+              extensions: async () => {
+                const extensions = await extensionRegistry.list(cwd);
+                return { extensions: extensions.extensions };
+              },
               info: async () => {
                 const [info, catalog, extensions] = await Promise.all([
                   extensionSession.info(),

@@ -716,7 +716,7 @@ test("manages global, explicit, and trusted project daemon extensions through th
   );
   assert.deepEqual(
     initialExtensions.commands.map((command) => command.name),
-    ["global-command"],
+    ["extensions", "global-command"],
   );
   assert.equal(
     (await client.listCommands({ sessionId: opened.sessionId })).commands.some(

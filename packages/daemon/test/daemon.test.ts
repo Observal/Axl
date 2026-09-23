@@ -79,6 +79,7 @@ import {
   AxlDaemon,
   commandCatalog,
   DaemonError,
+  type ExtensionManagementService,
   installDaemonCommandCapabilities,
   type McpConfigurationService,
   normalizeDaemonRpcErrorCode,
@@ -165,6 +166,7 @@ async function startDaemon(
     readonly tools?: (sessionId: SessionId, dataDirectory: string) => ToolRegistry;
     readonly extensionHost?: ExtensionHost;
     readonly mcpConfiguration?: McpConfigurationService;
+    readonly extensionManagement?: ExtensionManagementService;
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
@@ -660,6 +662,52 @@ test("cancels an in-flight MCP probe", async (context) => {
     { signal: controller.signal },
   );
   await probeStarted;
+  controller.abort();
+  await assert.rejects(
+    pending,
+    (error) => error instanceof AxlClientError && error.code === "cancelled",
+  );
+});
+
+test("forwards cancellation through journaled extension mutations", async (context) => {
+  let started!: () => void;
+  const operationStarted = new Promise<void>((resolvePromise) => {
+    started = resolvePromise;
+  });
+  const fixture = await startDaemon(context, replyPort(), "sandboxed", undefined, undefined, {
+    extensionManagement: {
+      list: async (cwd) => ({
+        configPath: "/tmp/extensions.json",
+        project: { root: cwd, trusted: false },
+        extensions: [],
+        commands: [],
+      }),
+      setEnabled: async () => undefined,
+      install: async (_source, signal) => {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+        throw new Error("unreachable");
+      },
+      update: async () => undefined,
+      remove: async () => undefined,
+      trustProject: async () => undefined,
+    },
+  });
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  const controller = new AbortController();
+  const pending = client.installExtension(
+    { sessionId: created.sessionId, source: { type: "npm", spec: "example" } },
+    { signal: controller.signal },
+  );
+  await operationStarted;
   controller.abort();
   await assert.rejects(
     pending,

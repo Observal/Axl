@@ -15,11 +15,11 @@ import {
   loadDaemonExtensions,
 } from "../src/index.ts";
 
-async function module(path: string, tool: string): Promise<void> {
+async function module(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(
     path,
-    `export default (axl) => axl.registerTool({ name: ${JSON.stringify(tool)}, description: ${JSON.stringify(tool)}, inputSchema: { type: "object" }, execute: () => ({ content: [] }) });\n`,
+    'export default (axl) => axl.registerTool({ name: "shared_tool", description: "shared", inputSchema: { type: "object" }, execute: () => ({ content: [] }) });\n',
   );
 }
 
@@ -29,10 +29,10 @@ test("resolves global, explicit, and trusted project extensions with determinist
   const home = join(root, "home");
   const project = join(root, "project");
   await mkdir(join(project, ".git"), { recursive: true });
-  await module(join(home, "extensions", "shared.js"), "global_tool");
+  await module(join(home, "extensions", "shared.js"));
   const explicit = join(root, "explicit", "shared.js");
-  await module(explicit, "explicit_tool");
-  await module(join(project, ".axl", "extensions", "shared.js"), "project_tool");
+  await module(explicit);
+  await module(join(project, ".axl", "extensions", "shared.js"));
   const registry = new DaemonExtensionRegistry(home);
 
   await registry.install({ type: "path", path: explicit });

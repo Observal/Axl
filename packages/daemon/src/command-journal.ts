@@ -345,9 +345,11 @@ export class CommandJournal {
         },
         async (cause: unknown) => {
           const code =
-            cause instanceof Error && "code" in cause && typeof cause.code === "string"
-              ? cause.code
-              : "internal_error";
+            cause instanceof DOMException && cause.name === "AbortError"
+              ? "cancelled"
+              : cause instanceof Error && "code" in cause && typeof cause.code === "string"
+                ? cause.code
+                : "internal_error";
           const failure: CommandFailure = {
             code,
             message: cause instanceof Error ? cause.message : "Request failed",

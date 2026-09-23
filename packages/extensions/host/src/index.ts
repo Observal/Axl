@@ -121,7 +121,8 @@ export interface DiscoveredDaemonExtension {
   readonly id: string;
   /** Canonical path of the module to import. */
   readonly path: string;
-  readonly source?: "global" | "explicit" | "project" | "package";
+  readonly source?: "builtin" | "global" | "explicit" | "project" | "package";
+  readonly factory?: DaemonExtensionFactory;
 }
 
 export interface DaemonExtensionFailure {
@@ -149,6 +150,7 @@ export interface LoadDaemonExtensionsOptions {
   readonly grantedAuthorities: ReadonlySet<string>;
   /** Pre-resolved extension entries. Defaults to discovery in `directory`. */
   readonly extensions?: readonly DiscoveredDaemonExtension[];
+  readonly builtinExtensions?: readonly DiscoveredDaemonExtension[];
   /** Extension IDs excluded before their modules are imported. */
   readonly disabledExtensionIds?: ReadonlySet<string>;
   /** Owning daemon operation. Aborting it cancels extension activation. */
@@ -294,6 +296,7 @@ function unavailableSession(): DaemonExtensionSession {
     newSession: fail,
     fork: fail,
     clone: fail,
+    extensions: fail,
     info: fail,
     getEntryLabel: fail,
     setEntryLabel: fail,
@@ -477,9 +480,17 @@ export async function loadDaemonExtensions(
       "cleanupTimeoutMs must be a positive integer",
     );
   }
-  const discovered = (
-    options.extensions ?? (await discoverDaemonExtensions(options.directory))
-  ).filter((extension) => !options.disabledExtensionIds?.has(extension.id));
+  const discovered = [
+    ...(options.builtinExtensions ?? []),
+    ...(options.extensions ?? (await discoverDaemonExtensions(options.directory))),
+  ].filter((extension) => !options.disabledExtensionIds?.has(extension.id));
+  const discoveredIds = new Set<string>();
+  for (const extension of discovered) {
+    if (discoveredIds.has(extension.id)) {
+      throw new DaemonExtensionError(extension.path, `duplicate extension id ${extension.id}`);
+    }
+    discoveredIds.add(extension.id);
+  }
   const states: LoadedExtensionState[] = [];
   const records: CapabilityRecord[] = [];
   let sessionBinding: ExtensionSessionBinding | undefined;
@@ -534,7 +545,7 @@ export async function loadDaemonExtensions(
   try {
     for (const extension of discovered) {
       options.signal?.throwIfAborted();
-      const factory = await importFactory(extension.path);
+      const factory = extension.factory ?? (await importFactory(extension.path));
       options.signal?.throwIfAborted();
       const state: LoadedExtensionState = {
         id: extension.id,

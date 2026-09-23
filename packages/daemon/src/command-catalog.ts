@@ -179,15 +179,6 @@ const BUILT_INS: readonly BuiltInCommand[] = [
     },
   },
   {
-    id: "core.extensions",
-    name: "extensions",
-    aliases: [],
-    description: "list daemon extensions and lifecycle diagnostics",
-    context: "session",
-    argument: { required: false },
-    requiredCapabilities: ["extension.list"],
-  },
-  {
     id: "core.reload",
     name: "reload",
     aliases: [],
@@ -335,7 +326,7 @@ export function commandCatalog(
   sessionId?: SessionId,
 ): CommandListResult {
   return {
-    generation: "builtin-6",
+    generation: "builtin-5",
     commands: BUILT_INS.filter((command) =>
       command.requiredCapabilities.every((capability) => capabilities.has(capability)),
     ).map(({ modelTool: _modelTool, ...command }) => ({

@@ -165,6 +165,14 @@ export type SessionRuntimeFactory = (input: {
     newSession(cwd?: string): Promise<{ readonly sessionId: string }>;
     fork(fromEventId: string): Promise<{ readonly sessionId: string }>;
     clone(): Promise<{ readonly sessionId: string }>;
+    extensions(): Promise<{
+      readonly extensions: readonly {
+        readonly id: string;
+        readonly source: "global" | "explicit" | "project" | "package";
+        readonly enabled: boolean;
+        readonly error?: string;
+      }[];
+    }>;
     info(): Promise<{
       readonly sessionId: string;
       readonly cwd: string;
@@ -610,6 +618,7 @@ export class SessionManager {
           const cloned = await this.clone(sessionId);
           return { sessionId: cloned.sessionId };
         },
+        extensions: async () => ({ extensions: [] }),
         info: async () => ({
           ...(await this.extensionInfo(sessionId)),
           models: [],

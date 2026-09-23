@@ -147,7 +147,7 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 
 | Completion evidence | Axl status | Remaining work |
 | --- | --- | --- |
-| First-party daemon consumer | Missing | Migrate one real daemon feature to the public third-party API. |
+| First-party daemon consumer | Done | The built-in `/extensions` diagnostics command is registered through the same `DaemonExtensionFactory` API as third-party commands. |
 | First-party TUI consumer | Partial | Existing internal consumers must load through the public package path. |
 | First-party web consumer | Missing | Requires the web host. |
 | Runnable examples | Partial | `examples/extensions/daemon-kitchen-sink.ts` covers daemon tools, hooks, state, commands, and progress; presentation examples remain. |

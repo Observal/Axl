@@ -276,34 +276,22 @@ test("extension diagnostics command uses the public SDK", async () => {
           generation: "extensions",
           commands: [
             {
-              id: "core.extensions",
+              id: "extension:axl-core/extensions",
               name: "extensions",
               aliases: [],
               description: "List extensions",
               context: "session",
               argument: { required: false },
-              requiredCapabilities: ["extension.list"],
+              requiredCapabilities: ["extension.command.invoke"],
               availability: { state: "available" },
+              extensionId: "axl-core",
             },
           ],
         };
       }
       throw new Error(`unexpected ${method}`);
     },
-    listExtensions: async () => ({
-      configPath: "/home/user/.axl/extensions.json",
-      project: { root: "/workspace", trusted: true },
-      extensions: [
-        {
-          id: "broken",
-          path: "/home/user/.axl/extensions/broken.js",
-          source: "global" as const,
-          enabled: true,
-          error: "activation failed",
-        },
-      ],
-      commands: [],
-    }),
+    invokeExtensionCommand: async () => ({ content: "enabled broken (global): activation failed" }),
   } as unknown as AxlClient;
   const commands = new CommandController(client);
   await commands.refresh(sessionId);

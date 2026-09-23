@@ -1452,7 +1452,13 @@ export class AxlDaemon {
         boundaryEventIds: reloaded.boundaryEventIds,
       };
     } catch (error) {
-      if (error instanceof DaemonError || error instanceof ExtensionHostError) throw error;
+      if (
+        error instanceof DaemonError ||
+        error instanceof ExtensionHostError ||
+        (error instanceof DOMException && error.name === "AbortError")
+      ) {
+        throw error;
+      }
       throw new ExtensionHostError(error instanceof Error ? error.message : String(error), {
         ...(extensionId === undefined ? {} : { extensionId }),
         phase: request.method,

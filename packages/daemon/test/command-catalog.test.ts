@@ -57,7 +57,6 @@ test("command catalog publishes the complete built-in shared directory", () => {
     "mcp.config.upsert",
     "mcp.config.remove",
     "mcp.config.probe",
-    "extension.list",
     "session.blob.abort",
     "session.blob.chunk",
     "session.blob.commit",
@@ -83,7 +82,7 @@ test("command catalog publishes the complete built-in shared directory", () => {
     parseSessionId("00000000-0000-4000-8000-000000000001"),
   );
 
-  assert.equal(catalog.generation, "builtin-6");
+  assert.equal(catalog.generation, "builtin-5");
   assert.deepEqual(
     catalog.commands.map((command) => command.name),
     [
@@ -94,7 +93,6 @@ test("command catalog publishes the complete built-in shared directory", () => {
       "refresh",
       "logout",
       "mcp",
-      "extensions",
       "reload",
       "compact",
       "request",

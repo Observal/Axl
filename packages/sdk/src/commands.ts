@@ -367,20 +367,6 @@ export class CommandController {
           update: { requestSettings },
         };
       }
-      case "extensions": {
-        if (argument) throw new AxlClientError("invalid_command_argument", "Use /extensions");
-        const result = await this.client.listExtensions({ sessionId: sessionId as SessionId });
-        const content =
-          result.extensions.length === 0
-            ? "No daemon extensions discovered."
-            : result.extensions
-                .map(
-                  (extension) =>
-                    `${extension.enabled ? "enabled" : "disabled"} ${extension.id} (${extension.source})${extension.error === undefined ? "" : `: ${extension.error}`}`,
-                )
-                .join("\n");
-        return { state: "completed", command: command.name, content };
-      }
       case "reload":
         if (argument) throw new AxlClientError("invalid_command_argument", "Use /reload");
         await this.client.request("session.reload", { sessionId: sessionId as SessionId });

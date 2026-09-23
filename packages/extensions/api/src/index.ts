@@ -328,6 +328,14 @@ export interface DaemonExtensionSession {
   newSession(cwd?: string): Promise<{ readonly sessionId: string }>;
   fork(fromEventId: string): Promise<{ readonly sessionId: string }>;
   clone(): Promise<{ readonly sessionId: string }>;
+  extensions(): Promise<{
+    readonly extensions: readonly {
+      readonly id: string;
+      readonly source: "global" | "explicit" | "project" | "package";
+      readonly enabled: boolean;
+      readonly error?: string;
+    }[];
+  }>;
   info(): Promise<{
     readonly sessionId: string;
     readonly cwd: string;
