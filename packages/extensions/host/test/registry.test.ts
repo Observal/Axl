@@ -127,6 +127,33 @@ test("TUI-only packages require trust, remain disabled before import, and resolv
   await assert.rejects(registry.list(project), /must be inside the package/);
 });
 
+test("browser-only packages expose a validated entry only after project trust", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-browser-registry-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const directory = join(project, ".axl", "extensions", "browser");
+  await mkdir(join(project, ".git"), { recursive: true });
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "package.json"),
+    JSON.stringify({ name: "browser", axl: { id: "browser", apiVersion: 1, web: "./web.mjs" } }),
+  );
+  await writeFile(join(directory, "web.mjs"), "export default {};\n");
+  const registry = new DaemonExtensionRegistry(join(root, "home"));
+  assert.deepEqual((await registry.list(project)).extensions, []);
+  await registry.trustProject(project, true);
+  assert.equal((await registry.list(project)).extensions[0]?.webPath, join(directory, "web.mjs"));
+  assert.deepEqual(await registry.entries(project), []);
+  await registry.setEnabled("browser", false);
+  assert.equal((await registry.list(project)).extensions[0]?.enabled, false);
+  await writeFile(
+    join(directory, "package.json"),
+    JSON.stringify({ name: "browser", axl: { id: "browser", apiVersion: 1, web: "./web.ts" } }),
+  );
+  await writeFile(join(directory, "web.ts"), "export default {};\n");
+  await assert.rejects(registry.list(project), /web entry must be a JavaScript file/);
+});
+
 test("trusted projects reject extension symlinks outside the project", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-terminal-trust-"));
   context.after(() => rm(root, { recursive: true, force: true }));

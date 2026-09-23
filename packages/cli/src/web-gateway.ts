@@ -11,6 +11,7 @@ import { StringDecoder } from "node:string_decoder";
 import {
   MAX_WIRE_MESSAGE_BYTES,
   type ProviderLoginMethod,
+  parseExtensionId,
   parseProviderAuthenticationStatus,
   parseProviderIdParam,
   parseProviderLoginMethod,
@@ -679,6 +680,34 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
         });
         await preferenceWrites;
         return send(response, 200, "{}", "application/json; charset=utf-8");
+      }
+      if (request.method === "GET" && relative.startsWith("extension/")) {
+        if (!authorized(request)) return send(response, 401, "Authentication required");
+        const match = /^extension\/([0-9a-f-]{36})\/([a-z0-9]+(?:[.-][a-z0-9]+)*)\.mjs$/u.exec(
+          relative,
+        );
+        if (match === null) return send(response, 404, "Not found");
+        const sessionId = parseSessionId(match[1]);
+        const extensionId = parseExtensionId(match[2], "extensionId");
+        const inventory = await withArtifactClient((client) =>
+          client.listExtensions({ sessionId }),
+        );
+        const entry = inventory.extensions.find((item) => item.id === extensionId);
+        if (entry?.enabled !== true || entry.webPath === undefined)
+          return send(response, 404, "Not found");
+        if ((await realpath(entry.webPath)) !== entry.webPath)
+          throw new Error(`Extension ${extensionId} web entry changed since discovery`);
+        const details = await stat(entry.webPath);
+        if (!details.isFile() || details.size > 1_000_000)
+          throw new Error(`Extension ${extensionId} web entry is not a bounded file`);
+        const data = await readFile(entry.webPath);
+        if (data.byteLength > 1_000_000)
+          throw new Error(`Extension ${extensionId} web entry exceeds the size limit`);
+        response.writeHead(200, {
+          ...SECURITY_HEADERS,
+          "content-type": "text/javascript; charset=utf-8",
+        });
+        return response.end(data);
       }
       if (request.method !== "GET") return send(response, 405, "Method not allowed");
       const file = relative === "" ? "index.html" : relative;

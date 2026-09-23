@@ -282,6 +282,8 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .composer-submit svg { width:19px; height:19px; fill:none; stroke:currentColor; stroke-linecap:round; stroke-linejoin:round; stroke-width:1.55; }
 .composer-submit.stop svg { width:18px; height:18px; stroke-width:1.6; }
 .composer-submit:disabled { opacity:.38; cursor:not-allowed; }
+.extension-statuses { display:flex; flex-wrap:wrap; gap:8px; padding:6px 24px; border-bottom:1px solid var(--line-soft); color:var(--muted); font-size:11px; }
+.extension-widget { margin:12px 0; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text); overflow-wrap:anywhere; }
 .unsafe-banner { position:absolute; z-index:2; top:56px; right:0; left:0; display:flex; justify-content:center; gap:8px; padding:7px 16px; border-bottom:1px solid #5b4d25; background:#211d12; color:#cdbd85; font-size:11px; }
 .unsafe-banner strong { color:#ead58a; font-weight:650; }
 .connection-banner { position:absolute; z-index:2; top:68px; right:32px; display:flex; align-items:center; gap:16px; padding:10px 12px; border:1px solid #5b4d25; border-radius:8px; background:#211d12; color:#e7cf7c; font-size:12px; }

@@ -11,6 +11,8 @@ export interface ExtensionRecord {
   readonly path: string;
   /** Canonical local entry, present only for packages declaring a terminal component. */
   readonly tuiPath?: string;
+  /** Canonical local browser module, served only through an authenticated gateway. */
+  readonly webPath?: string;
   readonly source: ExtensionSourceKind;
   readonly enabled: boolean;
   readonly version?: string;
@@ -208,6 +210,7 @@ function parseExtensionRecord(value: unknown, path: string): ExtensionRecord {
     "id",
     "path",
     "tuiPath",
+    "webPath",
     "source",
     "enabled",
     "version",
@@ -224,6 +227,7 @@ function parseExtensionRecord(value: unknown, path: string): ExtensionRecord {
     id: parseExtensionId(input.id, `${path}.id`),
     path: text(input.path, `${path}.path`),
     ...(input.tuiPath === undefined ? {} : { tuiPath: text(input.tuiPath, `${path}.tuiPath`) }),
+    ...(input.webPath === undefined ? {} : { webPath: text(input.webPath, `${path}.webPath`) }),
     source: input.source as ExtensionSourceKind,
     enabled: input.enabled,
     ...(input.version === undefined

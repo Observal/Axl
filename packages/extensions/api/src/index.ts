@@ -2,6 +2,30 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-License-Identifier: Apache-2.0
 
+export interface WebExtension {
+  readonly manifest: { readonly id: string; readonly name: string; readonly apiVersion: 1 };
+  // biome-ignore lint/suspicious/noConfusingVoidType: Activation may return no disposer, including from a synchronous function.
+  activate(api: WebExtensionApi): void | ExtensionDisposer | Promise<void | ExtensionDisposer>;
+}
+
+export interface WebExtensionApi {
+  readonly signal: AbortSignal;
+  readonly sessionId: string;
+  readonly ui: {
+    notify(message: string): void;
+  };
+  registerCommand(command: {
+    readonly name: string;
+    readonly description: string;
+    run(argument: string, signal: AbortSignal): void | Promise<void>;
+  }): ExtensionDisposer;
+  registerStatus(id: string, label: string): ExtensionDisposer;
+  registerWidget(id: string, text: string): ExtensionDisposer;
+  registerMarkdownTransformer(
+    transform: (text: string, role: "user" | "assistant") => string,
+  ): ExtensionDisposer;
+}
+
 export type ExtensionCapability =
   | "terminal.commands"
   | "terminal.shortcuts"

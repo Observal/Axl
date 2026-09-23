@@ -59,6 +59,7 @@ import {
 } from "./commands.ts";
 import type { ControlCenterTab } from "./control-center.tsx";
 import { Dock } from "./dock.tsx";
+import { WebExtensionHost } from "./extension-host.ts";
 import { trapDialogFocus } from "./dialog-focus.ts";
 import {
   browserProviderHost,
@@ -376,6 +377,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [error, setError] = useState<string>();
   const [actionNotice, setActionNotice] = useState<string>();
   const [commands, setCommands] = useState<readonly EffectiveCommand[]>(preview?.commands ?? []);
+  const [webExtensions, setWebExtensions] = useState<WebExtensionHost>();
+  const webExtensionRef = useRef<WebExtensionHost>(undefined);
+  const webExtensionSession = useRef<SessionId>(undefined);
+  const [extensionEpoch, setExtensionEpoch] = useState(0);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteError, setCommandPaletteError] = useState<string>();
   const [slashCommandIndex, setSlashCommandIndex] = useState(0);
@@ -491,6 +496,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       const nextSubscription = await subscribeSession(current, next.sessionId, {
         onEvent: (event) => {
           if (live && event.type === "config.dialect" && event.payload.reason === "reload") {
+            setExtensionEpoch((epoch) => epoch + 1);
             void providerDirectoryController.current?.load(true).catch(() => undefined);
             if (current.connection.grantedCapabilities.includes("mcp.config.list")) {
               void current.listMcpServers().then(setMcpConfiguration).catch(() => undefined);
@@ -546,7 +552,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       configuration.subscribe(setConfigurationState);
       if (environment.client.connection.grantedCapabilities.includes("command.list")) {
         commandController.current = new CommandController(environment.client, () =>
-          webPresentationCommands({
+          [
+          ...webPresentationCommands({
             canLogin: environment.bootstrap.hostCapabilities.includes("provider.auth.login"),
             openNewSession: (mode) => {
               const draft =
@@ -569,6 +576,14 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
             },
             setTheme,
           }),
+          ...(webExtensionRef.current?.commands().map((command) => ({
+            id: `${command.extensionId}.${command.name}`,
+            name: command.name,
+            description: command.description,
+            extensionId: command.extensionId,
+            run: (argument?: string) => command.run(argument ?? ""),
+          })) ?? []),
+          ],
         );
       }
       setSidebarWidth(environment.bootstrap.preferences.sidebarWidth);
@@ -630,6 +645,57 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       activeClient?.close();
     };
   }, [preview]);
+
+  useEffect(() => {
+    if (preview !== undefined) return;
+    if (client === undefined || opened === undefined) {
+      if (webExtensionRef.current !== undefined) {
+        void webExtensionRef.current.dispose().catch((cause: unknown) =>
+          setError(cause instanceof Error ? cause.message : "Web extension cleanup failed"),
+        );
+        webExtensionRef.current = undefined;
+        webExtensionSession.current = undefined;
+        setWebExtensions(undefined);
+      }
+      return;
+    }
+    const sessionId = opened.sessionId;
+    if (webExtensionSession.current !== undefined && webExtensionSession.current !== sessionId) {
+      void webExtensionRef.current?.dispose().catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : "Web extension cleanup failed"),
+      );
+      webExtensionRef.current = undefined;
+      webExtensionSession.current = undefined;
+      setWebExtensions(undefined);
+    }
+    let cancelled = false;
+    void (async () => {
+      const inventory = await client.listExtensions({ sessionId });
+      const next = await WebExtensionHost.load(inventory, sessionId, document.baseURI, showActionNotice);
+      if (cancelled) { await next.dispose(); return; }
+      const previous = webExtensionRef.current;
+      webExtensionRef.current = next;
+      webExtensionSession.current = sessionId;
+      try {
+        setCommands(await commandController.current?.refresh(sessionId) ?? []);
+      } catch (cause) {
+        webExtensionRef.current = previous;
+        if (previous === undefined) webExtensionSession.current = undefined;
+        await next.dispose();
+        throw cause;
+      }
+      setWebExtensions(next);
+      await previous?.dispose();
+    })().catch((cause: unknown) => {
+      if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not load web extensions");
+    });
+    return () => { cancelled = true; };
+  }, [client, opened?.sessionId, extensionEpoch, preview]);
+  useEffect(() => () => {
+    void webExtensionRef.current?.dispose().catch((cause: unknown) =>
+      console.error("Web extension cleanup failed", cause),
+    );
+  }, []);
 
   useEffect(() => {
     const sessionId = opened?.sessionId;
@@ -2155,6 +2221,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const promptBreakpoints = useMemo(() => transcriptPromptBreakpoints(conversation), [conversation]);
   const transcriptMatches = useMemo(() => transcriptMessageMatches(conversation, transcriptQuery), [conversation, transcriptQuery]);
   const usageStats = useMemo(() => sessionUsageStats(conversation), [conversation]);
+  const displayConversation = useMemo(
+    () => webExtensions?.display(conversation) ?? conversation,
+    [conversation, webExtensions],
+  );
   const stateHistory = useMemo(() => sessionStateHistory(conversation), [conversation]);
   const pausedQueue = useMemo(() => pausedQueueItems(conversation.queue), [conversation.queue]);
   const peers = useMemo(
@@ -2293,11 +2363,12 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     </aside>
     <section className="workspace" inert={sidebarOpen || mobileDock}>
       <header className="topbar"><div><span className="crumb">Sessions</span><span className="separator">›</span><strong>{opened ? currentTitle : "Select a session"}</strong>{opened && <span className={`session-profile ${opened.profile}`}>{opened.profile === "chat" ? "Chat" : opened.profile === "standard" ? "Code" : opened.profile}</span>}{peers.length > 0 && <span className="session-presence" role="status" aria-label={peerDescription} title={peerDescription}><i aria-hidden="true"></i>{peers.length} other</span>}</div><div className="top-actions"><button className="command-toggle" aria-label="Open command palette" title="Commands (Ctrl+K)" onClick={() => { setCommandPaletteError(undefined); setCommandPaletteOpen(true); void refreshCommandDirectory(opened?.sessionId).catch((cause: unknown) => setCommandPaletteError(cause instanceof Error ? cause.message : "Could not refresh commands")); }}>/</button>{opened && canManageSession && <button className={sessionLifecycleOpen ? "session-manage active" : "session-manage"} aria-label="Manage session" aria-expanded={sessionLifecycleOpen} onClick={() => { setControlCenter(undefined); setSessionLifecycleError(undefined); setSessionLifecycleOpen(true); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1" /><circle cx="8" cy="8" r="1" /><circle cx="13" cy="8" r="1" /></svg></button>}{opened && <button ref={usageToggle} className={usageOpen ? "usage-toggle active" : "usage-toggle"} aria-label="Show session usage" aria-expanded={usageOpen} onClick={() => { setControlCenter(undefined); setTranscriptSearchOpen(false); setUsageOpen((open) => !open); }}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12V8M8 12V4M13 12V6" /></svg><span>Usage</span></button>}{opened && <button className={transcriptSearchOpen ? "transcript-search-toggle active" : "transcript-search-toggle"} aria-label="Search transcript" aria-expanded={transcriptSearchOpen} onClick={() => { setControlCenter(undefined); setUsageOpen(false); setTranscriptSearchOpen((open) => !open); }}><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg></button>}{opened && dockOpen && <button ref={mobileDockToggle} type="button" className="mobile-dock-toggle" aria-label="Show panes" aria-controls="pane-dock" aria-expanded={mobileDock} onClick={() => { setSidebarOpen(false); setMobileDock(true); }}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5" /><path d="M9 2.5v11M9 8h5" /></svg></button>}{opened && <PanePicker openPanes={paneLayout.panes} unavailableReasons={paneUnavailableReasons} badges={workspaceReview === undefined ? {} : { changes: workspaceReview.status.entries.length }} onToggle={togglePaneOpen} />}</div></header>
+      {opened && webExtensions && webExtensions.statuses().length > 0 && <div className="extension-statuses" role="status" aria-label="Extension status">{webExtensions.statuses().map((status, index) => <span key={index}>{status}</span>)}</div>}
       {opened && conversation.sandbox?.enforced === false && <div className="unsafe-banner" role="alert"><strong>Unsafe session</strong><span>Sandbox enforcement is disabled. Tools run with your host permissions.</span></div>}
       {usageOpen && <section ref={usagePanel} className="session-usage" aria-label="Session usage"><header><strong>Session usage</strong><button type="button" aria-label="Close session usage" onClick={() => setUsageOpen(false)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></header><p>{conversation.provider && conversation.model ? `${conversation.provider} / ${conversation.model}` : conversation.model ?? "No model selected"}{conversation.thinking ? ` · ${conversation.thinking}` : ""}</p><dl><div><dt>Input</dt><dd>{compactNumber(conversation.usage.inputTokens)}</dd></div><div><dt>Output</dt><dd>{compactNumber(conversation.usage.outputTokens)}</dd></div><div><dt>Cache read</dt><dd>{compactNumber(conversation.usage.cacheReadTokens)}</dd></div><div><dt>Cache hit</dt><dd>{usageStats.cacheHitPercent.toFixed(1)}%</dd></div><div><dt>Reasoning</dt><dd>{compactNumber(conversation.usage.reasoningTokens)}</dd></div><div><dt>Throughput</dt><dd>{usageStats.tokensPerSecond === undefined ? "Unknown" : `${usageStats.tokensPerSecond.toFixed(1)} tok/s`}</dd></div><div><dt>Recorded cost</dt><dd>${conversation.usage.costUsd.toFixed(4)}</dd></div></dl>{usageStats.unknownCostResponses > 0 && <small>{usageStats.unknownCostResponses} response{usageStats.unknownCostResponses === 1 ? " has" : "s have"} no cost data.</small>}{stateHistory.length > 0 && <details className="state-history"><summary>Configuration history</summary><ol>{stateHistory.map((entry) => <li key={entry.id}><span><strong>{entry.label}</strong><small>{entry.detail}</small></span><time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></li>)}</ol></details>}</section>}
       {transcriptSearchOpen && <div className="transcript-search" role="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg><input autoFocus type="search" aria-label="Search transcript" placeholder="Search transcript" value={transcriptQuery} onChange={(event) => setTranscriptQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); moveTranscriptMatch(event.shiftKey ? -1 : 1); } }} /><span>{transcriptQuery.trim() ? `${transcriptMatches.length === 0 ? 0 : Math.max(0, transcriptMatch + 1)} / ${transcriptMatches.length}` : ""}</span><button type="button" aria-label="Previous result" disabled={transcriptMatches.length === 0} onClick={() => moveTranscriptMatch(-1)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4" /></svg></button><button type="button" aria-label="Next result" disabled={transcriptMatches.length === 0} onClick={() => moveTranscriptMatch(1)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><button type="button" aria-label="Close transcript search" onClick={() => { setTranscriptSearchOpen(false); setTranscriptQuery(""); }}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>}
       <div className="thread" ref={transcript} onScroll={trackTranscriptScroll}>
-        {opened ? <div className="thread-inner"><div className="thread-title"><h1>{currentTitle}</h1>{opened.profile !== "chat" && <p>{opened.cwd}</p>}</div><Suspense fallback={null}><Conversation conversation={conversation} searchQuery={transcriptQuery} resolveBlobUrl={(blob) => preview?.resolveBlobUrl?.(blob.sha256) ?? blobUrls.get(blob.sha256)} loadFullToolOutput={hasCapability("session.blob.read") && (preview?.readBlob !== undefined || client !== undefined) ? loadFullToolOutput : undefined} onRespondInteraction={hasCapability("session.interaction.respond") ? respondInteraction : undefined} onCopyMessage={(text) => void copyMessage(text)} onForkMessage={hasCapability("session.fork") ? (eventId) => void forkMessage(eventId) : undefined} /></Suspense>{conversation.activity && <article className="message assistant live"><span className="avatar axl">A</span><div><header><strong>Axl</strong><time>working</time></header>{conversation.activity.thinking && <details><summary>Thinking</summary><p>{conversation.activity.thinking}</p></details>}<p className="waiting-response">{conversation.activity.text || "Waiting for response"}<span className="waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span></p></div></article>}</div> : <div className="empty"><span className="brand-mark large">A</span><h1>No session selected</h1><p>Resume a durable session or start one in this workspace.</p><button title={canCreate ? undefined : "Unavailable because session creation was not granted"} disabled={!canCreate} onClick={() => openNewSession()}>New session</button></div>}
+        {opened ? <div className="thread-inner"><div className="thread-title"><h1>{currentTitle}</h1>{opened.profile !== "chat" && <p>{opened.cwd}</p>}</div>{webExtensions?.widgets().map((text, index) => <aside className="extension-widget" key={index}>{text}</aside>)}<Suspense fallback={null}><Conversation conversation={displayConversation} searchQuery={transcriptQuery} resolveBlobUrl={(blob) => preview?.resolveBlobUrl?.(blob.sha256) ?? blobUrls.get(blob.sha256)} loadFullToolOutput={hasCapability("session.blob.read") && (preview?.readBlob !== undefined || client !== undefined) ? loadFullToolOutput : undefined} onRespondInteraction={hasCapability("session.interaction.respond") ? respondInteraction : undefined} onCopyMessage={(text) => void copyMessage(text)} onForkMessage={hasCapability("session.fork") ? (eventId) => void forkMessage(eventId) : undefined} /></Suspense>{conversation.activity && <article className="message assistant live"><span className="avatar axl">A</span><div><header><strong>Axl</strong><time>working</time></header>{conversation.activity.thinking && <details><summary>Thinking</summary><p>{conversation.activity.thinking}</p></details>}<p className="waiting-response">{conversation.activity.text ? (webExtensions?.safeTransform(conversation.activity.text, "assistant") ?? conversation.activity.text) : "Waiting for response"}<span className="waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span></p></div></article>}</div> : <div className="empty"><span className="brand-mark large">A</span><h1>No session selected</h1><p>Resume a durable session or start one in this workspace.</p><button title={canCreate ? undefined : "Unavailable because session creation was not granted"} disabled={!canCreate} onClick={() => openNewSession()}>New session</button></div>}
       </div>
       {promptBreakpoints.length > 1 && <nav className={`prompt-breakpoints${transcriptNavigationVisible || transcriptSearchOpen ? " visible" : ""}`} aria-label="Conversation prompts" onMouseEnter={() => { if (transcriptNavigationTimer.current !== undefined) clearTimeout(transcriptNavigationTimer.current); setTranscriptNavigationVisible(true); }} onMouseLeave={() => setTranscriptNavigationVisible(false)}>{promptBreakpoints.map((point) => <button type="button" key={point.id} className={point.id === activePromptId ? "active" : ""} title={point.text} onClick={() => jumpToMessage(point.id)}><span>{point.text}</span></button>)}</nav>}
       {!connected && <div className="connection-banner" role="status" aria-live="polite"><span>{connection === "disconnected" ? "Connection to the daemon was lost." : connection === "incompatible" ? "The browser and daemon versions are incompatible." : "Connecting to the daemon…"}</span>{connection === "disconnected" && client !== undefined && <button onClick={() => void reconnect()}>Reconnect</button>}</div>}

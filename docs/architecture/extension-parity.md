@@ -21,7 +21,7 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | Global extension directory | Done | `~/.axl/extensions/` discovers `.ts`, `.mts`, `.js`, and `.mjs` entries deterministically. |
 | Explicit extension paths | Done | `extension.install` records canonical local paths with precedence above global and package sources. |
 | Project-local extensions | Done | `<project>/.axl/extensions/` loads only after a remembered canonical-root trust decision. |
-| Package-provided extensions | Partial | Versioned manifests support daemon-only, TUI-only, and combined entries. The local TUI loads enabled, validated entries through daemon inventory; the web host remains. |
+| Package-provided extensions | Partial | Versioned manifests support daemon, TUI, and browser entries through shared inventory. The browser host has only a subset of the terminal presentation API. |
 | npm package installation | Done | Daemon-owned install, update, remove, exact version reporting, and SDK methods use a private package root. |
 | Git package installation | Done | Git installs require credential-free HTTPS plus a full commit hash. |
 | Extension-owned dependencies | Done | Installed package entries load from their package directory and use native Node dependency resolution. |
@@ -133,15 +133,15 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 
 | Capability | Axl status | Axl evidence or remaining work |
 | --- | --- | --- |
-| Browser-safe extension entry point | Missing | Define package declaration, loading, compatibility, and isolation. |
-| Commands and applicable shortcuts | Missing | Route shared commands through SDK and keep browser-only intent local. |
+| Browser-safe extension entry point | Partial | Version-1 `axl.web` JavaScript entry paths are validated and advertised in daemon inventory, served through the authenticated same-origin gateway, and loaded into a separate browser host. Modules must be self-contained; they run with browser-client authority and require explicit project trust. Browser reload and security testing remain. |
+| Commands and applicable shortcuts | Partial | Local browser extension commands join the SDK command directory; shortcut registration and collision rollback remain. |
 | Notifications and dialogs/forms | Missing | Add owned, accessible UI surfaces with cleanup. |
-| Status and widget slots | Missing | Define stable browser presentation slots. |
+| Status and widget slots | Partial | Text-only status and widget slots render as bounded browser surfaces. Rich components and ownership tests remain. |
 | Tool, message, and event renderers | Missing | Add bounded rendering contracts and visible failure fallbacks. |
-| Markdown transforms | Missing | Add deterministic safe transforms before rendering. |
+| Markdown transforms | Done | The browser host applies bounded ordered text transforms to derived user and assistant records and live assistant output, without changing canonical SDK state. Failures show visible error text. |
 | Theme access | Missing | Expose browser-safe semantic theme tokens. |
-| Lifecycle and cleanup | Missing | Remove all DOM, handlers, and background work on disable or reload. |
-| Daemon state parity | Missing | Consume extension commands, enablement, lifecycle, and errors through the public SDK. |
+| Lifecycle and cleanup | Partial | Host registration disposal and abort signals exist; session switching, gateway verification, and failure replacement need end-to-end tests. |
+| Daemon state parity | Partial | The browser reads typed SDK inventory on session selection and canonical reload events; management and diagnostics UI remain. |
 | Terminal/browser parity mapping | Missing | Document explicit equivalents or maintainer-approved exclusions. |
 
 ## Release evidence
@@ -150,8 +150,8 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | --- | --- | --- |
 | First-party daemon consumer | Done | The built-in `/extensions` diagnostics command is registered through the same `DaemonExtensionFactory` API as third-party commands. |
 | First-party TUI consumer | Done | Prompt templates and skills load from public package exports only when enabled in daemon inventory and use the same `TerminalExtension` host and lifecycle as installed entries. |
-| First-party web consumer | Missing | Requires the web host. |
-| Runnable examples | Partial | `examples/extensions/daemon-kitchen-sink.ts` covers daemon tools, hooks, state, commands, and progress; presentation examples remain. |
+| First-party web consumer | Missing | The browser host exists, but first-party browser features have not been migrated through its public API. |
+| Runnable examples | Partial | `examples/extensions/daemon-kitchen-sink.ts`, `examples/extensions/terminal.ts`, and `examples/extensions/browser.mjs` cover daemon, terminal, and a browser-safe entry point; full web presentation examples remain. |
 | Multi-extension ordering and collisions | Done | Tests cover deterministic precedence, collisions, chained mutation, cancellation, disablement, replacement, restart reconstruction, and cleanup. |
 | Installed JavaScript and TypeScript artifact tests | Partial | Packaged JavaScript execution and external TypeScript declaration consumption pass; local daemon-backed TUI loader tests pass, but separately installed release TUI and web loading remain. |
 | Live packaged daemon smoke test | Done | An installed release artifact loaded provider hooks and completed a real Azure-backed turn. |

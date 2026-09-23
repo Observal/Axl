@@ -10,7 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { FileCredentialStore } from "@axl/ai";
 import { MAX_WIRE_MESSAGE_BYTES, WIRE_PROTOCOL_VERSION } from "@axl/protocol";
+import { startLocalDaemon } from "@axl/runtime";
+import { connectUnixClient } from "@axl/sdk/unix";
 import WebSocket from "ws";
 import {
   encodeWebSessionArtifact,
@@ -42,6 +45,85 @@ test("web assets fail closed when missing, altered, or incompatible", async (con
     JSON.stringify({ ...metadata, wireVersion: 0 }),
   );
   await assert.rejects(verifyWebAssets(directory), /missing or incompatible/);
+});
+
+test("authenticated browser modules honor project trust and disablement", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-web-extension-gateway-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const workspace = join(root, "workspace");
+  const packageRoot = join(workspace, ".axl", "extensions", "example");
+  const assets = join(root, "assets");
+  const stateDirectory = join(home, "unsafe");
+  const socketPath = join(stateDirectory, "axl.sock");
+  await mkdir(join(workspace, ".git"), { recursive: true });
+  await mkdir(packageRoot, { recursive: true });
+  await mkdir(assets);
+  await writeFile(
+    join(packageRoot, "package.json"),
+    JSON.stringify({ name: "example", axl: { id: "example", apiVersion: 1, web: "./view.mjs" } }),
+  );
+  const source = "export default { manifest: { id: 'example', apiVersion: 1 } };\n";
+  await writeFile(join(packageRoot, "view.mjs"), source);
+  const html = "<div></div>";
+  await writeFile(join(assets, "index.html"), html);
+  await writeFile(
+    join(assets, "asset-metadata.json"),
+    JSON.stringify({
+      webAssetVersion: 1,
+      packageVersion: "0.0.0-test",
+      sourceRevision: "fixture",
+      wireVersion: WIRE_PROTOCOL_VERSION,
+      entrypoints: ["index.html"],
+      sha256: { "index.html": createHash("sha256").update(html).digest("hex") },
+    }),
+  );
+  const store = new FileCredentialStore(join(home, "credentials.json"));
+  await store.modify("azure-openai", () =>
+    Promise.resolve({
+      type: "api_key",
+      key: "obviously-fake-web-test-key",
+      env: { AZURE_OPENAI_BASE_URL: "https://example.invalid/openai/v1" },
+    }),
+  );
+  const daemon = await startLocalDaemon({
+    axlHome: home,
+    stateDirectory,
+    socketPath,
+    defaults: { modelId: "gpt-5", thinkingLevel: "off" },
+    store,
+    unsafe: true,
+  });
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const opened = await client.request("session.create", { cwd: workspace });
+  const gateway = await startWebGateway({
+    socketPath,
+    assetDirectory: assets,
+    stateDirectory,
+    cwd: workspace,
+    packageVersion: "0.0.0-test",
+  });
+  context.after(() => gateway.close());
+  const launch = new URL(gateway.launchUrl);
+  const exchange = await fetch(new URL("auth/exchange", gateway.origin), {
+    method: "POST",
+    headers: { origin: launch.origin, "content-type": "application/json" },
+    body: JSON.stringify({ token: new URLSearchParams(launch.hash.slice(1)).get("token") }),
+  });
+  assert.equal(exchange.status, 200);
+  const cookie = exchange.headers.get("set-cookie")?.split(";", 1)[0];
+  assert.ok(cookie);
+  const moduleUrl = new URL(`extension/${opened.sessionId}/example.mjs`, gateway.origin);
+  const request = () => fetch(moduleUrl, { headers: { cookie } });
+  assert.equal((await request()).status, 404);
+  await client.trustExtensionProject({ sessionId: opened.sessionId, trusted: true });
+  const loaded = await request();
+  assert.equal(loaded.status, 200);
+  assert.equal(await loaded.text(), source);
+  await client.disableExtension({ sessionId: opened.sessionId, extensionId: "example" });
+  assert.equal((await request()).status, 404);
 });
 
 test("browser session artifacts round-trip only manifest-declared files", async (context) => {
@@ -276,6 +358,20 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     body: JSON.stringify({ token: launchToken }),
   });
   assert.equal(replay.status, 401);
+
+  const moduleUrl = new URL(
+    "extension/123e4567-e89b-42d3-a456-426614174000/example.mjs",
+    gateway.origin,
+  );
+  assert.equal((await fetch(moduleUrl)).status, 401);
+  assert.equal(
+    (
+      await fetch(new URL("extension/bad/path.mjs", gateway.origin), {
+        headers: { cookie: cookieHeader },
+      })
+    ).status,
+    404,
+  );
 
   const bootstrap = await fetch(new URL("bootstrap", gateway.origin), {
     method: "POST",

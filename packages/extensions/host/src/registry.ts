@@ -35,6 +35,7 @@ const CONFIG_VERSION = 1;
 const API_VERSION = 1;
 const MAX_CONFIG_BYTES = 1024 * 1024;
 const MODULE_EXTENSIONS = new Set([".js", ".mjs", ".ts", ".mts"]);
+const BROWSER_MODULE_EXTENSIONS = new Set([".js", ".mjs"]);
 const NPM_PACKAGE =
   /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)(?:@[^\s]+)?$/i;
 const GIT_COMMIT = /^[a-f0-9]{40}$/i;
@@ -77,6 +78,7 @@ interface RegistryEntry extends DiscoveredDaemonExtension {
   readonly missing?: boolean;
   readonly daemon?: boolean;
   readonly tuiPath?: string;
+  readonly webPath?: string;
 }
 
 type CommandRunner = (
@@ -237,7 +239,7 @@ async function packageEntry(packageDirectory: string): Promise<RegistryEntry> {
   const root = await realpath(packageDirectory);
   const manifestPath = join(root, "package.json");
   const parsed = parseManifest(await readJson(manifestPath), manifestPath);
-  const entry = async (kind: "daemon" | "tui"): Promise<string | undefined> => {
+  const entry = async (kind: "daemon" | "tui" | "web"): Promise<string | undefined> => {
     const declared = parsed.manifest[kind];
     if (declared === undefined) return undefined;
     const requested = resolve(root, declared);
@@ -248,23 +250,25 @@ async function packageEntry(packageDirectory: string): Promise<RegistryEntry> {
     if (
       !within(root, canonical) ||
       !(await stat(canonical)).isFile() ||
-      !MODULE_EXTENSIONS.has(extname(canonical))
+      !(kind === "web" ? BROWSER_MODULE_EXTENSIONS : MODULE_EXTENSIONS).has(extname(canonical))
     ) {
       throw new DaemonExtensionError(
         requested,
-        `${kind} entry must be a JavaScript or TypeScript file inside the package`,
+        `${kind} entry must be a ${kind === "web" ? "JavaScript" : "JavaScript or TypeScript"} file inside the package`,
       );
     }
     return canonical;
   };
   const daemonPath = await entry("daemon");
   const tuiPath = await entry("tui");
+  const webPath = await entry("web");
   return {
     id: parsed.manifest.id,
-    path: daemonPath ?? tuiPath ?? root,
+    path: daemonPath ?? tuiPath ?? webPath ?? root,
     source: "package",
     daemon: daemonPath !== undefined,
     ...(tuiPath === undefined ? {} : { tuiPath }),
+    ...(webPath === undefined ? {} : { webPath }),
     packageName: parsed.packageName,
     ...(parsed.version === undefined ? {} : { version: parsed.version }),
   };
@@ -494,6 +498,7 @@ export class DaemonExtensionRegistry {
           source: entry.source,
           enabled: !entry.missing && !config.disabled.includes(entry.id),
           ...(entry.tuiPath === undefined ? {} : { tuiPath: entry.tuiPath }),
+          ...(entry.webPath === undefined ? {} : { webPath: entry.webPath }),
           ...(entry.version === undefined ? {} : { version: entry.version }),
           ...(entry.packageName === undefined ? {} : { packageName: entry.packageName }),
           ...(error === undefined ? {} : { error }),

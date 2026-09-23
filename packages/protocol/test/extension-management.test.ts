@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ProtocolValidationError,
   parseExtensionInstallParams,
   parseExtensionListResult,
   parseExtensionTrustParams,
-  ProtocolValidationError,
 } from "../src/index.ts";
 
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
@@ -43,6 +43,7 @@ test("validates extension inventory and mutation results", () => {
       {
         id: "example",
         path: "/home/user/.axl/extensions/example.js",
+        webPath: "/home/user/.axl/extensions/example.mjs",
         source: "global",
         enabled: true,
       },
