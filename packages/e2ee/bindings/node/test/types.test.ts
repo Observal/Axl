@@ -7,10 +7,13 @@ import type {
   DaemonEndpoint,
   DeviceEndpoint,
   NativeOutbox,
-  NativePendingWitness,
   NativePlaintext,
+  NativeResult,
   PairState,
+  PendingWitness,
   Publication,
+  WitnessOutcome,
+  WitnessReconciliation,
 } from "../index.js";
 
 const codes = [
@@ -21,6 +24,9 @@ const codes = [
   "secure_store_locked",
   "secure_store_unavailable",
   "rollback_anchor_unavailable",
+  "endpoint_revoked",
+  "fresh_witness_required",
+  "initialization_incomplete",
   "witness_operation_conflict",
   "witness_receipt_invalid",
   "witness_unavailable",
@@ -31,14 +37,21 @@ const inspectTypes = (
   daemon: DaemonEndpoint,
   device: DeviceEndpoint,
   outbox: NativeOutbox,
-  pendingWitness: NativePendingWitness,
+  pending: PendingWitness,
   plaintext: NativePlaintext,
   publication: Publication,
   state: PairState,
+  outcome: WitnessOutcome,
+  result: NativeResult,
+  reconciliation: WitnessReconciliation,
 ): void => {
   acceptsBigint(outbox.epoch);
   acceptsBigint(plaintext.epoch);
-  void pendingWitness.continueWitness(pendingWitness.operationId, new Uint8Array());
+  void device.continueWitness(pending.operationId, new Uint8Array());
+  void daemon.reconcileWitness(new Uint8Array());
+  if (outcome.tag === "pending") void outcome.pending?.request;
+  if (result.tag === "commit") acceptsBigint(result.commit?.targetEpoch ?? 0n);
+  if (reconciliation.tag === "quarantined") void reconciliation.reason;
   if ("expiresAtMs" in publication) acceptsBigint(publication.expiresAtMs);
   void [info, daemon, device, publication, state, codes];
 };

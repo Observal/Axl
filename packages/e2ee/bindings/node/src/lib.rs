@@ -2,6 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Private Node-API binding for the Axl endpoint E2EE core.
+//!
+//! Every state-changing endpoint call returns a [`WitnessOutcome`]: either the exact pending
+//! witness request that JavaScript must transport to all three replicas, or an already released
+//! exact typed result. Nothing typed leaves the binding before `continueWitness` verifies the
+//! unanimous certificate. The continuation lives on the endpoint and reloads the durable pending
+//! record on every call; JavaScript holds only opaque bytes and an operation ID.
 
 mod support;
 #[cfg(feature = "test-fixtures")]
@@ -13,23 +19,25 @@ use std::{
 };
 
 #[cfg(feature = "test-fixtures")]
-use axl_e2ee::witness::{ReplicaKey, ReplicaTrust};
+use axl_e2ee::witness::{WITNESS_REQUEST_MAX_BYTES, WitnessError};
 use axl_e2ee::{
-    APPLICATION_MAX_BYTES, ENVELOPE_MAX_BYTES, HANDSHAKE_MAX_BYTES, Id, Identity, PROFILE_ID,
-    PROFILE_REVISION,
+    APPLICATION_MAX_BYTES, CommitMetadata, ENVELOPE_MAX_BYTES, HANDSHAKE_MAX_BYTES, Id, Identity,
+    PROFILE_ID, PROFILE_REVISION,
     pairing::{
         PAIRING_CLAIM_MAX_BYTES, PAIRING_INVITATION_MAX_BYTES, PairingClaimV1, PairingInvitation,
     },
     persistence::{
-        ActivationAcceptance, ActivationOutcome, ClaimSubmission, DurablePendingInvitation,
-        DurablePlaintext, DurablePreJoinDevice, EnvelopeKeyStore, EpochReadyAcceptance,
-        InvitationLifecycle, OutboxRecord, PairLifecycle, PersistenceError, PreJoinLifecycle,
-        RePairRequirement, RemovalOutcome, ReservationOutcome, RetryState, RollbackAnchor,
-        RollbackState, WelcomeOutcome, WelcomePublication,
+        AcceptedMessageRecord, ActivationAcceptance, ActivationOutcome, ClaimSubmission,
+        DurablePendingInvitation, DurablePlaintext, DurablePreJoinDevice, EnvelopeKeyStore,
+        EpochReadyAcceptance, InvitationLifecycle, InvitationPublication, OutboxRecord,
+        PairLifecycle, PendingWitnessRequest, PersistenceError, PreJoinLifecycle,
+        PreJoinPublication, RePairRequirement, RemovalOutcome, ReservationIntent,
+        ReservationOutcome, RetryState, TypedResult, WelcomeOutcome, WelcomePublication,
+        WitnessEndpoint, WitnessOutcome as Outcome,
     },
     witness::{
-        PendingWitnessOperation, PendingWitnessStatus, ReplicaTrustSet,
-        WITNESS_CERTIFICATE_MAX_BYTES, WitnessError,
+        EndpointQuarantineReason, EndpointReconciliation, ReplicaTrustSet,
+        WITNESS_CERTIFICATE_MAX_BYTES, WitnessRequestKind,
     },
 };
 use napi::{
@@ -45,7 +53,7 @@ fn initialize() {
     support::install_panic_redaction();
 }
 
-const ABI_VERSION: u32 = 1;
+const ABI_VERSION: u32 = 2;
 const ERROR_CODES: &[&str] = &[
     "already_acknowledged",
     "already_exists",
@@ -56,12 +64,16 @@ const ERROR_CODES: &[&str] = &[
     "consumed",
     "corrupt_state",
     "endpoint_closed",
+    "endpoint_revoked",
     "expired",
+    "fresh_witness_required",
     "future_epoch",
     "identity_mismatch",
+    "initialization_incomplete",
     "internal_error",
     "invalid_argument",
     "invalid_ciphertext",
+    "invalid_hash",
     "invalid_id",
     "invalid_lifecycle",
     "invalid_u64",
@@ -83,6 +95,7 @@ const ERROR_CODES: &[&str] = &[
     "state_loss",
     "storage_unavailable",
     "unsupported_platform",
+    "unsupported_schema",
     "witness_auth_failed",
     "witness_conflict",
     "witness_invalid_expected",
@@ -180,61 +193,10 @@ pub fn inspect_pairing_claim(bytes: Buffer) -> Result<AsyncTask<InspectTask>> {
     Ok(AsyncTask::new(InspectTask { bytes, claim: true }))
 }
 
-#[allow(dead_code)]
-struct UnavailableKeys;
-impl EnvelopeKeyStore for UnavailableKeys {
-    fn available(&self) -> bool {
-        false
-    }
-    fn prepare(
-        &self,
-        _: Id,
-        _: Id,
-        _: &[u8; 32],
-        _: &[u8],
-    ) -> std::result::Result<(), PersistenceError> {
-        Err(PersistenceError::KeyUnavailable)
-    }
-    fn load(&self, _: Id, _: Id, _: &[u8]) -> std::result::Result<[u8; 32], PersistenceError> {
-        Err(PersistenceError::KeyUnavailable)
-    }
-    fn activate(&self, _: Id, _: Id, _: &[u8]) -> std::result::Result<(), PersistenceError> {
-        Err(PersistenceError::KeyUnavailable)
-    }
-    fn reconcile_prepared(
-        &self,
-        _: Id,
-        _: Option<(Id, Vec<u8>)>,
-    ) -> std::result::Result<(), PersistenceError> {
-        Err(PersistenceError::KeyUnavailable)
-    }
-    fn erase(&self, _: Id, _: Id) -> std::result::Result<(), PersistenceError> {
-        Err(PersistenceError::KeyUnavailable)
-    }
-    fn destroy_session(&self, _: Id) -> std::result::Result<(), PersistenceError> {
-        Err(PersistenceError::KeyUnavailable)
-    }
-}
-#[allow(dead_code)]
-struct UnavailableAnchor;
-impl RollbackAnchor for UnavailableAnchor {
-    fn available(&self) -> bool {
-        false
-    }
-    fn read(&self, _: Id) -> std::result::Result<RollbackState, PersistenceError> {
-        Err(PersistenceError::AnchorUnavailable)
-    }
-    fn advance(
-        &self,
-        _: Id,
-        _: &RollbackState,
-        _: &RollbackState,
-        _: Id,
-    ) -> std::result::Result<(), PersistenceError> {
-        Err(PersistenceError::AnchorUnavailable)
-    }
-}
-
+/// Endpoint construction inputs. Only test artifacts can build one: production key storage and
+/// production replica trust are not approved, so the production constructors fail closed before
+/// any configuration exists.
+#[cfg_attr(not(feature = "test-fixtures"), allow(dead_code))]
 #[derive(Clone)]
 struct Config {
     root: PathBuf,
@@ -243,7 +205,7 @@ struct Config {
     session: Id,
     device: Option<Id>,
     keys: Arc<dyn EnvelopeKeyStore>,
-    anchor: Arc<dyn RollbackAnchor>,
+    trust: Arc<ReplicaTrustSet>,
 }
 
 struct DaemonState {
@@ -266,125 +228,348 @@ pub struct DeviceEndpoint {
     state: Arc<DeviceState>,
 }
 
-struct PendingWitnessState {
-    operation: PendingWitnessOperation,
-    trust: ReplicaTrustSet,
+// ---- Witness continuation values -------------------------------------------------------------
+
+/// The one durable pending witness request. It carries only the operation ID, the exact signed
+/// request bytes, and the request hash. Transport it to all three replicas and pass the unanimous
+/// certificate back to `continueWitness` on the same endpoint.
+#[napi(object)]
+pub struct PendingWitness {
+    pub operation_id: Buffer,
+    pub request: Buffer,
+    pub request_hash: Buffer,
+    pub kind: String,
 }
 
-/// Native-owned continuation. JavaScript can transport only the immutable request and return a
-/// certificate for the same operation ID.
-#[napi]
-pub struct NativePendingWitness {
-    gate: Arc<HandleGate>,
-    state: Arc<Mutex<PendingWitnessState>>,
-}
-
-impl NativePendingWitness {
-    #[allow(dead_code)]
-    fn new(operation: PendingWitnessOperation, trust: ReplicaTrustSet) -> Self {
-        Self {
-            gate: HandleGate::new(),
-            state: Arc::new(Mutex::new(PendingWitnessState { operation, trust })),
+fn pending_witness(value: &PendingWitnessRequest) -> PendingWitness {
+    PendingWitness {
+        operation_id: value.operation_id().to_vec().into(),
+        request: value.request().to_vec().into(),
+        request_hash: value.request_hash().to_vec().into(),
+        kind: match value.kind() {
+            WitnessRequestKind::Register => "register",
+            WitnessRequestKind::Advance => "advance",
+            WitnessRequestKind::Read => "read",
         }
+        .into(),
     }
 }
 
-#[napi]
-impl NativePendingWitness {
-    #[napi(getter)]
-    pub fn operation_id(&self) -> Result<Buffer> {
-        let state = self.state.lock().map_err(|_| error("internal_error"))?;
-        Ok(state.operation.operation_id().to_vec().into())
-    }
+/// Outcome of a fresh unanimous `read` reconciliation.
+#[napi(object)]
+pub struct WitnessReconciliation {
+    pub tag: String,
+    pub reason: Option<String>,
+}
 
-    #[napi(getter)]
-    pub fn witness_request(&self) -> Result<Buffer> {
-        let state = self.state.lock().map_err(|_| error("internal_error"))?;
-        Ok(state.operation.witness_request().to_vec().into())
+fn reconciliation(value: EndpointReconciliation) -> WitnessReconciliation {
+    let (tag, reason) = match value {
+        EndpointReconciliation::Ready => ("ready", None),
+        EndpointReconciliation::ResendPending => ("resend_pending", None),
+        EndpointReconciliation::RecoverAccepted => ("recover_accepted", None),
+        EndpointReconciliation::WitnessUnavailable => ("witness_unavailable", None),
+        EndpointReconciliation::Revoked => ("revoked", None),
+        EndpointReconciliation::Quarantined(reason) => (
+            "quarantined",
+            Some(match reason {
+                EndpointQuarantineReason::StateLoss => "stale_local_state",
+                EndpointQuarantineReason::PendingWithoutLocalState => "pending_without_local_state",
+                EndpointQuarantineReason::WitnessLineageMissing => "witness_lineage_missing",
+                EndpointQuarantineReason::CommitmentConflict => "commitment_conflict",
+                EndpointQuarantineReason::LocalAheadMoreThanOne => "local_ahead_more_than_one",
+                EndpointQuarantineReason::WitnessBehindMoreThanOne => {
+                    "witness_behind_more_than_one"
+                }
+                EndpointQuarantineReason::WitnessInconsistent => "witness_inconsistent",
+                EndpointQuarantineReason::ImmediateFork => "immediate_fork",
+                EndpointQuarantineReason::HistoricalFork => "historical_fork",
+            }),
+        ),
+    };
+    WitnessReconciliation {
+        tag: tag.into(),
+        reason: reason.map(str::to_owned),
     }
+}
 
-    #[napi(getter)]
-    pub fn request_hash(&self) -> Result<Buffer> {
-        let state = self.state.lock().map_err(|_| error("internal_error"))?;
-        Ok(state.operation.request_hash().to_vec().into())
-    }
+/// Exact typed value released by the barrier. Constructed only from the authenticated exact
+/// result of a completed operation or from a read-only no-change branch.
+#[derive(Clone)]
+enum Value {
+    Empty,
+    Outbox(OutboxRecord),
+    Plaintext(DurablePlaintext),
+    Accepted(AcceptedMessageRecord),
+    Commit(CommitMetadata),
+    Invitation(InvitationPublication),
+    PreJoin(PreJoinPublication),
+    Welcome(WelcomePublication),
+    Claim(ClaimSubmission),
+    Reservation(ReservationOutcome),
+    Activation(ActivationAcceptance),
+    EpochReady(EpochReadyAcceptance),
+    InvitationState(InvitationLifecycle),
+    PreJoinState(PreJoinLifecycle),
+    PairState(PairLifecycle),
+    Removal(RemovalOutcome),
+    RePair(RePairRequirement),
+    Status(&'static str),
+}
 
-    #[napi(getter)]
-    pub fn status(&self) -> Result<String> {
-        let state = self.state.lock().map_err(|_| error("internal_error"))?;
-        Ok(match state.operation.status() {
-            PendingWitnessStatus::AwaitingQuorum => "pending_quorum",
-            PendingWitnessStatus::Ready => "committed",
-        }
-        .into())
-    }
+impl TryFrom<TypedResult> for Value {
+    type Error = napi::Error;
 
-    #[napi]
-    pub fn continue_witness(
-        &self,
-        operation_id: Buffer,
-        certificate: Buffer,
-    ) -> Result<AsyncTask<Work<Buffer>>> {
-        let operation_id = id(operation_id.as_ref())?;
-        let certificate = copy_bounded(
-            certificate.as_ref(),
-            WITNESS_CERTIFICATE_MAX_BYTES,
-            "bound_exceeded",
-        )?;
-        let lease = self.gate.acquire(false)?;
-        let state = Arc::clone(&self.state);
-        Ok(AsyncTask::new(Work::new(lease, move || {
-            let mut state = state.lock().map_err(|_| error("internal_error"))?;
-            if state.operation.operation_id() != operation_id {
-                return Err(error("witness_operation_conflict"));
+    fn try_from(value: TypedResult) -> Result<Self> {
+        Ok(match value {
+            TypedResult::Empty => Self::Empty,
+            TypedResult::Envelope(v) | TypedResult::OutboxAcknowledged(v) => Self::Outbox(v),
+            TypedResult::Plaintext(v) => Self::Plaintext(v),
+            TypedResult::Accepted(v) | TypedResult::ReceiveAcknowledged(v) => Self::Accepted(v),
+            TypedResult::Commit(v) => Self::Commit(v),
+            TypedResult::Invitation(v) => Self::Invitation(v),
+            TypedResult::PreJoin(v) => Self::PreJoin(v),
+            TypedResult::Welcome(v) => Self::Welcome(v),
+            TypedResult::Claim(v) => Self::Claim(v),
+            TypedResult::Reservation(v) => Self::Reservation(v),
+            TypedResult::Activation(v) => Self::Activation(v),
+            TypedResult::EpochReady(v) => Self::EpochReady(v),
+            TypedResult::InvitationLifecycle(v) => Self::InvitationState(v),
+            TypedResult::PreJoinLifecycle(v) => Self::PreJoinState(v),
+            TypedResult::PairLifecycle(v) => Self::PairState(v),
+            TypedResult::Removal(v) => Self::from(v),
+            TypedResult::RePair(v) => Self::RePair(v),
+            // Legacy test-only endpoint results never belong to a pairing facade.
+            TypedResult::KeyPackage(_) | TypedResult::LegacyWelcome(_) => {
+                return Err(error("internal_error"));
             }
-            let trust = state.trust.clone();
-            state
-                .operation
-                .confirm_quorum(&certificate, &trust)
-                .map_err(map_witness)?;
-            Ok(state
-                .operation
-                .committed_result()
-                .map_err(map_witness)?
-                .to_vec()
-                .into())
-        })))
-    }
-
-    #[napi]
-    pub fn close(&self) {
-        self.gate.close();
+        })
     }
 }
 
-#[allow(dead_code)]
-fn config(
+impl From<WelcomeOutcome> for Value {
+    fn from(value: WelcomeOutcome) -> Self {
+        match value {
+            WelcomeOutcome::Committed(v) | WelcomeOutcome::Duplicate(v) => Self::Welcome(v),
+            WelcomeOutcome::Busy => Self::Status("busy"),
+            WelcomeOutcome::Expired => Self::Status("expired"),
+            WelcomeOutcome::Consumed => Self::Status("consumed"),
+            WelcomeOutcome::Rejected => Self::Status("rejected"),
+            WelcomeOutcome::Unavailable => Self::Status("unavailable"),
+        }
+    }
+}
+
+impl From<RemovalOutcome> for Value {
+    fn from(value: RemovalOutcome) -> Self {
+        match value {
+            RemovalOutcome::Commit(v) => Self::Outbox(v),
+            RemovalOutcome::RePairRequired(v) => Self::RePair(v),
+            RemovalOutcome::Removed | RemovalOutcome::Revoked => Self::Removal(value),
+        }
+    }
+}
+
+impl From<ActivationOutcome> for Value {
+    fn from(value: ActivationOutcome) -> Self {
+        match value {
+            ActivationOutcome::Prepared(v) => Self::Outbox(v),
+            ActivationOutcome::Activated(v) | ActivationOutcome::Duplicate(v) => {
+                Self::Activation(v)
+            }
+            ActivationOutcome::Rejected => Self::Status("rejected"),
+        }
+    }
+}
+
+/// Tagged exact result. Exactly one typed accessor is populated for each tag; `status` carries
+/// the discriminant of lifecycle, claim, reservation, removal, and no-change results.
+#[napi]
+pub struct NativeResult {
+    value: Value,
+}
+
+#[napi]
+impl NativeResult {
+    #[napi(getter)]
+    pub fn tag(&self) -> String {
+        match &self.value {
+            Value::Empty => "empty",
+            Value::Outbox(_) => "outbox",
+            Value::Plaintext(_) => "plaintext",
+            Value::Accepted(_) => "accepted",
+            Value::Commit(_) => "commit",
+            Value::Invitation(_) => "invitation",
+            Value::PreJoin(_) => "pre_join",
+            Value::Welcome(_) => "welcome",
+            Value::Claim(_) => "claim",
+            Value::Reservation(_) => "reservation",
+            Value::Activation(_) => "activation",
+            Value::EpochReady(_) => "epoch_ready",
+            Value::InvitationState(_) => "invitation_state",
+            Value::PreJoinState(_) => "pre_join_state",
+            Value::PairState(_) => "pair_state",
+            Value::Removal(_) => "removal",
+            Value::RePair(_) => "re_pair",
+            Value::Status(_) => "status",
+        }
+        .into()
+    }
+
+    #[napi(getter)]
+    pub fn status(&self) -> Option<String> {
+        Some(match &self.value {
+            Value::InvitationState(v) => invitation_lifecycle(*v),
+            Value::PreJoinState(v) => prejoin_lifecycle(*v),
+            Value::PairState(v) => lifecycle(*v),
+            Value::Removal(RemovalOutcome::Removed) => "removed".into(),
+            Value::Removal(RemovalOutcome::Revoked) => "revoked".into(),
+            Value::Removal(_) => return None,
+            Value::Claim(v) => claim_publication(v).tag,
+            Value::Reservation(v) => reservation_publication(v).tag,
+            Value::Status(v) => (*v).into(),
+            _ => return None,
+        })
+    }
+
+    #[napi(getter)]
+    pub fn outbox(&self) -> Option<NativeOutbox> {
+        match &self.value {
+            Value::Outbox(v) => Some(outbox(v.clone())),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn plaintext(&self) -> Option<NativePlaintext> {
+        match &self.value {
+            Value::Plaintext(v) => Some(plaintext(v.clone())),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn accepted(&self) -> Option<NativeAccepted> {
+        match &self.value {
+            Value::Accepted(v) => Some(NativeAccepted { inner: v.clone() }),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn commit(&self) -> Option<NativeCommit> {
+        match &self.value {
+            Value::Commit(v) => Some(NativeCommit { inner: v.clone() }),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn publication(&self) -> Option<Publication> {
+        match &self.value {
+            Value::Invitation(v) => Some(invitation_publication(v)),
+            Value::PreJoin(v) => Some(prejoin_publication(v)),
+            Value::Claim(v) => Some(claim_publication(v)),
+            Value::Reservation(v) => Some(reservation_publication(v)),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn welcome(&self) -> Option<NativeWelcome> {
+        match &self.value {
+            Value::Welcome(v) => Some(NativeWelcome { inner: v.clone() }),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn activation(&self) -> Option<NativeActivationAcceptance> {
+        match &self.value {
+            Value::Activation(v) => Some(NativeActivationAcceptance { inner: v.clone() }),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn epoch_ready(&self) -> Option<NativeEpochReadyAcceptance> {
+        match &self.value {
+            Value::EpochReady(v) => Some(NativeEpochReadyAcceptance { inner: v.clone() }),
+            _ => None,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn re_pair(&self) -> Option<NativeRePairRequirement> {
+        match &self.value {
+            Value::RePair(v) => Some(NativeRePairRequirement { inner: v.clone() }),
+            _ => None,
+        }
+    }
+}
+
+/// Result of a state-changing endpoint call: the exact pending request, or an exact result that
+/// needs no new barrier.
+#[napi]
+pub struct WitnessOutcome {
+    pending: Option<PendingWitnessRequest>,
+    released: Option<Value>,
+}
+
+#[napi]
+impl WitnessOutcome {
+    #[napi(getter)]
+    pub fn tag(&self) -> String {
+        if self.pending.is_some() {
+            "pending"
+        } else {
+            "released"
+        }
+        .into()
+    }
+
+    #[napi(getter)]
+    pub fn pending(&self) -> Option<PendingWitness> {
+        self.pending.as_ref().map(pending_witness)
+    }
+
+    #[napi(getter)]
+    pub fn result(&self) -> Option<NativeResult> {
+        self.released.clone().map(|value| NativeResult { value })
+    }
+}
+
+fn outcome<T>(value: Outcome<T>, into: impl FnOnce(T) -> Value) -> WitnessOutcome {
+    match value {
+        Outcome::Pending(request) => WitnessOutcome {
+            pending: Some(request),
+            released: None,
+        },
+        Outcome::Released(value) => WitnessOutcome {
+            pending: None,
+            released: Some(into(value)),
+        },
+    }
+}
+
+// ---- Construction ----------------------------------------------------------------------------
+
+#[cfg(feature = "test-fixtures")]
+fn test_config(
     root: String,
     account: Buffer,
     installation: Buffer,
     session: Buffer,
     device: Option<Buffer>,
-    test: bool,
+    witness: &TestWitness,
 ) -> Result<Config> {
-    let keys: Arc<dyn EnvelopeKeyStore> = if test {
-        test_keys()
-    } else {
-        Arc::new(UnavailableKeys)
-    };
-    let anchor: Arc<dyn RollbackAnchor> = if test {
-        test_anchor()
-    } else {
-        Arc::new(UnavailableAnchor)
-    };
     Ok(Config {
         root: PathBuf::from(root),
         account: id(account.as_ref())?,
         installation: id(installation.as_ref())?,
         session: id(session.as_ref())?,
         device: device.map(|v| id(v.as_ref())).transpose()?,
-        keys,
-        anchor,
+        keys: Arc::new(test_store::TestKeys::default()),
+        trust: witness.inner.trust(),
     })
 }
 
@@ -395,6 +580,7 @@ fn windows_test_config(
     installation: Buffer,
     session: Buffer,
     device: Option<Buffer>,
+    witness: &TestWitness,
 ) -> Result<Config> {
     let root = PathBuf::from(root);
     let keys = axl_e2ee::persistence::windows_test_envelope_key_store(&root.join("dpapi"))
@@ -406,30 +592,11 @@ fn windows_test_config(
         session: id(session.as_ref())?,
         device: device.map(|value| id(value.as_ref())).transpose()?,
         keys,
-        anchor: test_anchor(),
+        trust: witness.inner.trust(),
     })
 }
 
 #[cfg(feature = "test-fixtures")]
-fn test_keys() -> Arc<dyn EnvelopeKeyStore> {
-    Arc::new(test_store::TestKeys::default())
-}
-#[cfg(not(feature = "test-fixtures"))]
-#[allow(dead_code)]
-fn test_keys() -> Arc<dyn EnvelopeKeyStore> {
-    Arc::new(UnavailableKeys)
-}
-#[cfg(feature = "test-fixtures")]
-fn test_anchor() -> Arc<dyn RollbackAnchor> {
-    Arc::new(test_store::TestAnchor::default())
-}
-#[cfg(not(feature = "test-fixtures"))]
-#[allow(dead_code)]
-fn test_anchor() -> Arc<dyn RollbackAnchor> {
-    Arc::new(UnavailableAnchor)
-}
-
-#[allow(dead_code)]
 fn daemon_handle(config: Config) -> DaemonEndpoint {
     DaemonEndpoint {
         state: Arc::new(DaemonState {
@@ -439,7 +606,7 @@ fn daemon_handle(config: Config) -> DaemonEndpoint {
         }),
     }
 }
-#[allow(dead_code)]
+#[cfg(feature = "test-fixtures")]
 fn device_handle(config: Config) -> DeviceEndpoint {
     DeviceEndpoint {
         state: Arc::new(DeviceState {
@@ -480,6 +647,92 @@ pub fn open_device_endpoint() -> AsyncTask<FailTask> {
     AsyncTask::new(FailTask("rollback_anchor_unavailable"))
 }
 
+/// Deterministic in-process three-replica witness. Test artifact only.
+#[cfg(feature = "test-fixtures")]
+#[napi]
+pub struct TestWitness {
+    inner: Arc<axl_e2ee::test_witness::TestWitness>,
+}
+
+#[cfg(feature = "test-fixtures")]
+#[napi]
+impl TestWitness {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            inner: axl_e2ee::test_witness::TestWitness::new(),
+        }
+    }
+
+    /// Answer one exact request with a unanimous certificate, exactly as the replicas would.
+    #[napi]
+    pub fn respond(&self, request: Buffer) -> Result<Buffer> {
+        let request = copy_bounded(
+            request.as_ref(),
+            WITNESS_REQUEST_MAX_BYTES,
+            "bound_exceeded",
+        )?;
+        axl_e2ee::witness::WitnessRequest::decode(&request).map_err(map_witness)?;
+        self.inner
+            .respond(&request)
+            .map(|bytes| bytes.into())
+            .map_err(map_persistence)
+    }
+
+    #[napi]
+    pub fn set_unavailable(&self, value: bool) {
+        self.inner.set_unavailable(value);
+    }
+
+    #[napi]
+    pub fn set_forge_signature(&self, value: bool) {
+        self.inner.set_forge_signature(value);
+    }
+
+    #[napi]
+    pub fn roll_back_all(&self, request: Buffer) -> Result<()> {
+        self.inner.roll_back_all(&self.known_request(request)?);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn advance_foreign(&self, request: Buffer) -> Result<()> {
+        self.inner.advance_foreign(&self.known_request(request)?);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn revoke(&self, request: Buffer) -> Result<()> {
+        self.inner.revoke(&self.known_request(request)?);
+        Ok(())
+    }
+
+    #[napi(getter)]
+    pub fn responses(&self) -> BigInt {
+        bigint(self.inner.responses())
+    }
+
+    fn known_request(&self, request: Buffer) -> Result<Vec<u8>> {
+        let request = copy_bounded(
+            request.as_ref(),
+            WITNESS_REQUEST_MAX_BYTES,
+            "bound_exceeded",
+        )?;
+        axl_e2ee::witness::WitnessRequest::decode(&request).map_err(map_witness)?;
+        if self.inner.head(&request).is_none() {
+            return Err(error("not_found"));
+        }
+        Ok(request)
+    }
+}
+
+#[cfg(feature = "test-fixtures")]
+impl Default for TestWitness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(feature = "test-fixtures")]
 #[napi]
 pub fn test_daemon_endpoint(
@@ -487,14 +740,15 @@ pub fn test_daemon_endpoint(
     account: Buffer,
     installation: Buffer,
     session: Buffer,
+    witness: &TestWitness,
 ) -> Result<DaemonEndpoint> {
-    Ok(daemon_handle(config(
+    Ok(daemon_handle(test_config(
         root,
         account,
         installation,
         session,
         None,
-        true,
+        witness,
     )?))
 }
 #[cfg(feature = "test-fixtures")]
@@ -505,14 +759,15 @@ pub fn test_device_endpoint(
     installation: Buffer,
     session: Buffer,
     device: Buffer,
+    witness: &TestWitness,
 ) -> Result<DeviceEndpoint> {
-    Ok(device_handle(config(
+    Ok(device_handle(test_config(
         root,
         account,
         installation,
         session,
         Some(device),
-        true,
+        witness,
     )?))
 }
 
@@ -523,6 +778,7 @@ pub fn test_windows_daemon_endpoint(
     account: Buffer,
     installation: Buffer,
     session: Buffer,
+    witness: &TestWitness,
 ) -> Result<DaemonEndpoint> {
     Ok(daemon_handle(windows_test_config(
         root,
@@ -530,6 +786,7 @@ pub fn test_windows_daemon_endpoint(
         installation,
         session,
         None,
+        witness,
     )?))
 }
 
@@ -541,6 +798,7 @@ pub fn test_windows_device_endpoint(
     installation: Buffer,
     session: Buffer,
     device: Buffer,
+    witness: &TestWitness,
 ) -> Result<DeviceEndpoint> {
     Ok(device_handle(windows_test_config(
         root,
@@ -548,6 +806,7 @@ pub fn test_windows_device_endpoint(
         installation,
         session,
         Some(device),
+        witness,
     )?))
 }
 
@@ -557,51 +816,7 @@ pub fn test_panic(endpoint: &DaemonEndpoint) -> Result<AsyncTask<Work<String>>> 
     endpoint.work(move |_, _| panic!("contained test panic"))
 }
 
-#[cfg(feature = "test-fixtures")]
-fn witness_fixture_trust() -> Result<ReplicaTrustSet> {
-    let public_keys = [
-        [
-            0x1e, 0xbe, 0x96, 0x8b, 0x69, 0xd6, 0x14, 0xf9, 0xe4, 0xcb, 0x0f, 0x44, 0xbf, 0xc3,
-            0x8c, 0x01, 0x0b, 0x35, 0x5c, 0x65, 0x2d, 0xc3, 0xc4, 0x79, 0x5f, 0x1b, 0x03, 0xcf,
-            0xf7, 0xf8, 0x6e, 0xab,
-        ],
-        [
-            0x48, 0x8d, 0xa5, 0xa0, 0xa4, 0xe3, 0x75, 0xf9, 0x4b, 0x45, 0xa0, 0x09, 0xf4, 0x57,
-            0x33, 0xb3, 0xff, 0x9d, 0x6b, 0x01, 0x83, 0x5b, 0x21, 0x19, 0x66, 0x6c, 0x39, 0xed,
-            0xfb, 0xe1, 0x3f, 0x60,
-        ],
-        [
-            0x03, 0xc8, 0xc9, 0xea, 0xf5, 0xef, 0x22, 0x9b, 0x40, 0xa1, 0x26, 0x5e, 0xfa, 0x46,
-            0x4b, 0x0a, 0xe0, 0x33, 0xfc, 0x1e, 0xea, 0xaf, 0x35, 0x6f, 0xb4, 0xdc, 0xf4, 0x1a,
-            0x2b, 0x48, 0x14, 0xaa,
-        ],
-    ];
-    let mut replicas = Vec::with_capacity(3);
-    for (index, public_key) in public_keys.into_iter().enumerate() {
-        let replica_byte = 0x14 + index as u8;
-        let key_byte = 0x1e + index as u8;
-        let key = ReplicaKey::new([key_byte; 16], public_key).map_err(map_witness)?;
-        replicas.push(ReplicaTrust::new([replica_byte; 16], vec![key]).map_err(map_witness)?);
-    }
-    ReplicaTrustSet::new(replicas).map_err(map_witness)
-}
-
-#[cfg(feature = "test-fixtures")]
-#[napi]
-pub fn test_witness_pending(request: Buffer, exact_result: Buffer) -> Result<NativePendingWitness> {
-    let request = copy_bounded(
-        request.as_ref(),
-        axl_e2ee::witness::WITNESS_REQUEST_MAX_BYTES,
-        "bound_exceeded",
-    )?;
-    let exact_result = copy_bounded(exact_result.as_ref(), 1024 * 1024, "bound_exceeded")?;
-    let operation = axl_e2ee::witness::test_pending_witness_operation(&request, &exact_result)
-        .map_err(map_witness)?;
-    Ok(NativePendingWitness::new(
-        operation,
-        witness_fixture_trust()?,
-    ))
-}
+// ---- Typed values ----------------------------------------------------------------------------
 
 #[napi(object)]
 pub struct Publication {
@@ -612,6 +827,46 @@ pub struct Publication {
     pub group_id: Option<Buffer>,
     pub expires_at_ms: Option<BigInt>,
     pub comparison: Option<String>,
+    pub reservation: Option<NativeReservationIntent>,
+}
+
+/// The complete exact `ReservationIntent` released by a confirmed claim or a reservation.
+#[napi(object)]
+pub struct NativeReservationIntent {
+    pub reservation_id: Buffer,
+    pub crypto_session_id: Buffer,
+    pub account_id: Buffer,
+    pub installation_id: Buffer,
+    pub device_id: Buffer,
+    pub claim_hash: Buffer,
+    pub key_package_hash: Buffer,
+    pub expires_at_ms: BigInt,
+}
+
+fn reservation_intent(v: &ReservationIntent) -> NativeReservationIntent {
+    NativeReservationIntent {
+        reservation_id: v.reservation_id.to_vec().into(),
+        crypto_session_id: v.crypto_session_id.to_vec().into(),
+        account_id: v.account_id.to_vec().into(),
+        installation_id: v.installation_id.to_vec().into(),
+        device_id: v.device_id.to_vec().into(),
+        claim_hash: v.claim_hash.to_vec().into(),
+        key_package_hash: v.key_package_hash.to_vec().into(),
+        expires_at_ms: bigint(v.expires_at_ms),
+    }
+}
+
+fn reserved_publication(tag: &str, v: &ReservationIntent) -> Publication {
+    Publication {
+        tag: tag.into(),
+        bytes: None,
+        secondary_bytes: None,
+        hash: None,
+        group_id: None,
+        expires_at_ms: None,
+        comparison: None,
+        reservation: Some(reservation_intent(v)),
+    }
 }
 
 #[napi]
@@ -634,16 +889,7 @@ impl NativeOutbox {
     }
     #[napi(getter)]
     pub fn message_class(&self) -> String {
-        match self.inner.class() {
-            axl_e2ee::MessageClass::ApplicationRequest => "application_request",
-            axl_e2ee::MessageClass::ApplicationDelivery => "application_delivery",
-            axl_e2ee::MessageClass::UpdateProposal => "update_proposal",
-            axl_e2ee::MessageClass::Commit => "commit",
-            axl_e2ee::MessageClass::EpochReady => "epoch_ready",
-            axl_e2ee::MessageClass::PairActivation => "pair_activation",
-            axl_e2ee::MessageClass::ResyncControl => "resync_control",
-        }
-        .into()
+        message_class(self.inner.class()).into()
     }
     #[napi(getter)]
     pub fn epoch(&self) -> BigInt {
@@ -685,6 +931,18 @@ impl NativeOutbox {
     }
 }
 
+fn message_class(value: axl_e2ee::MessageClass) -> &'static str {
+    match value {
+        axl_e2ee::MessageClass::ApplicationRequest => "application_request",
+        axl_e2ee::MessageClass::ApplicationDelivery => "application_delivery",
+        axl_e2ee::MessageClass::UpdateProposal => "update_proposal",
+        axl_e2ee::MessageClass::Commit => "commit",
+        axl_e2ee::MessageClass::EpochReady => "epoch_ready",
+        axl_e2ee::MessageClass::PairActivation => "pair_activation",
+        axl_e2ee::MessageClass::ResyncControl => "resync_control",
+    }
+}
+
 #[napi]
 pub struct NativePlaintext {
     inner: DurablePlaintext,
@@ -706,6 +964,60 @@ impl NativePlaintext {
     #[napi(getter)]
     pub fn plaintext(&self) -> Buffer {
         self.inner.plaintext().to_vec().into()
+    }
+}
+
+/// Durable identity of an accepted handshake or acknowledged receive.
+#[napi]
+pub struct NativeAccepted {
+    inner: AcceptedMessageRecord,
+}
+#[napi]
+impl NativeAccepted {
+    #[napi(getter)]
+    pub fn operation_id(&self) -> Buffer {
+        self.inner.operation_id.to_vec().into()
+    }
+    #[napi(getter)]
+    pub fn crypto_session_id(&self) -> Buffer {
+        self.inner.crypto_session_id.to_vec().into()
+    }
+    #[napi(getter)]
+    pub fn logical_message_id(&self) -> Buffer {
+        self.inner.logical_message_id.to_vec().into()
+    }
+    #[napi(getter)]
+    pub fn message_class(&self) -> String {
+        message_class(self.inner.class).into()
+    }
+    #[napi(getter)]
+    pub fn epoch(&self) -> BigInt {
+        bigint(self.inner.epoch)
+    }
+    #[napi(getter)]
+    pub fn acknowledged(&self) -> bool {
+        self.inner.acknowledged
+    }
+}
+
+/// Metadata of a commit applied to the device group state. Pass it to `prepareEpochReady`.
+#[napi]
+pub struct NativeCommit {
+    inner: CommitMetadata,
+}
+#[napi]
+impl NativeCommit {
+    #[napi(getter)]
+    pub fn commit_id(&self) -> Buffer {
+        self.inner.commit_id.to_vec().into()
+    }
+    #[napi(getter)]
+    pub fn target_epoch(&self) -> BigInt {
+        bigint(self.inner.target_epoch)
+    }
+    #[napi(getter)]
+    pub fn epoch_authenticator(&self) -> Buffer {
+        self.inner.epoch_authenticator.to_vec().into()
     }
 }
 
@@ -797,15 +1109,6 @@ impl NativeRePairRequirement {
     }
 }
 
-#[napi(object)]
-pub struct StatusOutcome {
-    pub tag: String,
-    pub device_id: Option<Buffer>,
-    pub crypto_session_id: Option<Buffer>,
-    pub group_id: Option<Buffer>,
-    pub key_package_hash: Option<Buffer>,
-}
-
 fn publication(
     tag: &str,
     bytes: Option<&[u8]>,
@@ -823,7 +1126,88 @@ fn publication(
         group_id: group.map(|v| v.to_vec().into()),
         expires_at_ms: expires.map(bigint),
         comparison,
+        reservation: None,
     }
+}
+fn invitation_publication(p: &InvitationPublication) -> Publication {
+    publication(
+        "issued",
+        Some(p.bytes()),
+        None,
+        Some(&p.invitation_hash()),
+        None,
+        Some(p.expires_at_ms()),
+        None,
+    )
+}
+fn prejoin_publication(p: &PreJoinPublication) -> Publication {
+    publication(
+        "prepared",
+        Some(p.claim()),
+        Some(p.key_package()),
+        Some(&p.invitation_hash()),
+        None,
+        Some(p.expires_at_ms()),
+        None,
+    )
+}
+fn claim_publication(result: &ClaimSubmission) -> Publication {
+    match result {
+        ClaimSubmission::Pending {
+            claim_hash,
+            comparison,
+        } => publication(
+            "pending",
+            None,
+            None,
+            Some(claim_hash),
+            None,
+            None,
+            Some(comparison.clone()),
+        ),
+        ClaimSubmission::Confirmed(v) => reserved_publication("confirmed", v),
+        ClaimSubmission::Accepted(v) => welcome_publication("accepted", v),
+        ClaimSubmission::Consumed => publication("consumed", None, None, None, None, None, None),
+        ClaimSubmission::Rejected { reason } => publication(
+            reason
+                .map_or("rejected".into(), |v| {
+                    format!("rejected_{v:?}").to_ascii_lowercase()
+                })
+                .as_str(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        ClaimSubmission::Cancelled => publication("cancelled", None, None, None, None, None, None),
+        ClaimSubmission::Expired => publication("expired", None, None, None, None, None, None),
+        ClaimSubmission::Conflict => publication("conflict", None, None, None, None, None, None),
+    }
+}
+fn reservation_publication(value: &ReservationOutcome) -> Publication {
+    match value {
+        ReservationOutcome::Reserved(v) => reserved_publication("reserved", v),
+        ReservationOutcome::Busy => publication("busy", None, None, None, None, None, None),
+        ReservationOutcome::Expired => publication("expired", None, None, None, None, None, None),
+        ReservationOutcome::Consumed => publication("consumed", None, None, None, None, None, None),
+        ReservationOutcome::Rejected => publication("rejected", None, None, None, None, None, None),
+        ReservationOutcome::Unavailable => {
+            publication("unavailable", None, None, None, None, None, None)
+        }
+    }
+}
+fn welcome_publication(tag: &str, value: &WelcomePublication) -> Publication {
+    publication(
+        tag,
+        Some(value.bytes()),
+        None,
+        Some(&value.claim_hash()),
+        Some(&value.group_id()),
+        Some(value.expires_at_ms()),
+        None,
+    )
 }
 fn lifecycle(value: PairLifecycle) -> String {
     match value {
@@ -855,6 +1239,11 @@ fn prejoin_lifecycle(value: PreJoinLifecycle) -> String {
 fn outbox(value: OutboxRecord) -> NativeOutbox {
     NativeOutbox { inner: value }
 }
+fn plaintext(value: DurablePlaintext) -> NativePlaintext {
+    NativePlaintext { inner: value }
+}
+
+// ---- Endpoint work ---------------------------------------------------------------------------
 
 impl DaemonEndpoint {
     fn work<
@@ -896,31 +1285,68 @@ fn device_mut(value: &mut Option<DurablePreJoinDevice>) -> Result<&mut DurablePr
     value.as_mut().ok_or_else(|| error("invalid_lifecycle"))
 }
 
+/// Endpoint-owned witness operations shared by both facades. The durable pending record is
+/// reloaded on every call; no in-memory handle is recovery authority.
+fn witness_read_request<E: WitnessEndpoint>(endpoint: &E) -> Result<Buffer> {
+    endpoint
+        .witness_read_request()
+        .map(Buffer::from)
+        .map_err(map_persistence)
+}
+fn reconcile_witness<E: WitnessEndpoint>(
+    endpoint: &E,
+    certificate: &[u8],
+) -> Result<WitnessReconciliation> {
+    endpoint
+        .reconcile_witness(certificate)
+        .map(reconciliation)
+        .map_err(map_persistence)
+}
+fn pending_witness_of<E: WitnessEndpoint>(endpoint: &E) -> Result<Option<PendingWitness>> {
+    endpoint
+        .pending_witness()
+        .map(|value| value.as_ref().map(pending_witness))
+        .map_err(map_persistence)
+}
+fn continue_witness<E: WitnessEndpoint>(
+    endpoint: &E,
+    operation_id: Id,
+    certificate: &[u8],
+) -> Result<NativeResult> {
+    let value = endpoint
+        .continue_witness(operation_id, certificate)
+        .map_err(map_persistence)?;
+    Ok(NativeResult {
+        value: Value::try_from(value)?,
+    })
+}
+fn certificate_bytes(certificate: Buffer) -> Result<Vec<u8>> {
+    copy_bounded(
+        certificate.as_ref(),
+        WITNESS_CERTIFICATE_MAX_BYTES,
+        "bound_exceeded",
+    )
+}
+
 #[napi]
 impl DaemonEndpoint {
+    /// Create the daemon endpoint and return the counter-1 `register` request. The invitation
+    /// stays withheld until `continueWitness` completes that registration.
     #[napi]
-    pub fn issue(&self, operation_id: Buffer) -> Result<AsyncTask<Work<Publication>>> {
+    pub fn issue(&self, operation_id: Buffer) -> Result<AsyncTask<Work<PendingWitness>>> {
         let op = id(operation_id.as_ref())?;
         self.work(move |slot, c| {
-            let (endpoint, p) = DurablePendingInvitation::issue(
+            let (endpoint, request) = DurablePendingInvitation::issue(
                 &c.root,
                 Identity::daemon(c.account, c.installation),
                 c.session,
                 op,
                 Arc::clone(&c.keys),
-                Arc::clone(&c.anchor),
+                Arc::clone(&c.trust),
             )
             .map_err(map_persistence)?;
             *slot = Some(endpoint);
-            Ok(publication(
-                "issued",
-                Some(p.bytes()),
-                None,
-                Some(&p.invitation_hash()),
-                None,
-                Some(p.expires_at_ms()),
-                None,
-            ))
+            Ok(pending_witness(&request))
         })
     }
     #[napi]
@@ -932,26 +1358,69 @@ impl DaemonEndpoint {
                 &state.config.root,
                 state.config.session,
                 Arc::clone(&state.config.keys),
-                Arc::clone(&state.config.anchor),
+                Arc::clone(&state.config.trust),
             )
-            .map_err(map_persistence)?;
+            .map_err(map_open)?;
             *state.endpoint.lock().map_err(|_| error("internal_error"))? = Some(opened);
             state.gate.reopen();
             Ok("opened".into())
         })))
     }
+
+    #[napi]
+    pub fn witness_read_request(&self) -> Result<AsyncTask<Work<Buffer>>> {
+        self.work(move |slot, _| witness_read_request(daemon_mut(slot)?))
+    }
+    #[napi]
+    pub fn reconcile_witness(
+        &self,
+        certificate: Buffer,
+    ) -> Result<AsyncTask<Work<WitnessReconciliation>>> {
+        let certificate = certificate_bytes(certificate)?;
+        self.work(move |slot, _| reconcile_witness(daemon_mut(slot)?, &certificate))
+    }
+    #[napi]
+    pub fn pending_witness(&self) -> Result<AsyncTask<Work<Option<PendingWitness>>>> {
+        self.work(move |slot, _| pending_witness_of(daemon_mut(slot)?))
+    }
+    #[napi]
+    pub fn continue_witness(
+        &self,
+        operation_id: Buffer,
+        certificate: Buffer,
+    ) -> Result<AsyncTask<Work<NativeResult>>> {
+        let op = id(operation_id.as_ref())?;
+        let certificate = certificate_bytes(certificate)?;
+        self.work(move |slot, _| continue_witness(daemon_mut(slot)?, op, &certificate))
+    }
+    /// Persist a due invitation expiry as a witnessed operation. `null` when nothing is due.
+    #[napi]
+    pub fn expire_if_needed(&self) -> Result<AsyncTask<Work<Option<PendingWitness>>>> {
+        self.work(move |slot, _| {
+            Ok(daemon_mut(slot)?
+                .expire_if_needed()
+                .map_err(map_persistence)?
+                .as_ref()
+                .map(pending_witness))
+        })
+    }
+    /// Persist a due Welcome expiry as a witnessed operation. `null` when nothing is due.
+    #[napi]
+    pub fn expire_welcome_if_needed(&self) -> Result<AsyncTask<Work<Option<PendingWitness>>>> {
+        self.work(move |slot, _| {
+            Ok(daemon_mut(slot)?
+                .expire_welcome_if_needed()
+                .map_err(map_persistence)?
+                .as_ref()
+                .map(pending_witness))
+        })
+    }
+
     #[napi]
     pub fn invitation(&self) -> Result<AsyncTask<Work<Publication>>> {
         self.work(move |slot, _| {
-            let p = daemon_mut(slot)?.publication().map_err(map_persistence)?;
-            Ok(publication(
-                "issued",
-                Some(p.bytes()),
-                None,
-                Some(&p.invitation_hash()),
-                None,
-                Some(p.expires_at_ms()),
-                None,
+            Ok(invitation_publication(
+                &daemon_mut(slot)?.publication().map_err(map_persistence)?,
             ))
         })
     }
@@ -964,11 +1433,12 @@ impl DaemonEndpoint {
         })
     }
     #[napi]
-    pub fn cancel(&self, operation_id: Buffer) -> Result<AsyncTask<Work<String>>> {
+    pub fn cancel(&self, operation_id: Buffer) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         self.work(move |slot, _| {
-            Ok(invitation_lifecycle(
+            Ok(outcome(
                 daemon_mut(slot)?.cancel(op).map_err(map_persistence)?,
+                Value::InvitationState,
             ))
         })
     }
@@ -977,62 +1447,16 @@ impl DaemonEndpoint {
         &self,
         operation_id: Buffer,
         claim: Buffer,
-    ) -> Result<AsyncTask<Work<Publication>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let claim = copy_bounded(claim.as_ref(), PAIRING_CLAIM_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            let result = daemon_mut(slot)?
-                .submit_claim(op, &claim)
-                .map_err(map_persistence)?;
-            Ok(match result {
-                ClaimSubmission::Pending {
-                    claim_hash,
-                    comparison,
-                } => publication(
-                    "pending",
-                    None,
-                    None,
-                    Some(&claim_hash),
-                    None,
-                    None,
-                    Some(comparison),
-                ),
-                ClaimSubmission::Confirmed(v) => publication(
-                    "confirmed",
-                    None,
-                    None,
-                    Some(&v.claim_hash),
-                    None,
-                    Some(v.expires_at_ms),
-                    None,
-                ),
-                ClaimSubmission::Accepted(v) => welcome_publication("accepted", &v),
-                ClaimSubmission::Consumed => {
-                    publication("consumed", None, None, None, None, None, None)
-                }
-                ClaimSubmission::Rejected { reason } => publication(
-                    reason
-                        .map_or("rejected".into(), |v| {
-                            format!("rejected_{v:?}").to_ascii_lowercase()
-                        })
-                        .as_str(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
-                ClaimSubmission::Cancelled => {
-                    publication("cancelled", None, None, None, None, None, None)
-                }
-                ClaimSubmission::Expired => {
-                    publication("expired", None, None, None, None, None, None)
-                }
-                ClaimSubmission::Conflict => {
-                    publication("conflict", None, None, None, None, None, None)
-                }
-            })
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .submit_claim(op, &claim)
+                    .map_err(map_persistence)?,
+                Value::Claim,
+            ))
         })
     }
     #[napi]
@@ -1041,38 +1465,17 @@ impl DaemonEndpoint {
         operation_id: Buffer,
         claim_hash: Buffer,
         reservation_id: Buffer,
-    ) -> Result<AsyncTask<Work<Publication>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let reservation = id(reservation_id.as_ref())?;
         let hash = fixed::<48>(claim_hash.as_ref(), "invalid_hash")?;
         self.work(move |slot, _| {
-            let value = daemon_mut(slot)?
-                .confirm_claim(op, hash, reservation)
-                .map_err(map_persistence)?;
-            Ok(match value {
-                ReservationOutcome::Reserved(v) => publication(
-                    "reserved",
-                    None,
-                    None,
-                    Some(&v.claim_hash),
-                    None,
-                    Some(v.expires_at_ms),
-                    None,
-                ),
-                ReservationOutcome::Busy => publication("busy", None, None, None, None, None, None),
-                ReservationOutcome::Expired => {
-                    publication("expired", None, None, None, None, None, None)
-                }
-                ReservationOutcome::Consumed => {
-                    publication("consumed", None, None, None, None, None, None)
-                }
-                ReservationOutcome::Rejected => {
-                    publication("rejected", None, None, None, None, None, None)
-                }
-                ReservationOutcome::Unavailable => {
-                    publication("unavailable", None, None, None, None, None, None)
-                }
-            })
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .confirm_claim(op, hash, reservation)
+                    .map_err(map_persistence)?,
+                Value::Reservation,
+            ))
         })
     }
     #[napi]
@@ -1080,22 +1483,16 @@ impl DaemonEndpoint {
         &self,
         operation_id: Buffer,
         reservation_id: Buffer,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let reservation = id(reservation_id.as_ref())?;
         self.work(move |slot, _| {
-            let tag = match daemon_mut(slot)?
-                .release_reservation(op, reservation)
-                .map_err(map_persistence)?
-            {
-                ReservationOutcome::Reserved(_) => "reserved",
-                ReservationOutcome::Busy => "busy",
-                ReservationOutcome::Expired => "expired",
-                ReservationOutcome::Consumed => "consumed",
-                ReservationOutcome::Rejected => "rejected",
-                ReservationOutcome::Unavailable => "unavailable",
-            };
-            Ok(tag.into())
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .release_reservation(op, reservation)
+                    .map_err(map_persistence)?,
+                Value::Reservation,
+            ))
         })
     }
     #[napi]
@@ -1103,28 +1500,19 @@ impl DaemonEndpoint {
         &self,
         operation_id: Buffer,
         reservation_id: Buffer,
-    ) -> Result<AsyncTask<Work<NativeWelcome>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let reservation = id(reservation_id.as_ref())?;
         self.work(move |slot, _| {
-            match daemon_mut(slot)?
-                .create_welcome(op, reservation)
-                .map_err(map_persistence)?
-            {
-                WelcomeOutcome::Committed(v) | WelcomeOutcome::Duplicate(v) => {
-                    Ok(NativeWelcome { inner: v })
-                }
-                value => Err(error(match value {
-                    WelcomeOutcome::Busy => "lifecycle_busy",
-                    WelcomeOutcome::Expired => "expired",
-                    WelcomeOutcome::Consumed => "consumed",
-                    WelcomeOutcome::Rejected => "invalid_argument",
-                    WelcomeOutcome::Unavailable => "storage_unavailable",
-                    _ => "internal_error",
-                })),
-            }
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .create_welcome(op, reservation)
+                    .map_err(map_persistence)?,
+                Value::from,
+            ))
         })
     }
+    /// Read-only: the committed Welcome for a claim hash. Withheld while a barrier is pending.
     #[napi]
     pub fn recover_welcome(&self, claim_hash: Buffer) -> Result<AsyncTask<Work<NativeWelcome>>> {
         let hash = fixed::<48>(claim_hash.as_ref(), "invalid_hash")?;
@@ -1153,20 +1541,17 @@ impl DaemonEndpoint {
         operation_id: Buffer,
         logical_id: Buffer,
         ciphertext: Buffer,
-    ) -> Result<AsyncTask<Work<NativeActivationAcceptance>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let bytes = copy_bounded(ciphertext.as_ref(), ENVELOPE_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            match daemon_mut(slot)?
-                .accept_activation(op, logical, &bytes)
-                .map_err(map_persistence)?
-            {
-                ActivationOutcome::Activated(v) | ActivationOutcome::Duplicate(v) => {
-                    Ok(NativeActivationAcceptance { inner: v })
-                }
-                _ => Err(error("invalid_lifecycle")),
-            }
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .accept_activation(op, logical, &bytes)
+                    .map_err(map_persistence)?,
+                Value::from,
+            ))
         })
     }
     #[napi]
@@ -1176,16 +1561,17 @@ impl DaemonEndpoint {
         logical_id: Buffer,
         generation: BigInt,
         plaintext: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(plaintext.as_ref(), APPLICATION_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 daemon_mut(slot)?
                     .prepare_application(op, logical, generation, &bytes)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1196,16 +1582,17 @@ impl DaemonEndpoint {
         ciphertext: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<NativePlaintext>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(ciphertext.as_ref(), ENVELOPE_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            Ok(plaintext(
+            Ok(outcome(
                 daemon_mut(slot)?
                     .receive_application(op, &bytes, logical, generation)
                     .map_err(map_persistence)?,
+                Value::Plaintext,
             ))
         })
     }
@@ -1216,16 +1603,18 @@ impl DaemonEndpoint {
         ciphertext: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(ciphertext.as_ref(), HANDSHAKE_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            daemon_mut(slot)?
-                .receive_replacement_proposal(op, &bytes, logical, generation)
-                .map_err(map_persistence)?;
-            Ok("accepted".into())
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .receive_replacement_proposal(op, &bytes, logical, generation)
+                    .map_err(map_persistence)?,
+                Value::Accepted,
+            ))
         })
     }
     #[napi]
@@ -1234,15 +1623,16 @@ impl DaemonEndpoint {
         operation_id: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 daemon_mut(slot)?
                     .create_update_commit(op, logical, generation)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1253,17 +1643,18 @@ impl DaemonEndpoint {
         logical_id: Buffer,
         generation: BigInt,
         ciphertext: Buffer,
-    ) -> Result<AsyncTask<Work<NativeEpochReadyAcceptance>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(ciphertext.as_ref(), 2 * 1024, "bound_exceeded")?;
         self.work(move |slot, _| {
-            Ok(NativeEpochReadyAcceptance {
-                inner: daemon_mut(slot)?
+            Ok(outcome(
+                daemon_mut(slot)?
                     .accept_epoch_ready(op, logical, generation, &bytes)
                     .map_err(map_persistence)?,
-            })
+                Value::EpochReady,
+            ))
         })
     }
     #[napi]
@@ -1273,16 +1664,17 @@ impl DaemonEndpoint {
         logical_id: Buffer,
         generation: BigInt,
         acceptance: &NativeEpochReadyAcceptance,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let acceptance = acceptance.inner.clone();
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 daemon_mut(slot)?
                     .prepare_epoch_ready_confirmation(op, logical, generation, &acceptance)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1292,7 +1684,7 @@ impl DaemonEndpoint {
         operation_id: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         daemon_removal(self, operation_id, logical_id, generation, false)
     }
     #[napi]
@@ -1301,29 +1693,32 @@ impl DaemonEndpoint {
         operation_id: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         daemon_removal(self, operation_id, logical_id, generation, true)
     }
     #[napi]
-    pub fn reset(&self, operation_id: Buffer) -> Result<AsyncTask<Work<StatusOutcome>>> {
+    pub fn reset(&self, operation_id: Buffer) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         self.work(move |slot, _| {
-            Ok(removal_status(
+            Ok(outcome(
                 daemon_mut(slot)?.reset(op).map_err(map_persistence)?,
+                Value::from,
             ))
         })
     }
     #[napi]
-    pub fn mark_revoked(&self, operation_id: Buffer) -> Result<AsyncTask<Work<StatusOutcome>>> {
+    pub fn mark_revoked(&self, operation_id: Buffer) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         self.work(move |slot, _| {
-            Ok(removal_status(
+            Ok(outcome(
                 daemon_mut(slot)?
                     .mark_revoked(op)
                     .map_err(map_persistence)?,
+                Value::from,
             ))
         })
     }
+    /// Read-only: transmittable records. A record whose barrier is unconfirmed is withheld.
     #[napi]
     pub fn pending_outbox(&self) -> Result<AsyncTask<Work<Vec<NativeOutbox>>>> {
         self.work(move |slot, _| {
@@ -1333,20 +1728,20 @@ impl DaemonEndpoint {
                 .map_err(map_persistence)
         })
     }
-
     #[napi]
     pub fn acknowledge_outbox(
         &self,
         operation_id: Buffer,
         target: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let target = id(target.as_ref())?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 daemon_mut(slot)?
                     .acknowledge_outbox(op, target)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1355,14 +1750,16 @@ impl DaemonEndpoint {
         &self,
         operation_id: Buffer,
         target: Buffer,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let target = id(target.as_ref())?;
         self.work(move |slot, _| {
-            daemon_mut(slot)?
-                .acknowledge_receive(op, target)
-                .map_err(map_persistence)?;
-            Ok("acknowledged".into())
+            Ok(outcome(
+                daemon_mut(slot)?
+                    .acknowledge_receive(op, target)
+                    .map_err(map_persistence)?,
+                Value::Accepted,
+            ))
         })
     }
     #[napi]
@@ -1397,32 +1794,31 @@ fn daemon_removal(
     logical_id: Buffer,
     generation: BigInt,
     revoke: bool,
-) -> Result<AsyncTask<Work<NativeOutbox>>> {
+) -> Result<AsyncTask<Work<WitnessOutcome>>> {
     let op = id(operation_id.as_ref())?;
     let logical = id(logical_id.as_ref())?;
     let generation = u64_from_bigint(&generation)?;
     endpoint.work(move |slot, _| {
-        let outcome = if revoke {
+        let value = if revoke {
             daemon_mut(slot)?.revoke_device(op, logical, generation)
         } else {
             daemon_mut(slot)?.remove_device(op, logical, generation)
         }
         .map_err(map_persistence)?;
-        match outcome {
-            RemovalOutcome::Commit(v) => Ok(outbox(v)),
-            _ => Err(error("invalid_lifecycle")),
-        }
+        Ok(outcome(value, Value::from))
     })
 }
 
 #[napi]
 impl DeviceEndpoint {
+    /// Create the device endpoint and return the counter-1 `register` request. The claim and
+    /// KeyPackage stay withheld until `continueWitness` completes that registration.
     #[napi]
     pub fn prepare(
         &self,
         invitation: Buffer,
         operation_id: Buffer,
-    ) -> Result<AsyncTask<Work<Publication>>> {
+    ) -> Result<AsyncTask<Work<PendingWitness>>> {
         let bytes = copy_bounded(
             invitation.as_ref(),
             PAIRING_INVITATION_MAX_BYTES,
@@ -1436,25 +1832,53 @@ impl DeviceEndpoint {
                 c.device.ok_or_else(|| error("invalid_id"))?,
             )
             .map_err(map_core)?;
-            let (endpoint, p) = DurablePreJoinDevice::prepare(
+            let (endpoint, request) = DurablePreJoinDevice::prepare(
                 &c.root,
                 identity,
                 &bytes,
                 op,
                 Arc::clone(&c.keys),
-                Arc::clone(&c.anchor),
+                Arc::clone(&c.trust),
             )
             .map_err(map_persistence)?;
             *slot = Some(endpoint);
-            Ok(publication(
-                "prepared",
-                Some(p.claim()),
-                Some(p.key_package()),
-                Some(&p.invitation_hash()),
-                None,
-                Some(p.expires_at_ms()),
-                None,
-            ))
+            Ok(pending_witness(&request))
+        })
+    }
+    /// Re-pair after `reset`: a fresh crypto session and group are required by `requirement`.
+    #[napi]
+    pub fn prepare_repair(
+        &self,
+        invitation: Buffer,
+        operation_id: Buffer,
+        requirement: &NativeRePairRequirement,
+    ) -> Result<AsyncTask<Work<PendingWitness>>> {
+        let bytes = copy_bounded(
+            invitation.as_ref(),
+            PAIRING_INVITATION_MAX_BYTES,
+            "bound_exceeded",
+        )?;
+        let op = id(operation_id.as_ref())?;
+        let requirement = requirement.inner.clone();
+        self.work(move |slot, c| {
+            let identity = Identity::device(
+                c.account,
+                c.installation,
+                c.device.ok_or_else(|| error("invalid_id"))?,
+            )
+            .map_err(map_core)?;
+            let (endpoint, request) = DurablePreJoinDevice::prepare_repair(
+                &c.root,
+                identity,
+                &bytes,
+                op,
+                Arc::clone(&c.keys),
+                Arc::clone(&c.trust),
+                &requirement,
+            )
+            .map_err(map_persistence)?;
+            *slot = Some(endpoint);
+            Ok(pending_witness(&request))
         })
     }
     #[napi]
@@ -1466,14 +1890,53 @@ impl DeviceEndpoint {
                 &state.config.root,
                 state.config.session,
                 Arc::clone(&state.config.keys),
-                Arc::clone(&state.config.anchor),
+                Arc::clone(&state.config.trust),
             )
-            .map_err(map_persistence)?;
+            .map_err(map_open)?;
             *state.endpoint.lock().map_err(|_| error("internal_error"))? = Some(opened);
             state.gate.reopen();
             Ok("opened".into())
         })))
     }
+
+    #[napi]
+    pub fn witness_read_request(&self) -> Result<AsyncTask<Work<Buffer>>> {
+        self.work(move |slot, _| witness_read_request(device_mut(slot)?))
+    }
+    #[napi]
+    pub fn reconcile_witness(
+        &self,
+        certificate: Buffer,
+    ) -> Result<AsyncTask<Work<WitnessReconciliation>>> {
+        let certificate = certificate_bytes(certificate)?;
+        self.work(move |slot, _| reconcile_witness(device_mut(slot)?, &certificate))
+    }
+    #[napi]
+    pub fn pending_witness(&self) -> Result<AsyncTask<Work<Option<PendingWitness>>>> {
+        self.work(move |slot, _| pending_witness_of(device_mut(slot)?))
+    }
+    #[napi]
+    pub fn continue_witness(
+        &self,
+        operation_id: Buffer,
+        certificate: Buffer,
+    ) -> Result<AsyncTask<Work<NativeResult>>> {
+        let op = id(operation_id.as_ref())?;
+        let certificate = certificate_bytes(certificate)?;
+        self.work(move |slot, _| continue_witness(device_mut(slot)?, op, &certificate))
+    }
+    /// Persist a due pre-join expiry as a witnessed operation. `null` when nothing is due.
+    #[napi]
+    pub fn expire_if_needed(&self) -> Result<AsyncTask<Work<Option<PendingWitness>>>> {
+        self.work(move |slot, _| {
+            Ok(device_mut(slot)?
+                .expire_if_needed()
+                .map_err(map_persistence)?
+                .as_ref()
+                .map(pending_witness))
+        })
+    }
+
     #[napi]
     pub fn status(&self) -> Result<AsyncTask<Work<String>>> {
         self.work(move |slot, _| {
@@ -1485,15 +1948,8 @@ impl DeviceEndpoint {
     #[napi]
     pub fn publication(&self) -> Result<AsyncTask<Work<Publication>>> {
         self.work(move |slot, _| {
-            let p = device_mut(slot)?.publication().map_err(map_persistence)?;
-            Ok(publication(
-                "prepared",
-                Some(p.claim()),
-                Some(p.key_package()),
-                Some(&p.invitation_hash()),
-                None,
-                Some(p.expires_at_ms()),
-                None,
+            Ok(prejoin_publication(
+                &device_mut(slot)?.publication().map_err(map_persistence)?,
             ))
         })
     }
@@ -1502,14 +1958,15 @@ impl DeviceEndpoint {
         &self,
         operation_id: Buffer,
         welcome: &NativeWelcome,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let welcome = welcome.inner.clone();
         self.work(move |slot, _| {
-            Ok(prejoin_lifecycle(
+            Ok(outcome(
                 device_mut(slot)?
                     .join(op, &welcome)
                     .map_err(map_persistence)?,
+                Value::PreJoinState,
             ))
         })
     }
@@ -1521,17 +1978,18 @@ impl DeviceEndpoint {
         claim_hash: Buffer,
         welcome_hash: Buffer,
         expires_at_ms: BigInt,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let bytes = copy_bounded(welcome.as_ref(), HANDSHAKE_MAX_BYTES, "bound_exceeded")?;
         let claim_hash = fixed::<48>(claim_hash.as_ref(), "invalid_hash")?;
         let welcome_hash = fixed::<48>(welcome_hash.as_ref(), "invalid_hash")?;
         let expires_at_ms = u64_from_bigint(&expires_at_ms)?;
         self.work(move |slot, _| {
-            Ok(prejoin_lifecycle(
+            Ok(outcome(
                 device_mut(slot)?
                     .join_published_welcome(op, &bytes, claim_hash, welcome_hash, expires_at_ms)
                     .map_err(map_persistence)?,
+                Value::PreJoinState,
             ))
         })
     }
@@ -1540,17 +1998,16 @@ impl DeviceEndpoint {
         &self,
         operation_id: Buffer,
         logical_id: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         self.work(move |slot, _| {
-            match device_mut(slot)?
-                .prepare_activation(op, logical)
-                .map_err(map_persistence)?
-            {
-                ActivationOutcome::Prepared(v) => Ok(outbox(v)),
-                _ => Err(error("invalid_lifecycle")),
-            }
+            Ok(outcome(
+                device_mut(slot)?
+                    .prepare_activation(op, logical)
+                    .map_err(map_persistence)?,
+                Value::from,
+            ))
         })
     }
     #[napi]
@@ -1558,14 +2015,15 @@ impl DeviceEndpoint {
         &self,
         operation_id: Buffer,
         acceptance: &NativeActivationAcceptance,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let acceptance = acceptance.inner.clone();
         self.work(move |slot, _| {
-            Ok(lifecycle(
+            Ok(outcome(
                 device_mut(slot)?
                     .acknowledge_activation(op, &acceptance)
                     .map_err(map_persistence)?,
+                Value::PairState,
             ))
         })
     }
@@ -1576,16 +2034,17 @@ impl DeviceEndpoint {
         logical_id: Buffer,
         generation: BigInt,
         plaintext: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(plaintext.as_ref(), APPLICATION_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 device_mut(slot)?
                     .prepare_application(op, logical, generation, &bytes)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1596,16 +2055,17 @@ impl DeviceEndpoint {
         ciphertext: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<NativePlaintext>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(ciphertext.as_ref(), ENVELOPE_MAX_BYTES, "bound_exceeded")?;
         self.work(move |slot, _| {
-            Ok(plaintext(
+            Ok(outcome(
                 device_mut(slot)?
                     .receive_application(op, &bytes, logical, generation)
                     .map_err(map_persistence)?,
+                Value::Plaintext,
             ))
         })
     }
@@ -1615,18 +2075,21 @@ impl DeviceEndpoint {
         operation_id: Buffer,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 device_mut(slot)?
                     .prepare_replacement(op, logical, generation)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
+    /// Apply a locally held commit record. One OpenMLS transition; the epoch-ready message is a
+    /// separate operation (`prepareEpochReady`).
     #[napi]
     pub fn apply_update_commit(
         &self,
@@ -1634,21 +2097,22 @@ impl DeviceEndpoint {
         commit: &NativeOutbox,
         commit_logical_id: Buffer,
         generation: BigInt,
-        ready_logical_id: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let commit = commit.inner.clone();
         let logical = id(commit_logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
-        let ready = id(ready_logical_id.as_ref())?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 device_mut(slot)?
-                    .apply_update_commit(op, &commit, logical, generation, ready)
+                    .apply_update_commit(op, &commit, logical, generation)
                     .map_err(map_persistence)?,
+                Value::Commit,
             ))
         })
     }
+    /// Apply a received commit ciphertext. One OpenMLS transition; the epoch-ready message is a
+    /// separate operation (`prepareEpochReady`).
     #[napi]
     pub fn apply_received_update_commit(
         &self,
@@ -1656,18 +2120,40 @@ impl DeviceEndpoint {
         ciphertext: Buffer,
         commit_logical_id: Buffer,
         generation: BigInt,
-        ready_logical_id: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let bytes = copy_bounded(ciphertext.as_ref(), HANDSHAKE_MAX_BYTES, "bound_exceeded")?;
         let logical = id(commit_logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
-        let ready = id(ready_logical_id.as_ref())?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 device_mut(slot)?
-                    .apply_received_update_commit(op, &bytes, logical, generation, ready)
+                    .apply_received_update_commit(op, &bytes, logical, generation)
                     .map_err(map_persistence)?,
+                Value::Commit,
+            ))
+        })
+    }
+    /// Create the epoch-ready message for the exact commit metadata released by the apply
+    /// operation.
+    #[napi]
+    pub fn prepare_epoch_ready(
+        &self,
+        operation_id: Buffer,
+        logical_id: Buffer,
+        generation: BigInt,
+        commit: &NativeCommit,
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
+        let op = id(operation_id.as_ref())?;
+        let logical = id(logical_id.as_ref())?;
+        let generation = u64_from_bigint(&generation)?;
+        let commit = commit.inner.clone();
+        self.work(move |slot, _| {
+            Ok(outcome(
+                device_mut(slot)?
+                    .prepare_epoch_ready(op, logical, generation, &commit)
+                    .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1678,16 +2164,17 @@ impl DeviceEndpoint {
         logical_id: Buffer,
         generation: BigInt,
         ciphertext: Buffer,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         let bytes = copy_bounded(ciphertext.as_ref(), 2 * 1024, "bound_exceeded")?;
         self.work(move |slot, _| {
-            Ok(lifecycle(
+            Ok(outcome(
                 device_mut(slot)?
                     .accept_epoch_ready_confirmation(op, logical, generation, &bytes)
                     .map_err(map_persistence)?,
+                Value::PairState,
             ))
         })
     }
@@ -1696,14 +2183,15 @@ impl DeviceEndpoint {
         &self,
         operation_id: Buffer,
         acceptance: &NativeEpochReadyAcceptance,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let acceptance = acceptance.inner.clone();
         self.work(move |slot, _| {
-            Ok(lifecycle(
+            Ok(outcome(
                 device_mut(slot)?
                     .acknowledge_epoch_ready(op, &acceptance)
                     .map_err(map_persistence)?,
+                Value::PairState,
             ))
         })
     }
@@ -1714,30 +2202,31 @@ impl DeviceEndpoint {
         commit: &NativeOutbox,
         logical_id: Buffer,
         generation: BigInt,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let commit = commit.inner.clone();
         let logical = id(logical_id.as_ref())?;
         let generation = u64_from_bigint(&generation)?;
         self.work(move |slot, _| {
-            match device_mut(slot)?
-                .apply_removal(op, &commit, logical, generation)
-                .map_err(map_persistence)?
-            {
-                RemovalOutcome::Removed => Ok("removed".into()),
-                _ => Err(error("invalid_lifecycle")),
-            }
+            Ok(outcome(
+                device_mut(slot)?
+                    .apply_removal(op, &commit, logical, generation)
+                    .map_err(map_persistence)?,
+                Value::from,
+            ))
         })
     }
     #[napi]
-    pub fn reset(&self, operation_id: Buffer) -> Result<AsyncTask<Work<NativeRePairRequirement>>> {
+    pub fn reset(&self, operation_id: Buffer) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         self.work(move |slot, _| {
-            Ok(NativeRePairRequirement {
-                inner: device_mut(slot)?.reset(op).map_err(map_persistence)?,
-            })
+            Ok(outcome(
+                device_mut(slot)?.reset(op).map_err(map_persistence)?,
+                Value::RePair,
+            ))
         })
     }
+    /// Read-only: transmittable records. A record whose barrier is unconfirmed is withheld.
     #[napi]
     pub fn pending_outbox(&self) -> Result<AsyncTask<Work<Vec<NativeOutbox>>>> {
         self.work(move |slot, _| {
@@ -1747,20 +2236,20 @@ impl DeviceEndpoint {
                 .map_err(map_persistence)
         })
     }
-
     #[napi]
     pub fn acknowledge_outbox(
         &self,
         operation_id: Buffer,
         target: Buffer,
-    ) -> Result<AsyncTask<Work<NativeOutbox>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let target = id(target.as_ref())?;
         self.work(move |slot, _| {
-            Ok(outbox(
+            Ok(outcome(
                 device_mut(slot)?
                     .acknowledge_outbox(op, target)
                     .map_err(map_persistence)?,
+                Value::Outbox,
             ))
         })
     }
@@ -1769,14 +2258,16 @@ impl DeviceEndpoint {
         &self,
         operation_id: Buffer,
         target: Buffer,
-    ) -> Result<AsyncTask<Work<String>>> {
+    ) -> Result<AsyncTask<Work<WitnessOutcome>>> {
         let op = id(operation_id.as_ref())?;
         let target = id(target.as_ref())?;
         self.work(move |slot, _| {
-            device_mut(slot)?
-                .acknowledge_receive(op, target)
-                .map_err(map_persistence)?;
-            Ok("acknowledged".into())
+            Ok(outcome(
+                device_mut(slot)?
+                    .acknowledge_receive(op, target)
+                    .map_err(map_persistence)?,
+                Value::Accepted,
+            ))
         })
     }
     #[napi]
@@ -1811,41 +2302,8 @@ fn fixed<const N: usize>(bytes: &[u8], code: &'static str) -> Result<[u8; N]> {
     }
     bytes.try_into().map_err(|_| error(code))
 }
-fn welcome_publication(tag: &str, value: &WelcomePublication) -> Publication {
-    publication(
-        tag,
-        Some(value.bytes()),
-        None,
-        Some(&value.claim_hash()),
-        Some(&value.group_id()),
-        Some(value.expires_at_ms()),
-        None,
-    )
-}
-fn plaintext(value: DurablePlaintext) -> NativePlaintext {
-    NativePlaintext { inner: value }
-}
-fn removal_status(value: RemovalOutcome) -> StatusOutcome {
-    let empty = |tag: &str| StatusOutcome {
-        tag: tag.into(),
-        device_id: None,
-        crypto_session_id: None,
-        group_id: None,
-        key_package_hash: None,
-    };
-    match value {
-        RemovalOutcome::Removed => empty("removed"),
-        RemovalOutcome::Revoked => empty("revoked"),
-        RemovalOutcome::Commit(_) => empty("commit"),
-        RemovalOutcome::RePairRequired(value) => StatusOutcome {
-            tag: "re_pair_required".into(),
-            device_id: Some(value.device_id().to_vec().into()),
-            crypto_session_id: Some(value.crypto_session_id().to_vec().into()),
-            group_id: value.group_id().map(|bytes| bytes.to_vec().into()),
-            key_package_hash: Some(value.key_package_hash().to_vec().into()),
-        },
-    }
-}
+
+// ---- Error mapping ---------------------------------------------------------------------------
 
 fn map_pairing(value: axl_e2ee::pairing::PairingError) -> napi::Error {
     use axl_e2ee::pairing::PairingError::*;
@@ -1876,6 +2334,7 @@ fn map_core(value: axl_e2ee::Error) -> napi::Error {
         _ => "invalid_argument",
     })
 }
+#[cfg(feature = "test-fixtures")]
 fn map_witness(value: WitnessError) -> napi::Error {
     use WitnessError::*;
     error(match value {
@@ -1884,16 +2343,24 @@ fn map_witness(value: WitnessError) -> napi::Error {
         OperationConflict | OperationMismatch => "witness_operation_conflict",
         RegistrationConflict => "witness_registration_conflict",
         InvalidExpected | StaleExpected => "witness_invalid_expected",
-        Revoked | Forked | Quarantined => "witness_conflict",
-        FreshWitnessRequired | PendingOperation | NoPendingOperation | OutputBlocked => {
-            "witness_unavailable"
-        }
+        Revoked => "endpoint_revoked",
+        Forked | Quarantined => "witness_conflict",
+        FreshWitnessRequired => "fresh_witness_required",
+        PendingOperation | NoPendingOperation | OutputBlocked => "witness_unavailable",
         Malformed | NonCanonical | ProfileMismatch | LineageMismatch | RoleMismatch
         | GenerationMismatch | CounterMismatch | CommitmentMismatch | PredecessorMismatch
         | RequestHashMismatch | RevocationMismatch | InvalidSignature | InvalidQuorum
         | DuplicateReplica | InvalidTrustSet | UnpinnedKey | MixedReceipts | UnexpectedResult
         | CorruptState | Crypto => "witness_receipt_invalid",
     })
+}
+
+/// Opening an endpoint whose database is missing is state loss, not a missing record.
+fn map_open(value: PersistenceError) -> napi::Error {
+    match value {
+        PersistenceError::NotFound => error("state_loss"),
+        other => map_persistence(other),
+    }
 }
 
 fn map_persistence(value: PersistenceError) -> napi::Error {
@@ -1906,16 +2373,94 @@ fn map_persistence(value: PersistenceError) -> napi::Error {
         SecureStoreAccessDenied => error("secure_store_access_denied"),
         SecureStoreAmbiguous => error("secure_store_ambiguous"),
         StateLoss => error("state_loss"),
-        AnchorUnavailable => error("rollback_anchor_unavailable"),
         LifecycleBusy => error("lifecycle_busy"),
         Conflict | GenerationConflict => error("conflict"),
-        Corrupt | UnsupportedSchema => error("corrupt_state"),
+        Corrupt => error("corrupt_state"),
+        UnsupportedSchema => error("unsupported_schema"),
         Quarantined => error("rollback_detected"),
-        NotFound => error("state_loss"),
+        EndpointRevoked => error("endpoint_revoked"),
+        FreshWitnessRequired => error("fresh_witness_required"),
+        InitializationIncomplete => error("initialization_incomplete"),
+        NotFound => error("not_found"),
         AlreadyExists => error("already_exists"),
         AlreadyAcknowledged => error("already_acknowledged"),
         RetentionExceeded => error("retention_exceeded"),
         IdentityMismatch => error("identity_mismatch"),
-        InitializationIncomplete | Io | Storage | InjectedFault => error("storage_unavailable"),
+        WitnessConflict => error("witness_conflict"),
+        WitnessInvalidExpected => error("witness_invalid_expected"),
+        WitnessOperationConflict => error("witness_operation_conflict"),
+        WitnessReceiptInvalid => error("witness_receipt_invalid"),
+        WitnessRegistrationConflict => error("witness_registration_conflict"),
+        WitnessUnavailable => error("witness_unavailable"),
+        Io | Storage | InjectedFault => error("storage_unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ERROR_CODES;
+
+    /// Every stable code the binding can emit, including codes passed indirectly through
+    /// `fixed`, `ok_or_else`, or helper functions, must be declared in `ERROR_CODES`. The
+    /// declaration check in `scripts/check-abi.mjs` only sees `ERROR_CODES`; this closes the gap
+    /// for codes it cannot observe.
+    #[test]
+    fn every_emitted_error_code_is_declared() {
+        let sources = [
+            include_str!("lib.rs"),
+            include_str!("support.rs"),
+            include_str!("test_store.rs"),
+        ];
+        let mut emitted = std::collections::BTreeSet::new();
+        for source in sources {
+            for (index, _) in source.match_indices('"') {
+                let rest = &source[index + 1..];
+                let Some(end) = rest.find('"') else { continue };
+                let literal = &rest[..end];
+                let is_code = !literal.is_empty()
+                    && literal.len() <= 40
+                    && literal
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                    && literal.contains('_');
+                if !is_code {
+                    continue;
+                }
+                let before = &source[..index];
+                let context = before.trim_end();
+                let emits = context.ends_with("error(")
+                    || context.ends_with("Err(error(")
+                    || (context.ends_with(',') && before_is_fixed_call(context));
+                if emits {
+                    emitted.insert(literal);
+                }
+            }
+        }
+        assert!(
+            emitted.contains("invalid_hash"),
+            "scanner did not see fixed() codes"
+        );
+        assert!(emitted.contains("unsupported_schema"));
+        let undeclared: Vec<_> = emitted
+            .iter()
+            .filter(|code| !ERROR_CODES.contains(code))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "undeclared error codes: {undeclared:?}"
+        );
+        assert!(
+            ERROR_CODES.windows(2).all(|w| w[0] < w[1]),
+            "ERROR_CODES not sorted"
+        );
+    }
+
+    fn before_is_fixed_call(context: &str) -> bool {
+        // `fixed::<N>(bytes, "code")`: the literal follows the first argument's comma.
+        let Some(open) = context.rfind("fixed::<") else {
+            return false;
+        };
+        let tail = &context[open..];
+        tail.matches('(').count() == tail.matches(')').count() + 1
     }
 }

@@ -1,5 +1,5 @@
 {
-  "abiVersion": 1,
+  "abiVersion": 2,
   "profileId": "axl-e2ee-mls-pq-v1",
   "profileRevision": 1,
   "nodeApi": 9,

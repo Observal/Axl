@@ -31,6 +31,15 @@ import {
 } from "@axl/control-plane";
 
 import * as fixture from "./fixture-loader.mjs";
+import { complete, witnessed, witnessedFacade } from "./witness-driver.mjs";
+
+// Until the SDK and daemon adapters own witness reconciliation, the test drives every barrier
+// through an in-process quorum and hands the adapters a facade that yields released results only.
+const unwrap = (field) => (result) => {
+  const value = result[field];
+  if (value === undefined || value === null) throw new TypeError(`expected ${field}, got ${result.tag}`);
+  return value;
+};
 
 function uuid(seed) {
   const value = Buffer.alloc(16, seed);
@@ -50,25 +59,45 @@ async function activatedPair(root) {
   const installation = uuid(21);
   const session = uuid(22);
   const deviceId = uuid(23);
-  const daemon = fixture.testDaemonEndpoint(join(root, "daemon-e2ee"), account, installation, session);
-  const invitation = await daemon.issue(operation(1));
+  const witness = fixture.testWitness();
+  const daemon = fixture.testDaemonEndpoint(join(root, "daemon-e2ee"), account, installation, session, witness);
+  const invitation = unwrap("publication")(await complete(daemon, witness, await daemon.issue(operation(1))));
   const device = fixture.testDeviceEndpoint(
     join(root, "device-e2ee"),
     account,
     installation,
     session,
     deviceId,
+    witness,
   );
-  const prejoin = await device.prepare(invitation.bytes, operation(2));
-  const pending = await daemon.submitClaim(operation(3), prejoin.bytes);
+  const prejoin = unwrap("publication")(
+    await complete(device, witness, await device.prepare(invitation.bytes, operation(2))),
+  );
+  const pending = unwrap("publication")(
+    await witnessed(daemon, witness, () => daemon.submitClaim(operation(3), prejoin.bytes)),
+  );
   const reservationId = operation(4);
-  await daemon.confirmClaim(operation(5), pending.hash, reservationId);
-  const welcome = await daemon.createWelcome(operation(6), reservationId);
-  await device.join(operation(7), welcome);
-  const activation = await device.prepareActivation(operation(8), operation(9));
-  const acceptance = await daemon.acceptActivation(operation(10), operation(9), activation.ciphertext);
-  await device.acknowledgeActivation(operation(11), acceptance);
-  return { daemon, device, installation, session, deviceId };
+  await witnessed(daemon, witness, () => daemon.confirmClaim(operation(5), pending.hash, reservationId));
+  const welcome = unwrap("welcome")(
+    await witnessed(daemon, witness, () => daemon.createWelcome(operation(6), reservationId)),
+  );
+  await witnessed(device, witness, () => device.join(operation(7), welcome));
+  const activation = unwrap("outbox")(
+    await witnessed(device, witness, () => device.prepareActivation(operation(8), operation(9))),
+  );
+  const acceptance = unwrap("activation")(
+    await witnessed(daemon, witness, () =>
+      daemon.acceptActivation(operation(10), operation(9), activation.ciphertext),
+    ),
+  );
+  await witnessed(device, witness, () => device.acknowledgeActivation(operation(11), acceptance));
+  return {
+    daemon: witnessedFacade(daemon, witness),
+    device: witnessedFacade(device, witness),
+    installation,
+    session,
+    deviceId,
+  };
 }
 
 function replyPort() {
@@ -95,11 +124,13 @@ test("real native pairing crosses the hosted claim and Welcome rendezvous", asyn
   const installation = uuid(31);
   const session = uuid(32);
   const nativeDeviceId = uuid(33);
+  const witness = fixture.testWitness();
   const daemonEndpoint = fixture.testDaemonEndpoint(
     join(root, "daemon"),
     account,
     installation,
     session,
+    witness,
   );
   const deviceEndpoint = fixture.testDeviceEndpoint(
     join(root, "device"),
@@ -107,7 +138,10 @@ test("real native pairing crosses the hosted claim and Welcome rendezvous", asyn
     installation,
     session,
     nativeDeviceId,
+    witness,
   );
+  const daemonRun = (mutate, field) => witnessed(daemonEndpoint, witness, mutate).then(unwrap(field));
+  const deviceRun = (mutate, field) => witnessed(deviceEndpoint, witness, mutate).then(unwrap(field));
   const pairing = new PairingRendezvousService({
     store: new InMemoryPairingRendezvousStore(),
   });
@@ -134,8 +168,12 @@ test("real native pairing crosses the hosted claim and Welcome rendezvous", asyn
     allowInsecureLoopbackForTests: true,
   });
   try {
-    const invitation = await daemonEndpoint.issue(operation(1));
-    const prejoin = await deviceEndpoint.prepare(invitation.bytes, operation(2));
+    const invitation = unwrap("publication")(
+      await complete(daemonEndpoint, witness, await daemonEndpoint.issue(operation(1))),
+    );
+    const prejoin = unwrap("publication")(
+      await complete(deviceEndpoint, witness, await deviceEndpoint.prepare(invitation.bytes, operation(2))),
+    );
     const claimHash = createHash("sha384").update(prejoin.bytes).digest();
     const binding = {
       version: 1,
@@ -150,15 +188,19 @@ test("real native pairing crosses the hosted claim and Welcome rendezvous", asyn
       ...binding,
       reservationId: reservationText,
     });
-    const pending = await daemonEndpoint.submitClaim(operation(3), reserved.claim);
-    await daemonEndpoint.confirmClaim(
-      operation(4),
-      pending.hash,
-      Buffer.from(reservationText.replaceAll("-", ""), "hex"),
+    const pending = await daemonRun(() => daemonEndpoint.submitClaim(operation(3), reserved.claim), "publication");
+    await daemonRun(
+      () =>
+        daemonEndpoint.confirmClaim(
+          operation(4),
+          pending.hash,
+          Buffer.from(reservationText.replaceAll("-", ""), "hex"),
+        ),
+      "status",
     );
-    const welcome = await daemonEndpoint.createWelcome(
-      operation(5),
-      Buffer.from(reservationText.replaceAll("-", ""), "hex"),
+    const welcome = await daemonRun(
+      () => daemonEndpoint.createWelcome(operation(5), Buffer.from(reservationText.replaceAll("-", ""), "hex")),
+      "welcome",
     );
     const welcomeHash = createHash("sha384").update(welcome.bytes).digest();
     await client.publishWelcome({
@@ -169,22 +211,28 @@ test("real native pairing crosses the hosted claim and Welcome rendezvous", asyn
     });
     const published = await client.fetchWelcome(binding);
     assert.equal(
-      await deviceEndpoint.joinPublishedWelcome(
-        operation(6),
-        published.welcome,
-        claimHash,
-        published.welcomeHash,
-        BigInt(published.expiresAt),
+      await deviceRun(
+        () =>
+          deviceEndpoint.joinPublishedWelcome(
+            operation(6),
+            published.welcome,
+            claimHash,
+            published.welcomeHash,
+            BigInt(published.expiresAt),
+          ),
+        "status",
       ),
       "joined",
     );
-    const activation = await deviceEndpoint.prepareActivation(operation(7), operation(8));
-    const acceptance = await daemonEndpoint.acceptActivation(
-      operation(9),
-      operation(8),
-      activation.ciphertext,
+    const activation = await deviceRun(() => deviceEndpoint.prepareActivation(operation(7), operation(8)), "outbox");
+    const acceptance = await daemonRun(
+      () => daemonEndpoint.acceptActivation(operation(9), operation(8), activation.ciphertext),
+      "activation",
     );
-    assert.equal(await deviceEndpoint.acknowledgeActivation(operation(10), acceptance), "active");
+    assert.equal(
+      await deviceRun(() => deviceEndpoint.acknowledgeActivation(operation(10), acceptance), "status"),
+      "active",
+    );
     await client.acknowledgeWelcome({ ...binding, welcomeHash });
   } finally {
     daemonEndpoint.close();

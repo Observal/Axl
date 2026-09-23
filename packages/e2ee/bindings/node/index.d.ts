@@ -13,12 +13,16 @@ export type AxlE2eeErrorCode =
   | "consumed"
   | "corrupt_state"
   | "endpoint_closed"
+  | "endpoint_revoked"
   | "expired"
+  | "fresh_witness_required"
   | "future_epoch"
   | "identity_mismatch"
+  | "initialization_incomplete"
   | "internal_error"
   | "invalid_argument"
   | "invalid_ciphertext"
+  | "invalid_hash"
   | "invalid_id"
   | "invalid_lifecycle"
   | "invalid_u64"
@@ -40,6 +44,7 @@ export type AxlE2eeErrorCode =
   | "state_loss"
   | "storage_unavailable"
   | "unsupported_platform"
+  | "unsupported_schema"
   | "witness_auth_failed"
   | "witness_conflict"
   | "witness_invalid_expected"
@@ -54,7 +59,7 @@ export declare class AxlE2eeError extends Error {
 }
 
 export interface BindingInfo {
-  readonly abiVersion: 1;
+  readonly abiVersion: 2;
   readonly profileId: "axl-e2ee-mls-pq-v1";
   readonly profileRevision: 1;
   readonly nodeApi: 9;
@@ -89,7 +94,20 @@ export type PairState =
   | "removed"
   | "revoked"
   | "reset";
+export type RemovalState = "removed" | "revoked";
+export type NoChangeState = "busy" | "expired" | "consumed" | "rejected" | "unavailable";
 
+/** The complete exact reservation intent released by a confirmed claim or a reservation. */
+export interface ReservationIntent {
+  readonly reservationId: OwnedBytes;
+  readonly cryptoSessionId: OwnedBytes;
+  readonly accountId: OwnedBytes;
+  readonly installationId: OwnedBytes;
+  readonly deviceId: OwnedBytes;
+  readonly claimHash: OwnedBytes;
+  readonly keyPackageHash: OwnedBytes;
+  readonly expiresAtMs: bigint;
+}
 export type Publication =
   | {
       readonly tag: "issued";
@@ -111,8 +129,7 @@ export type Publication =
     }
   | {
       readonly tag: "confirmed" | "reserved";
-      readonly hash: OwnedBytes;
-      readonly expiresAtMs: bigint;
+      readonly reservation: ReservationIntent;
     }
   | {
       readonly tag: "accepted";
@@ -134,14 +151,89 @@ export type Publication =
         | "rejected_signature"
         | "unavailable";
     };
-export interface NativePendingWitness {
+
+/**
+ * The one durable pending witness request of an endpoint. Transport `request` unchanged to all
+ * three replicas and pass the unanimous certificate to `continueWitness` on the same endpoint.
+ * It never carries ciphertext, plaintext, pairing artifacts, or typed state.
+ */
+export interface PendingWitness {
   readonly operationId: OwnedBytes;
-  readonly witnessRequest: OwnedBytes;
+  readonly request: OwnedBytes;
   readonly requestHash: OwnedBytes;
-  readonly status: "pending_quorum" | "committed";
-  continueWitness(operationId: Uint8Array, certificate: Uint8Array): Promise<OwnedBytes>;
-  close(): void;
+  readonly kind: "register" | "advance";
 }
+export type WitnessQuarantineReason =
+  | "stale_local_state"
+  | "pending_without_local_state"
+  | "witness_lineage_missing"
+  | "commitment_conflict"
+  | "local_ahead_more_than_one"
+  | "witness_behind_more_than_one"
+  | "witness_inconsistent"
+  | "immediate_fork"
+  | "historical_fork";
+export type WitnessReconciliation =
+  | {
+      readonly tag:
+        | "ready"
+        | "resend_pending"
+        | "recover_accepted"
+        | "witness_unavailable"
+        | "revoked";
+    }
+  | { readonly tag: "quarantined"; readonly reason: WitnessQuarantineReason };
+
+export type NativeResultTag =
+  | "empty"
+  | "outbox"
+  | "plaintext"
+  | "accepted"
+  | "commit"
+  | "invitation"
+  | "pre_join"
+  | "welcome"
+  | "claim"
+  | "reservation"
+  | "activation"
+  | "epoch_ready"
+  | "invitation_state"
+  | "pre_join_state"
+  | "pair_state"
+  | "removal"
+  | "re_pair"
+  | "status";
+/**
+ * Exact typed result released by a completed witness barrier. Exactly one typed accessor is
+ * populated for a tag; `status` carries the discriminant of lifecycle, claim, reservation,
+ * removal, and no-change results.
+ */
+export interface NativeResult {
+  readonly tag: NativeResultTag;
+  readonly status?:
+    | InvitationState
+    | PreJoinState
+    | PairState
+    | RemovalState
+    | NoChangeState
+    | string;
+  readonly outbox?: NativeOutbox;
+  readonly plaintext?: NativePlaintext;
+  readonly accepted?: NativeAccepted;
+  readonly commit?: NativeCommit;
+  readonly publication?: Publication;
+  readonly welcome?: NativeWelcome;
+  readonly activation?: NativeActivationAcceptance;
+  readonly epochReady?: NativeEpochReadyAcceptance;
+  readonly rePair?: NativeRePairRequirement;
+}
+/** Result of every state-changing endpoint call. */
+export interface WitnessOutcome {
+  readonly tag: "pending" | "released";
+  readonly pending?: PendingWitness;
+  readonly result?: NativeResult;
+}
+
 export interface NativeOutbox {
   readonly operationId: OwnedBytes;
   readonly cryptoSessionId: OwnedBytes;
@@ -169,6 +261,19 @@ export interface NativePlaintext {
   readonly epoch: bigint;
   readonly plaintext: OwnedBytes;
 }
+export interface NativeAccepted {
+  readonly operationId: OwnedBytes;
+  readonly cryptoSessionId: OwnedBytes;
+  readonly logicalMessageId: OwnedBytes;
+  readonly messageClass: string;
+  readonly epoch: bigint;
+  readonly acknowledged: boolean;
+}
+export interface NativeCommit {
+  readonly commitId: OwnedBytes;
+  readonly targetEpoch: bigint;
+  readonly epochAuthenticator: OwnedBytes;
+}
 export interface NativeWelcome {
   readonly bytes: OwnedBytes;
   readonly groupId: OwnedBytes;
@@ -191,162 +296,190 @@ export interface NativeRePairRequirement {
   readonly groupId?: OwnedBytes;
   readonly keyPackageHash: OwnedBytes;
 }
-export interface StatusOutcome {
-  readonly tag: "removed" | "revoked" | "commit" | "re_pair_required";
-  readonly deviceId?: OwnedBytes;
-  readonly cryptoSessionId?: OwnedBytes;
-  readonly groupId?: OwnedBytes;
-  readonly keyPackageHash?: OwnedBytes;
+
+/** Endpoint-owned witness operations shared by both endpoint kinds. */
+export interface WitnessEndpoint {
+  /** Fresh signed `read`; the next `reconcileWitness` must present a certificate for these bytes. */
+  witnessReadRequest(): Promise<OwnedBytes>;
+  /** Verify the unanimous `read` certificate. `ready` grants exactly one mutation. */
+  reconcileWitness(certificate: Uint8Array): Promise<WitnessReconciliation>;
+  /** The one durable pending request, or `null`. Reloaded from storage on every call. */
+  pendingWitness(): Promise<PendingWitness | null>;
+  /** Verify the certificate, finish the key lifecycle, and release the exact result. */
+  continueWitness(operationId: Uint8Array, certificate: Uint8Array): Promise<NativeResult>;
+  /** Persist a due expiry as a witnessed operation; `null` when nothing is due. */
+  expireIfNeeded(): Promise<PendingWitness | null>;
 }
 
-export interface DaemonEndpoint {
-  issue(operationId: Uint8Array): Promise<Publication>;
+export interface DaemonEndpoint extends WitnessEndpoint {
+  /** Creates storage and returns the counter-1 `register` request; nothing is published yet. */
+  issue(operationId: Uint8Array): Promise<PendingWitness>;
   reopen(): Promise<"opened">;
+  expireWelcomeIfNeeded(): Promise<PendingWitness | null>;
   invitation(): Promise<Publication>;
   status(): Promise<InvitationState>;
-  cancel(operationId: Uint8Array): Promise<InvitationState>;
-  submitClaim(operationId: Uint8Array, claim: Uint8Array): Promise<Publication>;
+  cancel(operationId: Uint8Array): Promise<WitnessOutcome>;
+  submitClaim(operationId: Uint8Array, claim: Uint8Array): Promise<WitnessOutcome>;
   confirmClaim(
     operationId: Uint8Array,
     claimHash: Uint8Array,
     reservationId: Uint8Array,
-  ): Promise<Publication>;
-  releaseReservation(operationId: Uint8Array, reservationId: Uint8Array): Promise<string>;
-  createWelcome(operationId: Uint8Array, reservationId: Uint8Array): Promise<NativeWelcome>;
+  ): Promise<WitnessOutcome>;
+  releaseReservation(operationId: Uint8Array, reservationId: Uint8Array): Promise<WitnessOutcome>;
+  createWelcome(operationId: Uint8Array, reservationId: Uint8Array): Promise<WitnessOutcome>;
   recoverWelcome(claimHash: Uint8Array): Promise<NativeWelcome>;
   acceptActivation(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     ciphertext: Uint8Array,
-  ): Promise<NativeActivationAcceptance>;
+  ): Promise<WitnessOutcome>;
   prepareApplication(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     plaintext: Uint8Array,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
   receiveApplication(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativePlaintext>;
+  ): Promise<WitnessOutcome>;
   receiveReplacementProposal(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<"accepted">;
+  ): Promise<WitnessOutcome>;
   createUpdateCommit(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
   acceptEpochReady(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
-  ): Promise<NativeEpochReadyAcceptance>;
+  ): Promise<WitnessOutcome>;
   prepareEpochReadyConfirmation(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     acceptance: NativeEpochReadyAcceptance,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
   removeDevice(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
   revokeDevice(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativeOutbox>;
-  reset(operationId: Uint8Array): Promise<StatusOutcome>;
-  markRevoked(operationId: Uint8Array): Promise<StatusOutcome>;
+  ): Promise<WitnessOutcome>;
+  reset(operationId: Uint8Array): Promise<WitnessOutcome>;
+  markRevoked(operationId: Uint8Array): Promise<WitnessOutcome>;
   pendingOutbox(): Promise<readonly NativeOutbox[]>;
-  acknowledgeOutbox(operationId: Uint8Array, targetOperationId: Uint8Array): Promise<NativeOutbox>;
+  acknowledgeOutbox(
+    operationId: Uint8Array,
+    targetOperationId: Uint8Array,
+  ): Promise<WitnessOutcome>;
   acknowledgeReceive(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<"acknowledged">;
+  ): Promise<WitnessOutcome>;
   pairStatus(): Promise<PairState | undefined>;
   close(): void;
 }
-export interface DeviceEndpoint {
-  prepare(invitation: Uint8Array, operationId: Uint8Array): Promise<Publication>;
+export interface DeviceEndpoint extends WitnessEndpoint {
+  /** Creates storage and returns the counter-1 `register` request; nothing is published yet. */
+  prepare(invitation: Uint8Array, operationId: Uint8Array): Promise<PendingWitness>;
+  prepareRepair(
+    invitation: Uint8Array,
+    operationId: Uint8Array,
+    requirement: NativeRePairRequirement,
+  ): Promise<PendingWitness>;
   reopen(): Promise<"opened">;
   status(): Promise<PreJoinState>;
   publication(): Promise<Publication>;
-  join(operationId: Uint8Array, welcome: NativeWelcome): Promise<PreJoinState>;
+  join(operationId: Uint8Array, welcome: NativeWelcome): Promise<WitnessOutcome>;
   joinPublishedWelcome(
     operationId: Uint8Array,
     welcome: Uint8Array,
     claimHash: Uint8Array,
     welcomeHash: Uint8Array,
     expiresAtMs: bigint,
-  ): Promise<PreJoinState>;
-  prepareActivation(operationId: Uint8Array, logicalId: Uint8Array): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
+  prepareActivation(operationId: Uint8Array, logicalId: Uint8Array): Promise<WitnessOutcome>;
   acknowledgeActivation(
     operationId: Uint8Array,
     acceptance: NativeActivationAcceptance,
-  ): Promise<PairState>;
+  ): Promise<WitnessOutcome>;
   prepareApplication(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     plaintext: Uint8Array,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
   receiveApplication(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativePlaintext>;
+  ): Promise<WitnessOutcome>;
   prepareReplacement(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
+  /** One OpenMLS transition. The released result is the `commit` metadata. */
   applyUpdateCommit(
     operationId: Uint8Array,
     commit: NativeOutbox,
     commitLogicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-    epochReadyLogicalId: Uint8Array,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
+  /** One OpenMLS transition. The released result is the `commit` metadata. */
   applyReceivedUpdateCommit(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     commitLogicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-    epochReadyLogicalId: Uint8Array,
-  ): Promise<NativeOutbox>;
+  ): Promise<WitnessOutcome>;
+  /** Separate operation creating the epoch-ready message for an applied commit. */
+  prepareEpochReady(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    commit: NativeCommit,
+  ): Promise<WitnessOutcome>;
   acceptEpochReadyConfirmation(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
-  ): Promise<PairState>;
+  ): Promise<WitnessOutcome>;
   acknowledgeEpochReady(
     operationId: Uint8Array,
     acceptance: NativeEpochReadyAcceptance,
-  ): Promise<PairState>;
+  ): Promise<WitnessOutcome>;
   applyRemoval(
     operationId: Uint8Array,
     commit: NativeOutbox,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<"removed">;
-  reset(operationId: Uint8Array): Promise<NativeRePairRequirement>;
+  ): Promise<WitnessOutcome>;
+  reset(operationId: Uint8Array): Promise<WitnessOutcome>;
   pendingOutbox(): Promise<readonly NativeOutbox[]>;
-  acknowledgeOutbox(operationId: Uint8Array, targetOperationId: Uint8Array): Promise<NativeOutbox>;
+  acknowledgeOutbox(
+    operationId: Uint8Array,
+    targetOperationId: Uint8Array,
+  ): Promise<WitnessOutcome>;
   acknowledgeReceive(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<"acknowledged">;
+  ): Promise<WitnessOutcome>;
   pairStatus(): Promise<PairState | undefined>;
   close(): void;
 }
@@ -357,9 +490,9 @@ export declare function inspectPairingInvitation(bytes: Uint8Array): Promise<Pai
 export declare function inspectPairingClaim(bytes: Uint8Array): Promise<PairingInspection>;
 /** Always rejects until a production EnvelopeKeyStore is separately approved. */
 export declare function createDaemonEndpoint(): Promise<DaemonEndpoint>;
-/** Always rejects until production secure storage and rollback anchors are separately approved. */
+/** Always rejects until production secure storage and an approved witness quorum exist. */
 export declare function openDaemonEndpoint(): Promise<DaemonEndpoint>;
 /** Always rejects until a production EnvelopeKeyStore is separately approved. */
 export declare function createDeviceEndpoint(): Promise<DeviceEndpoint>;
-/** Always rejects until production secure storage and rollback anchors are separately approved. */
+/** Always rejects until production secure storage and an approved witness quorum exist. */
 export declare function openDeviceEndpoint(): Promise<DeviceEndpoint>;

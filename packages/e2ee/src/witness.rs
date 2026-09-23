@@ -626,7 +626,7 @@ impl ReplicaReceipt {
 
     /// Deterministic replica-side receipt construction for in-process test witnesses. Production
     /// replicas live in the control plane; this constructor never ships in a production artifact.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "node-test-fixtures"))]
     pub(crate) fn sign_for_test(
         fields: TestReceiptFields,
         signer: &SignatureKeyPair,
@@ -679,7 +679,7 @@ impl ReplicaReceipt {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "node-test-fixtures"))]
 pub(crate) struct TestReceiptFields {
     pub result: WitnessResult,
     pub replica_id: Id,
@@ -861,7 +861,7 @@ impl QuorumCertificate {
         &self.receipts
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "node-test-fixtures"))]
     pub(crate) fn from_receipts_for_test(
         mut receipts: Vec<ReplicaReceipt>,
     ) -> Result<Self, WitnessError> {
@@ -1272,29 +1272,6 @@ impl PendingWitnessOperation {
         self.obsolete_key_erased = true;
         Ok(())
     }
-}
-
-#[cfg(feature = "node-test-fixtures")]
-#[doc(hidden)]
-pub fn test_pending_witness_operation(
-    request_bytes: &[u8],
-    exact_result: &[u8],
-) -> Result<PendingWitnessOperation, WitnessError> {
-    if exact_result.len() > MAX_RESULT_BYTES {
-        return Err(WitnessError::BoundExceeded);
-    }
-    let request = WitnessRequest::decode(request_bytes)?;
-    Ok(PendingWitnessOperation {
-        request_hash: request.request_hash()?,
-        request,
-        request_bytes: request_bytes.to_vec(),
-        exact_result: exact_result.to_vec(),
-        current_key_active: true,
-        quorum_confirmed: false,
-        obsolete_key_erased: true,
-        revocation_generation: None,
-        certificate_hash: None,
-    })
 }
 
 /// Serializes state-advancing work for one endpoint. A locally committed operation remains the

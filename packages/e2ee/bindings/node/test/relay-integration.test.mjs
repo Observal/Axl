@@ -37,6 +37,13 @@ import {
 } from "@axl/control-plane";
 
 import * as fixture from "./fixture-loader.mjs";
+import { complete, witnessed, witnessedFacade } from "./witness-driver.mjs";
+
+const unwrap = (field) => (result) => {
+  const value = result[field];
+  if (value === undefined || value === null) throw new TypeError(`expected ${field}, got ${result.tag}`);
+  return value;
+};
 
 const repositoryRoot = fileURLToPath(new URL("../../../../../", import.meta.url));
 const externalControlPlaneOrigin = process.env.AXL_REAL_E2EE_CONTROL_PLANE_ORIGIN;
@@ -63,34 +70,52 @@ async function activatedPair(root) {
   const installation = uuid(21);
   const session = Buffer.from(cryptoSessionId.replaceAll("-", ""), "hex");
   const device = uuid(23);
+  const witness = fixture.testWitness();
   const daemonEndpoint = fixture.testDaemonEndpoint(
     join(root, "daemon-e2ee"),
     account,
     installation,
     session,
+    witness,
   );
-  const invitation = await daemonEndpoint.issue(operation(1));
+  const invitation = unwrap("publication")(
+    await complete(daemonEndpoint, witness, await daemonEndpoint.issue(operation(1))),
+  );
   const deviceEndpoint = fixture.testDeviceEndpoint(
     join(root, "device-e2ee"),
     account,
     installation,
     session,
     device,
+    witness,
   );
-  const prejoin = await deviceEndpoint.prepare(invitation.bytes, operation(2));
-  const pending = await daemonEndpoint.submitClaim(operation(3), prejoin.bytes);
+  const prejoin = unwrap("publication")(
+    await complete(deviceEndpoint, witness, await deviceEndpoint.prepare(invitation.bytes, operation(2))),
+  );
+  const pending = unwrap("publication")(
+    await witnessed(daemonEndpoint, witness, () => daemonEndpoint.submitClaim(operation(3), prejoin.bytes)),
+  );
   const reservation = operation(4);
-  await daemonEndpoint.confirmClaim(operation(5), pending.hash, reservation);
-  const welcome = await daemonEndpoint.createWelcome(operation(6), reservation);
-  await deviceEndpoint.join(operation(7), welcome);
-  const activation = await deviceEndpoint.prepareActivation(operation(8), operation(9));
-  const acceptance = await daemonEndpoint.acceptActivation(
-    operation(10),
-    operation(9),
-    activation.ciphertext,
+  await witnessed(daemonEndpoint, witness, () =>
+    daemonEndpoint.confirmClaim(operation(5), pending.hash, reservation),
   );
-  await deviceEndpoint.acknowledgeActivation(operation(11), acceptance);
-  return { daemonEndpoint, deviceEndpoint };
+  const welcome = unwrap("welcome")(
+    await witnessed(daemonEndpoint, witness, () => daemonEndpoint.createWelcome(operation(6), reservation)),
+  );
+  await witnessed(deviceEndpoint, witness, () => deviceEndpoint.join(operation(7), welcome));
+  const activation = unwrap("outbox")(
+    await witnessed(deviceEndpoint, witness, () => deviceEndpoint.prepareActivation(operation(8), operation(9))),
+  );
+  const acceptance = unwrap("activation")(
+    await witnessed(daemonEndpoint, witness, () =>
+      daemonEndpoint.acceptActivation(operation(10), operation(9), activation.ciphertext),
+    ),
+  );
+  await witnessed(deviceEndpoint, witness, () => deviceEndpoint.acknowledgeActivation(operation(11), acceptance));
+  return {
+    daemonEndpoint: witnessedFacade(daemonEndpoint, witness),
+    deviceEndpoint: witnessedFacade(deviceEndpoint, witness),
+  };
 }
 
 function replyPort() {

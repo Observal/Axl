@@ -1305,15 +1305,15 @@ impl DurablePendingInvitation {
         hosted_generation: u64,
         plaintext: &[u8],
     ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
-        self.require_active()?;
         super::DurableDaemon {
             store: Arc::clone(&self.store),
         }
-        .prepare_application(
+        .prepare_application_guarded(
             operation_id,
             logical_message_id,
             hosted_generation,
             plaintext,
+            &self.active_precondition(),
         )
     }
 
@@ -1324,15 +1324,15 @@ impl DurablePendingInvitation {
         logical_message_id: Id,
         hosted_generation: u64,
     ) -> Result<WitnessOutcome<super::DurablePlaintext>, PersistenceError> {
-        self.require_active()?;
         super::DurableDaemon {
             store: Arc::clone(&self.store),
         }
-        .receive_application(
+        .receive_application_guarded(
             operation_id,
             ciphertext,
             logical_message_id,
             hosted_generation,
+            &self.active_precondition(),
         )
     }
 
@@ -1364,11 +1364,19 @@ impl DurablePendingInvitation {
         )
     }
 
-    fn require_active(&self) -> Result<(), PersistenceError> {
-        if self.pair_lifecycle()? == Some(PairLifecycle::Active) {
-            Ok(())
-        } else {
-            Err(PersistenceError::Conflict)
+    /// Runner precondition on the committed pair record. The runner evaluates it on the fresh
+    /// transaction only after terminal state, the pending barrier, exact duplicates, and same-ID
+    /// conflicts have been resolved, so it can never preempt quarantine or duplicate replay.
+    fn active_precondition(&self) -> impl Fn(&super::CoreProvider) -> Result<(), PersistenceError> {
+        let crypto_session_id = self.store.crypto_session_id;
+        move |provider| {
+            if daemon_record(provider, crypto_session_id)?.pair_lifecycle
+                == Some(PairLifecycle::Active)
+            {
+                Ok(())
+            } else {
+                Err(PersistenceError::Conflict)
+            }
         }
     }
 
@@ -1459,7 +1467,6 @@ impl DurablePendingInvitation {
         hosted_generation: u64,
         acceptance: &EpochReadyAcceptance,
     ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
-        self.require_active()?;
         if acceptance.crypto_session_id != self.store.crypto_session_id {
             return Err(PersistenceError::IdentityMismatch);
         }
@@ -1467,11 +1474,12 @@ impl DurablePendingInvitation {
         super::DurableDaemon {
             store: Arc::clone(&self.store),
         }
-        .prepare_resync_control(
+        .prepare_resync_control_guarded(
             operation_id,
             logical_message_id,
             hosted_generation,
             &payload,
+            &self.active_precondition(),
         )
     }
 
@@ -2599,15 +2607,15 @@ impl DurablePreJoinDevice {
         hosted_generation: u64,
         plaintext: &[u8],
     ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
-        self.require_active()?;
         super::DurablePhone {
             store: Arc::clone(&self.store),
         }
-        .prepare_application(
+        .prepare_application_guarded(
             operation_id,
             logical_message_id,
             hosted_generation,
             plaintext,
+            &self.active_precondition(),
         )
     }
 
@@ -2618,15 +2626,15 @@ impl DurablePreJoinDevice {
         logical_message_id: Id,
         hosted_generation: u64,
     ) -> Result<WitnessOutcome<super::DurablePlaintext>, PersistenceError> {
-        self.require_active()?;
         super::DurablePhone {
             store: Arc::clone(&self.store),
         }
-        .receive_application(
+        .receive_application_guarded(
             operation_id,
             ciphertext,
             logical_message_id,
             hosted_generation,
+            &self.active_precondition(),
         )
     }
 
@@ -2658,11 +2666,19 @@ impl DurablePreJoinDevice {
         )
     }
 
-    fn require_active(&self) -> Result<(), PersistenceError> {
-        if self.pair_lifecycle()? == Some(PairLifecycle::Active) {
-            Ok(())
-        } else {
-            Err(PersistenceError::Conflict)
+    /// Runner precondition on the committed pair record. The runner evaluates it on the fresh
+    /// transaction only after terminal state, the pending barrier, exact duplicates, and same-ID
+    /// conflicts have been resolved, so it can never preempt quarantine or duplicate replay.
+    fn active_precondition(&self) -> impl Fn(&super::CoreProvider) -> Result<(), PersistenceError> {
+        let crypto_session_id = self.store.crypto_session_id;
+        move |provider| {
+            if device_record(provider, crypto_session_id)?.pair_lifecycle
+                == Some(PairLifecycle::Active)
+            {
+                Ok(())
+            } else {
+                Err(PersistenceError::Conflict)
+            }
         }
     }
 
