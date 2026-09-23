@@ -42,6 +42,18 @@ for (const forbidden of [
   "testOpenmlsLifecycleJson",
   "testOpenmlsNegativeCasesJson",
   "testSecureRandomProbe",
+  "TestWitness",
+  "TestBrowserLineage",
+  "test_witness",
+  "sign_for_test",
+  "from_receipts_for_test",
+  "set_forge_signature",
+  "roll_back_all",
+  "advance_foreign",
+  "barrier-scenario",
+  "BrowserWitnessVerifier",
+  "verifyCertificate",
+  "1_048_576",
   "SharedArrayBuffer",
   "Math.random",
   "randomFillSync",
@@ -66,10 +78,45 @@ assert.match(productionStorage, /extractable !== false/u, "production wrapping k
 assert.match(productionStorage, /wrapKey\("raw"/u, "production storage must wrap state keys");
 assert.match(productionStorage, /unwrapKey\(/u, "production storage must recover state keys in the worker");
 assert(!/test|fixture|fault/iu.test(productionStorage), "production storage contains test controls");
+assert.match(productionStorage, /^const DATABASE_VERSION = 2;$/mu, "production storage schema version drift");
+assert.match(productionStorage, /instanceof BrowserTransition/u, "commit must accept only Rust-finalized transitions");
+assert.match(productionStorage, /instanceof BrowserLineage/u, "store must require a Rust-owned lineage");
+assert.match(productionStorage, /instanceof BrowserReplicaTrust/u, "store must require Rust-owned replica trust");
+assert.match(productionStorage, /lifecycle: "prepared"/u, "successor key must commit as prepared");
+assert.match(productionStorage, /mark_current_key_active\(\)/u, "continuation must report successor activation to Rust");
+assert.match(productionStorage, /mark_obsolete_key_erased\(\)/u, "continuation must report obsolete-key erasure to Rust");
+assert.match(productionStorage, /keyStore\.delete\(operationRecord\.obsoleteKeyId\)/u, "completion must erase the obsolete key");
+assert.match(productionStorage, /unsupported_schema/u, "version 1 and newer stores must fail closed");
+assert(
+  !/subtle\.(encrypt|decrypt)\([^)]*iv:\s*(random|new Uint8Array|crypto)/u.test(productionStorage),
+  "storage must not select AEAD nonces",
+);
+const storageMethods = [...productionStorage.matchAll(/^  (?:async )?(#?[a-zA-Z]+)\(/gmu)].map((match) => match[1]);
+assert.deepEqual(
+  storageMethods.filter((name) => !name.startsWith("#")),
+  ["constructor", "create", "open", "pending", "commit", "continueWitness", "close"],
+  "production storage public surface drift",
+);
 assert.match(loader, /new Worker\([^)]*new URL/u, "loader must use a static same-origin worker URL");
 assert.match(glue, /getRandomValues/u, "generated glue must use browser secure randomness");
-assert.match(glue, /export class BrowserWitnessVerifier/u, "production WASM witness verifier missing");
-assert.match(glue, /verify\(request_bytes, certificate_bytes\)/u, "witness verifier ABI drift");
+const productionClasses = [...glue.matchAll(/^export class ([A-Za-z0-9_]+)/gmu)].map((match) => match[1]).sort();
+assert.deepEqual(
+  productionClasses,
+  [
+    "BrowserCommittedTransition",
+    "BrowserContinuation",
+    "BrowserLineage",
+    "BrowserReplicaTrust",
+    "BrowserSealedEnvelopes",
+    "BrowserTransition",
+  ],
+  "production WASM class drift",
+);
+for (const name of productionClasses) {
+  const body = glue.slice(glue.indexOf(`export class ${name}`));
+  const classBody = body.slice(0, body.indexOf("\n}\n"));
+  assert(!/^\s+constructor\(/mu.test(classBody), `${name} must not be constructible from JavaScript`);
+}
 assert.match(loader, /2048/u, "JavaScript invitation bound missing");
 assert.match(loader, /17320/u, "JavaScript claim bound missing");
 assert.match(worker, /2048/u, "worker invitation bound missing");
@@ -110,12 +157,32 @@ const generatedExports = [...glue.matchAll(/^export function ([a-z0-9_]+)/gmu)]
   .sort();
 assert.deepEqual(
   generatedExports,
-  ["get_binding_info_json", "inspect_pairing_claim", "inspect_pairing_invitation", "secure_random_check"],
+  [
+    "get_binding_info_json",
+    "inspect_committed_transition",
+    "inspect_pairing_claim",
+    "inspect_pairing_invitation",
+    "open_committed_transition",
+    "secure_random_check",
+  ],
   "production Rust/WASM export drift",
 );
 const testWorker = readFileSync(join(testArtifact, "worker/index.js"), "utf8");
 const testStorage = readFileSync(join(testArtifact, "worker/browser-storage.js"), "utf8");
 assert.match(testWorker, /test_browser_persistence_seed/u);
+assert.equal(
+  readFileSync(join(testArtifact, "worker/storage.js"), "utf8"),
+  productionStorage,
+  "the test artifact must exercise the byte-identical production store",
+);
+const testGlueClasses = [...readFileSync(join(testArtifact, "wasm/axl_e2ee_browser.js"), "utf8").matchAll(/^export class ([A-Za-z0-9_]+)/gmu)]
+  .map((match) => match[1])
+  .sort();
+assert.deepEqual(
+  testGlueClasses,
+  [...productionClasses, "TestBrowserLineageFixture", "TestWitness"].sort(),
+  "test-only WASM class drift",
+);
 assert.match(testStorage, /indexedDB/u);
 assert.match(testStorage, /navigator\.locks/u);
 assert.match(testStorage, /durability: "strict"/u);

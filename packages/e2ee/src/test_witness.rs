@@ -3,7 +3,7 @@
 
 //! Deterministic in-process three-replica witness for tests and test-only bindings.
 //!
-//! This module is compiled only for unit tests and for the `node-test-fixtures` artifact. It is
+//! This module is compiled only for unit tests and for the Node and browser test artifacts. It is
 //! never part of a production binding. It signs receipts with process-local keys and applies the
 //! shared `evaluate_witness_request` decision logic over an append-only per-lineage history.
 
@@ -20,7 +20,6 @@ use openmls_basic_credential::SignatureKeyPair;
 use crate::{
     SUITE,
     pairing::PairingCredential,
-    persistence::PersistenceError,
     witness::{
         QuorumCertificate, ReplicaKey, ReplicaReceipt, ReplicaTrust, ReplicaTrustSet,
         StoredWitnessOperation, TestReceiptFields, WitnessHead, WitnessHistory,
@@ -28,6 +27,17 @@ use crate::{
         WitnessRevocationEvent, evaluate_witness_request,
     },
 };
+
+/// The simulated quorum is switched off; no replica answers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TestWitnessUnavailable;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<TestWitnessUnavailable> for crate::persistence::PersistenceError {
+    fn from(_: TestWitnessUnavailable) -> Self {
+        Self::WitnessUnavailable
+    }
+}
 
 /// Deterministic in-process three-replica witness.
 ///
@@ -167,10 +177,10 @@ impl TestWitness {
         });
     }
 
-    pub fn respond(&self, request_bytes: &[u8]) -> Result<Vec<u8>, PersistenceError> {
+    pub fn respond(&self, request_bytes: &[u8]) -> Result<Vec<u8>, TestWitnessUnavailable> {
         self.respond_count.fetch_add(1, Ordering::SeqCst);
         if *self.unavailable.lock().unwrap() {
-            return Err(PersistenceError::WitnessUnavailable);
+            return Err(TestWitnessUnavailable);
         }
         let request = WitnessRequest::decode(request_bytes).unwrap();
         let lineage_hash = request.lineage().hash().unwrap();

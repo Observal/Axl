@@ -8,6 +8,7 @@ import {
   assertLifecycleScenario,
   assertNegativeOpenMlsScenario,
   assertPersistenceScenario,
+  assertProductionBarrierScenario,
   assertStateScenario,
 } from "./scenario-assertions.mjs";
 
@@ -38,24 +39,11 @@ test("fails closed for randomness, close, fatal state, and malformed responses",
   assertStateScenario(result);
 });
 
-test("verifies unanimous witness certificates in production WASM", async ({ page }) => {
-  const result = await page.evaluate(() =>
-    window.axlBrowserTest.runProductionWitnessVerifierScenario(),
-  );
-  test.expect(result).toEqual({ invalid: "witness_receipt_invalid", requestBytes: 414 });
-});
-
-test("persists production witness-pending envelopes without exposing key handles", async ({ page }) => {
-  const result = await page.evaluate(() => window.axlBrowserTest.runProductionStorageScenario());
-  test.expect(result).toEqual({
-    contention: "lifecycle_busy",
-    pendingStatus: "pending_quorum",
-    recoveredStatus: "pending_quorum",
-    restartStatus: "committed",
-    exact: "committed browser output",
-    repeated: "committed browser output",
-    verificationCount: 2,
-  });
+test("runs the production witness barrier in the worker without page-visible storage", async ({
+  page,
+}) => {
+  const result = await page.evaluate(() => window.axlBrowserTest.runProductionBarrierScenario());
+  assertProductionBarrierScenario(result);
 });
 
 test("persists prepare-and-compare transitions in real IndexedDB under Web Locks", async ({

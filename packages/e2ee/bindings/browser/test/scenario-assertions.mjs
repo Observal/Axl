@@ -159,10 +159,74 @@ export function assertPersistenceScenario(result) {
   assert.equal(result.lifecycleEvidence, "not_exposed_by_browser");
 }
 
+export function assertProductionBarrierScenario(result) {
+  assert.deepEqual(result, {
+    duplicateCreate: "lifecycle_busy",
+    contention: "lifecycle_busy",
+    plainObjectCommit: "invalid_argument",
+    oversizedResult: "bound_exceeded",
+    registerStatus: "pending_quorum",
+    registerRequestBytes: result.registerRequestBytes,
+    requestHashMatches: true,
+    secondWhilePending: "witness_unavailable",
+    duplicateExactRequest: true,
+    keysAfterCommit: ["active"],
+    quarantineWriteFailure: "storage_unavailable",
+    abortedLifecycleWrites: 1,
+    lifecycleAfterFailedQuarantine: "ready",
+    genuineAfterFailedQuarantine: "rollback_detected",
+    pendingAfterFailedQuarantine: "rollback_detected",
+    reopenAfterFailedQuarantine: "ready",
+    forgedCertificate: "witness_receipt_invalid",
+    lifecycleAfterForgery: "quarantined",
+    genuineAfterQuarantine: "rollback_detected",
+    corruptedRequestOpen: ["corrupt_state", "corrupt_state"],
+    reopenReportsPending: true,
+    recoveredExactRequest: true,
+    registerResult: "first result",
+    headAfterRegister: 1,
+    pendingAfterRegister: "not_found",
+    repeatedResult: "first result",
+    cachedDuplicate: { status: "completed", exactResult: "first result" },
+    advanceStatus: "pending_quorum",
+    keysAfterAdvanceCommit: ["active", "active"],
+    successorKeyRecorded: true,
+    keyReactivatedOnOpen: "active",
+    unavailable: "witness_unavailable",
+    advanceResult: "second result",
+    keysAfterCompletion: [["successor", "active"]],
+    headAfterAdvance: 2,
+    headCommitmentRecorded: true,
+    completedAfterRestart: "fresh_witness_required",
+    conflict: "witness_operation_conflict",
+    lifecycleAfterConflict: "quarantined",
+    mutationAfterQuarantine: "rollback_detected",
+    versionOneOpen: "unsupported_schema",
+    versionOneCreate: "unsupported_schema",
+    versionOnePreserved: 1,
+    newerOpen: "unsupported_schema",
+    newerCreate: "unsupported_schema",
+    missingOpen: "state_loss",
+    createAfterFailedOpen: "created",
+    schema: {
+      version: 2,
+      stores: [
+        "metadata_v2",
+        "wrapping_key_v2",
+        "wrapped_state_keys_v2",
+        "sealed_transitions_v2",
+        "witness_operations_v2",
+      ],
+    },
+  });
+  assert(result.registerRequestBytes > 0 && result.registerRequestBytes <= 1024);
+}
+
 export function assertAllScenarios(result) {
   assertLifecycleScenario(result.lifecycle);
   assertNegativeOpenMlsScenario(result.negativeOpenMls);
   assertBoundaryScenario(result.boundaries);
   assertStateScenario(result.state);
+  assertProductionBarrierScenario(result.productionBarrier);
   assertPersistenceScenario(result.persistence);
 }
