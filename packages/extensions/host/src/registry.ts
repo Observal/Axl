@@ -308,7 +308,7 @@ function gitSpec(url: string, ref: string): string {
     throw new Error("Git extension URL must be credential-free HTTPS");
   }
   if (!GIT_COMMIT.test(ref)) throw new Error("Git extension ref must be a full commit hash");
-  return `${parsed.href}#${ref}`;
+  return `git+${parsed.href}#${ref}`;
 }
 
 /** Owns daemon extension discovery, trust, enablement, and package installation. */

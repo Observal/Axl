@@ -83,6 +83,22 @@ test("configuration store atomically adds and removes private global servers", a
   await assert.rejects(() => store.list(), /not a symlink/);
 });
 
+test("rejects a batch that would exceed the total server limit before writing", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-mcp-limit-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new McpConfigStore(root, root);
+  await assert.rejects(
+    store.upsertMany(
+      Array.from({ length: 257 }, (_, index) => ({
+        name: `server-${index}`,
+        definition: { command: "example-mcp" },
+      })),
+    ),
+    /at most 256/u,
+  );
+  assert.equal((await store.list()).servers.length, 0);
+});
+
 test("rejects legacy, ambiguous, unsafe, and unknown configuration", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-mcp-config-"));
   context.after(() => rm(root, { recursive: true, force: true }));

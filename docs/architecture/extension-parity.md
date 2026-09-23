@@ -29,7 +29,7 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | JavaScript and TypeScript loading | Done | The daemon host loads both forms through Node. |
 | Extension list and inspection | Done | Typed daemon RPC and SDK inventory includes source, state, package metadata, and lifecycle diagnostics. |
 | Per-extension enable and disable | Done | Enablement is persisted and disabled IDs are removed before import. The selected session reloads atomically. |
-| Per-extension reload | Done | The targeted RPC validates the requested ID, then atomically rebuilds the selected session so prompt, provider, tool, and hook contributions stay coherent. |
+| Per-extension reload | Done | The targeted RPC validates the requested ID, then atomically rebuilds the selected session so prompt, provider, tool, and hook contributions stay coherent. Content-hashed imports load changed source, but Node retains prior ESM module instances and their untracked top-level side effects until daemon exit. |
 | Atomic replacement | Done | Replacement activation completes before the runtime swap; failed activation leaves the prior runtime active and writes no partial boundary. |
 
 ## Lifecycle and interception events

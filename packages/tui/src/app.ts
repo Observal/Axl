@@ -2672,7 +2672,9 @@ export class AxlApp {
       return;
     }
     if (outcome.state === "completed") {
-      if (command === "rename") {
+      if (outcome.content !== undefined) {
+        this.notice = this.view.palette.dim(`· ${sanitizeTerminalText(outcome.content)}`);
+      } else if (command === "rename") {
         this.notice = this.view.palette.dim(
           `· renamed session to ${sanitizeTerminalText(argument ?? "")}`,
         );

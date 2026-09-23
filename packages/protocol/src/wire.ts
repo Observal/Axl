@@ -3438,6 +3438,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_missing",
     "blob_corrupt",
     "content_too_large",
+    ...EXTENSION_ERRORS,
   ],
   "session.steer": [
     ...SESSION_BASE_ERRORS,
@@ -3445,6 +3446,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_not_owned",
     "blob_missing",
     "blob_corrupt",
+    ...EXTENSION_ERRORS,
   ],
   "session.followUp": [
     ...SESSION_BASE_ERRORS,
@@ -3452,6 +3454,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_not_owned",
     "blob_missing",
     "blob_corrupt",
+    ...EXTENSION_ERRORS,
   ],
   "session.interruptAndDeliver": [
     ...SESSION_BASE_ERRORS,
@@ -3461,6 +3464,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "blob_missing",
     "blob_corrupt",
     "content_too_large",
+    ...EXTENSION_ERRORS,
   ],
   "session.compact": [
     ...SESSION_BASE_ERRORS,

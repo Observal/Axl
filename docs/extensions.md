@@ -22,8 +22,10 @@ Extension code is trusted host code and can use the daemon process's filesystem,
 | --- | --- |
 | `~/.axl/extensions/<name>.ts` or `.js` | extension `<name>` |
 | `~/.axl/extensions/<name>/index.ts` or `index.js` | extension `<name>` |
+| `<project>/.axl/extensions/<name>.ts` or `.js` | trusted project extension `<name>` |
+| `<project>/.axl/extensions/<name>/index.ts` or `index.js` | trusted project extension `<name>` |
 
-Names must match `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`. Entries starting with `.` and files with other extensions are ignored. Discovery is one level deep and sorted by name; handlers run in that order. Project-local extension directories are not loaded yet.
+Names must match `^[a-z0-9]+(?:[.-][a-z0-9]+)*$`. Entries starting with `.` and files with other extensions are ignored. Discovery is one level deep and sorted by name; handlers run in that order. Untrusted project-local extension directories are not loaded.
 
 TypeScript files load through Node's built-in type stripping. Installed releases expose the authoring declarations at `@observal/axl/extension-api`; use `import type` because there is no runtime module to import. Repository-local development may import the private workspace package `@axl/extension-api` instead.
 

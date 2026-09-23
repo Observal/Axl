@@ -243,25 +243,28 @@ The following table lists the additional errors each method may return. The expo
 | --- | --- |
 | `daemon.info`, `connection.ping`, `request.cancel` | none |
 | `connection.initialize` | `unsupported_version`, `connection_already_initialized`, `unauthorized`, `forbidden` |
-| `session.create` | `invalid_cwd`, `invalid_idempotency_key`, `idempotency_conflict`, `corrupt_session`, `content_too_large` |
-| `session.resume` | `unknown_session`, `corrupt_session`, `event_migration_required` |
+| `extension.list` | `unknown_session`, `extension_failed` |
+| `extension.enable`, `extension.disable`, `extension.reload`, `extension.install`, `extension.update`, `extension.remove`, `extension.trust` | `unknown_session`, `operation_active`, `extension_failed` |
+| `extension.command.invoke` | `unknown_session`, `operation_active`, `extension_failed` |
+| `session.create` | `invalid_cwd`, `invalid_idempotency_key`, `idempotency_conflict`, `corrupt_session`, `content_too_large`, provider/model/authentication errors, `extension_failed` |
+| `session.resume` | `unknown_session`, `corrupt_session`, `event_migration_required`, provider/model/authentication errors, `extension_failed` |
 | `session.list` | `invalid_cwd`, `unknown_cursor` |
 | `session.history` | `unknown_cursor`, `snapshot_required`, `event_migration_required` |
 | `session.ack` | `unknown_subscription`, `unknown_cursor`, `snapshot_required` |
 | `session.unsubscribe` | `unknown_subscription` |
-| `session.fork` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_fork_point`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
-| `session.clone` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `empty_session`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
-| `session.rename` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.fork` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_fork_point`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large`, `command_blocked`, `extension_failed` |
+| `session.clone` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `empty_session`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large`, `command_blocked`, `extension_failed` |
+| `session.rename` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large`, `command_blocked` |
 | `session.delete` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict` |
 | `session.export` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_path`, `artifact_exists`, `blob_missing`, `blob_corrupt` |
 | `session.import` | `invalid_cwd`, `invalid_path`, `not_found`, `invalid_artifact`, `corrupt_session`, `blob_missing`, `blob_corrupt`, `content_too_large`, `invalid_idempotency_key`, `idempotency_conflict` |
-| `session.send` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
-| `session.interruptAndDeliver` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
+| `session.send` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large`, `extension_failed` |
+| `session.interruptAndDeliver` | `unknown_session`, `event_migration_required`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large`, `extension_failed` |
 | `session.queue.enqueue` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict`, `blob_not_owned`, `blob_missing`, `blob_corrupt`, `content_too_large` |
 | `session.queue.requeue` | `unknown_session`, `event_migration_required`, `unknown_queue_item`, `queue_not_paused`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
-| `session.shell` | `unknown_session`, `event_migration_required`, `operation_active`, `idempotency_conflict`, `content_too_large` |
+| `session.shell` | `unknown_session`, `event_migration_required`, `operation_active`, `idempotency_conflict`, `command_blocked`, `content_too_large` |
 | `session.interrupt` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict` |
-| `session.reload`, `session.configure` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
+| `session.reload`, `session.configure` | `unknown_session`, `event_migration_required`, `corrupt_session`, `operation_active`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large`, provider/model/authentication errors, `command_blocked`, `extension_failed` |
 | `session.interaction.respond` | `unknown_session`, `event_migration_required`, `unknown_interaction`, `interaction_already_resolved`, `invalid_interaction_response`, `invalid_idempotency_key`, `idempotency_conflict`, `content_too_large` |
 | `session.dispose` | `unknown_session`, `event_migration_required`, `invalid_idempotency_key`, `idempotency_conflict` |
 | `session.subscribe` | `unknown_session`, `event_migration_required`, `snapshot_required` |

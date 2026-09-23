@@ -1677,9 +1677,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (outcome.state === "completed") {
         if (outcome.command === "rename" && client !== undefined) await refreshSessions(client);
         showActionNotice(
-          compacting && directCancellationRequested.current
-            ? "Compaction cancelled"
-            : `/${outcome.command} completed`,
+          outcome.content ??
+            (compacting && directCancellationRequested.current
+              ? "Compaction cancelled"
+              : `/${outcome.command} completed`),
         );
         return;
       }

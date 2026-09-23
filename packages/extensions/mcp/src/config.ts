@@ -463,6 +463,12 @@ export class McpConfigStore {
         changed ||= JSON.stringify(configured[server.name]) !== JSON.stringify(server.definition);
         configured[server.name] = server.definition;
       }
+      if (Object.keys(configured).length > MCP_CONFIG_LIMITS.servers) {
+        throw new McpConfigError(
+          "mcpServers",
+          `must contain at most ${MCP_CONFIG_LIMITS.servers} servers`,
+        );
+      }
       return changed;
     });
   }

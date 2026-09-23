@@ -54,6 +54,38 @@ test("resolves global, explicit, and trusted project extensions with determinist
   assert.equal((await registry.list(project)).extensions[0]?.source, "global");
 });
 
+test("installs Git extensions from an explicit commit spec", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-extension-git-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const commit = "a".repeat(40);
+  let installedSpec = "";
+  const registry = new DaemonExtensionRegistry(home, async (_file, arguments_) => {
+    installedSpec = arguments_.at(-1) ?? "";
+    const packageRoot = join(home, "extensions", ".packages");
+    const packageDirectory = join(packageRoot, "node_modules", "git-extension");
+    await mkdir(packageDirectory, { recursive: true });
+    await writeFile(
+      join(packageRoot, "package.json"),
+      JSON.stringify({ dependencies: { "git-extension": installedSpec } }),
+    );
+    await writeFile(
+      join(packageDirectory, "package.json"),
+      JSON.stringify({
+        name: "git-extension",
+        version: "1.0.0",
+        axl: { id: "git-extension", apiVersion: 1, daemon: "index.js" },
+      }),
+    );
+    await writeFile(join(packageDirectory, "index.js"), "export default () => {};\n");
+  });
+  assert.equal(
+    await registry.install({ type: "git", url: "https://example.com/extension.git", ref: commit }),
+    "git-extension",
+  );
+  assert.equal(installedSpec, `git+https://example.com/extension.git#${commit}`);
+});
+
 test("installs, updates, loads, and removes package extensions", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-extension-package-"));
   context.after(() => rm(root, { recursive: true, force: true }));

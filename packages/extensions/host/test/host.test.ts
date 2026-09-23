@@ -264,6 +264,21 @@ test("tool input and result handlers chain in extension order", async (context) 
     },
   );
   await host.dispose();
+
+  const bad = await directory(context);
+  await writeFile(
+    join(bad, "bad.js"),
+    `export default (axl) => axl.on("tool.result", () => ({ content: "invalid" }));\n`,
+  );
+  const invalid = await load(bad);
+  await assert.rejects(
+    invalid.host.afterToolCall?.(
+      { callId: "1", name: "echo", input: {}, content: [], isError: false },
+      signal,
+    ),
+    /content/u,
+  );
+  await invalid.host.dispose();
 });
 
 test("provider hooks chain headers and payloads and observe responses", async (context) => {

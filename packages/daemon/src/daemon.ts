@@ -1010,7 +1010,7 @@ export class AxlDaemon {
           ...(affectedOperationId === undefined ? {} : { affectedOperationId }),
           ...(interactionId === undefined ? {} : { interactionId }),
         },
-        (acceptance) => this.dispatch(normalized, send, state, acceptance) as never,
+        (acceptance) => this.dispatch(normalized, send, state, acceptance, signal) as never,
       );
     } finally {
       if (interruptDeliveryOperationId !== undefined) {
@@ -1440,10 +1440,14 @@ export class AxlDaemon {
           throw new Error(`Enabled extension ${extensionId} was not found`);
         }
       }
-      const reloaded = await this.sessions.reload(request.params.sessionId, operationId, signal);
+      const reloaded = await this.sessions.reloadIfOpen(
+        request.params.sessionId,
+        operationId,
+        signal,
+      );
       return {
         ...(await service.list(cwd)),
-        commands: await this.sessions.extensionCommands(request.params.sessionId),
+        commands: this.sessions.extensionCommandsIfOpen(request.params.sessionId),
         ...(extensionId === undefined ? {} : { changedExtensionId: extensionId }),
         boundaryEventIds: reloaded.boundaryEventIds,
       };

@@ -350,6 +350,35 @@ function validateToolDefinition(definition: unknown, path: string): DaemonToolDe
   return definition as DaemonToolDefinition;
 }
 
+function validateToolResultPatch(
+  value: unknown,
+  path: string,
+): {
+  readonly content?: readonly UserContent[];
+  readonly isError?: boolean;
+  readonly details?: JsonValue;
+} {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new DaemonExtensionError(path, "tool.result handler must return a result patch");
+  }
+  const patch = value as Record<string, unknown>;
+  for (const key of Object.keys(patch)) {
+    if (!["content", "isError", "details"].includes(key)) {
+      throw new DaemonExtensionError(path, `tool.result patch field ${key} is not allowed`);
+    }
+  }
+  if (patch.isError !== undefined && typeof patch.isError !== "boolean") {
+    throw new DaemonExtensionError(path, "tool.result patch isError must be a boolean");
+  }
+  return {
+    ...(patch.content === undefined
+      ? {}
+      : { content: parseUserContent(patch.content, "extension.tool.result.content") }),
+    ...(patch.isError === undefined ? {} : { isError: patch.isError }),
+    ...(patch.details === undefined ? {} : { details: stateValue(patch.details) }),
+  };
+}
+
 function validateToolResult(value: unknown, toolName: string): DaemonToolResult {
   if (typeof value !== "object" || value === null) {
     throw new TypeError(`Tool ${toolName} returned a non-object result`);
@@ -1132,13 +1161,10 @@ export async function loadDaemonExtensions(
                   );
                 }
                 if (decision === undefined) continue;
-                if (typeof decision !== "object" || decision === null) {
-                  throw new DaemonExtensionError(
-                    state.path,
-                    "tool.result handler must return undefined or a result patch",
-                  );
-                }
-                current = { ...current, ...structuredClone(decision) } as ToolResultInterception;
+                current = {
+                  ...current,
+                  ...validateToolResultPatch(decision, state.path),
+                } as ToolResultInterception;
                 changed = true;
               }
             }

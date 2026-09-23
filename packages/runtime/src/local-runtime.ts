@@ -662,6 +662,7 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
                 },
                 wrapStdio: (input) => sandbox.wrapProcess({ ...input, policy }),
               });
+              hosts.push(manager);
               const mcp = await loadMcpCapabilities({
                 servers,
                 manager,
@@ -670,7 +671,6 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
               });
               grantedAuthorities.add(mcp.authority);
               capabilitySources.push({ records: mcp.service.records, service: mcp.service });
-              hosts.push(manager);
             }
           }
           extensionHost = kernel.composeExtensionHosts(hosts);

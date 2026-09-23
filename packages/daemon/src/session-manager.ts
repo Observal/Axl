@@ -1365,6 +1365,11 @@ export class SessionManager {
     return this.managed(parsed).session.extensionCommands();
   }
 
+  extensionCommandsIfOpen(sessionId: unknown) {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    return this.sessions.get(parsed)?.session.extensionCommands() ?? [];
+  }
+
   async invokeExtensionCommand(
     sessionId: unknown,
     name: string,
@@ -1383,8 +1388,37 @@ export class SessionManager {
 
   async cwd(sessionId: unknown): Promise<string> {
     const parsed = parseSessionId(sessionId, "sessionId");
-    await this.resume(parsed);
-    return this.managed(parsed).cwd;
+    const managed = this.sessions.get(parsed);
+    if (managed !== undefined) return managed.cwd;
+    this.assertNotQuarantined(parsed);
+    const path = this.logPath(parsed);
+    try {
+      await stat(path);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new DaemonError("unknown_session", `Session ${parsed} has no recorded history`, {
+          cause,
+        });
+      }
+      throw cause;
+    }
+    const opened = await JsonlEventLog.open(path, parsed);
+    const created = opened.events[0];
+    if (created?.type !== "session.created") {
+      throw new DaemonError("corrupt_session", `Session ${parsed} has no creation event`);
+    }
+    return created.payload.cwd;
+  }
+
+  async reloadIfOpen(
+    sessionId: unknown,
+    operationId: OperationId,
+    signal?: AbortSignal,
+  ): Promise<{ readonly boundaryEventIds: readonly EventId[] }> {
+    const parsed = parseSessionId(sessionId, "sessionId");
+    return this.sessions.has(parsed)
+      ? this.reload(parsed, operationId, signal)
+      : { boundaryEventIds: [] };
   }
 
   async resume(
