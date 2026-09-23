@@ -624,6 +624,36 @@ impl ReplicaReceipt {
         self.revocation_generation
     }
 
+    /// Deterministic replica-side receipt construction for in-process test witnesses. Production
+    /// replicas live in the control plane; this constructor never ships in a production artifact.
+    #[cfg(test)]
+    pub(crate) fn sign_for_test(
+        fields: TestReceiptFields,
+        signer: &SignatureKeyPair,
+    ) -> Result<Self, WitnessError> {
+        let mut value = Self {
+            result: fields.result,
+            replica_id: fields.replica_id,
+            witness_key_id: fields.witness_key_id,
+            lineage_hash: fields.lineage_hash,
+            counter: fields.counter,
+            commitment: fields.commitment,
+            predecessor_commitment: fields.predecessor_commitment,
+            operation_id: fields.operation_id,
+            request_hash: fields.request_hash,
+            ledger_sequence: fields.ledger_sequence,
+            issued_at_ms: fields.issued_at_ms,
+            revocation_generation: fields.revocation_generation,
+            signature: [0; 64],
+        };
+        value.signature = signer
+            .sign(&value.signature_input())
+            .map_err(|_| WitnessError::Crypto)?
+            .try_into()
+            .map_err(|_| WitnessError::Crypto)?;
+        Ok(value)
+    }
+
     fn fields_before_signature(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&WITNESS_PROTOCOL_VERSION.to_be_bytes());
@@ -647,6 +677,22 @@ impl ReplicaReceipt {
         out.extend_from_slice(&self.fields_before_signature());
         out
     }
+}
+
+#[cfg(test)]
+pub(crate) struct TestReceiptFields {
+    pub result: WitnessResult,
+    pub replica_id: Id,
+    pub witness_key_id: Id,
+    pub lineage_hash: [u8; 48],
+    pub counter: u64,
+    pub commitment: [u8; 48],
+    pub predecessor_commitment: [u8; 48],
+    pub operation_id: Id,
+    pub request_hash: [u8; 48],
+    pub ledger_sequence: u64,
+    pub issued_at_ms: u64,
+    pub revocation_generation: u64,
 }
 
 /// One versioned verification key pinned to exactly one replica identity.
@@ -813,6 +859,19 @@ impl QuorumCertificate {
 
     pub fn receipts(&self) -> &[ReplicaReceipt; WITNESS_REPLICA_COUNT] {
         &self.receipts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_receipts_for_test(
+        mut receipts: Vec<ReplicaReceipt>,
+    ) -> Result<Self, WitnessError> {
+        receipts.sort_by_key(ReplicaReceipt::replica_id);
+        let receipts = receipts
+            .try_into()
+            .map_err(|_| WitnessError::InvalidQuorum)?;
+        let value = Self { receipts };
+        value.validate_canonical_order()?;
+        Ok(value)
     }
 
     pub fn verify(
@@ -1104,6 +1163,26 @@ pub(crate) struct AuthorizedWitnessTransition {
     authorization: MutationAuthorization,
 }
 
+impl AuthorizedWitnessTransition {
+    /// The canonical committed record the storage adapter writes atomically with the successor.
+    pub(crate) fn committed_record(&self) -> Result<Vec<u8>, WitnessError> {
+        self.prepared.committed_record()
+    }
+
+    /// Exact signed request bytes, available to the storage adapter for the durable pending row.
+    pub(crate) fn request_bytes(&self) -> &[u8] {
+        &self.prepared.request_bytes
+    }
+
+    pub(crate) fn request_hash(&self) -> [u8; 48] {
+        self.prepared.request_hash
+    }
+
+    pub(crate) fn is_register(&self) -> bool {
+        matches!(self.authorization, MutationAuthorization::Register)
+    }
+}
+
 /// The only public continuation for a locally committed state transition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PendingWitnessStatus {
@@ -1245,6 +1324,67 @@ impl EndpointWitnessState {
             terminal: None,
             mutation_authorization: None,
         }
+    }
+
+    /// Rebuild the in-memory head from an authenticated durable confirmed head.
+    pub(crate) fn from_confirmed(
+        head_counter: u64,
+        head_commitment: [u8; 48],
+        previous_certificate_hash: [u8; 48],
+    ) -> Self {
+        Self {
+            head_counter,
+            head_commitment,
+            previous_certificate_hash,
+            pending: None,
+            terminal: None,
+            mutation_authorization: None,
+        }
+    }
+
+    pub(crate) fn head(&self) -> WitnessHead {
+        WitnessHead {
+            counter: self.head_counter,
+            commitment: self.head_commitment,
+        }
+    }
+
+    pub(crate) fn previous_certificate_hash(&self) -> [u8; 48] {
+        self.previous_certificate_hash
+    }
+
+    pub(crate) fn terminal(&self) -> Option<EndpointTerminalState> {
+        self.terminal
+    }
+
+    pub(crate) fn set_terminal(&mut self, terminal: EndpointTerminalState) {
+        self.terminal = Some(terminal);
+        self.mutation_authorization = None;
+    }
+
+    pub(crate) fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub(crate) fn has_mutation_authorization(&self) -> bool {
+        self.mutation_authorization.is_some()
+    }
+
+    /// Grant the initial registration authorization. Creation cannot sign a fresh read before its
+    /// endpoint credential exists, so the counter-1 `register` compare-and-swap is itself the
+    /// fresh witness check for a brand-new lineage.
+    pub(crate) fn authorize_initial_registration(&mut self) -> Result<(), WitnessError> {
+        if self.terminal.is_some() {
+            return Err(WitnessError::Quarantined);
+        }
+        if self.pending.is_some() {
+            return Err(WitnessError::PendingOperation);
+        }
+        if self.head_counter != 0 || self.head_commitment != ZERO_HASH {
+            return Err(WitnessError::GenerationMismatch);
+        }
+        self.mutation_authorization = Some(MutationAuthorization::Register);
+        Ok(())
     }
 
     pub(crate) fn prepare(
@@ -1471,6 +1611,10 @@ pub(crate) struct FreshQuorumHead {
     head: WitnessHead,
     revocation: Option<WitnessRevocationEvent>,
     fork: Option<WitnessResult>,
+    /// Ledger evidence for the pending operation's acceptance when the quorum answer carries it.
+    /// A `read` certificate carries none: it names only the read itself. `None` therefore means
+    /// "no evidence in this answer", not "never accepted"; the replicas remain the ordering
+    /// authority and answer the exact resent request with the recovered receipts or `Revoked`.
     accepted_operation: Option<AcceptedRecoveryEvidence>,
 }
 
@@ -1481,6 +1625,52 @@ pub(crate) enum FreshQuorumState {
     Mixed,
     Inconsistent,
     Unavailable,
+}
+
+impl FreshQuorumState {
+    /// Interpret a verified unanimous `read` certificate. The caller must already have verified
+    /// the certificate against the exact signed read request and the pinned trust set.
+    pub(crate) fn from_verified_read(
+        certificate: &QuorumCertificate,
+        result: WitnessResult,
+    ) -> Self {
+        let first = &certificate.receipts[0];
+        let head = WitnessHead {
+            counter: first.counter,
+            commitment: first.commitment,
+        };
+        match result {
+            WitnessResult::Head if head.counter == 0 && head.commitment == ZERO_HASH => {
+                Self::Absent
+            }
+            WitnessResult::Head => Self::Head(FreshQuorumHead {
+                head,
+                revocation: None,
+                fork: None,
+                accepted_operation: None,
+            }),
+            WitnessResult::Revoked => Self::Head(FreshQuorumHead {
+                head,
+                revocation: Some(WitnessRevocationEvent {
+                    position: WitnessLedgerPosition {
+                        sequence: first.ledger_sequence,
+                        revocation_generation: first.revocation_generation,
+                    },
+                }),
+                fork: None,
+                accepted_operation: None,
+            }),
+            WitnessResult::Forked
+            | WitnessResult::ConflictingSuccessor
+            | WitnessResult::HistoricalFork => Self::Head(FreshQuorumHead {
+                head,
+                revocation: None,
+                fork: Some(result),
+                accepted_operation: None,
+            }),
+            _ => Self::Inconsistent,
+        }
+    }
 }
 
 fn quarantine(reason: EndpointQuarantineReason) -> EndpointReconciliation {
@@ -1533,22 +1723,22 @@ fn reconcile_endpoint_state(
                 {
                     return quarantine(EndpointQuarantineReason::WitnessInconsistent);
                 }
-                let recoverable =
-                    pending
-                        .zip(quorum.accepted_operation)
-                        .is_some_and(|(pending, accepted)| {
-                            let proposed = WitnessHead {
-                                counter: pending.request.proposed_counter.unwrap_or(0),
-                                commitment: pending
-                                    .request
-                                    .proposed_commitment
-                                    .unwrap_or(ZERO_HASH),
-                            };
-                            quorum.head == proposed
-                                && accepted.operation_id == pending.operation_id()
+                // A pending operation whose proposed head is the revoked lineage's head may have
+                // been accepted before the revocation. With ledger evidence the ordering is
+                // checked here; without it, the exact resent request is the query and the
+                // replicas answer with the recovered receipts or with `Revoked`.
+                let recoverable = pending.is_some_and(|pending| {
+                    let proposed = WitnessHead {
+                        counter: pending.request.proposed_counter.unwrap_or(0),
+                        commitment: pending.request.proposed_commitment.unwrap_or(ZERO_HASH),
+                    };
+                    quorum.head == proposed
+                        && quorum.accepted_operation.as_ref().is_none_or(|accepted| {
+                            accepted.operation_id == pending.operation_id()
                                 && accepted.request_hash == pending.request_hash()
                                 && accepted.accepted_before_revocation(revocation)
-                        });
+                        })
+                });
                 return if recoverable {
                     EndpointReconciliation::RecoverAccepted
                 } else {

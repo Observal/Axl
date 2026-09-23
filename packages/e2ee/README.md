@@ -24,8 +24,7 @@ It provides:
   outbox recovery, durable acknowledgement and bounded retry retention, accepted-message-before-
   plaintext behavior, authenticated metadata manifests, restart-stable previous-epoch windows, and
   deterministic fault injection;
-- injected active-only envelope-key and legacy test rollback-anchor interfaces with crash
-  reconciliation for prepared keys;
+- injected active-only envelope-key interfaces with crash reconciliation for prepared keys;
 - canonical signed rollback-witness register, read, and advance requests, bounded per-replica
   overlap keysets, strict unanimous 3-of-3 certificate verification, append-ordered fork and
   revocation decisions, complete endpoint reconciliation and quarantine, and an output-gating state
@@ -33,6 +32,10 @@ It provides:
 - an acyclic sealed-inner and sealed-outer format that encrypts and authenticates the exact result
   inside the committed successor, then binds its SHA-384 state commitment to the exact signed
   request while keeping request construction and state material below the public API;
+- one native witness transaction runner used by every state-changing mutation: at most one OpenMLS
+  transition per operation, atomic successor and pending-request commit, successor-key activation
+  before request exposure, and exact-result release only after a unanimous certificate and
+  obsolete-key erasure, with restart recovery from the redb pending row;
 - fail-closed creation recovery serialized across threads and processes by an OS-backed per-session
   lifecycle claim; cleanup requires proof that no cryptographic state committed, while open finishes
   publication of authenticated state and removes only a stale `.initializing` marker.

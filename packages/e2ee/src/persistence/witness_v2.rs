@@ -3,10 +3,8 @@
 
 //! Version-2 native witness persistence codecs.
 //!
-//! These codecs are intentionally not wired to endpoint mutators yet. They define and validate the
-//! exact durable records that the later transaction runner will write atomically.
-
-#![allow(dead_code)]
+//! The transaction runner in `persistence.rs` writes these records atomically with the successor
+//! state. The pending row is the only durable record that changes at continuation time.
 
 use openmls_traits::{OpenMlsProvider, crypto::OpenMlsCrypto as _};
 
@@ -207,6 +205,7 @@ impl WitnessOperationIndex {
         Ok(out)
     }
 
+    #[cfg(test)]
     pub(super) fn decode(bytes: &[u8]) -> Result<Self, PersistenceError> {
         let (value, consumed) = Self::decode_prefix(bytes)?;
         if consumed != bytes.len() || value.encode()? != bytes {
@@ -359,9 +358,16 @@ impl DurableWitnessOperation {
             || recovered.predecessor != self.confirmed_head.commitment
             || operation_index.operation_kind != self.operation_kind
             || operation_index.fingerprint != self.fingerprint
-            || operation_index.disposition != self.disposition
             || operation_index.exact_result_kind != self.exact_result_kind
             || exact_result.kind() != self.exact_result_kind
+        {
+            return Err(PersistenceError::Corrupt);
+        }
+        // The operation index is sealed under the successor manifest, so it records the
+        // disposition at commit time and flips to `Completed` only in the next sealed successor.
+        // The pending row is the completion cache and may run ahead of the index, never behind.
+        if operation_index.disposition == WitnessOperationDisposition::Completed
+            && self.disposition == WitnessOperationDisposition::Pending
         {
             return Err(PersistenceError::Corrupt);
         }
@@ -452,6 +458,29 @@ pub(super) fn write_pending_operation(
         .insert(CURRENT_PENDING_KEY, encoded.as_slice())
         .map_err(|_| PersistenceError::Storage)?;
     Ok(())
+}
+
+/// Remove a completed row so the next successor can install its own pending row. A row that is
+/// still pending blocks every later mutation and is never removed here.
+pub(super) fn remove_completed_operation(write: &WriteTransaction) -> Result<(), PersistenceError> {
+    let mut table = write
+        .open_table(PENDING_WITNESS)
+        .map_err(|_| PersistenceError::Corrupt)?;
+    let existing = table
+        .get(CURRENT_PENDING_KEY)
+        .map_err(|_| PersistenceError::Storage)?
+        .map(|value| DurableWitnessOperation::decode(value.value()))
+        .transpose()?;
+    match existing {
+        None => Ok(()),
+        Some(existing) if existing.disposition == WitnessOperationDisposition::Completed => {
+            table
+                .remove(CURRENT_PENDING_KEY)
+                .map_err(|_| PersistenceError::Storage)?;
+            Ok(())
+        }
+        Some(_) => Err(PersistenceError::WitnessUnavailable),
+    }
 }
 
 pub(super) fn read_pending_operation(

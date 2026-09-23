@@ -459,7 +459,7 @@ pub(crate) enum TransactionOutcome {
 /// adapter then stages the immutable envelope or accepted-message identity in that same
 /// transaction. Network transmission and plaintext release are forbidden until `commit` returns.
 /// No relay route appears in this contract.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) trait TransactionalProvider {
     type TransactionError: StdError + Send + Sync + 'static;
     type Transaction<'a>: GroupTransaction<Error = Self::TransactionError>
