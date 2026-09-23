@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   type BlobReference,
   type CanonicalPresentationItem,
@@ -22,6 +22,8 @@ import { editDiffRows } from "./diff.ts";
 import { InteractionCard, type InteractionResponder } from "./interaction.tsx";
 import { Markdown } from "./markdown.tsx";
 import { highlightLine, languageForPath } from "./syntax.ts";
+
+export { Markdown } from "./markdown.tsx";
 
 export function contentText(content: readonly { readonly type: string; readonly text?: string }[]): string {
   return content.filter((item) => item.type === "text").map((item) => item.text ?? "").join("");
@@ -244,7 +246,30 @@ function assertNever(value: never): never {
   throw new Error(`Unhandled conversation presentation item: ${JSON.stringify(value)}`);
 }
 
-function EventRow({ item, tool, queue, interruption, interaction, attribution, resolveBlobUrl, loadFullToolOutput, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly item: ConversationPresentationItem; readonly tool?: ProjectedToolCall | undefined; readonly queue?: ProjectedQueueItem | undefined; readonly interruption?: ProjectedInterruptDelivery | undefined; readonly interaction?: ProjectedInteraction | undefined; readonly attribution?: ResponseAttribution | undefined; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element | null {
+// Canonical events are immutable and identified, so their presentation item is
+// stable. Caching by the event object keeps item props referentially stable so
+// the memoized rows below skip re-rendering unchanged history during streaming.
+const presentedCanonical = new WeakMap<object, CanonicalPresentationItem>();
+const presentedUnknown = new WeakMap<object, ConversationPresentationItem>();
+const eventAttribution = new WeakMap<object, ResponseAttribution>();
+
+function presentCanonicalCached(event: Parameters<typeof presentCanonicalEvent>[0]): CanonicalPresentationItem {
+  const cached = presentedCanonical.get(event);
+  if (cached !== undefined) return cached;
+  const item = presentCanonicalEvent(event);
+  presentedCanonical.set(event, item);
+  return item;
+}
+
+function presentUnknownCached(event: Parameters<typeof presentUnknownEvent>[0]): ConversationPresentationItem {
+  const cached = presentedUnknown.get(event);
+  if (cached !== undefined) return cached;
+  const item = presentUnknownEvent(event);
+  presentedUnknown.set(event, item);
+  return item;
+}
+
+const EventRow = memo(function EventRow({ item, tool, queue, interruption, interaction, attribution, resolveBlobUrl, loadFullToolOutput, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly item: ConversationPresentationItem; readonly tool?: ProjectedToolCall | undefined; readonly queue?: ProjectedQueueItem | undefined; readonly interruption?: ProjectedInterruptDelivery | undefined; readonly interaction?: ProjectedInteraction | undefined; readonly attribution?: ResponseAttribution | undefined; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element | null {
   switch (item.kind) {
     case "user.message": {
       const event = item.event;
@@ -314,7 +339,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     default:
       return assertNever(item);
   }
-}
+});
 
 export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly conversation: ConversationState; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element {
   const compacted = useMemo(() => new Set(conversation.compactedEventIds), [conversation.compactedEventIds]);
@@ -335,15 +360,20 @@ export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput,
       else if (record.event.type === "config.thinking") thinking = record.event.payload.effective;
       else if (record.event.type === "model.request_configured") startedAt = record.event.timestamp;
       else if (record.event.type === "assistant.message" && record.event.payload.usage !== undefined) {
-        result.set(record.event.id, { ...(provider === undefined ? {} : { provider }), ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinking }), ...(startedAt === undefined ? {} : { startedAt }) });
+        // Cache by the immutable event so the attribution prop stays referentially
+        // stable across streaming re-renders and does not defeat the row memo.
+        const cached = eventAttribution.get(record.event);
+        const attribution = cached ?? { ...(provider === undefined ? {} : { provider }), ...(model === undefined ? {} : { model }), ...(thinking === undefined ? {} : { thinking }), ...(startedAt === undefined ? {} : { startedAt }) };
+        if (cached === undefined) eventAttribution.set(record.event, attribution);
+        result.set(record.event.id, attribution);
         startedAt = undefined;
       }
     }
     return result;
   }, [conversation.records]);
   return <>{conversation.records.map((record) => {
-    if (record.kind === "unknown_event") return <EventRow key={record.event.id} item={presentUnknownEvent(record.event)} />;
+    if (record.kind === "unknown_event") return <EventRow key={record.event.id} item={presentUnknownCached(record.event)} />;
     if (compacted.has(record.event.id)) return null;
-    return <EventRow key={record.event.id} item={presentCanonicalEvent(record.event)} tool={record.event.type === "tool.call" ? tools.get(record.event.id) : undefined} queue={queue.get(record.event.id)} interruption={interruptions.get(record.event.id)} interaction={interactions.get(record.event.id)} attribution={attributions.get(record.event.id)} resolveBlobUrl={resolveBlobUrl} loadFullToolOutput={loadFullToolOutput} searchQuery={searchQuery} onCopyMessage={onCopyMessage} onForkMessage={onForkMessage} onRespondInteraction={onRespondInteraction} />;
+    return <EventRow key={record.event.id} item={presentCanonicalCached(record.event)} tool={record.event.type === "tool.call" ? tools.get(record.event.id) : undefined} queue={queue.get(record.event.id)} interruption={interruptions.get(record.event.id)} interaction={interactions.get(record.event.id)} attribution={attributions.get(record.event.id)} resolveBlobUrl={resolveBlobUrl} loadFullToolOutput={loadFullToolOutput} searchQuery={searchQuery} onCopyMessage={onCopyMessage} onForkMessage={onForkMessage} onRespondInteraction={onRespondInteraction} />;
   })}</>;
 }

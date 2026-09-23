@@ -576,6 +576,41 @@ test("cancels attachment-owned read requests without cancelling session operatio
   );
 });
 
+test("session.list reports the configured profile for each session", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "axl.sock");
+  const cwd = await realpath(directory);
+  const daemon = new AxlDaemon({
+    socketPath,
+    dataDirectory: join(directory, "data"),
+    runtime: ({ selection }) => ({
+      model: replyPort(),
+      tools: new ToolRegistry(),
+      configProfile: { profile: selection.profile ?? "standard" },
+    }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const client = await connectUnixClient(socketPath);
+  context.after(() => client.close());
+  const standard = await client.request("session.create", { cwd });
+  const chat = await client.request("session.create", { cwd, profile: "chat" });
+  const listed = await client.request("session.list", {
+    scope: "all_local",
+    order: "recent",
+    pageSize: 50,
+  });
+  assert.equal(
+    listed.sessions.find((session) => session.sessionId === standard.sessionId)?.profile,
+    "standard",
+  );
+  assert.equal(
+    listed.sessions.find((session) => session.sessionId === chat.sessionId)?.profile,
+    "chat",
+  );
+});
+
 test("expires incomplete snapshots and requires a replacement boundary", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
   context.after(() => rm(directory, { recursive: true, force: true }));

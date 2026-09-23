@@ -38,6 +38,9 @@ export class WorkspaceController implements WorkspaceOperations {
   private readonly client: AxlClient;
   private readonly sessionId: SessionId;
   private workspaceGeneration: string | undefined;
+  // Bumped on every reset() so a late response from a request started before the
+  // reset cannot write its stale generation back over a fresh one.
+  private epoch = 0;
 
   constructor(client: AxlClient, sessionId: SessionId) {
     this.client = client;
@@ -46,9 +49,11 @@ export class WorkspaceController implements WorkspaceOperations {
 
   reset(): void {
     this.workspaceGeneration = undefined;
+    this.epoch += 1;
   }
 
   async list(path: string, pageCursor?: string): Promise<WorkspaceListResult> {
+    const epoch = this.epoch;
     const result = await this.client.request("session.workspace.list", {
       sessionId: this.sessionId,
       path,
@@ -58,11 +63,12 @@ export class WorkspaceController implements WorkspaceOperations {
         ? {}
         : { ifWorkspaceGeneration: this.workspaceGeneration }),
     });
-    this.acceptGeneration(result.workspaceGeneration);
+    this.acceptGeneration(result.workspaceGeneration, epoch);
     return result;
   }
 
   async read(path: string, startLine = 1, fileRevision?: string): Promise<WorkspaceReadResult> {
+    const epoch = this.epoch;
     const result = await this.client.request("session.workspace.read", {
       sessionId: this.sessionId,
       path,
@@ -74,11 +80,12 @@ export class WorkspaceController implements WorkspaceOperations {
         : { ifWorkspaceGeneration: this.workspaceGeneration }),
       ...(fileRevision === undefined ? {} : { ifFileRevision: fileRevision }),
     });
-    this.acceptGeneration(result.workspaceGeneration);
+    this.acceptGeneration(result.workspaceGeneration, epoch);
     return result;
   }
 
   async review(scope: WorkspaceStatusScope): Promise<WorkspaceReviewSnapshot> {
+    const epoch = this.epoch;
     const status = await this.client.request("session.workspace.status", {
       sessionId: this.sessionId,
       scope,
@@ -86,7 +93,7 @@ export class WorkspaceController implements WorkspaceOperations {
         ? {}
         : { ifWorkspaceGeneration: this.workspaceGeneration }),
     });
-    this.acceptGeneration(status.workspaceGeneration);
+    this.acceptGeneration(status.workspaceGeneration, epoch);
     const diffs: WorkspaceDiffResult[] = [];
     for (const entry of status.entries.slice(0, 100)) {
       const diff = await this.client.request("session.workspace.diff", {
@@ -96,7 +103,7 @@ export class WorkspaceController implements WorkspaceOperations {
         repositoryGeneration: status.repositoryGeneration,
         maxBytes: DIFF_BYTES,
       });
-      this.acceptGeneration(diff.workspaceGeneration);
+      this.acceptGeneration(diff.workspaceGeneration, epoch);
       diffs.push(diff);
     }
     return {
@@ -115,7 +122,10 @@ export class WorkspaceController implements WorkspaceOperations {
     });
   }
 
-  private acceptGeneration(generation: string): void {
+  private acceptGeneration(generation: string, epoch: number): void {
+    // A reset() happened while this request was in flight; discard its result so
+    // it cannot poison the generation a newer request already established.
+    if (epoch !== this.epoch) return;
     if (this.workspaceGeneration !== undefined && this.workspaceGeneration !== generation) {
       throw new AxlClientError(
         "workspace_changed",

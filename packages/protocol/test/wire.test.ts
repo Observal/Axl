@@ -742,12 +742,24 @@ test("validates server messages and newline framing", () => {
           lastUserMessage: "hello",
           runtime: { state: "idle" },
           attachmentCount: 1,
+          profile: "chat",
         },
       ],
       nextPageCursor: "page-2",
     },
   } as const;
   assert.deepEqual(parseServerMessage(listed), listed);
+  assert.throws(
+    () =>
+      parseServerMessage({
+        ...listed,
+        result: {
+          ...listed.result,
+          sessions: [{ ...listed.result.sessions[0], profile: "invalid" }],
+        },
+      }),
+    ProtocolValidationError,
+  );
   assert.throws(
     () =>
       parseServerMessage({

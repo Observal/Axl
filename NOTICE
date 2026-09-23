@@ -5,7 +5,7 @@ Copyright 2026 Lokesh
 Copyright 2026 Srihari
 Copyright 2026 VishnuM449
 
-Axl is an independent implementation. No third-party source code or fixtures are copied or adapted into this repository.
+Axl is an independent implementation. Third-party data retained in this repository is identified below with its source and license; no third-party source code is copied or adapted.
 
 Axl uses the official Model Context Protocol TypeScript SDK as an external dependency. It is distributed under its own MIT license.
 
@@ -16,6 +16,10 @@ Axl uses highlight.js 11.12.0 as an external dependency for syntax highlighting.
 Axl uses grok-mermaid 0.2.2 as an external dependency for Unicode Mermaid rendering. It is distributed under its own Apache-2.0 license.
 
 Axl's generated model catalog includes factual metadata derived from models.dev, retrieved from https://models.dev/api.json. Models.dev is Copyright 2025 models.dev contributors and is distributed under the MIT license.
+
+Axl's Codeword dictionaries are transformed from the English Speller Database (ESDB, formerly SCOWLv2) release rel-2026.02.25 at commit 7e99edab8e32f9f9ea2b15f249ca8d4d67237410. ESDB is Copyright 2000-2026 by Kevin Atkinson and is distributed under the permissive terms in LICENSES/LicenseRef-ESDB.txt.
+
+Axl's Chess puzzle subset is transformed from the official Lichess puzzle database snapshot reported for 2026-09-10 and retrieved from https://database.lichess.org/. Lichess database exports are dedicated to the public domain under CC0 1.0; the legal text is in LICENSES/CC0-1.0.txt.
 
 Axl uses `@deepseek-ai/node-addon-landlock-run` 0.1.1 from DeepSeek Harness.
 Its JavaScript package includes an MIT notice, and its platform launcher packages

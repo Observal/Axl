@@ -155,6 +155,14 @@ export function BrowserPane({
         </div>
       ) : (
         <div className={`browser-frame${loading ? " loading" : ""}`}>
+          {/*
+            Embedded pages are cross-origin dev servers, so allow-same-origin
+            only grants same-origin privileges relative to the framed page's own
+            origin, never the gateway origin. no-referrer plus the random gateway
+            path keep the launch credentials unreachable. Framing of the gateway
+            itself is refused by frame-ancestors 'none'. See
+            docs/architecture/web-gateway-security.md.
+          */}
           <iframe
             key={`${url}#${state.generation}`}
             title="Development preview"

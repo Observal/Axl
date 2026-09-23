@@ -12,6 +12,44 @@ export interface Overlay {
   dispose?(): void;
 }
 
+/** A separate highest-priority slot for daemon-authoritative attention. */
+export class AttentionOverlaySlot implements Component {
+  private entry: Overlay | undefined;
+
+  get active(): Overlay | undefined {
+    return this.entry;
+  }
+
+  replace(overlay: Overlay): void {
+    this.clear();
+    this.entry = overlay;
+  }
+
+  clear(): void {
+    const previous = this.entry;
+    this.entry = undefined;
+    previous?.dispose?.();
+  }
+
+  handleInput(data: string): void {
+    this.entry?.handleKey(data);
+  }
+
+  paste(text: string): boolean {
+    if (this.entry?.paste === undefined) return false;
+    this.entry.paste(text);
+    return true;
+  }
+
+  cursorPlacement(): CursorPlacement | undefined {
+    return this.entry?.cursor?.();
+  }
+
+  render(width: number): string[] {
+    return this.entry?.render(width) ?? [];
+  }
+}
+
 /** Retained overlay stack with one explicit keyboard-focus owner. */
 export class OverlayStack implements Component {
   private readonly entries: Overlay[] = [];

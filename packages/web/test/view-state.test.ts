@@ -4,20 +4,43 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ConversationState, SessionSummary } from "@axl/sdk";
+import { type ConversationState, parseSessionId, type SessionSummary } from "@axl/sdk";
 import { editDiffRows } from "@axl/ui";
 import {
+  anyModalOverlayOpen,
+  compactNumber,
   consumePendingPromptDeliveries,
   directShellInput,
+  findSessionInCatalog,
+  isScrolledToBottom,
   matchesSession,
+  messageBlobs,
+  nextSelectableSlashIndex,
+  previewSessionSummary,
+  type OverlayFlags,
   promptDeliveryShortcut,
   restoreDraft,
+  selectableSlashCommand,
+  sessionStateHistory,
   sessionTitle,
   sessionUsageStats,
+  topLightOverlay,
   transcriptMessageMatches,
   transcriptPromptBreakpoints,
   workspaceTotals,
 } from "../src/view-state.ts";
+
+const NO_OVERLAYS: OverlayFlags = {
+  requeue: false,
+  sessionLifecycle: false,
+  newSession: false,
+  commandPalette: false,
+  transcriptSearch: false,
+  usage: false,
+  controlCenter: false,
+  mobileDock: false,
+  sidebar: false,
+};
 
 const session = {
   cwd: "/workspace/مرحبا",
@@ -185,6 +208,135 @@ test("edit presentation keeps replacement order and line sides", () => {
   assert.deepEqual(editDiffRows({ edits: [null, "bad"] }), []);
 });
 
+test("message blobs are collected once across user and assistant messages", () => {
+  const conversation = {
+    records: [
+      {
+        kind: "event",
+        event: {
+          type: "user.message",
+          payload: {
+            content: [
+              { type: "text", text: "see this" },
+              { type: "blob", blob: { sha256: "a", mediaType: "image/png" } },
+            ],
+          },
+        },
+      },
+      {
+        kind: "event",
+        event: {
+          type: "assistant.message",
+          payload: { content: [{ type: "blob", blob: { sha256: "a", mediaType: "image/png" } }] },
+        },
+      },
+      {
+        kind: "event",
+        event: {
+          type: "assistant.message",
+          payload: { content: [{ type: "blob", blob: { sha256: "b", mediaType: "image/png" } }] },
+        },
+      },
+      { kind: "activity" },
+    ],
+  } as unknown as ConversationState;
+
+  assert.deepEqual(
+    messageBlobs(conversation).map((blob) => blob.sha256),
+    ["a", "b"],
+  );
+});
+
+test("session state history keeps the last twenty configuration events newest first", () => {
+  const records = Array.from({ length: 25 }, (_value, index) => ({
+    kind: "event",
+    event: {
+      id: `model-${index}`,
+      type: "config.model",
+      timestamp: index,
+      payload: { modelId: `model-${index}` },
+    },
+  }));
+  const conversation = { records } as unknown as ConversationState;
+  const history = sessionStateHistory(conversation);
+  assert.equal(history.length, 20);
+  assert.equal(history[0]?.id, "model-24");
+  assert.equal(history[0]?.label, "Model");
+  assert.equal(history.at(-1)?.id, "model-5");
+});
+
+test("compact number abbreviates thousands and keeps small values exact", () => {
+  assert.equal(compactNumber(999), "999");
+  assert.equal(compactNumber(1000), "1.0k");
+  assert.equal(compactNumber(1240), "1.2k");
+  assert.equal(compactNumber(12_800), "13k");
+});
+
+test("scroll stickiness tolerates a small gap but not a scrolled-up reader", () => {
+  assert.equal(isScrolledToBottom({ scrollTop: 900, scrollHeight: 1000, clientHeight: 100 }), true);
+  assert.equal(isScrolledToBottom({ scrollTop: 850, scrollHeight: 1000, clientHeight: 100 }), true);
+  assert.equal(
+    isScrolledToBottom({ scrollTop: 835, scrollHeight: 1000, clientHeight: 100 }),
+    false,
+  );
+  assert.equal(isScrolledToBottom({ scrollTop: 0, scrollHeight: 1000, clientHeight: 100 }), false);
+  assert.equal(
+    isScrolledToBottom({ scrollTop: 0, scrollHeight: 1000, clientHeight: 100 }, 1000),
+    true,
+  );
+});
+
+test("catalog scan confirms deletion only after a terminal page", async () => {
+  const fetchPage = (
+    cursor: string | undefined,
+  ): Promise<{ sessions: { sessionId: string }[]; nextPageCursor?: string }> =>
+    Promise.resolve(
+      cursor === "p2"
+        ? { sessions: [{ sessionId: "c" }] }
+        : { sessions: [{ sessionId: "a" }, { sessionId: "b" }], nextPageCursor: "p2" },
+    );
+
+  assert.deepEqual(await findSessionInCatalog(fetchPage, "c"), {
+    session: { sessionId: "c" },
+    confirmedAbsent: false,
+  });
+  assert.deepEqual(await findSessionInCatalog(fetchPage, "z"), { confirmedAbsent: true });
+});
+
+test("catalog scan leaves absence unconfirmed when the page cap is hit", async () => {
+  let pageCount = 0;
+  const fetchPage = (): Promise<{ sessions: { sessionId: string }[]; nextPageCursor?: string }> => {
+    pageCount += 1;
+    return Promise.resolve({ sessions: [{ sessionId: "other" }], nextPageCursor: "more" });
+  };
+  assert.deepEqual(await findSessionInCatalog(fetchPage, "missing", 3), { confirmedAbsent: false });
+  assert.equal(pageCount, 3);
+});
+
+test("modal dialogs suppress global shortcuts but light overlays do not", () => {
+  assert.equal(anyModalOverlayOpen(NO_OVERLAYS), false);
+  assert.equal(anyModalOverlayOpen({ ...NO_OVERLAYS, newSession: true }), true);
+  assert.equal(anyModalOverlayOpen({ ...NO_OVERLAYS, requeue: true }), true);
+  assert.equal(anyModalOverlayOpen({ ...NO_OVERLAYS, sessionLifecycle: true }), true);
+  // Light overlays must not block shortcuts by themselves.
+  assert.equal(anyModalOverlayOpen({ ...NO_OVERLAYS, commandPalette: true }), false);
+  assert.equal(anyModalOverlayOpen({ ...NO_OVERLAYS, sidebar: true }), false);
+});
+
+test("Escape closes one light overlay at a time and never a modal dialog", () => {
+  assert.equal(topLightOverlay(NO_OVERLAYS), undefined);
+  // Modal dialogs own their Escape; they are not returned as closable here.
+  assert.equal(topLightOverlay({ ...NO_OVERLAYS, newSession: true }), undefined);
+  assert.equal(topLightOverlay({ ...NO_OVERLAYS, requeue: true }), undefined);
+  // The most modal light overlay closes first.
+  assert.equal(
+    topLightOverlay({ ...NO_OVERLAYS, commandPalette: true, sidebar: true }),
+    "commandPalette",
+  );
+  assert.equal(topLightOverlay({ ...NO_OVERLAYS, usage: true, sidebar: true }), "usage");
+  assert.equal(topLightOverlay({ ...NO_OVERLAYS, sidebar: true }), "sidebar");
+});
+
 test("workspace totals combine additions and deletions across files", () => {
   assert.deepEqual(
     workspaceTotals([
@@ -193,4 +345,44 @@ test("workspace totals combine additions and deletions across files", () => {
     ] as never),
     { additions: 2, deletions: 1 },
   );
+});
+
+test("slash-command navigation and selection skip unavailable commands", () => {
+  const commands = [
+    { availability: { state: "available" } },
+    { availability: { state: "unavailable" } },
+    { availability: { state: "available" } },
+  ] as const;
+  // Arrow-down from the first available command skips the unavailable middle one.
+  assert.equal(nextSelectableSlashIndex(commands, 0, 1), 2);
+  // Arrow-up wraps past the unavailable entry back to the first available one.
+  assert.equal(nextSelectableSlashIndex(commands, 2, -1), 0);
+  // A highlighted unavailable command falls back to the first available command.
+  assert.equal(selectableSlashCommand(commands, 1), commands[0]);
+  assert.equal(selectableSlashCommand(commands, 2), commands[2]);
+  // No selectable command yields undefined and a stable index.
+  const unavailable = [{ availability: { state: "unavailable" } }] as const;
+  assert.equal(selectableSlashCommand(unavailable, 0), undefined);
+  assert.equal(nextSelectableSlashIndex(unavailable, 0, 1), 0);
+});
+
+test("preview session summary carries opened fields with placeholder counts", () => {
+  const opened = {
+    sessionId: parseSessionId("123e4567-e89b-42d3-a456-426614174777"),
+    cwd: "/repo",
+    title: "Cloned",
+    runtime: { state: "idle" as const },
+    profile: "chat" as const,
+  };
+  const summary = previewSessionSummary(opened, 1234);
+  assert.equal(summary.sessionId, opened.sessionId);
+  assert.equal(summary.cwd, "/repo");
+  assert.equal(summary.title, "Cloned");
+  assert.equal(summary.createdAt, 1234);
+  assert.equal(summary.updatedAt, 1234);
+  assert.equal(summary.userMessageCount, 0);
+  assert.equal(summary.profile, "chat");
+  // No title falls through to undefined rather than an empty string.
+  const untitled = previewSessionSummary({ ...opened, title: undefined }, 1);
+  assert.equal(untitled.title, undefined);
 });

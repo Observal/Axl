@@ -8,7 +8,10 @@ const PASTE_ON = "\x1b[?2004h";
 const PASTE_OFF = "\x1b[?2004l";
 const FOCUS_ON = "\x1b[?1004h";
 const FOCUS_OFF = "\x1b[?1004l";
+const MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 const KITTY_QUERY_AND_ENABLE = "\x1b[>1u\x1b[?u\x1b[c";
+const CELL_SIZE_QUERY = "\x1b[16t";
 const KITTY_KEYS_OFF = "\x1b[<u";
 const MODIFY_OTHER_KEYS_ON = "\x1b[>4;2m";
 const MODIFY_OTHER_KEYS_OFF = "\x1b[>4;0m";
@@ -49,12 +52,18 @@ export function assertInteractiveTerminal(input: TerminalInput, output: Terminal
   }
 }
 
+export interface TerminalCellSize {
+  readonly width: number;
+  readonly height: number;
+}
+
 export interface TerminalSessionOptions {
   readonly input: TerminalInput;
   readonly output: TerminalOutput;
   readonly onInput: (sequence: string) => void;
   readonly onInputError: (error: Error) => void;
   readonly onResize: () => void;
+  readonly onCellSize?: (size: TerminalCellSize | undefined) => void;
   readonly suspendProcess?: () => void;
   readonly keyboardNegotiationTimeoutMs?: number;
 }
@@ -72,6 +81,24 @@ function isDeviceAttributes(sequence: string): boolean {
   return sequence === "\x1b[c" || /^\?[0-9;]*c$/.test(sequence.slice(2));
 }
 
+function terminalCellSize(sequence: string): TerminalCellSize | null | undefined {
+  if (!sequence.startsWith("\x1b[6;") || !sequence.endsWith("t")) return undefined;
+  const match = /^6;(\d+);(\d+)t$/.exec(sequence.slice(2));
+  if (match === null) return null;
+  const height = Number(match[1]);
+  const width = Number(match[2]);
+  if (
+    !Number.isSafeInteger(width) ||
+    width <= 0 ||
+    width > 4_096 ||
+    !Number.isSafeInteger(height) ||
+    height <= 0 ||
+    height > 4_096
+  )
+    return null;
+  return Object.freeze({ width, height });
+}
+
 /** Owns process-terminal modes, input buffering, and listeners for one interactive attachment. */
 export class TerminalSession {
   private readonly options: TerminalSessionOptions;
@@ -82,6 +109,8 @@ export class TerminalSession {
   private resizeAttached = false;
   private pasteEnabled = false;
   private focusEnabled = false;
+  private mouseCaptureRequested = false;
+  private mouseCaptureEnabled = false;
   private keyboardMode: KeyboardMode = "inactive";
   private keyboardTimer: NodeJS.Timeout | undefined;
   private inputBuffer: TerminalInputBuffer | undefined;
@@ -109,11 +138,15 @@ export class TerminalSession {
       this.pasteEnabled = true;
       this.focusEnabled = true;
       this.keyboardMode = "negotiating";
-      this.options.output.write(`${PASTE_ON}${FOCUS_ON}${KITTY_QUERY_AND_ENABLE}`);
       this.inputAttached = true;
       this.options.input.on("data", this.inputListener);
       this.resizeAttached = true;
-      this.options.output.on("resize", this.options.onResize);
+      this.options.output.on("resize", this.resizeListener);
+      this.options.onCellSize?.(undefined);
+      this.options.output.write(
+        `${PASTE_ON}${FOCUS_ON}${KITTY_QUERY_AND_ENABLE}${CELL_SIZE_QUERY}${this.mouseCaptureRequested ? MOUSE_ON : ""}`,
+      );
+      this.mouseCaptureEnabled = this.mouseCaptureRequested;
       this.scheduleKeyboardFallback();
       this.started = true;
     } catch (error) {
@@ -136,11 +169,25 @@ export class TerminalSession {
       !this.resizeAttached &&
       !this.pasteEnabled &&
       !this.focusEnabled &&
-      this.keyboardMode === "inactive"
+      this.keyboardMode === "inactive" &&
+      !this.mouseCaptureEnabled
     ) {
       return;
     }
     this.restore();
+  }
+
+  setMouseCapture(enabled: boolean): void {
+    this.mouseCaptureRequested = enabled;
+    if (!this.started || enabled === this.mouseCaptureEnabled) return;
+    this.options.output.write(enabled ? MOUSE_ON : MOUSE_OFF);
+    this.mouseCaptureEnabled = enabled;
+  }
+
+  refreshMouseCapture(): void {
+    if (!this.started) return;
+    this.options.output.write(this.mouseCaptureRequested ? MOUSE_ON : MOUSE_OFF);
+    this.mouseCaptureEnabled = this.mouseCaptureRequested;
   }
 
   suspend(): void {
@@ -179,7 +226,22 @@ export class TerminalSession {
     }
   };
 
+  private readonly resizeListener = (): void => {
+    this.options.onCellSize?.(undefined);
+    try {
+      this.options.output.write(CELL_SIZE_QUERY);
+    } catch (error) {
+      this.reportInputError(error);
+    }
+    this.options.onResize();
+  };
+
   private handleSequence(sequence: string): void {
+    const size = terminalCellSize(sequence);
+    if (size !== undefined) {
+      this.options.onCellSize?.(size ?? undefined);
+      return;
+    }
     const flags = kittyFlags(sequence);
     if (flags !== undefined) {
       this.clearKeyboardTimer();
@@ -250,19 +312,25 @@ export class TerminalSession {
       this.inputAttached = false;
     }
     if (this.resizeAttached) {
-      attempt(() => this.options.output.off("resize", this.options.onResize));
+      attempt(() => this.options.output.off("resize", this.resizeListener));
       this.resizeAttached = false;
     }
-    if (this.pasteEnabled || this.focusEnabled || this.keyboardMode !== "inactive") {
+    if (
+      this.pasteEnabled ||
+      this.focusEnabled ||
+      this.mouseCaptureEnabled ||
+      this.keyboardMode !== "inactive"
+    ) {
       const keyboardOff =
         this.keyboardMode === "modifyOtherKeys" ? MODIFY_OTHER_KEYS_OFF : KITTY_KEYS_OFF;
       attempt(() => {
         this.options.output.write(
-          `${PASTE_OFF}${FOCUS_OFF}${keyboardOff}${RESET_STYLE}${ENABLE_AUTOWRAP}${SHOW_CURSOR}`,
+          `${PASTE_OFF}${FOCUS_OFF}${this.mouseCaptureEnabled ? MOUSE_OFF : ""}${keyboardOff}${RESET_STYLE}${ENABLE_AUTOWRAP}${SHOW_CURSOR}`,
         );
       });
       this.pasteEnabled = false;
       this.focusEnabled = false;
+      this.mouseCaptureEnabled = false;
       this.keyboardMode = "inactive";
     }
     attempt(() => this.options.input.setRawMode?.(this.previousRaw));

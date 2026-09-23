@@ -64,6 +64,7 @@ export interface WebPreferences {
   readonly sidebarCollapsed: boolean;
   readonly changesView: "files" | "all";
   readonly panes: readonly WebPaneId[];
+  readonly theme: "system" | "light" | "dark";
 }
 
 const MAX_WEB_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -75,6 +76,7 @@ const DEFAULT_WEB_PREFERENCES: WebPreferences = {
   sidebarCollapsed: false,
   changesView: "files",
   panes: ["browser", "files"],
+  theme: "system",
 };
 
 function isWorkspaceDiffRequest(text: string): boolean {
@@ -104,8 +106,19 @@ function parsePreferences(value: unknown): WebPreferences {
   if (
     Object.keys(record).some(
       (key) =>
-        !["sidebarWidth", "dockWidth", "sidebarCollapsed", "changesView", "panes"].includes(key),
+        ![
+          "sidebarWidth",
+          "dockWidth",
+          "sidebarCollapsed",
+          "changesView",
+          "panes",
+          "theme",
+        ].includes(key),
     ) ||
+    (record.theme !== undefined &&
+      record.theme !== "system" &&
+      record.theme !== "light" &&
+      record.theme !== "dark") ||
     !Number.isInteger(record.sidebarWidth) ||
     Number(record.sidebarWidth) < 200 ||
     Number(record.sidebarWidth) > 420 ||
@@ -122,6 +135,7 @@ function parsePreferences(value: unknown): WebPreferences {
     sidebarCollapsed: record.sidebarCollapsed,
     changesView: record.changesView,
     panes: parsePaneIds(record.panes),
+    theme: (record.theme as "system" | "light" | "dark" | undefined) ?? "system",
   };
 }
 
@@ -671,13 +685,28 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
         }
         const next = parsePreferences(JSON.parse(Buffer.concat(chunks).toString("utf8")));
         preferences = next;
-        preferenceWrites = preferenceWrites.then(async () => {
-          await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
-          const temporary = `${preferencesPath}.${process.pid}.tmp`;
-          await writeFile(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-          await rename(temporary, preferencesPath);
-        });
-        await preferenceWrites;
+        // Recover from a prior failed write so persistence is not disabled for the
+        // gateway lifetime, and use a unique temp path so concurrent writers do
+        // not clobber each other's temp file. Still surface this write's outcome.
+        const write = preferenceWrites
+          .catch(() => undefined)
+          .then(async () => {
+            await mkdir(options.stateDirectory, { recursive: true, mode: 0o700 });
+            const temporary = `${preferencesPath}.${randomUUID()}.tmp`;
+            try {
+              await writeFile(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+              await rename(temporary, preferencesPath);
+            } catch (cause) {
+              await rm(temporary, { force: true });
+              throw cause;
+            }
+          });
+        preferenceWrites = write;
+        try {
+          await write;
+        } catch {
+          return send(response, 500, "Could not persist preferences");
+        }
         return send(response, 200, "{}", "application/json; charset=utf-8");
       }
       if (request.method !== "GET") return send(response, 405, "Method not allowed");
@@ -768,13 +797,21 @@ export async function startWebGateway(options: WebGatewayOptions): Promise<WebGa
       const text = data.toString();
       if (binary || Buffer.byteLength(text) > MAX_WIRE_MESSAGE_BYTES)
         return webSocket.close(1009, "Text message limit exceeded");
+      // Require exactly one NDJSON record per frame (one trailing newline, no
+      // interior newlines). Otherwise many requests could be packed into one
+      // frame and counted once, bypassing the per-record rate limits before the
+      // frame is written verbatim to the daemon socket.
+      if (!text.endsWith("\n") || text.indexOf("\n") !== text.length - 1)
+        return webSocket.close(1008, "One request per message required");
+      const record = text.slice(0, -1);
+      if (record === "") return webSocket.close(1008, "Empty request");
       const now = performance.now();
       if (now - windowStarted > 10_000) {
         windowStarted = now;
         messages = 0;
         workspaceDiffs = 0;
       }
-      if (isWorkspaceDiffRequest(text)) {
+      if (isWorkspaceDiffRequest(record)) {
         if (++workspaceDiffs > MAX_WORKSPACE_REVIEW_DIFFS)
           return webSocket.close(1008, "Rate limit exceeded");
       } else {

@@ -34,6 +34,7 @@ export function ModelPicker({
   const summary = useRef<HTMLElement>(null);
   const search = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
   const selected = choices.find(
     (choice) => choice.providerId === provider && choice.modelId === model,
   );
@@ -59,17 +60,29 @@ export function ModelPicker({
     details.current?.setAttribute("open", "");
     focusPicker();
   }, [openRequest, initialFocus]);
+  useEffect(() => {
+    if (!open) return;
+    // Close the menu when the pointer goes down outside it, like the usage panel.
+    const onPointerDown = (event: PointerEvent): void => {
+      if (details.current !== null && !details.current.contains(event.target as Node)) close();
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [open]);
 
   return (
+    <span className="model-picker-shell">
     <details
       className="model-picker"
       ref={details}
       onToggle={(event) => {
-        if (disabled && event.currentTarget.open) {
+        const isOpen = event.currentTarget.open;
+        if (disabled && isOpen) {
           close();
           return;
         }
-        if (event.currentTarget.open) focusPicker();
+        setOpen(isOpen);
+        if (isOpen) focusPicker();
         else setQuery("");
       }}
       onKeyDown={(event) => {
@@ -102,7 +115,30 @@ export function ModelPicker({
           <path d="m3 4.5 3 3 3-3" />
         </svg>
       </summary>
-      <div className="model-menu">
+      <div
+        className="model-menu"
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          const focusables = Array.from(
+            details.current?.querySelectorAll<HTMLElement>(
+              ".model-options button:not([disabled]), .effort-options button:not([disabled])",
+            ) ?? [],
+          );
+          if (focusables.length === 0) return;
+          event.preventDefault();
+          const activeIndex = focusables.indexOf(document.activeElement as HTMLElement);
+          if (event.key === "ArrowDown") {
+            (activeIndex < 0
+              ? focusables[0]
+              : focusables[Math.min(activeIndex + 1, focusables.length - 1)]
+            )?.focus();
+          } else if (activeIndex <= 0) {
+            search.current?.focus();
+          } else {
+            focusables[activeIndex - 1]?.focus();
+          }
+        }}
+      >
         <label className="model-search">
           <span className="sr-only">Search models</span>
           <input
@@ -150,11 +186,6 @@ export function ModelPicker({
             </section>
           ))}
         </div>
-        {error && (
-          <p className="model-error" role="alert">
-            {error}
-          </p>
-        )}
         {levels.length > 0 && (
           <>
             <div className="model-menu-rule" />
@@ -180,5 +211,11 @@ export function ModelPicker({
         )}
       </div>
     </details>
+      {error && (
+        <span className="model-error-toast" role="alert">
+          {error}
+        </span>
+      )}
+    </span>
   );
 }

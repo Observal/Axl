@@ -17,7 +17,7 @@ import {
   type ProviderManagementService,
   type SessionInteractionRequest,
 } from "@axl/daemon";
-import type { TerminalExtension } from "@axl/extension-api";
+import type { ActivityInput, TerminalExtension } from "@axl/extension-api";
 import {
   type CompactionSettings,
   type ModelPort,
@@ -1350,6 +1350,530 @@ for (const submission of ["local", "other attachment"] as const) {
   }
 }
 
+test("a fake activity shows live agent work and stays open on completion", async (context) => {
+  let release!: () => void;
+  let began = false;
+  let turns = 0;
+  const gate = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
+  });
+  const model: ModelPort = {
+    stream() {
+      turns += 1;
+      const turn = turns;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (turn === 1) {
+          yield { type: "tool_call", callId: "activity-tool", name: "echo", input: {} };
+          yield { type: "completed", stopReason: "tool_use", usage };
+          return;
+        }
+        yield { type: "text_delta", text: "activity work complete" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const keys: string[] = [];
+  const pauses: string[] = [];
+  let help = false;
+  let disposals = 0;
+  const extension: TerminalExtension = {
+    manifest: {
+      id: "test.activity-host",
+      name: "Activity host",
+      capabilities: ["terminal.activities"],
+    },
+    activate(api) {
+      api.registerActivity({
+        id: "test.fake-game",
+        name: "Fake Game",
+        description: "TUI activity fixture",
+        category: "game",
+        create: () => ({
+          render: () => ({
+            lines: [[{ text: help ? "FAKE HELP" : "FAKE ACTIVITY", style: "accent" }]],
+          }),
+          handleInput: (input) => {
+            if (input.type === "key") {
+              keys.push(input.key);
+              if (input.key === "?") help = !help;
+            }
+          },
+          pause: (reason) => pauses.push(reason),
+          resume: () => undefined,
+          serialize: () => ({ keys: keys.length }),
+          dispose: () => {
+            disposals += 1;
+          },
+        }),
+      });
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, () => {
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "echo",
+      description: "Wait while the activity remains interactive",
+      inputSchema: { type: "object" },
+      execute: async () => {
+        began = true;
+        await gate;
+        return { content: [{ type: "text", text: "tool complete" }], isError: false };
+      },
+    });
+    return tools;
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    extensions: [extension],
+  });
+  context.after(() => app.stop());
+
+  input.write("work\r");
+  await until(() => began, "long-running activity fixture");
+  input.write("/play\r");
+  await until(() => text().includes("FAKE ACTIVITY"), "active activity");
+  const agentRows = (
+    app as unknown as { activityAgentRows(width: number): readonly { readonly text: string }[] }
+  ).activityAgentRows(48);
+  assert.ok(agentRows.some(({ text: row }) => row.toLowerCase().includes("echo")));
+  assert.ok(agentRows.every(({ text: row }) => stripAnsi(row).length <= 48));
+  input.write("?");
+  await until(() => text().includes("FAKE HELP"), "activity help through composed TUI");
+  input.write("?");
+  await until(() => text().includes("FAKE ACTIVITY"), "activity help return");
+  input.write("\t\x0f");
+  await until(
+    () =>
+      (app as unknown as { view: { toolOutputDisplay: string } }).view.toolOutputDisplay === "full",
+    "Agent pane tool details",
+  );
+  const loungeInternals = app as unknown as {
+    editor: { readonly text: string };
+    activitySurface: { readonly state: string; readonly agentFocused: boolean };
+  };
+  input.write("/he\t");
+  await until(() => loungeInternals.editor.text === "/help", "Agent completion owns Tab");
+  assert.equal(loungeInternals.activitySurface.agentFocused, true);
+  input.write("\x15draft in Lounge");
+  await until(() => loungeInternals.editor.text === "draft in Lounge", "shared Lounge draft");
+  input.write("\t");
+  assert.equal(loungeInternals.activitySurface.agentFocused, false);
+  assert.equal(loungeInternals.editor.text, "draft in Lounge");
+  input.write("z");
+  await until(() => keys.includes("z"), "isolated activity input");
+  release();
+  await until(() => text().includes("activity work complete"), "daemon completion");
+  await until(() => text().includes("Axl finished"), "non-blocking completion notice");
+  assert.equal(
+    (app as unknown as { activitySurface: { state: string } }).activitySurface.state,
+    "active",
+  );
+  assert.equal(disposals, 0);
+  assert.deepEqual(pauses, []);
+  input.write("\t\r");
+  await until(() => turns >= 3, "prompt submitted from Lounge Agent pane");
+  assert.equal(loungeInternals.activitySurface.state, "active");
+  assert.equal(loungeInternals.editor.text, "");
+
+  input.write("/settings\r");
+  await until(() => text().includes("Terminal settings"), "Lounge settings takeover");
+  assert.equal(loungeInternals.activitySurface.agentFocused, true);
+  input.write("\x1b");
+  await until(() => text().includes("FAKE ACTIVITY"), "Lounge settings return");
+  assert.equal(loungeInternals.activitySurface.state, "active");
+  assert.equal(loungeInternals.activitySurface.agentFocused, true);
+
+  input.write("/review\r\x1b");
+  await until(() => text().includes("Workspace review"), "Lounge review takeover");
+  await until(() => text().includes("FAKE ACTIVITY"), "cancelled Lounge review return");
+  assert.equal(loungeInternals.activitySurface.state, "active");
+  assert.equal(loungeInternals.activitySurface.agentFocused, true);
+
+  input.write("\x14");
+  await until(
+    () =>
+      (app as unknown as { activitySurface: { state: string } }).activitySurface.state === "closed",
+    "explicit transcript return",
+  );
+});
+
+test("Ctrl+P keeps the wide Agent pane live and returns to the same activity", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.columns = 120;
+  output.rows = 30;
+  let firstCreations = 0;
+  let firstDisposals = 0;
+  const activityMouseInputs: ActivityInput[] = [];
+  const extension: TerminalExtension = {
+    manifest: {
+      id: "test.library-app",
+      name: "Library app",
+      capabilities: ["terminal.activities"],
+    },
+    activate(api) {
+      for (const [id, name] of [
+        ["test.library-first", "First Library Game"],
+        ["test.library-second", "Second Library Game"],
+      ] as const) {
+        api.registerActivity({
+          id,
+          name,
+          description: `${name} fixture`,
+          category: "game",
+          mouse: true,
+          create: () => {
+            if (id === "test.library-first") firstCreations += 1;
+            return {
+              render: () => ({ lines: [[{ text: `${name} BOARD`, style: "accent" }]] }),
+              handleInput: (activityInput) => {
+                if (activityInput.type === "mouse") activityMouseInputs.push(activityInput);
+              },
+              pause: () => undefined,
+              resume: () => undefined,
+              serialize: () => ({ id }),
+              dispose: () => {
+                if (id === "test.library-first") firstDisposals += 1;
+              },
+            };
+          },
+        });
+      }
+    },
+  };
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    extensions: [extension],
+  });
+  context.after(() => app.stop());
+
+  input.write("/play\r");
+  await until(() => text().includes("Axl Lounge · Games"), "game library");
+  input.write("\r");
+  await until(() => text().includes("First Library Game BOARD"), "first library game");
+  assert.equal(firstCreations, 1);
+  assert.equal(text().includes("\x1b[?1000h"), true);
+  input.write("\x1b[<0;67;15M");
+  await until(() => activityMouseInputs.length === 1, "activity mouse input");
+  assert.deepEqual(activityMouseInputs[0], {
+    type: "mouse",
+    phase: "press",
+    button: "left",
+    row: 0,
+    column: 0,
+    ctrl: false,
+    alt: false,
+    shift: false,
+  });
+  input.write("\x10");
+  await until(
+    () => text().includes("Axl Lounge · Games") && text().includes("Agent · idle"),
+    "wide right-pane library",
+  );
+  assert.equal(firstCreations, 1);
+  assert.equal(firstDisposals, 0);
+
+  input.write("\t/he\t");
+  await until(
+    () => (app as unknown as { editor: { text: string } }).editor.text === "/help",
+    "Agent completion beside library",
+  );
+  assert.equal(
+    (app as unknown as { activitySurface: { agentFocused: boolean } }).activitySurface.agentFocused,
+    true,
+  );
+  input.write("\x15wide picker draft");
+  await until(
+    () => (app as unknown as { editor: { text: string } }).editor.text === "wide picker draft",
+    "Agent input beside library",
+  );
+  input.write("\x10");
+  await until(() => text().includes("First Library Game BOARD"), "return from library");
+  assert.equal(firstCreations, 1);
+  assert.equal(firstDisposals, 0);
+  assert.equal((app as unknown as { editor: { text: string } }).editor.text, "wide picker draft");
+  input.write("\x14");
+  await until(() => text().includes("\x1b[?1000l"), "activity mouse capture cleanup");
+});
+
+test("supported interaction preempts Lounge before another game key can run", async (context) => {
+  let release!: () => void;
+  let toolBegan = false;
+  const gate = new Promise<void>((resolvePromise) => {
+    release = resolvePromise;
+  });
+  let turn = 0;
+  const model: ModelPort = {
+    stream() {
+      turn += 1;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (turn === 1) {
+          yield { type: "tool_call", callId: "attention", name: "attention", input: {} };
+          yield { type: "completed", stopReason: "tool_use", usage };
+          return;
+        }
+        yield { type: "text_delta", text: "attention complete" };
+        yield { type: "completed", stopReason: "stop", usage };
+      })();
+    },
+  };
+  const keys: string[] = [];
+  const pauses: string[] = [];
+  const extension: TerminalExtension = {
+    manifest: { id: "test.preempt", name: "Preempt", capabilities: ["terminal.activities"] },
+    activate(api) {
+      api.registerActivity({
+        id: "test.preempt-game",
+        name: "Preempt game",
+        description: "Attention preemption fixture",
+        category: "game",
+        create: () => ({
+          render: () => ({ lines: [[{ text: "PREEMPT GAME", style: "text" }]] }),
+          handleInput: (activityInput) => {
+            if (activityInput.type === "key") keys.push(activityInput.key);
+          },
+          pause: (reason) => pauses.push(reason),
+          resume: () => undefined,
+          serialize: () => undefined,
+          dispose: () => undefined,
+        }),
+      });
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, (interact) => {
+    const tools = new ToolRegistry();
+    tools.register({
+      name: "attention",
+      description: "Wait, then request attention",
+      inputSchema: { type: "object" },
+      async execute(_input, signal) {
+        toolBegan = true;
+        await gate;
+        const response = await interact(
+          { kind: "mcp_tool", source: "mcp:fixture", message: "Allow attention fixture?" },
+          signal,
+        );
+        return {
+          content: [{ type: "text", text: response.action }],
+          isError: response.action !== "accept",
+        };
+      },
+    });
+    return tools;
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    extensions: [extension],
+  });
+  context.after(() => app.stop());
+
+  input.write("work\r");
+  await until(() => toolBegan, "attention tool start");
+  input.write("/lounge\r");
+  await until(() => text().includes("PREEMPT GAME"), "attention fixture activity");
+  input.write("a");
+  await until(() => keys.length === 1, "initial game key");
+  release();
+  await until(() => text().includes("Allow attention fixture?"), "attention overlay");
+  assert.deepEqual(pauses, ["attention"]);
+  assert.equal(
+    (app as unknown as { activitySurface: { state: string } }).activitySurface.state,
+    "suspended",
+  );
+  input.write("y");
+  await until(
+    () => (app as unknown as { activeInteractionId?: string }).activeInteractionId === undefined,
+    "attention response",
+  );
+  assert.deepEqual(keys, ["a"]);
+});
+
+test("closing Lounge preserves draft, selection, attachments, transcript scroll, and display mode", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output } = captureOutput();
+  const extension: TerminalExtension = {
+    manifest: { id: "test.return", name: "Return", capabilities: ["terminal.activities"] },
+    activate(api) {
+      api.registerActivity({
+        id: "test.return-game",
+        name: "Return game",
+        description: "Context return fixture",
+        category: "game",
+        create: () => ({
+          render: () => ({ lines: [[{ text: "RETURN GAME", style: "text" }]] }),
+          handleInput: () => undefined,
+          pause: () => undefined,
+          resume: () => undefined,
+          serialize: () => undefined,
+          dispose: () => undefined,
+        }),
+      });
+    },
+  };
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    tuiMode: "fullscreen",
+    extensions: [extension],
+  });
+  context.after(() => app.stop());
+  const internals = app as unknown as {
+    editor: { text: string; selectedText: string; setText(value: string): void; selectAll(): void };
+    pendingAttachments: unknown[];
+    tuiMode: "regular" | "fullscreen";
+    fullscreen: { scrollTop: number; following: boolean };
+    activitySurface: { readonly state: string; open(id: string): void; close(): void };
+  };
+  internals.editor.setText("preserved draft");
+  internals.editor.selectAll();
+  const attachment = { id: "preserved-attachment" };
+  internals.pendingAttachments.push(attachment);
+  internals.fullscreen.following = false;
+  internals.fullscreen.scrollTop = 7;
+
+  internals.activitySurface.open("test.return-game");
+  internals.activitySurface.close();
+
+  assert.equal(internals.editor.text, "preserved draft");
+  assert.equal(internals.editor.selectedText, "preserved draft");
+  assert.deepEqual(internals.pendingAttachments, [attachment]);
+  assert.equal(internals.fullscreen.scrollTop, 7);
+  assert.equal(internals.fullscreen.following, false);
+  assert.equal(internals.tuiMode, "fullscreen");
+
+  input.write("\x1b[O\x1b[I");
+  await new Promise<void>((resolvePromise) => setImmediate(resolvePromise));
+  assert.equal(internals.activitySurface.state, "closed");
+});
+
+test("generic settings enable and disable Lounge without disabled activity work", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  let activations = 0;
+  let creations = 0;
+  let disposals = 0;
+  let storageReads = 0;
+  let preferenceLoads = 0;
+  const preferences: Array<Record<string, unknown>> = [];
+  const extension: TerminalExtension = {
+    manifest: {
+      id: "test.lounge-toggle",
+      name: "Lounge toggle fixture",
+      capabilities: ["terminal.activities", "terminal.activity-storage"],
+    },
+    activate(api) {
+      activations += 1;
+      api.registerActivity({
+        id: "test.toggle-game",
+        name: "Toggle Game",
+        description: "Disabled Lounge fixture",
+        category: "game",
+        create(activity) {
+          creations += 1;
+          activity.schedule(10_000, () => undefined);
+          return {
+            render: () => ({ lines: [[{ text: "TOGGLE ACTIVITY", style: "accent" }]] }),
+            handleInput: () => undefined,
+            pause: () => undefined,
+            resume: () => undefined,
+            serialize: () => ({ paused: true }),
+            dispose: () => {
+              disposals += 1;
+            },
+          };
+        },
+      });
+    },
+  };
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    extensions: [extension],
+    loungeEnabled: false,
+    loungeExtensionIds: ["test.lounge-toggle"],
+    activityStorage: {
+      read: () => {
+        storageReads += 1;
+        return Promise.resolve(undefined);
+      },
+      write: () => Promise.reject(new Error("unexpected storage write")),
+      reset: () => Promise.reject(new Error("unexpected storage reset")),
+    },
+    loadLoungePreferences: () => {
+      preferenceLoads += 1;
+      return Promise.resolve({ reducedMotion: true, textOnly: true });
+    },
+    onPreferenceChange: (update) => {
+      preferences.push(update);
+    },
+  });
+  context.after(() => app.stop());
+
+  assert.equal(activations, 0);
+  assert.equal(storageReads, 0);
+  input.write("/lounge\r");
+  await until(() => text().includes("unknown command /lounge"), "disabled Lounge command");
+  input.write("/settings\r");
+  await until(() => text().includes("Terminal settings"), "settings surface");
+  input.write("\x1b[B".repeat(13));
+  input.write("\r");
+  await until(
+    () => stripAnsi(text()).includes("enable Lounge commands and activities"),
+    "Lounge toggle",
+  );
+  input.write("\x1b[A\r");
+  await until(() => activations === 1, "Lounge activation");
+  assert.equal(preferenceLoads, 1);
+  assert.deepEqual(preferences.at(-1), { loungeEnabled: true });
+
+  input.write("/lounge\r");
+  await until(() => text().includes("TOGGLE ACTIVITY"), "enabled Lounge activity");
+  assert.equal(creations, 1);
+  assert.equal(storageReads, 0);
+  input.write("\x1b");
+  await until(
+    () =>
+      (app as unknown as { activitySurface: { state: string } }).activitySurface.state === "closed",
+    "closed Lounge activity",
+  );
+  await (app as unknown as { setLoungeEnabled(enabled: boolean): Promise<void> }).setLoungeEnabled(
+    false,
+  );
+  await until(() => disposals === 1, "Lounge cleanup");
+  assert.deepEqual(preferences.at(-1), { loungeEnabled: false });
+  assert.equal(storageReads, 0);
+  input.write("/lounge\r");
+  await until(
+    () => (text().match(/unknown command \/lounge/g) ?? []).length === 2,
+    "disabled Lounge command after toggle",
+  );
+});
+
 test("terminal extensions cannot replace encoded safety shortcuts", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
@@ -1519,6 +2043,8 @@ test("every TUI command has an explicit owner", async (context) => {
       "help",
       "history",
       "hotkeys",
+      "lounge",
+      "play",
       "regular",
       "settings",
       "stash",

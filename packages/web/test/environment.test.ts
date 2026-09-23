@@ -24,6 +24,7 @@ const valid = {
     sidebarCollapsed: false,
     changesView: "files",
     panes: ["browser", "files"],
+    theme: "system",
   },
   hostCapabilities: ["project.folder.validate", "provider.auth.login"],
 };
@@ -52,6 +53,17 @@ test("validates persisted browser layout preferences", () => {
   );
   assert.throws(
     () => parseBootstrap({ ...valid, preferences: { ...valid.preferences, changesView: "grid" } }),
+    /Invalid web preferences/,
+  );
+  assert.equal(
+    parseBootstrap({ ...valid, preferences: { ...valid.preferences, theme: "dark" } }).preferences
+      .theme,
+    "dark",
+  );
+  const { theme: _omittedTheme, ...withoutTheme } = valid.preferences;
+  assert.equal(parseBootstrap({ ...valid, preferences: withoutTheme }).preferences.theme, "system");
+  assert.throws(
+    () => parseBootstrap({ ...valid, preferences: { ...valid.preferences, theme: "neon" } }),
     /Invalid web preferences/,
   );
   assert.throws(

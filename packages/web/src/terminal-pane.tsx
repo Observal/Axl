@@ -134,6 +134,7 @@ export function TerminalPane({
               event.preventDefault();
               onCancel();
             } else if (event.key === "Escape") {
+              event.preventDefault();
               setInput("");
               setHistoryIndex(undefined);
             }

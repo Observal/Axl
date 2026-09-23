@@ -291,6 +291,7 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
       sidebarCollapsed: false,
       changesView: "files",
       panes: ["browser", "files"],
+      theme: "system",
     },
     hostCapabilities: ["project.folder.validate", "provider.auth.login"],
   });
@@ -349,7 +350,38 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     sidebarCollapsed: true,
     changesView: "all",
     panes: ["browser", "terminal"],
+    theme: "system",
   });
+  const themed = await fetch(new URL("preferences", gateway.origin), {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({
+      sidebarWidth: 300,
+      dockWidth: 720,
+      sidebarCollapsed: true,
+      changesView: "all",
+      panes: ["terminal", "browser"],
+      theme: "dark",
+    }),
+  });
+  assert.equal(themed.status, 200);
+  assert.equal(
+    JSON.parse(await readFile(join(directory, "web-preferences.json"), "utf8")).theme,
+    "dark",
+  );
+  const invalidTheme = await fetch(new URL("preferences", gateway.origin), {
+    method: "POST",
+    headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({
+      sidebarWidth: 300,
+      dockWidth: 720,
+      sidebarCollapsed: true,
+      changesView: "all",
+      panes: ["terminal", "browser"],
+      theme: "neon",
+    }),
+  });
+  assert.equal(invalidTheme.status, 400);
   const invalidPanes = await fetch(new URL("preferences", gateway.origin), {
     method: "POST",
     headers: { origin, cookie: cookieHeader, "content-type": "application/json" },
@@ -564,6 +596,22 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     })}\n`,
   );
   assert.equal(await reviewClose, 1008);
+
+  const multiRecord = new WebSocket(new URL("ws", gateway.origin), {
+    headers: { origin, cookie: cookieHeader },
+  });
+  await new Promise<void>((resolve, reject) => {
+    multiRecord.once("open", resolve);
+    multiRecord.once("error", reject);
+  });
+  const multiRecordClose = new Promise<number>((resolve) =>
+    multiRecord.once("close", (code) => resolve(code)),
+  );
+  const packed = Array.from({ length: 200 }, (_unused, id) =>
+    JSON.stringify({ kind: "request", id, method: "connection.ping", params: {} }),
+  ).join("\n");
+  multiRecord.send(`${packed}\n`);
+  assert.equal(await multiRecordClose, 1008);
 
   const flooded = new WebSocket(new URL("ws", gateway.origin), {
     headers: { origin, cookie: cookieHeader },

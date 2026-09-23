@@ -168,6 +168,8 @@ export class VirtualTerminal {
       this.cursorColumn = 0;
     } else if (final === "J" && parameters === "3") {
       return;
+    } else if (final === "t" && parameters === "16") {
+      return;
     } else {
       throw new Error(
         `Virtual terminal received unsupported CSI sequence ESC[${parameters}${final}`,

@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ActivityBackgroundStyle } from "@axl/extension-api";
+
 import type { Palette } from "./transcript.ts";
 
 function sgr(open: string, close: string): (text: string) => string {
@@ -27,6 +29,15 @@ function background(hex: string): (text: string) => string {
   return (text) => `\x1b[48;2;${color}m${text}\x1b[49m`;
 }
 
+function activityBackgrounds(
+  colors: Readonly<Record<ActivityBackgroundStyle, string>>,
+): NonNullable<Palette["activityBackground"]> {
+  const styles = Object.fromEntries(
+    Object.entries(colors).map(([role, color]) => [role, background(color)]),
+  ) as Readonly<Record<ActivityBackgroundStyle, (text: string) => string>>;
+  return (role, text) => styles[role](text);
+}
+
 function foregroundOn(fg: string, bg: string): (text: string) => string {
   const foregroundColor = rgb(fg);
   const backgroundColor = rgb(bg);
@@ -46,6 +57,15 @@ const axl: Palette = {
   text: sgr("97", "39"),
   userMessage: background("#14252b"),
   selection: foregroundOn("#e7f6ff", "#164e63"),
+  activityBackground: activityBackgrounds({
+    surface: "#46545a",
+    surfaceAlternate: "#24343a",
+    accent: "#164e63",
+    selection: "#155e75",
+    success: "#14532d",
+    warning: "#713f12",
+    error: "#7f1d1d",
+  }),
   searchMatch: background("#3f3f46"),
   searchCurrent: foregroundOn("#082f49", "#67e8f9"),
   toolBackground: background("#111c20"),
@@ -81,6 +101,15 @@ const ember: Palette = {
   text: foreground("#fff1d6"),
   userMessage: background("#302016"),
   selection: foregroundOn("#fff7ed", "#9a3412"),
+  activityBackground: activityBackgrounds({
+    surface: "#685746",
+    surfaceAlternate: "#342a22",
+    accent: "#7c2d12",
+    selection: "#9a3412",
+    success: "#365314",
+    warning: "#713f12",
+    error: "#7f1d1d",
+  }),
   searchMatch: background("#4a2c1c"),
   searchCurrent: foregroundOn("#431407", "#fdba74"),
   toolBackground: background("#261b15"),
@@ -116,6 +145,15 @@ const ocean: Palette = {
   text: foreground("#e7f6ff"),
   userMessage: background("#10283a"),
   selection: foregroundOn("#eff6ff", "#1d4ed8"),
+  activityBackground: activityBackgrounds({
+    surface: "#466a7d",
+    surfaceAlternate: "#17384a",
+    accent: "#075985",
+    selection: "#1d4ed8",
+    success: "#065f46",
+    warning: "#713f12",
+    error: "#7f1d1d",
+  }),
   searchMatch: background("#173b57"),
   searchCurrent: foregroundOn("#082f49", "#7dd3fc"),
   toolBackground: background("#0c202f"),
@@ -151,6 +189,15 @@ const grove: Palette = {
   text: foreground("#edf4dc"),
   userMessage: background("#20291a"),
   selection: foregroundOn("#f7fee7", "#4d7c0f"),
+  activityBackground: activityBackgrounds({
+    surface: "#5f6846",
+    surfaceAlternate: "#303b28",
+    accent: "#3f6212",
+    selection: "#4d7c0f",
+    success: "#166534",
+    warning: "#713f12",
+    error: "#7f1d1d",
+  }),
   searchMatch: background("#334025"),
   searchCurrent: foregroundOn("#1a2e05", "#bef264"),
   toolBackground: background("#192117"),
@@ -203,6 +250,15 @@ const dark: Palette = {
   text: foreground(gruvbox.fg1),
   userMessage: foregroundOn(gruvbox.fg1, gruvbox.bg0Hard),
   selection: foregroundOn(gruvbox.fg1, gruvbox.bg1),
+  activityBackground: activityBackgrounds({
+    surface: "#665c54",
+    surfaceAlternate: "#3c3836",
+    accent: "#3f5f66",
+    selection: "#7c4f2f",
+    success: "#3f5f36",
+    warning: "#735f28",
+    error: "#743f3b",
+  }),
   searchMatch: background(gruvbox.bg1),
   searchCurrent: foregroundOn(gruvbox.bg0Hard, gruvbox.yellow),
   toolBackground: background("#202324"),
@@ -257,6 +313,15 @@ const light: Palette = {
   text: foreground("#111827"),
   userMessage: foregroundOn("#111827", "#f3f4f6"),
   selection: foregroundOn("#ffffff", "#075985"),
+  activityBackground: activityBackgrounds({
+    surface: "#d8cfba",
+    surfaceAlternate: "#9aaa88",
+    accent: "#bae6fd",
+    selection: "#7dd3fc",
+    success: "#bbf7d0",
+    warning: "#fde68a",
+    error: "#fecaca",
+  }),
   searchMatch: background("#e0f2fe"),
   searchCurrent: foregroundOn("#ffffff", "#075985"),
   toolBackground: background("#f8fafc"),
@@ -297,7 +362,25 @@ const system: Palette = {
   border: sgr("2", "22"),
   success: sgr("32", "39"),
   warning: sgr("33", "39"),
+  text: sgr("97", "39"),
   selection: sgr("7", "27"),
+  activityBackground: (role, text) => {
+    const color =
+      role === "surface"
+        ? 240
+        : role === "surfaceAlternate"
+          ? 236
+          : role === "accent"
+            ? 24
+            : role === "selection"
+              ? 25
+              : role === "success"
+                ? 22
+                : role === "warning"
+                  ? 58
+                  : 52;
+    return `\x1b[48;5;${color}m${text}\x1b[49m`;
+  },
   searchMatch: sgr("4", "24"),
   searchCurrent: sgr("1;7", "22;27"),
   thinking: (_level, text) => sgr("36", "39")(text),
@@ -322,6 +405,23 @@ const highContrast: Palette = {
   warning: sgr("93", "39"),
   text: sgr("97", "39"),
   selection: sgr("7", "27"),
+  activityBackground: (role, text) => {
+    const color =
+      role === "surface"
+        ? 244
+        : role === "surfaceAlternate"
+          ? 235
+          : role === "accent"
+            ? 24
+            : role === "selection"
+              ? 27
+              : role === "success"
+                ? 28
+                : role === "warning"
+                  ? 94
+                  : 88;
+    return `\x1b[48;5;${color}m${text}\x1b[49m`;
+  },
   searchMatch: sgr("4", "24"),
   searchCurrent: sgr("1;7", "22;27"),
   diffAdded: sgr("92", "39"),
@@ -347,6 +447,14 @@ const plain: Palette = {
   error: (text) => text,
   bold: (text) => text,
   selection: (text) => `\x1b[7m${text}\x1b[27m`,
+  activityBackground: (role, text) =>
+    role === "surface"
+      ? text
+      : role === "surfaceAlternate"
+        ? `\x1b[7m${text}\x1b[27m`
+        : role === "selection" || role === "error"
+          ? `\x1b[1;7m${text}\x1b[22;27m`
+          : `\x1b[4m${text}\x1b[24m`,
   searchMatch: (text) => `\x1b[4m${text}\x1b[24m`,
   searchCurrent: (text) => `\x1b[1;7m${text}\x1b[22;27m`,
 };

@@ -48,7 +48,11 @@ export function NewSessionDialog({
   >();
   useEffect(() => {
     const prior = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
-    dialog.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    // Focus the first session-type choice, not the header Close button.
+    (
+      dialog.current?.querySelector<HTMLButtonElement>(".session-mode button") ??
+      dialog.current?.querySelector<HTMLButtonElement>("button")
+    )?.focus();
     return () => prior?.focus();
   }, []);
 
@@ -58,7 +62,11 @@ export function NewSessionDialog({
       return;
     }
     if (onValidateProjectFolder === undefined) {
-      setFolderValidation({ valid: false, error: "Project folder validation is unavailable" });
+      setFolderValidation({
+        valid: false,
+        error:
+          "Code sessions need the trusted host to validate a project folder, which is not available here. Switch to Chat, or relaunch axl web from a trusted host.",
+      });
       return;
     }
     const controller = new AbortController();

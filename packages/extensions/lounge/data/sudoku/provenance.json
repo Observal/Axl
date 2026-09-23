@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "fixtureSetRevision": "axl-sudoku-v1",
+  "generatorAlgorithmVersion": 1,
+  "solverAlgorithmVersion": 1,
+  "difficultyAlgorithmVersion": 1,
+  "origin": {
+    "kind": "generated-in-repository",
+    "description": "Axl-generated Sudoku grids derived from a canonical mathematical base pattern using deterministic permutations and uniqueness-preserving clue removal.",
+    "externalPuzzleData": false,
+    "license": "Apache-2.0"
+  },
+  "review": {
+    "criteria": [
+      "Every puzzle has exactly one solution.",
+      "Every given agrees with the stored solution.",
+      "Easy puzzles solve using naked singles only.",
+      "Medium puzzles require hidden singles but no branching.",
+      "Hard puzzles require deterministic branching after singles are exhausted.",
+      "The set contains four puzzles at each difficulty."
+    ],
+    "difficultyClueRanges": {
+      "easy": [38, 45],
+      "medium": [32, 39],
+      "hard": [24, 32]
+    }
+  },
+  "fixtures": [
+    {
+      "id": "easy-01",
+      "difficulty": "easy",
+      "seed": 1,
+      "puzzleSha256": "5221c6ebebec045346ec77d5e2bfae811200d3e774e81636b809b24c85a532d5",
+      "solutionSha256": "9be22eb20a7dccbf114c70e41ee2b39e6829db2f1aeda86c1a01b989d887388b"
+    },
+    {
+      "id": "easy-02",
+      "difficulty": "easy",
+      "seed": 2,
+      "puzzleSha256": "029ae770e8d6479fac5275e084e2e9bd76143614a79bea69e1809b3f09f4a1f2",
+      "solutionSha256": "50bca3e38b9b80304299f41bd9e0b9875e7c8ef0899878fa5b0ad8900920393b"
+    },
+    {
+      "id": "easy-03",
+      "difficulty": "easy",
+      "seed": 3,
+      "puzzleSha256": "49dd3d7e4826fd8002c3e5b0f9da82587ef64649d25b25a9bbd69c4b253f947d",
+      "solutionSha256": "1a4723f29fcdc9050f1d5cb65a5d2b2f4c2d79df85315792eadeac8b83f799db"
+    },
+    {
+      "id": "easy-04",
+      "difficulty": "easy",
+      "seed": 4,
+      "puzzleSha256": "dbf5a64f417adc3987872266ad171a80d2d7b576f0d9fac707ef009ee29b7c3f",
+      "solutionSha256": "4b6083c2268e5f1538a7f33d367062b4360a132a65dbc1c0a04731093f26e08d"
+    },
+    {
+      "id": "medium-01",
+      "difficulty": "medium",
+      "seed": 6,
+      "puzzleSha256": "4a3c99ecc766c669e24d82ecd353cf56a8ed8188260e395f6027fca4c451a7ed",
+      "solutionSha256": "1212c8e10378f345de1674c9224d5b7516aaa964b8b694536dc6bc656b410152"
+    },
+    {
+      "id": "medium-02",
+      "difficulty": "medium",
+      "seed": 9,
+      "puzzleSha256": "b6406dbfb6f616652de605bdc246ceca7dd6f8f4d9757d61d6973baf545f8821",
+      "solutionSha256": "6e26125c1735c3eccbb06704c293713d76460c723023be4ae353980a00487de3"
+    },
+    {
+      "id": "medium-03",
+      "difficulty": "medium",
+      "seed": 12,
+      "puzzleSha256": "fc20dc6b158e51a99e34bf7a5ea733ffc55fca06dcc90a1e999aad5647b36097",
+      "solutionSha256": "1cd920965a9e0601c0da174f1bbc718ba4967354cfd630708c824f8ff1c9c328"
+    },
+    {
+      "id": "medium-04",
+      "difficulty": "medium",
+      "seed": 14,
+      "puzzleSha256": "bc9cecd580dad61b0d3397e20e2848cc7cc7cb0a09d9abce9bcb9b72140be8db",
+      "solutionSha256": "ae8d46673385adcf954a083a8ae90c87214eff7a26c93bee59367b62b0e8da05"
+    },
+    {
+      "id": "hard-01",
+      "difficulty": "hard",
+      "seed": 11,
+      "puzzleSha256": "94ed75e5efdb9da95b779b6ea46b773e0db3bb035b6a6f899cb7e9ea78d9dcf0",
+      "solutionSha256": "4349f1811536b0dfc500e1e1a699e1583d306a494d1a4cc7ff887cba500b9faa"
+    },
+    {
+      "id": "hard-02",
+      "difficulty": "hard",
+      "seed": 16,
+      "puzzleSha256": "06d75ec32af554d0aefa17ac347eb9a221f03c30df78e6a1d53004cedeee00db",
+      "solutionSha256": "1e1476b8e46184350fbc4e3818deaa121690b8666ea87d56550ee9faae988ee6"
+    },
+    {
+      "id": "hard-03",
+      "difficulty": "hard",
+      "seed": 17,
+      "puzzleSha256": "8603627f3d953c5606da7d4aa2190820db369eca96320b3a9b3d27932be89518",
+      "solutionSha256": "89837c78dac6365b281376aa1dd94707c633160b6ae790d3a3bdf47395939ef3"
+    },
+    {
+      "id": "hard-04",
+      "difficulty": "hard",
+      "seed": 19,
+      "puzzleSha256": "68c5d5a00d69c35910a4b3063daa88617a8031e048f45f90512f137b369727d3",
+      "solutionSha256": "5069932cce72ee3e96ef694857408828ec8ddc4a714bb955703700c746c53592"
+    }
+  ]
+}

@@ -157,3 +157,29 @@ test("workspace controller rejects inconsistent response generations and can res
   workspace.reset();
   assert.equal((await workspace.list("src")).workspaceGeneration, "workspace-2");
 });
+
+test("workspace controller ignores a late response from before a reset", async () => {
+  let releaseSlow: () => void = () => {};
+  let call = 0;
+  const client = {
+    request: (_method: string) => {
+      const index = call;
+      call += 1;
+      if (index === 0) {
+        return new Promise((resolve) => {
+          releaseSlow = () => resolve({ workspaceGeneration: "workspace-old", entries: [] });
+        });
+      }
+      return Promise.resolve({ workspaceGeneration: "workspace-new", entries: [] });
+    },
+  } as unknown as AxlClient;
+  const workspace = new WorkspaceController(client, sessionId);
+
+  const slow = workspace.list(""); // starts before the reset
+  workspace.reset(); // the user refreshes
+  releaseSlow(); // the stale response lands after the reset
+  await slow; // its generation must be ignored, not written back
+
+  // The user's refreshed request must not fail with workspace_changed.
+  assert.equal((await workspace.list("src")).workspaceGeneration, "workspace-new");
+});

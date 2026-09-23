@@ -25,8 +25,21 @@ export function languageForPath(path: string | undefined): string | undefined {
   return language && hljs.getLanguage(language) !== undefined ? language : undefined;
 }
 
+// Highlighting a line is pure in (text, language). Streaming re-renders the
+// whole transcript, so without a cache every visible code line is re-highlighted
+// on each token. The cache is bounded and cleared wholesale when it grows large.
+const HIGHLIGHT_CACHE_LIMIT = 5000;
+const highlightCache = new Map<string, string>();
+
 export function highlightLine(text: string, language: string | undefined): string {
-  return language === undefined
-    ? text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
-    : hljs.highlight(text, { language, ignoreIllegals: true }).value;
+  const key = `${language ?? ""}\u0000${text}`;
+  const cached = highlightCache.get(key);
+  if (cached !== undefined) return cached;
+  const value =
+    language === undefined
+      ? text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+      : hljs.highlight(text, { language, ignoreIllegals: true }).value;
+  if (highlightCache.size >= HIGHLIGHT_CACHE_LIMIT) highlightCache.clear();
+  highlightCache.set(key, value);
+  return value;
 }

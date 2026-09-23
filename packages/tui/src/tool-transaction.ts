@@ -11,6 +11,12 @@ import { renderToolTransaction, type ToolTransactionStatus } from "./tool-displa
 import type { BlobRenderer, Palette, ToolOutputDisplay } from "./transcript.ts";
 import type { TranscriptRow } from "./transcript-document.ts";
 
+export interface ToolMonitorEntry {
+  readonly label: string;
+  readonly status: ToolTransactionStatus;
+  readonly preview: readonly string[];
+}
+
 function textOf(content: EventPayloadMap["tool.result"]["content"]): string {
   return sanitizeTerminalText(
     content
@@ -96,6 +102,33 @@ export class ToolTransactionComponent implements Component {
 
   get state(): ToolTransactionStatus {
     return this.status;
+  }
+
+  monitorEntry(): ToolMonitorEntry {
+    let rendered: ReturnType<OwnedTerminalToolRenderer["renderer"]>;
+    try {
+      rendered = this.renderer()?.renderer({
+        callId: this.callId,
+        name: this.name,
+        arguments: this.args,
+        ...(this.result === undefined ? {} : { result: this.result }),
+        isError: this.isError,
+        status: this.status,
+        ...(this.durationMs === undefined ? {} : { durationMs: this.durationMs }),
+        detail: "compact",
+      });
+    } catch {
+      rendered = undefined;
+    }
+    const label = [rendered?.label ?? this.name, rendered?.target]
+      .filter((value): value is string => typeof value === "string" && value.length > 0)
+      .map(sanitizeTerminalText)
+      .join(" · ");
+    const preview = sanitizeTerminalText(this.result ?? "")
+      .slice(0, 8 * 1_024)
+      .split("\n")
+      .slice(0, 20);
+    return { label: truncateToWidth(label, 120, "…"), status: this.status, preview };
   }
 
   render(width: number): string[] {
@@ -223,6 +256,10 @@ export class ToolTransactionStore implements Component {
 
   components(): readonly ToolTransactionComponent[] {
     return [...this.transactions.values()];
+  }
+
+  monitorEntries(): readonly ToolMonitorEntry[] {
+    return this.components().map((component) => component.monitorEntry());
   }
 
   render(width: number): string[] {

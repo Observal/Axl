@@ -55,7 +55,15 @@ export function CommandPalette({
         <input
           ref={input}
           type="search"
+          role="combobox"
           aria-label="Search commands"
+          aria-controls="command-palette-list"
+          aria-expanded={true}
+          aria-haspopup="listbox"
+          aria-autocomplete="list"
+          {...(visible.length > 0
+            ? { "aria-activedescendant": `command-option-${visible[active]?.id}` }
+            : {})}
           placeholder="Search commands"
           value={query}
           onChange={(event) => { setQuery(event.target.value); setActive(0); }}
@@ -66,11 +74,12 @@ export function CommandPalette({
           }}
         />
         {error && <p className="command-error" role="alert">{error}</p>}
-        <div className="command-list" role="listbox" aria-label="Available commands">
+        <div id="command-palette-list" className="command-list" role="listbox" aria-label="Available commands">
           {visible.length === 0 && <p>No matching commands</p>}
           {visible.map((command, index) => (
             <button
               key={command.id}
+              id={`command-option-${command.id}`}
               type="button"
               role="option"
               aria-selected={index === active}

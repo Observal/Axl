@@ -414,8 +414,8 @@ export function WorkspaceChanges({
     <div className="workspace-changes">
       <div className="workspace-review-toolbar">
         <div role="group" aria-label="Change scope">
-          <button className={scope === "working" ? "active" : ""} type="button" onClick={() => onScope("working")}>Working tree</button>
-          <button className={scope === "last-turn" ? "active" : ""} type="button" onClick={() => onScope("last-turn")}>Last turn</button>
+          <button className={scope === "working" ? "active" : ""} type="button" aria-pressed={scope === "working"} onClick={() => onScope("working")}>Working tree</button>
+          <button className={scope === "last-turn" ? "active" : ""} type="button" aria-pressed={scope === "last-turn"} onClick={() => onScope("last-turn")}>Last turn</button>
         </div>
         {review && (
           <span className="changes-summary">
@@ -446,10 +446,10 @@ export function WorkspaceChanges({
             </button>
           )}
           {view === "files" && <SplitToggle state={changesSplit} onState={onChangesSplit} label="changed files" />}
-          <button className={view === "files" ? "icon-button active" : "icon-button"} type="button" onClick={() => onViewChange("files")} aria-label="One file at a time" title="One file at a time">
+          <button className={view === "files" ? "icon-button active" : "icon-button"} type="button" aria-pressed={view === "files"} onClick={() => onViewChange("files")} aria-label="One file at a time" title="One file at a time">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3h4v10h-4zM6.5 3h7v10h-7" /></svg>
           </button>
-          <button className={view === "all" ? "icon-button active" : "icon-button"} type="button" onClick={() => onViewChange("all")} aria-label="All files stacked" title="All files stacked">
+          <button className={view === "all" ? "icon-button active" : "icon-button"} type="button" aria-pressed={view === "all"} onClick={() => onViewChange("all")} aria-label="All files stacked" title="All files stacked">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 8h10M3 12.5h10" /></svg>
           </button>
         </div>

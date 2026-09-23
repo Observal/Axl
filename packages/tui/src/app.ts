@@ -12,6 +12,8 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
+  type ActivitySafeStatus,
+  type ActivityStorageAdapter,
   type TerminalCommandContext,
   type TerminalExtension,
   TerminalExtensionHost,
@@ -54,8 +56,13 @@ import {
   THINKING_LEVELS,
   type TrustedProviderHost,
 } from "@axl/sdk";
-
 import { ActivityComponent } from "./activity.ts";
+import {
+  type ActivityAgentFrame,
+  type ActivityMonitorEntry,
+  type ActivityMonitorSnapshot,
+  ActivitySurfaceHost,
+} from "./activity-surface.ts";
 import { droppedImages, type LocalAttachment, readImageFile } from "./attachments.ts";
 import {
   type ClipboardContent,
@@ -88,7 +95,7 @@ import {
   type TerminalMediaCapabilities,
   uploadBlob,
 } from "./media.ts";
-import { type Overlay, OverlayStack } from "./overlay.ts";
+import { AttentionOverlaySlot, type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
 import {
@@ -107,6 +114,7 @@ import {
 } from "./render.ts";
 import {
   assertInteractiveTerminal,
+  type TerminalCellSize,
   type TerminalInput,
   type TerminalOutput,
   TerminalSession,
@@ -119,7 +127,13 @@ import {
   themeNames,
 } from "./themes.ts";
 import { ToolTransactionStore } from "./tool-transaction.ts";
-import { type Palette, PLAIN_PALETTE, SessionView, type ToolOutputDisplay } from "./transcript.ts";
+import {
+  type Palette,
+  PLAIN_PALETTE,
+  SessionView,
+  type ThinkingDisplay,
+  type ToolOutputDisplay,
+} from "./transcript.ts";
 import {
   type TranscriptAppendOptions,
   TranscriptDocument,
@@ -356,6 +370,8 @@ function openExternalUrl(url: string, onError: (error: Error) => void): void {
 }
 
 const TUI_COMMANDS: readonly { readonly name: string; readonly description: string }[] = [
+  { name: "lounge", description: "open, resume, close, or inspect Lounge" },
+  { name: "play", description: "open the Lounge game library" },
   { name: "theme", description: "select a color theme" },
   { name: "settings", description: "change persistent terminal preferences" },
   { name: "details", description: "set transcript detail: compact, full, or focus" },
@@ -530,6 +546,22 @@ export interface AxlAppOptions {
   readonly imageDisplay?: ImageDisplay;
   readonly mediaCapabilities?: TerminalMediaCapabilities;
   readonly extensions?: readonly TerminalExtension[];
+  readonly activityStorage?: ActivityStorageAdapter;
+  readonly loungeEnabled?: boolean;
+  readonly loungeExtensionIds?: readonly string[];
+  readonly loungeLastActivityId?: string;
+  readonly loungeReducedMotion?: boolean;
+  readonly loungeTextOnly?: boolean;
+  readonly loadLoungePreferences?: () => Promise<{
+    readonly lastActivityId?: string;
+    readonly reducedMotion: boolean;
+    readonly textOnly: boolean;
+  }>;
+  readonly onLoungePreferenceChange?: (update: {
+    lastActivityId?: string;
+    reducedMotion?: boolean;
+    textOnly?: boolean;
+  }) => void | Promise<void>;
   readonly onPreferenceChange?: (update: {
     providerId?: string;
     modelId?: string;
@@ -552,6 +584,7 @@ export interface AxlAppOptions {
     diffLayout?: DiffLayout;
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
+    loungeEnabled?: boolean;
   }) => void | Promise<void>;
   /** Compatibility hook called after the daemon accepts a model switch. */
   readonly onModelChange?: (modelId: string) => void;
@@ -599,6 +632,7 @@ export class AxlApp {
   private readonly attachmentBar: AttachmentBarComponent;
   private readonly mediaCache: MediaCache;
   private readonly extensionHost: TerminalExtensionHost;
+  private readonly activitySurface: ActivitySurfaceHost;
   private readonly extensionWidgetsAbove: ExtensionWidgetsComponent;
   private readonly extensionWidgetsBelow: ExtensionWidgetsComponent;
   private readonly extensionCommandControllers = new Set<AbortController>();
@@ -616,6 +650,11 @@ export class AxlApp {
   private diffLayout: DiffLayout;
   private workspaceReviewEnabled: boolean;
   private imageDisplay: ImageDisplay;
+  private loungeEnabled: boolean;
+  private readonly loungeExtensionIds: readonly string[];
+  private loungeLastActivityId: string | undefined;
+  private loungeReducedMotion: boolean;
+  private loungeTextOnly: boolean;
   private readonly pendingAttachments: BlobReference[] = [];
   private attachmentBusy = false;
   private clipboardBusy = false;
@@ -629,10 +668,22 @@ export class AxlApp {
   private readonly awayChangedFiles = new Set<string>();
   private readonly document = new TranscriptDocument();
   private fullscreenRowsCache: readonly TranscriptRow[] | undefined;
+  private activitySurfaceRowOffset = 0;
+  private activityMouseCapture = false;
+  private activityAgentRowsCache:
+    | {
+        readonly width: number;
+        readonly palette: Palette;
+        readonly toolOutputDisplay: ToolOutputDisplay;
+        readonly thinkingDisplay: ThinkingDisplay;
+        readonly rows: readonly TranscriptRow[];
+      }
+    | undefined;
   private width: number;
   private height: number;
   private readonly transcript: TranscriptEntry[] = [];
   private notice: string | undefined;
+  private readonly attentionOverlay = new AttentionOverlaySlot();
   private readonly overlays = new OverlayStack();
   private stopped = false;
   private spinnerIndex = 0;
@@ -673,8 +724,11 @@ export class AxlApp {
   private interactionResponding = false;
   private interactionError: string | undefined;
   private readonly toolTransactions: ToolTransactionStore;
+  private readonly recentActivityTools: ActivityMonitorEntry[] = [];
+  private readonly observedActivityFiles = new Set<string>();
   private readonly toolGroupModes = new Map<string, ToolOutputDisplay>();
   private readonly terminal: TerminalSession;
+  private terminalCellSize: TerminalCellSize | undefined;
   private connectionState: "connected" | "reconnecting" | "detached" = "connected";
   private reconnectGeneration = 0;
   private reconnectAttempts = 0;
@@ -720,13 +774,19 @@ export class AxlApp {
     this.diffLayout = options.diffLayout ?? "unified";
     this.workspaceReviewEnabled = options.workspaceReview ?? false;
     this.imageDisplay = options.imageDisplay ?? "auto";
+    this.loungeEnabled = options.loungeEnabled ?? true;
+    this.loungeExtensionIds = [...(options.loungeExtensionIds ?? [])];
+    this.loungeLastActivityId = options.loungeLastActivityId;
+    this.loungeReducedMotion = options.loungeReducedMotion ?? false;
+    this.loungeTextOnly = options.loungeTextOnly ?? false;
     this.webFetchEnabled = options.webFetch ?? true;
     this.webSearchEnabled = options.webSearch ?? true;
     this.initialResumePending = options.initialResume ?? false;
+    const mediaCapabilities = options.mediaCapabilities ?? detectTerminalMedia();
     this.mediaCache = new MediaCache(
       () => this.client,
       sessionId,
-      options.mediaCapabilities ?? detectTerminalMedia(),
+      mediaCapabilities,
       () => this.imageDisplay,
       () => {
         if (!this.stopped && !this.hydrating) this.redraw();
@@ -767,7 +827,47 @@ export class AxlApp {
         this.mediaCache.rows(reference, mediaWidth, this.tuiMode === "fullscreen", mediaPalette),
     );
     this.view.toolOutputDisplay = options.toolOutputDisplay ?? "compact";
-    this.extensionHost = new TerminalExtensionHost(options.extensions);
+    this.extensionHost = new TerminalExtensionHost(options.extensions, {
+      initiallyInactiveExtensionIds: this.loungeEnabled ? [] : this.loungeExtensionIds,
+    });
+    this.activitySurface = new ActivitySurfaceHost({
+      host: this.extensionHost,
+      palette: () => this.view.palette,
+      invalidate: () => this.redraw(),
+      monitor: () => this.activityMonitorSnapshot(),
+      agentFrame: (width, height, focused) => this.activityAgentFrame(width, height, focused),
+      handleAgentInput: (data) => this.handleActivityAgentInput(data),
+      agentTabHint: () => (this.completionMatches().length > 0 ? "complete" : "game"),
+      presentation: () => ({
+        reducedMotion: this.loungeReducedMotion,
+        textOnly: this.loungeTextOnly,
+      }),
+      rasterProtocol: mediaCapabilities.activityRaster ?? null,
+      terminalCellPixels: () => this.terminalCellSize,
+      returnToTranscript: () => {
+        if (this.tuiMode === "regular") this.repaintRegularTranscript();
+        this.redraw(true);
+      },
+      returnToEditor: () => this.redraw(true),
+      openWorkspaceReview: () => {
+        void this.openDiffReview("working");
+      },
+      reportError: (error) => {
+        this.notice = this.view.palette.error(
+          `✖ activity failed · ${sanitizeTerminalText(error.message)}`,
+        );
+        this.redraw();
+      },
+      setMouseCapture: (enabled) => {
+        this.activityMouseCapture = enabled;
+        this.syncTerminalMouseCapture();
+      },
+      ...(options.activityStorage === undefined ? {} : { storage: options.activityStorage }),
+      onActivityOpened: (activityId) => {
+        this.loungeLastActivityId = activityId;
+        return this.options.onLoungePreferenceChange?.({ lastActivityId: activityId });
+      },
+    });
     this.commandController = this.createCommandController(options.client);
     this.extensionWidgetsAbove = new ExtensionWidgetsComponent(
       this.extensionHost,
@@ -816,6 +916,10 @@ export class AxlApp {
         this.redraw();
       },
       onResize: this.resizeListener,
+      onCellSize: (size) => {
+        this.terminalCellSize = size;
+        if (!this.stopped && !this.hydrating) this.redraw(true);
+      },
       ...(options.suspendProcess === undefined ? {} : { suspendProcess: options.suspendProcess }),
     });
     this.bindClient(options.client);
@@ -825,8 +929,9 @@ export class AxlApp {
     return [
       ...TUI_COMMANDS.filter(
         (command) =>
-          command.name !== "login" ||
-          this.client.connection.grantedCapabilities?.includes("provider.auth.login") !== true,
+          ((command.name !== "lounge" && command.name !== "play") || this.loungeEnabled) &&
+          (command.name !== "login" ||
+            this.client.connection.grantedCapabilities?.includes("provider.auth.login") !== true),
       ).map((command) => ({
         id: `tui.${command.name}`,
         name: command.name,
@@ -856,6 +961,7 @@ export class AxlApp {
     this.client = client;
     this.commandController = this.createCommandController(client);
     this.unsubscribeDisconnect = client.onDisconnect((error) => {
+      this.activitySurface.suspend("disconnect");
       if (error instanceof AxlClientError && error.code === "daemon_stopping") {
         this.reconnectGeneration += 1;
         this.connectionState = "detached";
@@ -1126,8 +1232,10 @@ export class AxlApp {
     this.providerOperation = undefined;
 
     const failures: unknown[] = [];
+    const activityCleanup = this.activitySurface.dispose();
     const extensionCleanup = this.extensionHost.dispose();
     try {
+      this.attentionOverlay.clear();
       this.overlays.clear();
     } catch (error) {
       failures.push(error);
@@ -1160,8 +1268,9 @@ export class AxlApp {
     } catch (error) {
       failures.push(error);
     }
+    const cleanup = Promise.all([activityCleanup, extensionCleanup]).then(() => undefined);
     if (notifyExit) {
-      void extensionCleanup.then(
+      void cleanup.then(
         () => {
           try {
             this.options.onExit?.();
@@ -1185,7 +1294,7 @@ export class AxlApp {
         },
       );
     } else {
-      void extensionCleanup.catch((error: unknown) => {
+      void cleanup.catch((error: unknown) => {
         this.options.output.write(
           `\r\nextension cleanup failed: ${error instanceof Error ? error.message : String(error)}\r\n`,
         );
@@ -1264,10 +1373,184 @@ export class AxlApp {
     return this.view.palette.dim(text);
   }
 
+  private activityAgentRows(width: number): readonly TranscriptRow[] {
+    const cache = this.activityAgentRowsCache;
+    let settled: readonly TranscriptRow[];
+    if (
+      cache !== undefined &&
+      cache.width === width &&
+      cache.palette === this.view.palette &&
+      cache.toolOutputDisplay === this.view.toolOutputDisplay &&
+      cache.thinkingDisplay === this.view.thinkingDisplay
+    ) {
+      settled = cache.rows;
+    } else {
+      settled = this.buildTranscript(width).document.rows;
+      this.activityAgentRowsCache = {
+        width,
+        palette: this.view.palette,
+        toolOutputDisplay: this.view.toolOutputDisplay,
+        thinkingDisplay: this.view.thinkingDisplay,
+        rows: settled,
+      };
+    }
+    const pending = this.toolTransactions.rows(width);
+    const streaming = this.liveAssistant.render(width).map((text, rowInSource) => ({
+      text,
+      sourceId: "live-assistant",
+      prompt: false,
+      rowInSource,
+    }));
+    return [...settled, ...pending, ...streaming].slice(-200);
+  }
+
+  private activityAgentFrame(width: number, height: number, focused: boolean): ActivityAgentFrame {
+    const spinner = SPINNER_FRAMES[this.spinnerIndex % SPINNER_FRAMES.length] as string;
+    this.activity.update({
+      working: this.view.working || this.connectionState === "reconnecting",
+      label:
+        this.connectionState === "reconnecting"
+          ? "Reconnecting"
+          : this.activeRequest === "compaction"
+            ? "Compacting context… (Esc to cancel)"
+            : extensionSingleLine(this.extensionHost.workingLabel() ?? "Working"),
+      spinner,
+      elapsedSeconds: this.view.elapsedSeconds,
+      queued: this.queued.length,
+    });
+    this.updateEditorFrame();
+    this.attachmentBar.update(this.pendingAttachments);
+    this.updateDeveloperPanel();
+
+    const fixed: Component[] = [
+      this.extensionWidgetsAbove,
+      this.attachmentBar,
+      ...(this.developerPanelEnabled ? [this.developerPanel] : []),
+      { render: (frameWidth) => this.pendingInputStatusRows(frameWidth) },
+      this.activity,
+      this.editorFrame,
+      this.extensionWidgetsBelow,
+    ];
+    const measured = fixed.map((component) => component.render(width));
+    const fixedHeight = measured.reduce((total, rows) => total + rows.length, 0);
+    const bodyHeight = Math.max(0, height - fixedHeight);
+    const transcript =
+      bodyHeight === 0
+        ? []
+        : this.activityAgentRows(width)
+            .slice(-bodyHeight)
+            .map(({ text }) => text);
+    while (transcript.length < bodyHeight) transcript.unshift("");
+    const editorCursor = this.editorFrame.cursorPlacement();
+    const beforeEditor = measured
+      .slice(0, fixed.indexOf(this.editorFrame))
+      .reduce((total, rows) => total + rows.length, 0);
+    return clipFrame([...transcript, ...measured.flat()], height, {
+      row: transcript.length + beforeEditor + editorCursor.row,
+      column: editorCursor.column,
+      visible: focused && !this.view.working && this.connectionState === "connected",
+    });
+  }
+
+  private handleActivityAgentInput(data: string): boolean {
+    const key = decodeOneKey(data, 0).key;
+    if (key.kind === "shift-tab") return false;
+    if (key.kind === "tab" && this.completionMatches().length === 0) return false;
+    this.handleAgentInput(data);
+    return true;
+  }
+
+  private updateEditorFrame(): void {
+    const completion = this.completions();
+    const editorMode = this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined;
+    this.editorFrame.update({
+      ...(this.notice === undefined ? {} : { notice: this.notice }),
+      ...(editorMode ? { mode: editorMode } : {}),
+      location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
+        this.view.sandbox ? `  sandbox:${this.view.sandbox}` : ""
+      }${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.extensionHost
+        .statuses()
+        .map((line) => `  · ${this.styledExtensionLine(line)}`)
+        .join("")}`,
+      ...(completion === undefined ? {} : { completion }),
+    });
+  }
+
+  private updateDeveloperPanel(): void {
+    this.developerPanel.update({
+      sessionId: this.sessionId,
+      ...(this.branch === undefined ? {} : { branch: this.branch }),
+      ...(this.view.sandbox === undefined ? {} : { sandbox: this.view.sandbox }),
+      connection: this.connectionState,
+      phase: this.view.working ? "active" : "idle",
+      ...(this.workspaceDiff === undefined ? {} : { diff: this.workspaceDiff }),
+      ...(this.workspaceDiffError === undefined ? {} : { error: this.workspaceDiffError }),
+    });
+  }
+
+  private pendingInputStatusRows(width: number): string[] {
+    const pending = orderPendingTurnInputs(this.pendingTurnInputs);
+    const rows = pending.map(
+      (item, index) =>
+        `${index + 1}. ${item.mode === "steer" ? "Steering" : item.mode === "followUp" ? "Follow-up" : "Interrupt"}: ${extensionSingleLine(item.text) || "[attachment]"}`,
+    );
+    return [
+      ...(rows.length === 0
+        ? []
+        : ["", `Pending from this terminal (${rows.length}) · injection order`, ...rows]),
+      ...(this.view.working
+        ? [
+            this.activeRequest === "shell" || this.activeRequest === "compaction"
+              ? "Enter queues a follow-up · Esc cancels"
+              : "Enter steers next · Alt+Enter follows up · Ctrl+Enter interrupts and delivers",
+          ]
+        : []),
+    ].map((line) => this.view.palette.dim(truncateToWidth(line, width, "…")));
+  }
+
+  private activityMonitorSnapshot(): ActivityMonitorSnapshot {
+    const entries = this.toolTransactions.monitorEntries();
+    const current = entries.findLast(
+      (entry) => entry.status === "pending" || entry.status === "running",
+    );
+    const operation: ActivitySafeStatus["operation"] =
+      this.connectionState !== "connected"
+        ? "blocked"
+        : this.activeInteractionId !== undefined || this.interactionQueue.length > 0
+          ? "waiting"
+          : this.view.working
+            ? "working"
+            : "idle";
+    const pending = orderPendingTurnInputs(this.pendingTurnInputs);
+    return {
+      status: {
+        operation,
+        ...(this.view.working ? { elapsedMs: this.view.elapsedSeconds * 1_000 } : {}),
+        activeToolCount: entries.filter(
+          (entry) => entry.status === "pending" || entry.status === "running",
+        ).length,
+        queuedInput: {
+          steer: pending.filter((item) => item.mode === "steer").length,
+          followUp: pending.filter((item) => item.mode === "followUp").length + this.queued.length,
+          interrupt: pending.filter((item) => item.mode === "interrupt").length,
+        },
+      },
+      connection: this.connectionState,
+      ...(this.view.sandbox === undefined ? {} : { sandbox: this.view.sandbox }),
+      ...(current === undefined ? {} : { current }),
+      recent: this.recentActivityTools,
+      changes:
+        this.workspaceDiff?.files.map((file) => `${file.status} ${file.path}`).slice(0, 20) ??
+        [...this.observedActivityFiles].slice(0, 20),
+      changesAuthoritative: this.workspaceDiff !== undefined,
+    };
+  }
+
   private liveFrame(includePendingTools = true): {
     lines: readonly string[];
     cursor?: CursorPlacement;
   } {
+    this.activitySurfaceRowOffset = 0;
     const unsafeComponents: Component[] = this.view.unsafe
       ? [
           {
@@ -1283,15 +1566,45 @@ export class AxlApp {
           },
         ]
       : [];
+    const frameHeight =
+      this.tuiMode === "regular" ? this.height : fullscreenDockHeight(this.height);
+    if (this.attentionOverlay.active !== undefined) {
+      const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
+      const lines = [...prefix, ...this.attentionOverlay.render(this.width)];
+      const cursor = this.attentionOverlay.cursorPlacement();
+      return clipFrame(
+        lines,
+        frameHeight,
+        cursor === undefined ? undefined : { ...cursor, row: prefix.length + cursor.row },
+        prefix.length,
+      );
+    }
     if (this.overlays.active !== undefined) {
       const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
       const lines = [...prefix, ...this.overlays.render(this.width)];
       const cursor = this.overlays.cursorPlacement();
       return clipFrame(
         lines,
-        this.tuiMode === "regular" ? this.height : fullscreenDockHeight(this.height),
+        frameHeight,
         cursor === undefined ? undefined : { ...cursor, row: prefix.length + cursor.row },
         prefix.length + (this.overlays.active instanceof PickerOverlay ? 4 : 0),
+      );
+    }
+    if (this.activitySurface.visible) {
+      const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
+      this.activitySurfaceRowOffset =
+        prefix.length + (this.tuiMode === "fullscreen" ? this.height - frameHeight : 0);
+      const activityFrame = this.activitySurface.render(
+        this.width,
+        Math.max(1, frameHeight - prefix.length),
+      );
+      return clipFrame(
+        [...prefix, ...activityFrame.lines],
+        frameHeight,
+        activityFrame.cursor === undefined
+          ? undefined
+          : { ...activityFrame.cursor, row: prefix.length + activityFrame.cursor.row },
+        prefix.length,
       );
     }
 
@@ -1308,55 +1621,15 @@ export class AxlApp {
       elapsedSeconds: this.view.elapsedSeconds,
       queued: this.queued.length,
     });
-    const completion = this.completions();
-    const editorMode = this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined;
-    this.editorFrame.update({
-      ...(this.notice === undefined ? {} : { notice: this.notice }),
-      ...(editorMode ? { mode: editorMode } : {}),
-      location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
-        this.view.sandbox ? `  sandbox:${this.view.sandbox}` : ""
-      }${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.extensionHost
-        .statuses()
-        .map((line) => `  · ${this.styledExtensionLine(line)}`)
-        .join("")}`,
-      ...(completion === undefined ? {} : { completion }),
-    });
+    this.updateEditorFrame();
     this.attachmentBar.update(this.pendingAttachments);
-    this.developerPanel.update({
-      sessionId: this.sessionId,
-      ...(this.branch === undefined ? {} : { branch: this.branch }),
-      ...(this.view.sandbox === undefined ? {} : { sandbox: this.view.sandbox }),
-      connection: this.connectionState,
-      phase: this.view.working ? "active" : "idle",
-      ...(this.workspaceDiff === undefined ? {} : { diff: this.workspaceDiff }),
-      ...(this.workspaceDiffError === undefined ? {} : { error: this.workspaceDiffError }),
-    });
+    this.updateDeveloperPanel();
     const fixed: Component[] = [
       ...unsafeComponents,
       this.extensionWidgetsAbove,
       this.attachmentBar,
       ...(this.developerPanelEnabled ? [this.developerPanel] : []),
-      {
-        render: (width) => {
-          const pending = orderPendingTurnInputs(this.pendingTurnInputs);
-          const rows = pending.map(
-            (item, index) =>
-              `${index + 1}. ${item.mode === "steer" ? "Steering" : item.mode === "followUp" ? "Follow-up" : "Interrupt"}: ${extensionSingleLine(item.text) || "[attachment]"}`,
-          );
-          return [
-            ...(rows.length === 0
-              ? []
-              : ["", `Pending from this terminal (${rows.length}) · injection order`, ...rows]),
-            ...(this.view.working
-              ? [
-                  this.activeRequest === "shell" || this.activeRequest === "compaction"
-                    ? "Enter queues a follow-up · Esc cancels"
-                    : "Enter steers next · Alt+Enter follows up · Ctrl+Enter interrupts and delivers",
-                ]
-              : []),
-          ].map((line) => this.view.palette.dim(truncateToWidth(line, width, "…")));
-        },
-      },
+      { render: (width) => this.pendingInputStatusRows(width) },
       this.activity,
       this.editorFrame,
       this.extensionWidgetsBelow,
@@ -1591,6 +1864,7 @@ export class AxlApp {
 
   private invalidateFullscreenRows(): void {
     this.fullscreenRowsCache = undefined;
+    this.activityAgentRowsCache = undefined;
   }
 
   private invalidateScreens(): void {
@@ -1616,6 +1890,7 @@ export class AxlApp {
 
   private setWorking(working: boolean): void {
     working = working && !this.stopped;
+    if (working) this.activitySurface.notifyOperationStarted();
     const changed = this.view.working !== working;
     this.view.working = working;
     if (changed) {
@@ -1674,6 +1949,16 @@ export class AxlApp {
       }
     }
 
+    if (
+      this.extensionHost.activities().length > 0 &&
+      event.type === "tool.call" &&
+      ["edit", "write"].includes(event.payload.name)
+    ) {
+      const input = jsonObject(event.payload.input);
+      const path = input?.path ?? input?.filePath ?? input?.file_path;
+      if (typeof path === "string") this.observedActivityFiles.add(path);
+    }
+
     if (event.type === "config.tools") {
       this.webFetchEnabled = event.payload.webFetch;
       this.webSearchEnabled = event.payload.webSearch;
@@ -1711,11 +1996,24 @@ export class AxlApp {
       event.type === "session.error" ||
       (event.type === "assistant.message" && event.payload.stopReason !== "tool_use")
     ) {
+      if (event.type === "interaction.requested") this.activitySurface.suspend("attention");
+      else if (event.type === "session.error") {
+        this.activitySurface.close("failure");
+        void this.activitySurface.reset().catch((error: unknown) => {
+          this.notice = this.view.palette.error(
+            `✖ activity cleanup failed · ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      } else this.activitySurface.notifyCompletion();
       this.attend();
     }
     if (event.type === "tool.result") {
       void this.refreshBranch();
       const component = this.toolTransactions.settle(event);
+      if (component !== undefined && this.extensionHost.activities().length > 0) {
+        this.recentActivityTools.unshift(component.monitorEntry());
+        this.recentActivityTools.splice(20);
+      }
       this.invalidateFullscreenRows();
       if (component === undefined) {
         this.commitLines(
@@ -1735,7 +2033,7 @@ export class AxlApp {
       if (queued >= 0) this.interactionQueue.splice(queued, 1);
       if (this.activeInteractionId === event.payload.interactionId) {
         this.activeInteractionId = undefined;
-        this.overlays.close();
+        this.attentionOverlay.clear();
         this.openNextInteraction();
       }
     } else if (
@@ -1851,25 +2149,37 @@ export class AxlApp {
     if (this.stopped) return;
     if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) {
       const text = data.slice(6, -6);
-      if (this.overlays.paste(text)) this.redraw();
-      else void this.handleBracketedPaste(text);
+      if (this.attentionOverlay.paste(text) || this.overlays.paste(text)) this.redraw();
+      else if (!this.activitySurface.visible || this.activitySurface.agentFocused)
+        void this.handleBracketedPaste(text);
       return;
     }
-    if (data === "\x16" && this.overlays.active?.paste !== undefined) {
-      void this.pasteClipboardIntoOverlay(this.overlays.active);
-      return;
+    if (data === "\x16") {
+      const overlay = this.attentionOverlay.active ?? this.overlays.active;
+      if (overlay?.paste !== undefined) {
+        void this.pasteClipboardIntoOverlay(overlay);
+        return;
+      }
     }
     if (data === "\x1b[I") {
       const wasAway = !this.focused;
       this.focused = true;
+      this.activitySurface.restoreTerminalFocus();
       if (wasAway && this.refocusRecap) this.showRefocusRecap();
-      this.redraw();
+      this.invalidateScreens();
+      this.redraw(true);
       return;
     }
     if (data === "\x1b[O") {
       this.focused = false;
       this.awayCompletedTurns = 0;
       this.awayChangedFiles.clear();
+      this.activitySurface.suspend("unfocused");
+      return;
+    }
+    if (this.attentionOverlay.active !== undefined) {
+      this.attentionOverlay.handleInput(data);
+      if (!this.stopped) this.redraw();
       return;
     }
     if (
@@ -1877,6 +2187,15 @@ export class AxlApp {
       this.overlays.active !== undefined &&
       isMouseReport(data)
     ) {
+      return;
+    }
+    if (this.overlays.active === undefined && this.activitySurface.visible) {
+      if (data === "\x1a") this.suspend();
+      else if (data === "\x0c") this.invalidateScreens();
+      else if (data !== "\x04") {
+        this.activitySurface.handleInput(data, decodeOneKey, this.activitySurfaceRowOffset);
+      }
+      if (!this.stopped) this.redraw();
       return;
     }
     if (this.tuiMode === "fullscreen" && this.overlays.active === undefined) {
@@ -1890,6 +2209,10 @@ export class AxlApp {
       if (!this.stopped) this.redraw();
       return;
     }
+    this.handleAgentInput(data);
+  }
+
+  private handleAgentInput(data: string): void {
     if (this.handleExtensionShortcut(data)) return;
 
     for (let index = 0; index < data.length; ) {
@@ -2410,8 +2733,43 @@ export class AxlApp {
     }
   }
 
+  private runLoungeCommand(action: string): void {
+    if (!action || action === "game") {
+      if (!this.activitySurface.resume() && !this.activitySurface.openPrimary()) {
+        this.notice = this.view.palette.dim("· no terminal activities are registered");
+      }
+    } else if (action === "resume") {
+      if (!this.activitySurface.resume()) {
+        const saved = this.loungeLastActivityId;
+        if (
+          saved !== undefined &&
+          this.extensionHost.activities().some((activity) => activity.id === saved)
+        ) {
+          this.activitySurface.open(saved);
+        } else {
+          this.notice = this.view.palette.dim("· no paused Lounge activity");
+        }
+      }
+    } else if (action === "close") {
+      this.activitySurface.close();
+    } else if (action === "status") {
+      this.notice = this.view.palette.dim(`· Lounge ${this.activitySurface.statusLabel()}`);
+    } else {
+      this.notice = this.view.palette.error(
+        "✖ use /lounge, /lounge game, /lounge resume, /lounge close, or /lounge status",
+      );
+    }
+    this.redraw();
+  }
+
   private async runPresentationCommand(name: string, argument?: string): Promise<void> {
     switch (name) {
+      case "lounge":
+        this.runLoungeCommand(argument ?? "");
+        return;
+      case "play":
+        this.runLoungeCommand("game");
+        return;
       case "quit":
         await this.quit();
         return;
@@ -2868,7 +3226,7 @@ export class AxlApp {
     if (rows.length === 0) return;
     this.document.appendRows(rows);
     this.invalidateFullscreenRows();
-    if (this.tuiMode === "regular" && !this.hydrating) {
+    if (this.tuiMode === "regular" && !this.hydrating && !this.activitySurface.visible) {
       this.options.output.write(this.screen.clear());
       this.options.output.write(`${rows.map((row) => row.text).join("\r\n")}\r\n`);
     }
@@ -2885,7 +3243,7 @@ export class AxlApp {
       if (remember) this.transcript.push({ kind: "lines", lines: [...lines] });
       this.document.append(lines, metadata);
       this.invalidateFullscreenRows();
-      if (this.tuiMode === "regular" && !this.hydrating) {
+      if (this.tuiMode === "regular" && !this.hydrating && !this.activitySurface.visible) {
         this.options.output.write(this.screen.clear());
         this.options.output.write(`${lines.join("\r\n")}\r\n`);
       }
@@ -2893,10 +3251,14 @@ export class AxlApp {
     if (redraw) this.redraw();
   }
 
-  private rebuildTranscript(repaint = true): void {
+  private buildTranscript(width: number): {
+    readonly view: SessionView;
+    readonly document: TranscriptDocument;
+    readonly pending: ToolTransactionStore;
+  } {
     const previous = this.view;
     const next = new SessionView(
-      this.width,
+      width,
       previous.palette,
       this.options.modelCatalog,
       (reference, mediaWidth, mediaPalette) =>
@@ -2920,13 +3282,13 @@ export class AxlApp {
         .map((component) => component.callId),
     );
     const flushTools = (): void => {
-      const rows = pending.drain(this.width);
+      const rows = pending.drain(width);
       document.appendRows(rows);
     };
     for (const entry of this.transcript) {
       if (entry.kind === "lines") {
         flushTools();
-        document.append(entry.lines.flatMap((line) => wrapLine(line, this.width)));
+        document.append(entry.lines.flatMap((line) => wrapLine(line, width)));
         continue;
       }
       const event = entry.event;
@@ -2965,12 +3327,17 @@ export class AxlApp {
     next.working = previous.working;
     next.elapsedSeconds = previous.elapsedSeconds;
     next.tokensPerSecond = previous.tokensPerSecond;
-    this.view = next;
-    this.toolTransactions.replace(pending);
-    this.document.replace(document.rows);
+    return { view: next, document, pending };
+  }
+
+  private rebuildTranscript(repaint = true): void {
+    const rebuilt = this.buildTranscript(this.width);
+    this.view = rebuilt.view;
+    this.toolTransactions.replace(rebuilt.pending);
+    this.document.replace(rebuilt.document.rows);
     this.invalidateFullscreenRows();
     if (!repaint) return;
-    if (this.tuiMode === "regular") {
+    if (this.tuiMode === "regular" && !this.activitySurface.visible) {
       this.repaintRegularTranscript();
       return;
     }
@@ -3022,6 +3389,7 @@ export class AxlApp {
       this.tuiMode = mode;
       this.screen.reset(this.width);
     }
+    this.syncTerminalMouseCapture(true);
     void this.persistPreferences({ tuiMode: mode });
     this.rebuildTranscript(false);
     this.redraw();
@@ -3184,23 +3552,42 @@ export class AxlApp {
 
   private async openDiffReview(scope: WorkspaceReviewScope): Promise<void> {
     if (this.overlays.active !== undefined) return;
+    const loadingOverlay: Overlay = {
+      render: (width) =>
+        renderDialog({
+          title: "Workspace review",
+          rows: [this.view.palette.dim("Loading review…")],
+          footer: "Esc cancel",
+          width,
+          palette: this.view.palette,
+        }),
+      handleKey: (data) => {
+        if (decodeOneKey(data, 0).key.kind !== "escape") return;
+        if (this.overlays.active === loadingOverlay) this.overlays.close();
+        this.redraw();
+      },
+    };
+    this.notice = undefined;
+    this.overlays.replace(loadingOverlay);
+    this.redraw();
     const newlyEnabled = !this.workspaceReviewEnabled;
     if (newlyEnabled && !(await this.configureWorkspaceReview(true))) {
+      if (this.overlays.active === loadingOverlay) this.overlays.close();
       this.redraw();
       return;
     }
+    if (this.overlays.active !== loadingOverlay) return;
     if (newlyEnabled && scope === "last-turn") {
+      this.overlays.close();
       this.notice = this.view.palette.dim(
         "· workspace checkpoints enabled · last-turn review starts with the next prompt",
       );
       this.redraw();
       return;
     }
-    this.notice = this.view.palette.dim("· loading workspace review…");
-    this.redraw();
     try {
       const initial = await this.loadWorkspaceDiff(scope);
-      this.notice = undefined;
+      if (this.overlays.active !== loadingOverlay) return;
       this.overlays.replace(
         new DiffReviewOverlay({
           initial,
@@ -3221,6 +3608,8 @@ export class AxlApp {
         }),
       );
     } catch (error) {
+      if (this.overlays.active !== loadingOverlay) return;
+      this.overlays.close();
       this.notice = this.view.palette.error(
         `✖ ${error instanceof Error ? error.message : "Workspace review failed"}`,
       );
@@ -3278,6 +3667,25 @@ export class AxlApp {
           description: this.workspaceReviewEnabled ? "on" : "off",
         },
         {
+          value: "lounge",
+          label: "Axl Lounge",
+          description: this.loungeEnabled ? "on" : "off",
+        },
+        ...(this.loungeEnabled
+          ? [
+              {
+                value: "lounge-motion",
+                label: "Lounge reduced motion",
+                description: this.loungeReducedMotion ? "on" : "off",
+              },
+              {
+                value: "lounge-text",
+                label: "Lounge text-only",
+                description: this.loungeTextOnly ? "on" : "off",
+              },
+            ]
+          : []),
+        {
           value: "web-fetch",
           label: "Web fetch tool",
           description: this.webFetchEnabled ? "on" : "off",
@@ -3307,10 +3715,96 @@ export class AxlApp {
         else if (value === "recap") this.selectRefocusRecap();
         else if (value === "developer") this.selectDeveloperPanel();
         else if (value === "review") this.selectWorkspaceReview();
+        else if (value === "lounge") this.selectLoungeEnabled();
+        else if (value === "lounge-motion") this.selectLoungeAccessibility("reducedMotion");
+        else if (value === "lounge-text") this.selectLoungeAccessibility("textOnly");
         else if (value === "web-fetch") this.selectWebTool("webFetch");
         else if (value === "web-search") this.selectWebTool("webSearch");
         else if (value === "images") this.selectImageDisplay();
         else this.selectDiffLayout();
+      },
+    });
+  }
+
+  private selectLoungeEnabled(): void {
+    this.openPicker({
+      title: "Axl Lounge",
+      items: [
+        { value: "on", label: "On", description: "enable Lounge commands and activities" },
+        { value: "off", label: "Off", description: "remove all Lounge activity and work" },
+      ],
+      current: this.loungeEnabled ? "on" : "off",
+      onPick: (value) => void this.setLoungeEnabled(value === "on"),
+    });
+  }
+
+  private async setLoungeEnabled(enabled: boolean): Promise<void> {
+    if (enabled === this.loungeEnabled) return;
+    try {
+      if (enabled) {
+        await this.options.onPreferenceChange?.({ loungeEnabled: true });
+        const preferences = await this.options.loadLoungePreferences?.();
+        if (preferences !== undefined) {
+          this.loungeLastActivityId = preferences.lastActivityId;
+          this.loungeReducedMotion = preferences.reducedMotion;
+          this.loungeTextOnly = preferences.textOnly;
+        }
+        for (const extensionId of this.loungeExtensionIds) {
+          await this.extensionHost.setExtensionEnabled(extensionId, true);
+        }
+        this.loungeEnabled = true;
+        this.notice = this.view.palette.dim("· Axl Lounge enabled");
+      } else {
+        this.loungeEnabled = false;
+        await this.activitySurface.reset();
+        for (const extensionId of [...this.loungeExtensionIds].reverse()) {
+          await this.extensionHost.setExtensionEnabled(extensionId, false);
+        }
+        await this.options.onPreferenceChange?.({ loungeEnabled: false });
+        this.notice = this.view.palette.dim("· Axl Lounge disabled");
+      }
+    } catch (error) {
+      if (enabled) {
+        for (const extensionId of [...this.loungeExtensionIds].reverse()) {
+          await this.extensionHost.setExtensionEnabled(extensionId, false).catch(() => undefined);
+        }
+        await Promise.resolve(this.options.onPreferenceChange?.({ loungeEnabled: false })).catch(
+          () => undefined,
+        );
+        this.loungeEnabled = false;
+      }
+      this.notice = this.view.palette.error(
+        `✖ ${sanitizeTerminalText(error instanceof Error ? error.message : "Lounge setting failed")}`,
+      );
+    }
+    this.redraw();
+  }
+
+  private selectLoungeAccessibility(setting: "reducedMotion" | "textOnly"): void {
+    const current = setting === "reducedMotion" ? this.loungeReducedMotion : this.loungeTextOnly;
+    this.openPicker({
+      title: setting === "reducedMotion" ? "Lounge reduced motion" : "Lounge text-only",
+      items: [
+        { value: "on", label: "On" },
+        { value: "off", label: "Off" },
+      ],
+      current: current ? "on" : "off",
+      onPick: (value) => {
+        const next = value === "on";
+        if (setting === "reducedMotion") this.loungeReducedMotion = next;
+        else this.loungeTextOnly = next;
+        this.activitySurface.presentationChanged();
+        void Promise.resolve(this.options.onLoungePreferenceChange?.({ [setting]: next })).catch(
+          (error: unknown) => {
+            if (setting === "reducedMotion") this.loungeReducedMotion = current;
+            else this.loungeTextOnly = current;
+            this.activitySurface.presentationChanged();
+            this.notice = this.view.palette.error(
+              `✖ ${sanitizeTerminalText(error instanceof Error ? error.message : "Lounge setting failed")}`,
+            );
+            this.redraw();
+          },
+        );
       },
     });
   }
@@ -3374,6 +3868,14 @@ export class AxlApp {
     });
   }
 
+  private syncTerminalMouseCapture(refresh = false): void {
+    this.terminal.setMouseCapture(
+      this.activityMouseCapture ||
+        (this.tuiMode === "fullscreen" && this.fullscreenMouse === "capture"),
+    );
+    if (refresh) this.terminal.refreshMouseCapture();
+  }
+
   private selectFullscreenMouse(): void {
     this.openPicker({
       title: "Fullscreen mouse",
@@ -3385,6 +3887,7 @@ export class AxlApp {
       onPick: (value) => {
         this.fullscreenMouse = value as FullscreenMouse;
         this.fullscreen.setMouse(this.fullscreenMouse);
+        this.syncTerminalMouseCapture(true);
         void this.persistPreferences({ fullscreenMouse: this.fullscreenMouse });
         this.redraw();
       },
@@ -4269,6 +4772,8 @@ export class AxlApp {
       throw error;
     }
     this.reconnectGeneration += 1;
+    await this.activitySurface.reset();
+    this.attentionOverlay.clear();
     if (client !== this.client) this.bindClient(client);
     this.connectionState = "connected";
     if (this.tuiMode === "regular") this.options.output.write(this.screen.clear());
@@ -4281,6 +4786,8 @@ export class AxlApp {
     this.seenEventIds.clear();
     this.transcript.length = 0;
     this.document.clear();
+    this.recentActivityTools.length = 0;
+    this.observedActivityFiles.clear();
     this.toolGroupModes.clear();
     this.toolTransactions.replace(
       new ToolTransactionStore(
@@ -4371,7 +4878,8 @@ export class AxlApp {
   }
 
   private openNextInteraction(): void {
-    if (this.overlays.active !== undefined || this.interactionQueue.length === 0) return;
+    if (this.attentionOverlay.active !== undefined || this.interactionQueue.length === 0) return;
+    this.activitySurface.suspend("attention");
     const request = this.interactionQueue.shift() as EventPayloadMap["interaction.requested"];
     this.activeInteractionId = request.interactionId;
     this.interactionError = undefined;
@@ -4446,7 +4954,7 @@ export class AxlApp {
         }
       },
     };
-    this.overlays.replace(modal);
+    this.attentionOverlay.replace(modal);
   }
 
   private openInteractionForm(request: EventPayloadMap["interaction.requested"]): void {
@@ -4466,7 +4974,7 @@ export class AxlApp {
       cancel: () => controller.abort(),
       refresh: () => this.redraw(),
     });
-    this.overlays.replace(dialog);
+    this.attentionOverlay.replace(dialog);
     this.redraw();
     void this.collectInteractionForm(request, schema, dialog, controller.signal);
   }
@@ -4757,7 +5265,7 @@ export class AxlApp {
       if (resolved && this.activeInteractionId === interactionId) {
         this.activeInteractionId = undefined;
         this.interactionError = undefined;
-        this.overlays.close();
+        this.attentionOverlay.clear();
         this.openNextInteraction();
       }
       this.redraw();
@@ -5421,7 +5929,9 @@ export class AxlApp {
       await this.commandController.invoke("/reload", this.sessionId);
       for (const controller of this.extensionCommandControllers) controller.abort();
       this.extensionCommandControllers.clear();
+      this.attentionOverlay.clear();
       this.overlays.clear();
+      await this.activitySurface.reset();
       await this.extensionHost.reload();
       try {
         void this.commandController.commands;

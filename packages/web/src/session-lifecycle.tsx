@@ -29,15 +29,29 @@ export function SessionLifecycle({
   readonly onClose: () => void;
 }): React.JSX.Element {
   const panel = useRef<HTMLElement>(null);
-  const [title, setTitle] = useState(session.title ?? session.firstUserMessage ?? "");
+  const canonicalTitle = session.title ?? session.firstUserMessage ?? "";
+  const [title, setTitle] = useState(canonicalTitle);
+  const [dirty, setDirty] = useState(false);
+  const [conflict, setConflict] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const operationActive = ["running", "waiting_interaction", "disposing"].includes(session.runtime.state);
+  const lastCanonical = useRef(canonicalTitle);
 
   useEffect(() => {
     const prior = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
     panel.current?.querySelector<HTMLElement>("input")?.focus();
     return () => prior?.focus();
   }, []);
+
+  // Another attached client can rename the session while this dialog is open.
+  // Resync the untouched field to the new name; warn instead of silently
+  // reverting when the user has unsaved edits.
+  useEffect(() => {
+    if (canonicalTitle === lastCanonical.current) return;
+    lastCanonical.current = canonicalTitle;
+    if (dirty) setConflict(true);
+    else setTitle(canonicalTitle);
+  }, [canonicalTitle, dirty]);
 
   const trapFocus = (event: React.KeyboardEvent): void => {
     if (event.key === "Escape") {
@@ -53,8 +67,9 @@ export function SessionLifecycle({
       <header><div><strong id="session-lifecycle-title">Session controls</strong><small>{session.sessionId}</small></div><button className="control-close" aria-label="Close" onClick={onClose}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" /></svg></button></header>
       <form onSubmit={(event) => { event.preventDefault(); onRename(title.trim()); }}>
         <label htmlFor="session-title">Name</label>
-        <div><input id="session-title" value={title} maxLength={256} onChange={(event) => setTitle(event.target.value)} /><button title={capabilities.has("session.rename") ? undefined : "Unavailable because session rename was not granted"} disabled={busy || operationActive || !title.trim() || title.trim() === (session.title ?? session.firstUserMessage) || !capabilities.has("session.rename")}>Save</button></div>
+        <div><input id="session-title" value={title} maxLength={256} onChange={(event) => { setTitle(event.target.value); setDirty(true); }} /><button title={capabilities.has("session.rename") ? undefined : "Unavailable because session rename was not granted"} disabled={busy || operationActive || !title.trim() || title.trim() === canonicalTitle || !capabilities.has("session.rename")}>Save</button></div>
       </form>
+      {conflict && <p className="lifecycle-conflict" role="alert">Renamed to "{canonicalTitle}" from another client. Saving replaces it.<button type="button" onClick={() => { setTitle(canonicalTitle); setDirty(false); setConflict(false); }}>Use latest</button></p>}
       {error && <p className="lifecycle-error" role="alert">{error}</p>}
       <div className="lifecycle-actions">
         <button title={capabilities.has("session.clone") ? undefined : "Unavailable because session clone was not granted"} disabled={busy || operationActive || !capabilities.has("session.clone")} onClick={onClone}><span><strong>Clone session</strong><small>Create a complete independent copy.</small></span></button>

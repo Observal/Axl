@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "./activity.ts";
+export * from "./activity-raster.ts";
+export * from "./activity-surface.ts";
 export * from "./app.ts";
 export * from "./attachments.ts";
 export * from "./clipboard.ts";
