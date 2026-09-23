@@ -113,6 +113,7 @@ jobs:
         working-directory: packages/e2ee
         run: |
           cargo test --locked
+          cargo test --locked -p axl-e2ee --features browser-test-fixtures witness::browser
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked -p axl-e2ee --all-targets --features browser-test-fixtures -- -D warnings

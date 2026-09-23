@@ -241,7 +241,7 @@ This preserves the atomic advanced-state plus exact-ciphertext guarantee while a
 
 ## Browser database
 
-The version 1 IndexedDB state database uses one key space bound to the origin and stores records under `crypto_session_id`. Its stores mirror the native logical schema:
+The test artifact's version 1 IndexedDB state database uses one key space bound to the origin and stores records under `crypto_session_id`. Its stores mirror the native logical schema:
 
 - metadata and lifecycle;
 - sealed current state and authenticated manifest;
@@ -251,9 +251,13 @@ The version 1 IndexedDB state database uses one key space bound to the origin an
 
 A separate key database holds the non-extractable WebCrypto wrapping key and prepared, active, or obsolete wrapped-DEK records for feasibility testing. It is not an independent rollback domain. Key preparation happens before the state transaction, activation happens after its completion, and restart reconciliation activates only the key referenced by authenticated committed state and removes only unreferenced inactive records. Obsolete active keys are removed only after anchor reconciliation.
 
+The production worker store is database version 2 with `_v2` stores for metadata, the wrapping key, wrapped state keys, the one sealed committed transition, and witness operations. The committed transition is the same canonical record the native endpoint writes: clear header, both AEAD nonces, exact sealed inner state and result, and exact sealed outer metadata containing the signed witness request. WebCrypto seals and unseals; private WASM finalization produces the header, nonces, AADs, key ID, commitment over the exact sealed inner bytes, signed request, and record. JavaScript cannot construct a transition or select any of those values. The operation record stores the input fingerprint, counter, generation, confirmed predecessor, successor and obsolete key IDs, exact request, request hash, and pending or completed disposition. Metadata stores the confirmed head, previous certificate hash, current key, one optional pending operation, and a fail-closed terminal lifecycle marker.
+
+The successor key record is written `prepared` in the commit transaction and marked `active` in its own strict transaction after the commit completes; open, pending, and continuation finish an interrupted activation before exposing the request. Continuation verifies the certificate in WASM against Rust-owned replica trust, rechecks the successor key, deletes the obsolete key and observes it absent, marks the operation completed, and advances the confirmed head in one strict transaction before Rust releases the exact result. A completed operation is a cache reusable only in the live lifetime that verified it; after restart it requires a fresh witness head.
+
 A single `readwrite` transaction covers all state, operation, outbox, and accepted-message stores affected by an operation. No unrelated promise, WebCrypto request, network request, timer, or UI callback occurs inside it.
 
-Schema upgrades run only in `versionchange`. Existing connections close on `versionchange`; a blocked upgrade reports `storage_unavailable`. A failed upgrade aborts and retains the old version. Unknown newer versions fail closed. The implementation never deletes and recreates a database as migration recovery.
+Schema upgrades run only in `versionchange`. Existing connections close on `versionchange`; a blocked upgrade reports `storage_unavailable`. A failed upgrade aborts and retains the old version. Version 1 production stores and unknown newer versions fail closed with `unsupported_schema`. The implementation never deletes and recreates a database as migration recovery.
 
 `QuotaExceededError`, forced close, unavailable storage, failed persistence request, or transaction abort returns a typed storage outcome and releases no ciphertext or plaintext. Missing or evicted committed state returns `state_loss` followed by `re_pair_required`. Private browsing is not guessed from browser heuristics. Pairing remains unavailable whenever required durability cannot be demonstrated.
 

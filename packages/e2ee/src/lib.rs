@@ -29,7 +29,7 @@ pub mod browser_test_fixtures;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
-#[cfg(any(test, feature = "node-test-fixtures"))]
+#[cfg(any(test, feature = "test-witness"))]
 #[doc(hidden)]
 pub mod test_witness;
 

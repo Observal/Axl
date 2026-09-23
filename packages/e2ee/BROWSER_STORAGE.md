@@ -13,13 +13,15 @@ IndexedDB, Web Locks, WebCrypto, and dedicated workers. It exercises real OpenML
 and written back to an authenticated committed snapshot. The implementation adds no browser storage
 library, lock library, cryptography library, or test database mock.
 
-The production artifact does not export the test adapter or its test anchor. It now includes a
+The production artifact does not export the test adapter or its test anchor. It includes a
 worker-private production store with Web Lock ownership, strict IndexedDB commits, a non-extractable
-AES-KW wrapping key, wrapped state keys, distinct AES-GCM envelopes, exact witness requests, and
-certificate continuation. No page protocol operation constructs that store. Production
-`createDaemonEndpoint`, `openDaemonEndpoint`, `createDeviceEndpoint`, and `openDeviceEndpoint`
-continue to return `rollback_anchor_unavailable` until private WASM finalization, pinned production
-replica trust, hosted transport, and the full runtime matrix are complete.
+AES-KW wrapping key, wrapped state keys, the canonical sealed committed-transition record, exact
+witness requests, and certificate continuation. The store accepts only Rust-finalized transitions,
+a Rust-owned lineage, and Rust-owned replica trust; see "Production barrier store" below. No page
+protocol operation constructs that store. Production `createDaemonEndpoint`, `openDaemonEndpoint`,
+`createDeviceEndpoint`, and `openDeviceEndpoint` continue to return `rollback_anchor_unavailable`
+until the transient production endpoint, pinned production replica trust, hosted transport, and the
+full runtime matrix are complete.
 
 This implementation is feasibility evidence, not production rollback protection. IndexedDB,
 WebCrypto non-extractability, persistent-storage permission, and WebAuthn counters are not an
@@ -80,6 +82,48 @@ generation, rollback counter, current key identifier, and manifest digest. The m
 same metadata plus the creation result and every operation, outbox, accepted-message, and
 sealed-pending-plaintext record. Every collection is sorted by its validated durable key before
 SHA-384 hashing, independent of append or IndexedDB cursor order.
+
+## Production barrier store
+
+The production worker store (`worker/storage.js`) is database version 2 under the same
+`axl-e2ee-production-v1:<session hex>` name. Version 1 databases and unknown newer versions fail
+closed with `unsupported_schema`; a failed upgrade aborts and preserves the old database. Its stores:
+
+| Store | Purpose |
+| --- | --- |
+| `metadata_v2` | Profile and session binding, generation, confirmed witness counter and commitment, previous certificate hash, current key ID, one optional pending operation ID, and a fail-closed `ready`, `quarantined`, or `revoked` lifecycle |
+| `wrapping_key_v2` | One origin-bound, non-extractable AES-KW `CryptoKey` |
+| `wrapped_state_keys_v2` | Wrapped AES-256-GCM state keys in `prepared` or `active` lifecycle |
+| `sealed_transitions_v2` | The one canonical committed-transition record: clear header, both nonces, exact sealed inner state and result, exact sealed outer metadata with the signed request |
+| `witness_operations_v2` | Operation ID, input fingerprint, counter, generation, confirmed predecessor, successor and obsolete key IDs, exact request, request hash, and `pending` or `completed` disposition |
+
+A commit takes a `BrowserTransition` produced by Rust. The store generates and wraps the state key,
+seals the inner payload Rust hands over once with the Rust-chosen nonce and AAD, returns the exact
+sealed bytes to `finalize`, seals the outer metadata Rust returns, and stores the record Rust
+assembles from both. JavaScript never selects a counter, commitment, nonce, key ID, or request. One
+strict transaction rechecks the confirmed head, generation, current key, and absence of a pending
+operation, then writes the `prepared` key, the record, the operation, and the metadata. After it
+completes, a second strict transaction marks the key `active`; only then is the exact pending
+request exposed. Open, `pending()`, and continuation finish an interrupted activation first, then
+decrypt the sealed record and let Rust authenticate it. The operation row's request and hash are a
+cache of the signed request inside that record; a mismatch is `corrupt_state` and nothing is
+exposed for resend. A failed `create()` or `open()` releases the Web Lock before rejecting.
+
+Continuation unwraps the state key non-extractable and decrypt-only, decrypts both envelopes, hands
+the plaintexts and record to Rust, which rechecks lineage, commitment, request hash, signature, and
+heads, verifies the certificate against Rust-owned replica trust, and then, in one strict
+transaction, rechecks the successor key, deletes the obsolete key and observes it absent, marks the
+operation completed, and advances the confirmed head. Rust releases the exact result only after the
+store reports that erasure. A witness decision against the lineage or an invalid certificate
+persists a terminal lifecycle marker; a reused operation ID with another fingerprint does the same
+and returns `witness_operation_conflict`. If that marker's write does not complete, the call fails
+with the storage error and the live store refuses every later call, so a later certificate cannot
+be tried against an endpoint whose terminal decision was never recorded. A completed operation is reusable only inside the live
+lifetime that verified it; after restart it returns `fresh_witness_required`.
+
+The test artifact drives this byte-identical store from the dedicated test worker with a fixture
+lineage and an in-WASM deterministic three-replica witness. Production replica trust is not pinned
+yet, so no production path constructs the store.
 
 ## Prepare-and-compare order
 

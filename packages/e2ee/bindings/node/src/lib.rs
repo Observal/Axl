@@ -676,7 +676,7 @@ impl TestWitness {
         self.inner
             .respond(&request)
             .map(|bytes| bytes.into())
-            .map_err(map_persistence)
+            .map_err(|_| error("witness_unavailable"))
     }
 
     #[napi]

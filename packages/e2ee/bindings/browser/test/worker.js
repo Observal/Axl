@@ -12,6 +12,7 @@ import initializeWasm, {
   test_openmls_negative_cases_json as testOpenmlsNegativeCasesJson,
   test_secure_random_probe as testSecureRandomProbe,
 } from "../wasm/axl_e2ee_browser.js";
+import { runProductionBarrierScenario } from "./barrier-scenario.js";
 import {
   BrowserPersistenceEndpoint,
   createNewerStateDatabase,
@@ -180,6 +181,7 @@ function request(data) {
       "binding_info",
       "openmls_lifecycle",
       "openmls_negative_cases",
+      "production_barrier_scenario",
       "secure_random_probe",
     ].includes(data.operation)
   ) {
@@ -252,6 +254,8 @@ self.addEventListener("message", async ({ data }) => {
           typeof SharedArrayBuffer !== "undefined" &&
           exports.memory.buffer instanceof SharedArrayBuffer,
       };
+    } else if (validated.operation === "production_barrier_scenario") {
+      value = await runProductionBarrierScenario();
     } else if (validated.operation === "persistence_delete") {
       await deleteTestDatabases(sessionId(validated.receive));
       value = { deleted: true };

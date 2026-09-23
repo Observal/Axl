@@ -24,6 +24,9 @@ use crate::{
     pairing::PairingCredential,
 };
 
+#[cfg(feature = "browser")]
+pub mod browser;
+
 pub const WITNESS_PROTOCOL_VERSION: u16 = 1;
 pub const WITNESS_REQUEST_MAX_BYTES: usize = 1024;
 pub const WITNESS_RECEIPT_MAX_BYTES: usize = 1024;
@@ -626,7 +629,7 @@ impl ReplicaReceipt {
 
     /// Deterministic replica-side receipt construction for in-process test witnesses. Production
     /// replicas live in the control plane; this constructor never ships in a production artifact.
-    #[cfg(any(test, feature = "node-test-fixtures"))]
+    #[cfg(any(test, feature = "test-witness"))]
     pub(crate) fn sign_for_test(
         fields: TestReceiptFields,
         signer: &SignatureKeyPair,
@@ -679,7 +682,7 @@ impl ReplicaReceipt {
     }
 }
 
-#[cfg(any(test, feature = "node-test-fixtures"))]
+#[cfg(any(test, feature = "test-witness"))]
 pub(crate) struct TestReceiptFields {
     pub result: WitnessResult,
     pub replica_id: Id,
@@ -861,7 +864,7 @@ impl QuorumCertificate {
         &self.receipts
     }
 
-    #[cfg(any(test, feature = "node-test-fixtures"))]
+    #[cfg(any(test, feature = "test-witness"))]
     pub(crate) fn from_receipts_for_test(
         mut receipts: Vec<ReplicaReceipt>,
     ) -> Result<Self, WitnessError> {
