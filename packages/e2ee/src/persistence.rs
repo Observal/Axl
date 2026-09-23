@@ -2845,6 +2845,14 @@ fn optional_field(value: Option<&[u8]>) -> Vec<u8> {
     }
 }
 
+/// A facade precondition on committed endpoint state. The runner evaluates it on the fresh
+/// transaction only after `begin_witnessed` has resolved terminal state, the pending barrier,
+/// exact duplicates, and same-ID conflicts, so a precondition can never preempt quarantine or
+/// duplicate replay.
+pub(crate) type Precondition<'a> = &'a dyn Fn(&CoreProvider) -> Result<(), PersistenceError>;
+
+pub(crate) const NO_PRECONDITION: Precondition<'static> = &|_| Ok(());
+
 #[allow(dead_code)]
 impl DurableDaemon {
     pub fn create(
@@ -3025,6 +3033,23 @@ impl DurableDaemon {
         hosted_generation: u64,
         plaintext: &[u8],
     ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
+        self.prepare_application_guarded(
+            operation_id,
+            logical_message_id,
+            hosted_generation,
+            plaintext,
+            NO_PRECONDITION,
+        )
+    }
+
+    pub(crate) fn prepare_application_guarded(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        hosted_generation: u64,
+        plaintext: &[u8],
+        precondition: Precondition<'_>,
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
             op_kind::APPLICATION_SEND,
@@ -3036,6 +3061,7 @@ impl DurableDaemon {
                     plaintext,
                 ],
             )?,
+            precondition,
             |daemon| daemon.prepare_application(logical_message_id, hosted_generation, plaintext),
         )
     }
@@ -3046,6 +3072,23 @@ impl DurableDaemon {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
+    ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
+        self.receive_application_guarded(
+            operation_id,
+            ciphertext,
+            logical_message_id,
+            hosted_generation,
+            NO_PRECONDITION,
+        )
+    }
+
+    pub(crate) fn receive_application_guarded(
+        &mut self,
+        operation_id: Id,
+        ciphertext: &[u8],
+        logical_message_id: Id,
+        hosted_generation: u64,
+        precondition: Precondition<'_>,
     ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
         self.receive_operation(
             operation_id,
@@ -3058,6 +3101,7 @@ impl DurableDaemon {
                 ],
             )?,
             MessageClass::ApplicationRequest,
+            precondition,
             |daemon| daemon.receive_application(ciphertext, logical_message_id, hosted_generation),
         )
     }
@@ -3142,12 +3186,13 @@ impl DurableDaemon {
         )
     }
 
-    pub fn prepare_resync_control(
+    pub(crate) fn prepare_resync_control_guarded(
         &mut self,
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
         plaintext: &[u8],
+        precondition: Precondition<'_>,
     ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
@@ -3160,6 +3205,7 @@ impl DurableDaemon {
                     plaintext,
                 ],
             )?,
+            precondition,
             |daemon| {
                 daemon.prepare_resync_control(logical_message_id, hosted_generation, plaintext)
             },
@@ -3179,6 +3225,7 @@ impl DurableDaemon {
                 op_kind::DAEMON_COMMIT,
                 &[&logical_message_id, &hosted_generation.to_be_bytes()],
             )?,
+            NO_PRECONDITION,
             |daemon| daemon.prepare_commit(logical_message_id, hosted_generation),
         )
     }
@@ -3188,6 +3235,7 @@ impl DurableDaemon {
         operation_id: Id,
         operation_kind: u16,
         fingerprint: [u8; 48],
+        precondition: Precondition<'_>,
         operation: impl FnOnce(&mut Daemon) -> Result<PreparedEnvelope, CoreError>,
     ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         let mut transaction = fresh_or_return!(self.store.begin_witnessed(
@@ -3195,6 +3243,7 @@ impl DurableDaemon {
             operation_kind,
             fingerprint
         )?);
+        precondition(&transaction.provider)?;
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -3226,6 +3275,7 @@ impl DurableDaemon {
         operation_id: Id,
         fingerprint: [u8; 48],
         class: MessageClass,
+        precondition: Precondition<'_>,
         operation: impl FnOnce(&mut Daemon) -> Result<crate::PreparedPlaintext, CoreError>,
     ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
         let mut transaction = fresh_or_return!(self.store.begin_witnessed(
@@ -3233,6 +3283,7 @@ impl DurableDaemon {
             op_kind::APPLICATION_RECEIVE,
             fingerprint
         )?);
+        precondition(&transaction.provider)?;
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -3496,6 +3547,23 @@ impl DurablePhone {
         hosted_generation: u64,
         plaintext: &[u8],
     ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
+        self.prepare_application_guarded(
+            operation_id,
+            logical_message_id,
+            hosted_generation,
+            plaintext,
+            NO_PRECONDITION,
+        )
+    }
+
+    pub(crate) fn prepare_application_guarded(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        hosted_generation: u64,
+        plaintext: &[u8],
+        precondition: Precondition<'_>,
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
             op_kind::APPLICATION_SEND,
@@ -3507,6 +3575,7 @@ impl DurablePhone {
                     plaintext,
                 ],
             )?,
+            precondition,
             |phone| phone.prepare_application(logical_message_id, hosted_generation, plaintext),
         )
     }
@@ -3552,6 +3621,7 @@ impl DurablePhone {
                 op_kind::PROPOSAL_SEND,
                 &[&logical_message_id, &hosted_generation.to_be_bytes()],
             )?,
+            NO_PRECONDITION,
             |phone| phone.prepare_self_update(logical_message_id, hosted_generation),
         )
     }
@@ -3615,6 +3685,23 @@ impl DurablePhone {
         logical_message_id: Id,
         hosted_generation: u64,
     ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
+        self.receive_application_guarded(
+            operation_id,
+            ciphertext,
+            logical_message_id,
+            hosted_generation,
+            NO_PRECONDITION,
+        )
+    }
+
+    pub(crate) fn receive_application_guarded(
+        &mut self,
+        operation_id: Id,
+        ciphertext: &[u8],
+        logical_message_id: Id,
+        hosted_generation: u64,
+        precondition: Precondition<'_>,
+    ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
         let fingerprint = witness_v2::operation_fingerprint(
             op_kind::APPLICATION_RECEIVE,
             &[
@@ -3628,6 +3715,7 @@ impl DurablePhone {
             op_kind::APPLICATION_RECEIVE,
             fingerprint
         )?);
+        precondition(&transaction.provider)?;
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -3672,6 +3760,7 @@ impl DurablePhone {
         operation_id: Id,
         operation_kind: u16,
         fingerprint: [u8; 48],
+        precondition: Precondition<'_>,
         operation: impl FnOnce(&mut Phone) -> Result<PreparedEnvelope, CoreError>,
     ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         let mut transaction = fresh_or_return!(self.store.begin_witnessed(
@@ -3679,6 +3768,7 @@ impl DurablePhone {
             operation_kind,
             fingerprint
         )?);
+        precondition(&transaction.provider)?;
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;

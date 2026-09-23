@@ -64,6 +64,8 @@ pub(crate) struct HandleGate {
 }
 
 impl HandleGate {
+    /// Only test artifacts construct endpoints; production constructors fail closed first.
+    #[cfg_attr(not(feature = "test-fixtures"), allow(dead_code))]
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             busy: AtomicBool::new(false),

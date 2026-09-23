@@ -5,18 +5,33 @@
 
 Private Node-API binding for revision 1 of `axl-e2ee-mls-pq-v1`.
 
-This package is not published and is not wired into the daemon or SDK. Its native boundary includes
-a narrow witness continuation whose immutable getters return only the operation ID, exact committed
-request, request hash, and status. The continuation accepts a bounded certificate only for that
-operation, verifies the pinned unanimous trust set in Rust, and returns only the exact committed
-output after native storage barriers are complete. Recovery construction is test-feature-only.
+This package is not published and is not wired into the daemon or SDK. ABI version 2 exposes the
+atomic witness barrier directly on each endpoint. Every state-changing call returns a
+`WitnessOutcome`: either the one exact pending request (`operationId`, byte-identical signed
+`request`, `requestHash`, `kind`) that JavaScript must transport unchanged to all three replicas, or
+an already released exact typed result. `witnessReadRequest` and `reconcileWitness` obtain the fresh
+unanimous head that authorizes exactly one mutation; `pendingWitness` reloads the durable pending
+request from storage on every call; `continueWitness` verifies the certificate in Rust, rechecks
+successor-key activation, erases and verifies the obsolete key, and only then returns the tagged
+`NativeResult`. No ciphertext, plaintext, pairing artifact, or typed state crosses the boundary
+before that completes, and JavaScript cannot select counters, commitments, nonces, keys, or
+verifiers. Received commit application (`applyReceivedUpdateCommit`) and epoch-ready creation
+(`prepareEpochReady`) are separate single-transition operations. Expiry is an explicit witnessed
+operation (`expireIfNeeded`, `expireWelcomeIfNeeded`).
+
 Production endpoint constructors still fail closed because production replica trust and hosted
-witness transport are not enabled. The build and integrity loader support Windows MSVC x64 and
-ARM64 artifacts in addition to the existing macOS and glibc Linux targets. The Windows test artifact can
-exercise the real DPAPI envelope-key store under an explicitly selected non-built-in account by
-setting `AXL_RUN_WINDOWS_DPAPI_TESTS=1`; ordinary hosted CI accounts continue to use test storage
-rather than silently weakening the DPAPI identity policy. Test constructors and the test binary are
-excluded from production package staging.
+witness transport are not enabled, and `productionStorageReady` stays `false`. The test artifact
+adds an in-process deterministic three-replica `TestWitness` and test endpoint constructors; both
+are excluded from the production artifact, package, and tarball, along with every test-only Rust
+symbol. The build and integrity loader support Windows MSVC x64 and ARM64 artifacts in addition to
+the existing macOS and glibc Linux targets. The Windows test artifact can exercise the real DPAPI
+envelope-key store under an explicitly selected non-built-in account by setting
+`AXL_RUN_WINDOWS_DPAPI_TESTS=1`; ordinary hosted CI accounts continue to use test storage rather
+than silently weakening the DPAPI identity policy.
+
+The SDK and daemon adapters do not yet drive the barrier themselves. Until that integration lands,
+`test/witness-driver.mjs` runs the complete barrier against the test witness and adapts released
+results to the shape those adapters still expect. It is test scaffolding, not part of the artifact.
 
 Every accepted JavaScript byte input is length-checked and copied before native asynchronous work
 is scheduled. Returned byte arrays are new Node-owned values containing the exact committed Rust

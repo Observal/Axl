@@ -29,16 +29,34 @@ const errorBlock = declarations.match(/export type AxlE2eeErrorCode =([\s\S]*?);
 const declaredErrors = [...errorBlock.matchAll(/"([a-z0-9_]+)"/gu)].map((match) => match[1]).sort();
 assert.deepEqual(declaredErrors, [...native.errorCodes()].sort());
 
-for (const [className, interfaceName] of [
-  ["DaemonEndpoint", "DaemonEndpoint"],
-  ["DeviceEndpoint", "DeviceEndpoint"],
-  ["NativePendingWitness", "NativePendingWitness"],
-]) {
-  const body = declarations.match(new RegExp(`export interface ${interfaceName} \\{([\\s\\S]*?)\\n\\}`, "u"))?.[1] ?? "";
-  const declared = [
+function interfaceMembers(interfaceName) {
+  const match = declarations.match(
+    new RegExp(`export interface ${interfaceName}(?: extends ([A-Za-z0-9_]+))? \\{([\\s\\S]*?)\\n\\}`, "u"),
+  );
+  assert(match, `missing interface ${interfaceName}`);
+  const body = match[2];
+  const own = [
     ...body.matchAll(/^  ([A-Za-z0-9_]+)\(/gmu),
-    ...body.matchAll(/^  readonly ([A-Za-z0-9_]+):/gmu),
-  ].map((match) => match[1]).sort();
+    ...body.matchAll(/^  readonly ([A-Za-z0-9_]+)\??:/gmu),
+  ].map((entry) => entry[1]);
+  return match[1] ? [...interfaceMembers(match[1]), ...own] : own;
+}
+
+for (const className of [
+  "DaemonEndpoint",
+  "DeviceEndpoint",
+  "WitnessOutcome",
+  "NativeResult",
+  "NativeOutbox",
+  "NativePlaintext",
+  "NativeAccepted",
+  "NativeCommit",
+  "NativeWelcome",
+  "NativeActivationAcceptance",
+  "NativeEpochReadyAcceptance",
+  "NativeRePairRequirement",
+]) {
+  const declared = interfaceMembers(className).sort();
   const actual = Object.getOwnPropertyNames(native[className].prototype).filter((name) => name !== "constructor").sort();
   assert.deepEqual(declared, actual, `${className} declaration drift`);
 }
@@ -53,10 +71,20 @@ for (const pattern of [
   /hostedGrantGeneration: bigint/u,
 ]) assert.match(declarations, pattern, `missing bigint declaration: ${pattern}`);
 assert(!/hostedGrantGeneration: number|readonly (?:epoch|expiresAtMs|targetEpoch)\??: number/u.test(declarations), "u64 exposed as number");
-for (const discriminant of ["issued", "pending", "reserved", "active", "waiting_for_epoch_ready", "re_pair_required", "application_request", "application_delivery", "update_proposal", "commit", "epoch_ready", "pair_activation", "resync_control"]) assert(declarations.includes(`"${discriminant}"`), `missing discriminant ${discriminant}`);
+for (const discriminant of ["issued", "pending", "reserved", "active", "waiting_for_epoch_ready", "re_pair_required", "application_request", "application_delivery", "update_proposal", "commit", "epoch_ready", "pair_activation", "resync_control", "register", "advance", "ready", "resend_pending", "recover_accepted", "quarantined", "revoked", "released"]) assert(declarations.includes(`"${discriminant}"`), `missing discriminant ${discriminant}`);
+for (const member of ["reservationId", "cryptoSessionId", "accountId", "installationId", "deviceId", "claimHash", "keyPackageHash", "expiresAtMs"]) {
+  assert(interfaceMembers("ReservationIntent").includes(member), `ReservationIntent lacks ${member}`);
+}
+for (const code of ["unsupported_schema", "invalid_hash"]) assert(declaredErrors.includes(code), `missing error code ${code}`);
+assert.equal(native.getBindingInfo().abiVersion, 2);
+assert.match(declarations, /readonly abiVersion: 2;/u);
+for (const forbidden of ["NativePendingWitness", "testWitnessPending", "rollbackAnchor", "RollbackAnchor"]) {
+  assert(!declarations.includes(forbidden), `declarations expose removed API ${forbidden}`);
+}
 
 const testPath = join(root, "dist/test-artifact/native", `axl-e2ee-node.${target}.node`);
 const testNative = createRequire(import.meta.url)(testPath);
 assert(Object.keys(testNative).includes("testDaemonEndpoint"));
-assert(!Object.keys(native).some((name) => name.startsWith("test")));
+assert(Object.keys(testNative).includes("TestWitness"));
+assert(!Object.keys(native).some((name) => /^test/iu.test(name)));
 console.log("Node ABI, declarations, discriminants, bigint fields, and readonly fields match.");
