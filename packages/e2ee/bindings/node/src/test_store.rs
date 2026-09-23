@@ -3,7 +3,7 @@
 
 use axl_e2ee::{
     Id,
-    persistence::{EnvelopeKeyStore, PersistenceError, RollbackAnchor, RollbackState},
+    persistence::{EnvelopeKeyStore, PersistenceError},
 };
 use std::{collections::BTreeMap, sync::Mutex};
 
@@ -115,46 +115,6 @@ impl EnvelopeKeyStore for TestKeys {
             .lock()
             .map_err(|_| PersistenceError::Storage)?
             .retain(|_, record| record.session != session);
-        Ok(())
-    }
-}
-
-pub(crate) struct TestAnchor {
-    state: Mutex<RollbackState>,
-}
-impl Default for TestAnchor {
-    fn default() -> Self {
-        Self {
-            state: Mutex::new(RollbackState {
-                counter: 0,
-                epoch: 0,
-                epoch_authenticator: Vec::new(),
-            }),
-        }
-    }
-}
-impl RollbackAnchor for TestAnchor {
-    fn available(&self) -> bool {
-        true
-    }
-    fn read(&self, _session: Id) -> Result<RollbackState, PersistenceError> {
-        self.state
-            .lock()
-            .map(|s| s.clone())
-            .map_err(|_| PersistenceError::Storage)
-    }
-    fn advance(
-        &self,
-        _session: Id,
-        expected: &RollbackState,
-        next: &RollbackState,
-        _operation_id: Id,
-    ) -> Result<(), PersistenceError> {
-        let mut state = self.state.lock().map_err(|_| PersistenceError::Storage)?;
-        if *state != *expected || next.counter != expected.counter.saturating_add(1) {
-            return Err(PersistenceError::Quarantined);
-        }
-        *state = next.clone();
         Ok(())
     }
 }

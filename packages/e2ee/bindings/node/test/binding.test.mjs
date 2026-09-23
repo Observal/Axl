@@ -13,6 +13,9 @@ const production = await import(
   new URL("dist/package/loader/index.js", packageRoot)
 );
 const fixture = await import("./fixture-loader.mjs");
+const { authorize, complete, reconcile, witnessed, witnessedFacade } = await import(
+  "./witness-driver.mjs"
+);
 
 function uuid(seed) {
   const value = Buffer.alloc(16, seed);
@@ -21,6 +24,8 @@ function uuid(seed) {
   return value;
 }
 const operation = (value) => Buffer.alloc(16, value);
+const contains = (haystack, needle) =>
+  Buffer.from(haystack).includes(Buffer.from(needle));
 
 async function activatedPair(seed = 20) {
   const root = mkdtempSync(join(tmpdir(), "axl-e2ee-node-"));
@@ -28,64 +33,109 @@ async function activatedPair(seed = 20) {
   const installation = uuid(seed + 1);
   const session = uuid(seed + 2);
   const deviceId = uuid(seed + 3);
+  const witness = fixture.testWitness();
   const daemon = fixture.testDaemonEndpoint(
     join(root, "daemon"),
     account,
     installation,
     session,
+    witness,
   );
-  const invitation = await daemon.issue(operation(1));
+  // Creation is the counter-1 registration. Nothing is published before it completes.
+  const register = await daemon.issue(operation(1));
+  assert.equal(register.kind, "register");
+  await assert.rejects(daemon.invitation(), { code: "initialization_incomplete" });
+  const issued = await complete(daemon, witness, register);
+  assert.equal(issued.tag, "invitation");
+  const invitation = issued.publication;
+  assert.equal(invitation.tag, "issued");
+  assert.deepEqual(await daemon.invitation(), invitation);
+
   const device = fixture.testDeviceEndpoint(
     join(root, "device"),
     account,
     installation,
     session,
     deviceId,
+    witness,
   );
-  const prejoin = await device.prepare(invitation.bytes, operation(2));
-  const pending = await daemon.submitClaim(operation(3), prejoin.bytes);
-  assert.equal(pending.tag, "pending");
+  const prepared = await device.prepare(invitation.bytes, operation(2));
+  assert.equal(prepared.kind, "register");
+  await assert.rejects(device.publication(), { code: "initialization_incomplete" });
+  const prejoin = (await complete(device, witness, prepared)).publication;
+  assert.equal(prejoin.tag, "prepared");
+
+  const pending = await witnessed(daemon, witness, () =>
+    daemon.submitClaim(operation(3), prejoin.bytes),
+  );
+  assert.equal(pending.tag, "claim");
+  assert.equal(pending.publication.tag, "pending");
   const reservationId = operation(4);
-  assert.equal(
-    (await daemon.confirmClaim(operation(5), pending.hash, reservationId)).tag,
-    "reserved",
+  // Hash length is checked before any asynchronous work is scheduled, with a declared ABI code.
+  await assert.rejects(daemon.confirmClaim(operation(5), Buffer.alloc(47), reservationId), {
+    code: "invalid_hash",
+  });
+  const reserved = await witnessed(daemon, witness, () =>
+    daemon.confirmClaim(operation(5), pending.publication.hash, reservationId),
   );
-  const welcome = await daemon.createWelcome(operation(6), reservationId);
+  assert.equal(reserved.status, "reserved");
+  // The complete exact reservation intent crosses the boundary, not a lossy summary.
+  const intent = reserved.publication.reservation;
+  assert.deepEqual(reserved.publication, { tag: "reserved", reservation: intent });
+  assert.deepEqual(Buffer.from(intent.reservationId), reservationId);
+  assert.deepEqual(Buffer.from(intent.cryptoSessionId), session);
+  assert.deepEqual(Buffer.from(intent.accountId), account);
+  assert.deepEqual(Buffer.from(intent.installationId), installation);
+  assert.deepEqual(Buffer.from(intent.deviceId), deviceId);
+  assert.deepEqual(Buffer.from(intent.claimHash), Buffer.from(pending.publication.hash));
+  assert.deepEqual(
+    Buffer.from(intent.keyPackageHash),
+    createHash("sha384").update(prejoin.secondaryBytes).digest(),
+  );
+  assert.equal(typeof intent.expiresAtMs, "bigint");
+  assert(intent.expiresAtMs > 0n);
+  const welcome = (
+    await witnessed(daemon, witness, () => daemon.createWelcome(operation(6), reservationId))
+  ).welcome;
   assert.equal(
-    await device.joinPublishedWelcome(
-      operation(7),
-      welcome.bytes,
-      welcome.claimHash,
-      createHash("sha384").update(welcome.bytes).digest(),
-      welcome.expiresAtMs,
-    ),
+    (
+      await witnessed(device, witness, () =>
+        device.joinPublishedWelcome(
+          operation(7),
+          welcome.bytes,
+          welcome.claimHash,
+          createHash("sha384").update(welcome.bytes).digest(),
+          welcome.expiresAtMs,
+        ),
+      )
+    ).status,
     "joined",
   );
-  const activation = await device.prepareActivation(operation(8), operation(9));
-  assert.rejects(
-    device.prepareApplication(
-      operation(10),
-      operation(11),
-      1n,
-      Buffer.from("blocked"),
+  const activation = (
+    await witnessed(device, witness, () => device.prepareActivation(operation(8), operation(9)))
+  ).outbox;
+  await assert.rejects(
+    witnessed(device, witness, () =>
+      device.prepareApplication(operation(10), operation(11), 1n, Buffer.from("blocked")),
     ),
     { code: "conflict" },
   );
-  const acceptance = await daemon.acceptActivation(
-    operation(12),
-    operation(9),
-    activation.ciphertext,
-  );
+  const acceptance = (
+    await witnessed(daemon, witness, () =>
+      daemon.acceptActivation(operation(12), operation(9), activation.ciphertext),
+    )
+  ).activation;
   assert.equal(
-    await device.acknowledgeActivation(operation(13), acceptance),
+    (await witnessed(device, witness, () => device.acknowledgeActivation(operation(13), acceptance)))
+      .status,
     "active",
   );
-  return { root, daemon, device };
+  return { root, daemon, device, witness, session };
 }
 
 test("production artifact reports its ABI and fails closed", async () => {
   assert.deepEqual(production.getBindingInfo(), {
-    abiVersion: 1,
+    abiVersion: 2,
     profileId: "axl-e2ee-mls-pq-v1",
     profileRevision: 1,
     nodeApi: 9,
@@ -144,136 +194,148 @@ test("checked-in pairing fixtures are consumed and bounds precede decoding", asy
   });
 });
 
-test("native witness continuation binds operation, certificate, and exact committed output", async () => {
-  const fixtures = new URL("../../../fixtures/v1/", import.meta.url);
-  const request = readFileSync(new URL("witness-advance-v1.bin", fixtures));
-  const certificate = readFileSync(new URL("witness-quorum-v1.bin", fixtures));
-  const exact = Buffer.from("exact committed output");
-  const pending = fixture.testWitnessPending(request, exact);
-  assert.equal(pending.status, "pending_quorum");
-  assert.deepEqual(pending.witnessRequest, request);
-  assert.deepEqual(
-    pending.requestHash,
-    createHash("sha384").update(request).digest(),
-  );
-  const wrongOperation = Buffer.from(pending.operationId);
-  wrongOperation[0] ^= 1;
-  await assert.rejects(pending.continueWitness(wrongOperation, certificate), {
-    code: "witness_operation_conflict",
-  });
-  const copiedCertificate = Buffer.from(certificate);
-  const completion = pending.continueWitness(
-    pending.operationId,
-    copiedCertificate,
-  );
-  copiedCertificate.fill(0);
-  assert.deepEqual(await completion, exact);
-  assert.equal(pending.status, "committed");
-  assert.deepEqual(
-    await pending.continueWitness(pending.operationId, certificate),
-    exact,
-  );
+test("witness barrier withholds every result until the exact certificate completes", async () => {
+  const pair = await activatedPair(30);
+  try {
+    const { device, witness } = pair;
+    const plaintext = Buffer.from("withheld until the quorum answers");
+    // Mutation without a fresh unanimous read is refused before any input is evaluated.
+    await assert.rejects(
+      device.prepareApplication(operation(20), operation(21), 7n, plaintext),
+      { code: "fresh_witness_required" },
+    );
+    await authorize(device, witness);
+    const outcome = await device.prepareApplication(operation(20), operation(21), 7n, plaintext);
+    assert.equal(outcome.tag, "pending");
+    assert.equal(outcome.result, null);
+    const pending = outcome.pending;
+    assert.equal(pending.kind, "advance");
+    assert.deepEqual(pending.operationId, operation(20));
+    assert.deepEqual(pending.requestHash, createHash("sha384").update(pending.request).digest());
+    assert(!contains(pending.request, plaintext), "request carries no plaintext");
+    // The durable pending request is reloaded, byte-identical, on every call.
+    assert.deepEqual(await device.pendingWitness(), pending);
+    // A duplicate call returns the same request without a second transition.
+    const duplicate = await device.prepareApplication(operation(20), operation(21), 7n, plaintext);
+    assert.equal(duplicate.tag, "pending");
+    assert.deepEqual(duplicate.pending, pending);
+    // Nothing typed leaves the binding while the barrier is open.
+    assert(
+      !(await device.pendingOutbox()).some((record) => record.operationId.equals(operation(20))),
+    );
+    await assert.rejects(device.pairStatus(), { code: "witness_unavailable" });
+    await assert.rejects(
+      device.prepareApplication(operation(22), operation(23), 7n, Buffer.from("later")),
+      { code: "witness_unavailable" },
+    );
+    // Bounds and identity are checked before any work.
+    await assert.rejects(device.continueWitness(pending.operationId, Buffer.alloc(3 * 1024 + 1)), {
+      code: "bound_exceeded",
+    });
+    const wrongOperation = Buffer.from(pending.operationId);
+    wrongOperation[0] ^= 1;
+    await assert.rejects(device.continueWitness(wrongOperation, Buffer.alloc(32)), {
+      code: "not_found",
+    });
+    // Certificate bytes are copied before async work.
+    const certificate = Buffer.from(witness.respond(pending.request));
+    const completion = device.continueWitness(pending.operationId, certificate);
+    certificate.fill(0);
+    const released = await completion;
+    assert.equal(released.tag, "outbox");
+    assert.deepEqual(released.outbox.operationId, operation(20));
+    assert(!contains(released.outbox.ciphertext, plaintext));
+    assert(
+      (await device.pendingOutbox()).some((record) =>
+        record.ciphertext.equals(released.outbox.ciphertext),
+      ),
+    );
+    assert.equal(await device.pendingWitness(), null);
+    assert.equal(await device.pairStatus(), "active");
+    // Completed operations replay the exact result without a new advance.
+    const responses = witness.responses;
+    const replay = await device.prepareApplication(operation(20), operation(21), 7n, plaintext);
+    assert.equal(replay.tag, "released");
+    assert.deepEqual(replay.result.outbox.ciphertext, released.outbox.ciphertext);
+    assert.equal(witness.responses, responses);
 
-  const recovered = fixture.testWitnessPending(request, exact);
-  assert.deepEqual(recovered.witnessRequest, request);
-  await assert.rejects(
-    recovered.continueWitness(recovered.operationId, Buffer.alloc(32)),
-    {
-      code: "witness_receipt_invalid",
-    },
-  );
-  await assert.rejects(
-    recovered.continueWitness(
-      recovered.operationId,
-      Buffer.alloc(3 * 1024 + 1),
-    ),
-    { code: "bound_exceeded" },
-  );
-  assert.deepEqual(
-    await recovered.continueWitness(recovered.operationId, certificate),
-    exact,
-  );
-  pending.close();
-  recovered.close();
+    // A forged replica signature releases nothing and quarantines the endpoint durably.
+    await authorize(device, witness);
+    const forged = (
+      await device.prepareApplication(operation(24), operation(25), 7n, Buffer.from("forged"))
+    ).pending;
+    witness.setForgeSignature(true);
+    await assert.rejects(complete(device, witness, forged), { code: "witness_receipt_invalid" });
+    witness.setForgeSignature(false);
+    await assert.rejects(complete(device, witness, forged), { code: "rollback_detected" });
+    await assert.rejects(device.pendingWitness(), { code: "rollback_detected" });
+    await device.close();
+    assert.equal(await device.reopen(), "opened");
+    await assert.rejects(device.pendingWitness(), { code: "rollback_detected" });
+    // A fresh read still runs: the terminal state is rediscovered, never cleared.
+    assert.equal((await reconcile(device, witness)).tag, "quarantined");
+    await assert.rejects(
+      device.prepareApplication(operation(26), operation(27), 7n, Buffer.from("frozen")),
+      { code: "rollback_detected" },
+    );
+  } finally {
+    try {
+      await pair.daemon.close();
+    } catch {}
+    try {
+      await pair.device.close();
+    } catch {}
+    rmSync(pair.root, { recursive: true, force: true });
+  }
 });
 
 test("fresh lifecycle preserves barriers, exact retries, copied input, and close semantics", async () => {
-  const pair = await activatedPair(30);
+  const pair = await activatedPair(31);
+  const daemon = witnessedFacade(pair.daemon, pair.witness);
+  const device = witnessedFacade(pair.device, pair.witness);
   try {
+    // Input buffers are copied synchronously, before the async work starts.
+    await authorize(pair.device, pair.witness);
     const input = Buffer.from("copied before async work");
-    const sendPromise = pair.device.prepareApplication(
-      operation(20),
-      operation(21),
-      7n,
-      input,
-    );
+    const sendPromise = pair.device.prepareApplication(operation(20), operation(21), 7n, input);
     input.fill(0);
-    const sent = await sendPromise;
-    const duplicate = await pair.device.prepareApplication(
+    const sent = (await complete(pair.device, pair.witness, (await sendPromise).pending)).outbox;
+    const duplicate = await device.prepareApplication(
       operation(20),
       operation(21),
       7n,
       Buffer.from("copied before async work"),
     );
     assert.deepEqual(duplicate.ciphertext, sent.ciphertext);
-    const pendingBeforeAcknowledgement = await pair.device.pendingOutbox();
     assert.deepEqual(
-      pendingBeforeAcknowledgement.map((record) => record.operationId),
+      (await device.pendingOutbox()).map((record) => record.operationId),
       [operation(8), operation(20)],
     );
-    await assert.rejects(
-      pair.device.prepareApplication(
-        operation(20),
-        operation(21),
-        7n,
-        Buffer.from("conflict"),
-      ),
-      { code: "conflict" },
-    );
-    const received = await pair.daemon.receiveApplication(
-      operation(22),
-      sent.ciphertext,
-      operation(21),
-      7n,
-    );
+    const received = await daemon.receiveApplication(operation(22), sent.ciphertext, operation(21), 7n);
     assert.equal(received.plaintext.toString(), "copied before async work");
-    const recovered = await pair.daemon.receiveApplication(
-      operation(22),
-      sent.ciphertext,
-      operation(21),
-      7n,
-    );
+    const recovered = await daemon.receiveApplication(operation(22), sent.ciphertext, operation(21), 7n);
     assert.equal(recovered.plaintext.toString(), "copied before async work");
     await assert.rejects(
-      pair.daemon.receiveApplication(
-        operation(70),
-        sent.ciphertext,
-        operation(21),
-        7n,
-      ),
+      daemon.receiveApplication(operation(70), sent.ciphertext, operation(21), 7n),
       { code: "replay_rejected" },
     );
     assert.equal(
-      (await pair.device.acknowledgeOutbox(operation(71), operation(20)))
-        .retryState,
+      (await device.acknowledgeOutbox(operation(71), operation(20))).retryState,
       "acknowledged",
     );
     assert.deepEqual(
-      (await pair.device.pendingOutbox()).map((record) => record.operationId),
+      (await device.pendingOutbox()).map((record) => record.operationId),
       [operation(8)],
     );
-    assert.equal(
-      await pair.daemon.acknowledgeReceive(operation(72), operation(22)),
-      "acknowledged",
-    );
+    assert.equal(await daemon.acknowledgeReceive(operation(72), operation(22)), "acknowledged");
 
-    const delivered = await pair.daemon.prepareApplication(
+    const delivered = await daemon.prepareApplication(
       operation(73),
       operation(74),
       7n,
       Buffer.from("return path"),
     );
-    const deliveredPlaintext = await pair.device.receiveApplication(
+    const deliveredPlaintext = await device.receiveApplication(
       operation(75),
       delivered.ciphertext,
       operation(74),
@@ -281,93 +343,162 @@ test("fresh lifecycle preserves barriers, exact retries, copied input, and close
     );
     assert.equal(deliveredPlaintext.plaintext.toString(), "return path");
 
-    const pending = pair.device.pairStatus();
+    // One operation owner per endpoint: an overlapping call is refused, not queued.
+    const status = pair.device.pairStatus();
     await assert.rejects(pair.device.pairStatus(), { code: "lifecycle_busy" });
-    assert.equal(await pending, "active");
-    const proposal = await pair.device.prepareReplacement(
-      operation(23),
-      operation(24),
-      7n,
+    assert.equal(await status, "active");
+
+    const proposal = await device.prepareReplacement(operation(23), operation(24), 7n);
+    assert.equal(
+      await daemon.receiveReplacementProposal(operation(25), proposal.ciphertext, operation(24), 7n),
+      "accepted",
     );
-    await pair.daemon.receiveReplacementProposal(
-      operation(25),
-      proposal.ciphertext,
-      operation(24),
-      7n,
-    );
-    const commit = await pair.daemon.createUpdateCommit(
-      operation(26),
-      operation(27),
-      7n,
-    );
+    const commit = await daemon.createUpdateCommit(operation(26), operation(27), 7n);
     await assert.rejects(
-      pair.daemon.prepareApplication(
-        operation(28),
-        operation(29),
-        7n,
-        Buffer.from("barrier"),
-      ),
+      daemon.prepareApplication(operation(28), operation(29), 7n, Buffer.from("barrier")),
       { code: "conflict" },
     );
-    const ready = await pair.device.applyReceivedUpdateCommit(
-      operation(30),
-      commit.ciphertext,
-      operation(27),
-      7n,
-      operation(31),
+    // Received commit application and epoch-ready creation are separate operations.
+    const applied = await witnessed(pair.device, pair.witness, () =>
+      pair.device.applyReceivedUpdateCommit(operation(30), commit.ciphertext, operation(27), 7n),
     );
+    assert.equal(applied.tag, "commit");
+    assert.deepEqual(applied.commit.commitId, commit.commitId);
+    assert.equal(applied.commit.targetEpoch, commit.targetEpoch);
     await assert.rejects(
-      pair.device.prepareApplication(
-        operation(32),
-        operation(33),
-        7n,
-        Buffer.from("barrier"),
-      ),
+      device.prepareApplication(operation(32), operation(33), 7n, Buffer.from("barrier")),
       { code: "conflict" },
     );
-    const epochAcceptance = await pair.daemon.acceptEpochReady(
-      operation(34),
-      operation(31),
-      7n,
-      ready.ciphertext,
+    const ready = await witnessed(pair.device, pair.witness, () =>
+      pair.device.prepareEpochReady(operation(31), operation(34), 7n, applied.commit),
     );
-    const confirmation = await pair.daemon.prepareEpochReadyConfirmation(
+    assert.equal(ready.outbox.messageClass, "epoch_ready");
+    const epochAcceptance = await daemon.acceptEpochReady(
       operation(35),
+      operation(34),
+      7n,
+      ready.outbox.ciphertext,
+    );
+    assert.deepEqual(epochAcceptance.commitId, commit.commitId);
+    const confirmation = await daemon.prepareEpochReadyConfirmation(
+      operation(36),
       operation(38),
       7n,
       epochAcceptance,
     );
     assert.equal(
-      await pair.device.acceptEpochReadyConfirmation(
-        operation(39),
-        operation(38),
-        7n,
-        confirmation.ciphertext,
-      ),
+      await device.acceptEpochReadyConfirmation(operation(39), operation(38), 7n, confirmation.ciphertext),
       "active",
     );
 
-    const retryBeforeClose = await pair.device.prepareApplication(
-      operation(36),
-      operation(37),
+    // Restart: the completed cache is not authority until a fresh unanimous head confirms it.
+    const retryBeforeClose = await device.prepareApplication(
+      operation(40),
+      operation(41),
       8n,
       Buffer.from("reopen retry"),
     );
     await pair.device.close();
     await assert.rejects(pair.device.pairStatus(), { code: "endpoint_closed" });
     assert.equal(await pair.device.reopen(), "opened");
-    const retryAfterClose = await pair.device.prepareApplication(
-      operation(36),
-      operation(37),
+    await assert.rejects(pair.device.pairStatus(), { code: "witness_unavailable" });
+    await assert.rejects(
+      pair.device.prepareApplication(operation(40), operation(41), 8n, Buffer.from("reopen retry")),
+      { code: "fresh_witness_required" },
+    );
+    assert.equal((await reconcile(pair.device, pair.witness)).tag, "recover_accepted");
+    const recoveredPending = await pair.device.pendingWitness();
+    assert.deepEqual(recoveredPending.operationId, operation(40));
+    const recoveredResult = await complete(pair.device, pair.witness, recoveredPending);
+    assert.deepEqual(recoveredResult.outbox.ciphertext, retryBeforeClose.ciphertext);
+    const retryAfterClose = await device.prepareApplication(
+      operation(40),
+      operation(41),
       8n,
       Buffer.from("reopen retry"),
     );
     assert.deepEqual(retryAfterClose.ciphertext, retryBeforeClose.ciphertext);
+    assert.equal(await pair.device.pairStatus(), "active");
+
+    // Same operation ID with different input is a fingerprint conflict: fail closed and freeze.
+    await assert.rejects(
+      device.prepareApplication(operation(40), operation(41), 8n, Buffer.from("conflict")),
+      { code: "witness_operation_conflict" },
+    );
+    await assert.rejects(
+      device.prepareApplication(operation(42), operation(43), 8n, Buffer.from("frozen")),
+      { code: "rollback_detected" },
+    );
     await pair.device.close();
     await pair.device.close();
   } finally {
     try {
       await pair.daemon.close();
+    } catch {}
+    rmSync(pair.root, { recursive: true, force: true });
+  }
+});
+
+test("restart before transmission resends the byte-identical request", async () => {
+  const pair = await activatedPair(32);
+  try {
+    const { device, witness } = pair;
+    await authorize(device, witness);
+    const pending = (
+      await device.prepareApplication(operation(50), operation(51), 3n, Buffer.from("resend me"))
+    ).pending;
+    const responses = witness.responses;
+    await device.close();
+    assert.equal(await device.reopen(), "opened");
+    assert.deepEqual(await device.pendingWitness(), pending);
+    assert.equal((await reconcile(device, witness)).tag, "resend_pending");
+    const released = await complete(device, witness, pending);
+    assert.equal(released.tag, "outbox");
+    assert.deepEqual(released.outbox.operationId, operation(50));
+    assert.equal(witness.responses, responses + 2n, "one read and one exact resend");
+    assert(
+      (await device.pendingOutbox()).some((record) => record.operationId.equals(operation(50))),
+    );
+  } finally {
+    try {
+      await pair.daemon.close();
+    } catch {}
+    try {
+      await pair.device.close();
+    } catch {}
+    rmSync(pair.root, { recursive: true, force: true });
+  }
+});
+
+test("unavailable and revoking quorums release nothing", async () => {
+  const pair = await activatedPair(33);
+  try {
+    const { daemon, witness } = pair;
+    witness.setUnavailable(true);
+    assert.throws(() => witness.respond(Buffer.alloc(0)), { code: "bound_exceeded" });
+    await assert.rejects(authorize(daemon, witness), { code: "witness_unavailable" });
+    witness.setUnavailable(false);
+    await authorize(daemon, witness);
+    const pending = (
+      await daemon.prepareApplication(operation(60), operation(61), 2n, Buffer.from("revoked"))
+    ).pending;
+    // Revocation that wins before the advance: the exact request now answers `Revoked`.
+    witness.revoke(pending.request);
+    await assert.rejects(complete(daemon, witness, pending), { code: "endpoint_revoked" });
+    assert(
+      !(await daemon.pendingOutbox()).some((record) => record.operationId.equals(operation(60))),
+    );
+    await assert.rejects(daemon.pairStatus(), { code: "endpoint_revoked" });
+    await daemon.close();
+    assert.equal(await daemon.reopen(), "opened");
+    await assert.rejects(daemon.pendingWitness(), { code: "endpoint_revoked" });
+    assert.equal((await reconcile(daemon, witness)).tag, "revoked");
+  } finally {
+    try {
+      await pair.daemon.close();
+    } catch {}
+    try {
+      await pair.device.close();
     } catch {}
     rmSync(pair.root, { recursive: true, force: true });
   }
@@ -391,20 +522,22 @@ test("panic containment releases operation ownership", async () => {
 test("daemon-only removal and device reset become terminal", async () => {
   const pair = await activatedPair(60);
   try {
-    const removal = await pair.daemon.revokeDevice(
-      operation(80),
-      operation(81),
-      9n,
+    const { daemon, device, witness } = pair;
+    const removal = await witnessed(daemon, witness, () =>
+      daemon.revokeDevice(operation(80), operation(81), 9n),
     );
-    assert.equal(await pair.daemon.pairStatus(), "revoked");
-    assert.equal(
-      await pair.device.applyRemoval(operation(82), removal, operation(81), 9n),
-      "removed",
+    assert.equal(removal.tag, "outbox");
+    assert.equal(removal.outbox.messageClass, "commit");
+    assert.equal(await daemon.pairStatus(), "revoked");
+    const removed = await witnessed(device, witness, () =>
+      device.applyRemoval(operation(82), removal.outbox, operation(81), 9n),
     );
-    assert.equal(await pair.device.pairStatus(), "removed");
-    const requirement = await pair.device.reset(operation(83));
+    assert.equal(removed.status, "removed");
+    assert.equal(await device.pairStatus(), "removed");
+    const requirement = (await witnessed(device, witness, () => device.reset(operation(83)))).rePair;
     assert.equal(requirement.cryptoSessionId.length, 16);
     assert.equal(requirement.keyPackageHash.length, 48);
+    assert.equal(await device.pairStatus(), "reset");
   } finally {
     try {
       await pair.daemon.close();
@@ -419,8 +552,7 @@ test("daemon-only removal and device reset become terminal", async () => {
 test("state loss and corrupt storage fail closed", async () => {
   const lost = await activatedPair(40);
   await lost.device.close();
-  const sessionHex = uuid(42).toString("hex");
-  rmSync(join(lost.root, "device", `${sessionHex}.redb`));
+  rmSync(join(lost.root, "device", `${lost.session.toString("hex")}.redb`));
   await assert.rejects(lost.device.reopen(), { code: "state_loss" });
   try {
     await lost.daemon.close();
@@ -429,11 +561,7 @@ test("state loss and corrupt storage fail closed", async () => {
 
   const corrupt = await activatedPair(50);
   await corrupt.device.close();
-  const corruptPath = join(
-    corrupt.root,
-    "device",
-    `${uuid(52).toString("hex")}.redb`,
-  );
+  const corruptPath = join(corrupt.root, "device", `${corrupt.session.toString("hex")}.redb`);
   const bytes = readFileSync(corruptPath);
   bytes.fill(0, 0, Math.min(64, bytes.length));
   writeFileSync(corruptPath, bytes);
@@ -446,5 +574,6 @@ test("state loss and corrupt storage fail closed", async () => {
 
 test("test-only exports exist only in the fixture artifact", () => {
   assert(fixture.nativeExports.includes("testDaemonEndpoint"));
-  assert(!Object.keys(production).some((name) => name.startsWith("test")));
+  assert(fixture.nativeExports.includes("TestWitness"));
+  assert(!Object.keys(production).some((name) => /^test/iu.test(name)));
 });

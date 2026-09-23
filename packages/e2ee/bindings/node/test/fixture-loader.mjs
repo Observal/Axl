@@ -16,7 +16,8 @@ export class AxlE2eeError extends Error {
   }
 }
 
-function mapError(cause) {
+export function mapError(cause) {
+  if (cause instanceof AxlE2eeError) return cause;
   const message = typeof cause?.message === "string" ? cause.message : "";
   const marker = "AXL_E2EE:";
   const index = message.indexOf(marker);
@@ -51,8 +52,41 @@ const daemonFactory = useWindowsDpapi
 const deviceFactory = useWindowsDpapi
   ? native.testWindowsDeviceEndpoint
   : native.testDeviceEndpoint;
-export const testDaemonEndpoint = (...args) => wrap(daemonFactory(...args));
-export const testDeviceEndpoint = (...args) => wrap(deviceFactory(...args));
+
+const witnessHandles = new WeakMap();
+
+/** Deterministic in-process three-replica witness. Its methods are synchronous. */
+export const testWitness = () => {
+  const witness = new native.TestWitness();
+  const facade = {
+    respond(request) {
+      try {
+        return witness.respond(request);
+      } catch (cause) {
+        throw mapError(cause);
+      }
+    },
+    setUnavailable: (value) => witness.setUnavailable(value),
+    setForgeSignature: (value) => witness.setForgeSignature(value),
+    rollBackAll: (request) => witness.rollBackAll(request),
+    advanceForeign: (request) => witness.advanceForeign(request),
+    revoke: (request) => witness.revoke(request),
+    get responses() {
+      return witness.responses;
+    },
+  };
+  witnessHandles.set(facade, witness);
+  return facade;
+};
+export const testDaemonEndpoint = (root, account, installation, session, witness) =>
+  wrap(daemonFactory(root, account, installation, session, targetsWitness(witness)));
+export const testDeviceEndpoint = (root, account, installation, session, device, witness) =>
+  wrap(deviceFactory(root, account, installation, session, device, targetsWitness(witness)));
 export const testPanic = (endpoint) => Promise.resolve(native.testPanic(targets.get(endpoint))).catch((cause) => { throw mapError(cause); });
-export const testWitnessPending = (...args) => wrap(native.testWitnessPending(...args));
 export const nativeExports = Object.freeze(Object.keys(native).sort());
+
+function targetsWitness(witness) {
+  const handle = witnessHandles.get(witness);
+  if (!handle) throw new TypeError("a witness from testWitness() is required");
+  return handle;
+}

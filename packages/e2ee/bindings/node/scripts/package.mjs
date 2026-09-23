@@ -58,7 +58,12 @@ for (const forbidden of [
   "testWitnessPending",
   "testWindowsDaemonEndpoint",
   "testWindowsDeviceEndpoint",
+  "testPanic",
+  "TestWitness",
+  "test_witness",
   "test_pending_witness_operation",
+  "sign_for_test",
+  "from_receipts_for_test",
   "TestKeys",
   "TestAnchor",
   "FakeKeychain",
@@ -73,7 +78,10 @@ const module = await import(`${pathToFileURL(join(staging, "loader/index.js")).h
 const expected = ["AxlE2eeError", "ERROR_CODES", "createDaemonEndpoint", "createDeviceEndpoint", "getBindingInfo", "inspectPairingClaim", "inspectPairingInvitation", "openDaemonEndpoint", "openDeviceEndpoint"];
 if (JSON.stringify(Object.keys(module).sort()) !== JSON.stringify(expected.sort())) throw new Error("production ESM export drift");
 const nativeExports = Object.keys((await import("node:module")).createRequire(import.meta.url)(join(staging, manifest.artifacts[0].path)));
-if (nativeExports.some((name) => name.startsWith("test"))) throw new Error("production native exports test API");
+if (nativeExports.some((name) => /^test/iu.test(name))) throw new Error("production native exports test API");
+for (const forbidden of ["NativePendingWitness", "setForgeSignature", "rollBackAll", "advanceForeign"]) {
+  if (nativeExports.includes(forbidden) || nativeBytes.includes(Buffer.from(forbidden))) throw new Error(`production binary exposes ${forbidden}`);
+}
 const npm = (arguments_, options) =>
   process.platform === "win32"
     ? execFileSync(

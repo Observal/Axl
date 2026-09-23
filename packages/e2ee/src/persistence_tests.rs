@@ -15,12 +15,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use openmls_basic_credential::SignatureKeyPair;
 use redb::{Database, Durability, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::{
-    Clock, Error, Identity, PairContext, PairWelcome, SUITE, SystemClock, TransactionalProvider,
-    pairing::PairingCredential,
+    Clock, Error, Identity, PairContext, PairWelcome, SystemClock, TransactionalProvider,
     persistence::{
         ActivationOutcome, ClaimSubmission, CommittedOperation, DurableDaemon,
         DurablePendingInvitation, DurablePhone, DurablePreJoinDevice, EnvelopeKeyStore,
@@ -29,12 +27,8 @@ use crate::{
         ReservationOutcome, RuntimeHooks, TypedResult, WelcomeOutcome, WitnessEndpoint,
         WitnessOutcome, discard_interrupted_creation,
     },
-    witness::{
-        EndpointReconciliation, QuorumCertificate, ReplicaKey, ReplicaReceipt, ReplicaTrust,
-        ReplicaTrustSet, StoredWitnessOperation, TestReceiptFields, WitnessHead, WitnessHistory,
-        WitnessLedgerPosition, WitnessRequest, WitnessRequestKind, WitnessResult,
-        WitnessRevocationEvent, evaluate_witness_request,
-    },
+    test_witness::TestWitness,
+    witness::{EndpointReconciliation, WitnessRequest, WitnessRequestKind},
 };
 
 fn id(value: u8) -> [u8; 16] {
@@ -335,294 +329,6 @@ impl EnvelopeKeyStore for TestKeys {
             .unwrap()
             .retain(|_, record| record.crypto_session_id != crypto_session_id);
         Ok(())
-    }
-}
-
-/// Deterministic in-process three-replica witness.
-///
-/// Each replica signs its own receipt with its own key. Decisions come from the shared
-/// `evaluate_witness_request` logic over an append-only per-lineage history. Byte-identical
-/// certificates are returned for duplicate accepted operations. Fault switches simulate an
-/// unavailable quorum, a rolled-back replica, and a forged receipt.
-struct TestWitness {
-    signers: [SignatureKeyPair; 3],
-    trust: Arc<ReplicaTrustSet>,
-    lineages: Mutex<BTreeMap<[u8; 48], Lineage>>,
-    sequence: AtomicU64,
-    unavailable: Mutex<bool>,
-    forge_signature: Mutex<bool>,
-    respond_count: AtomicU64,
-}
-
-struct Lineage {
-    history: WitnessHistory,
-    credential: PairingCredential,
-    head_predecessor: [u8; 48],
-    certificates: BTreeMap<[u8; 16], Vec<u8>>,
-    revocation_generation: u64,
-}
-
-impl TestWitness {
-    fn new() -> Arc<Self> {
-        let signers: [SignatureKeyPair; 3] =
-            std::array::from_fn(|_| SignatureKeyPair::new(SUITE.signature_algorithm()).unwrap());
-        let trust = ReplicaTrustSet::new(
-            (0..3)
-                .map(|index| {
-                    ReplicaTrust::new(
-                        id(200 + index as u8),
-                        vec![
-                            ReplicaKey::new(
-                                id(210 + index as u8),
-                                signers[index].public().try_into().unwrap(),
-                            )
-                            .unwrap(),
-                        ],
-                    )
-                    .unwrap()
-                })
-                .collect(),
-        )
-        .unwrap();
-        Arc::new(Self {
-            signers,
-            trust: Arc::new(trust),
-            lineages: Mutex::new(BTreeMap::new()),
-            sequence: AtomicU64::new(0),
-            unavailable: Mutex::new(false),
-            forge_signature: Mutex::new(false),
-            respond_count: AtomicU64::new(0),
-        })
-    }
-
-    fn trust(&self) -> Arc<ReplicaTrustSet> {
-        Arc::clone(&self.trust)
-    }
-
-    fn set_unavailable(&self, value: bool) {
-        *self.unavailable.lock().unwrap() = value;
-    }
-
-    fn set_forge_signature(&self, value: bool) {
-        *self.forge_signature.lock().unwrap() = value;
-    }
-
-    fn responses(&self) -> u64 {
-        self.respond_count.load(Ordering::SeqCst)
-    }
-
-    fn head(&self, request_bytes: &[u8]) -> Option<WitnessHead> {
-        let request = WitnessRequest::decode(request_bytes).unwrap();
-        let hash = request.lineage().hash().unwrap();
-        self.lineages
-            .lock()
-            .unwrap()
-            .get(&hash)
-            .map(|lineage| lineage.history.head.clone())
-    }
-
-    /// Roll every replica back to the previous head (correlated three-replica rollback).
-    fn roll_back_all(&self, request_bytes: &[u8]) {
-        let request = WitnessRequest::decode(request_bytes).unwrap();
-        let hash = request.lineage().hash().unwrap();
-        let mut lineages = self.lineages.lock().unwrap();
-        let lineage = lineages.get_mut(&hash).unwrap();
-        let predecessor = lineage.head_predecessor;
-        let counter = lineage.history.head.counter - 1;
-        lineage.history.head = WitnessHead {
-            counter,
-            commitment: predecessor,
-        };
-        lineage.history.successors.retain(|(c, _), _| *c < counter);
-        lineage
-            .history
-            .operations
-            .retain(|_, op| op.successor.as_ref().is_none_or(|s| s.counter <= counter));
-    }
-
-    /// Advance the lineage by one foreign successor (a clone won the race).
-    fn advance_foreign(&self, request_bytes: &[u8]) {
-        let request = WitnessRequest::decode(request_bytes).unwrap();
-        let hash = request.lineage().hash().unwrap();
-        let mut lineages = self.lineages.lock().unwrap();
-        let lineage = lineages.get_mut(&hash).unwrap();
-        let old = lineage.history.head.clone();
-        let next = WitnessHead {
-            counter: old.counter + 1,
-            commitment: [0xEE; 48],
-        };
-        lineage
-            .history
-            .successors
-            .insert((old.counter, old.commitment), next.clone());
-        lineage.head_predecessor = old.commitment;
-        lineage.history.head = next;
-    }
-
-    fn revoke(&self, request_bytes: &[u8]) {
-        let request = WitnessRequest::decode(request_bytes).unwrap();
-        let hash = request.lineage().hash().unwrap();
-        let mut lineages = self.lineages.lock().unwrap();
-        let lineage = lineages.get_mut(&hash).unwrap();
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-        lineage.revocation_generation += 1;
-        lineage.history.revocation = Some(WitnessRevocationEvent {
-            position: WitnessLedgerPosition {
-                sequence,
-                revocation_generation: lineage.revocation_generation,
-            },
-        });
-    }
-
-    fn respond(&self, request_bytes: &[u8]) -> Result<Vec<u8>, PersistenceError> {
-        self.respond_count.fetch_add(1, Ordering::SeqCst);
-        if *self.unavailable.lock().unwrap() {
-            return Err(PersistenceError::WitnessUnavailable);
-        }
-        let request = WitnessRequest::decode(request_bytes).unwrap();
-        let lineage_hash = request.lineage().hash().unwrap();
-        let mut lineages = self.lineages.lock().unwrap();
-        if request.kind() == WitnessRequestKind::Register && !lineages.contains_key(&lineage_hash) {
-            let credential = PairingCredential::decode(request.credential().unwrap()).unwrap();
-            request.verify(request.lineage(), &credential).unwrap();
-            lineages.insert(
-                lineage_hash,
-                Lineage {
-                    history: WitnessHistory {
-                        head: WitnessHead {
-                            counter: 0,
-                            commitment: [0; 48],
-                        },
-                        successors: BTreeMap::new(),
-                        operations: BTreeMap::new(),
-                        revocation: None,
-                        forked: false,
-                    },
-                    credential,
-                    head_predecessor: [0; 48],
-                    certificates: BTreeMap::new(),
-                    revocation_generation: 0,
-                },
-            );
-        }
-        let Some(lineage) = lineages.get_mut(&lineage_hash) else {
-            // Absent lineage: a read answers with an empty head; anything else cannot exist.
-            assert_eq!(request.kind(), WitnessRequestKind::Read);
-            return Ok(self.certificate(
-                &request,
-                WitnessResult::Head,
-                WitnessHead {
-                    counter: 0,
-                    commitment: [0; 48],
-                },
-                [0; 48],
-                0,
-            ));
-        };
-        request
-            .verify(request.lineage(), &lineage.credential)
-            .unwrap();
-        let decision = evaluate_witness_request(&lineage.history, &request).unwrap();
-        if decision.exact_receipt.is_some() {
-            return Ok(lineage.certificates[&request.operation_id()].clone());
-        }
-        let (head, predecessor) = match request.kind() {
-            WitnessRequestKind::Read => (lineage.history.head.clone(), lineage.head_predecessor),
-            _ => (
-                WitnessHead {
-                    counter: request.proposed_counter().unwrap(),
-                    commitment: request.proposed_commitment().unwrap(),
-                },
-                request.expected_commitment().unwrap_or([0; 48]),
-            ),
-        };
-        let certificate = self.certificate(
-            &request,
-            decision.result,
-            head.clone(),
-            predecessor,
-            lineage.revocation_generation,
-        );
-        match decision.result {
-            WitnessResult::Registered | WitnessResult::Advanced => {
-                let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
-                let old = lineage.history.head.clone();
-                lineage
-                    .history
-                    .successors
-                    .insert((old.counter, old.commitment), head.clone());
-                lineage.head_predecessor = old.commitment;
-                lineage.history.head = head.clone();
-                let receipt = QuorumCertificate::decode(&certificate).unwrap().receipts()[0]
-                    .encode()
-                    .unwrap();
-                lineage.history.operations.insert(
-                    request.operation_id(),
-                    StoredWitnessOperation {
-                        request_hash: request.request_hash().unwrap(),
-                        result: decision.result,
-                        successor: Some(head),
-                        exact_receipt: receipt,
-                        accepted_at: Some(WitnessLedgerPosition {
-                            sequence,
-                            revocation_generation: lineage.revocation_generation,
-                        }),
-                    },
-                );
-                lineage
-                    .certificates
-                    .insert(request.operation_id(), certificate.clone());
-            }
-            WitnessResult::ConflictingSuccessor | WitnessResult::HistoricalFork => {
-                lineage.history.forked = true;
-            }
-            _ => {}
-        }
-        Ok(certificate)
-    }
-
-    fn certificate(
-        &self,
-        request: &WitnessRequest,
-        result: WitnessResult,
-        head: WitnessHead,
-        predecessor: [u8; 48],
-        revocation_generation: u64,
-    ) -> Vec<u8> {
-        let forge = *self.forge_signature.lock().unwrap();
-        let receipts = (0..3)
-            .map(|index| {
-                let forged;
-                let signer = if forge && index == 1 {
-                    forged = SignatureKeyPair::new(SUITE.signature_algorithm()).unwrap();
-                    &forged
-                } else {
-                    &self.signers[index]
-                };
-                ReplicaReceipt::sign_for_test(
-                    TestReceiptFields {
-                        result,
-                        replica_id: self.trust.replicas()[index].replica_id(),
-                        witness_key_id: self.trust.replicas()[index].keys()[0].key_id(),
-                        lineage_hash: request.lineage().hash().unwrap(),
-                        counter: head.counter,
-                        commitment: head.commitment,
-                        predecessor_commitment: predecessor,
-                        operation_id: request.operation_id(),
-                        request_hash: request.request_hash().unwrap(),
-                        ledger_sequence: self.sequence.load(Ordering::SeqCst) + 1,
-                        issued_at_ms: 1_000,
-                        revocation_generation,
-                    },
-                    signer,
-                )
-                .unwrap()
-            })
-            .collect();
-        QuorumCertificate::from_receipts_for_test(receipts)
-            .unwrap()
-            .encode()
-            .unwrap()
     }
 }
 
@@ -1594,7 +1300,7 @@ fn ready_commit_fault_recovers_without_losing_database_or_external_state() {
     assert!(!database_bytes.is_empty());
     let key_records = keys.snapshot();
     let witness_head = witness.head(request.request()).unwrap();
-    assert_eq!(witness_head.counter, 1);
+    assert_eq!(witness_head.0, 1);
     assert!(marker.is_file());
     assert_eq!(keys.activity_counts(), (1, 0));
     assert_eq!(keys.destroy_calls(), 0);
@@ -5339,9 +5045,9 @@ fn legacy_creation_and_invitation_issue_register_before_publication() {
         panic!("expected invitation");
     };
     assert!(!marker_path(&root, ids.session).exists());
-    assert_eq!(witness.head(request.request()).unwrap().counter, 1);
+    assert_eq!(witness.head(request.request()).unwrap().0, 1);
     assert_eq!(
-        witness.head(request.request()).unwrap().commitment,
+        witness.head(request.request()).unwrap().1,
         stolen.proposed_commitment().unwrap()
     );
     assert!(!publication.bytes().is_empty());
@@ -5751,5 +5457,151 @@ fn advance_accepted_before_revocation_is_recoverable_after_a_fresh_read() {
             .unwrap()
             .iter()
             .any(|record| record.operation_id == id(1))
+    );
+}
+
+#[test]
+fn pairing_facades_resolve_duplicates_before_evaluating_preconditions() {
+    let (mut fixture, mut device) = activated_pair(234);
+    authorize(&device.device, &device.witness).unwrap();
+    let WitnessOutcome::Pending(pending) = device
+        .device
+        .prepare_application(id(1), id(2), 1, b"facade duplicate")
+        .unwrap()
+    else {
+        panic!("expected pending");
+    };
+    // Same operation while pending: the exact request again, through the facade precondition.
+    assert_eq!(
+        device
+            .device
+            .prepare_application(id(1), id(2), 1, b"facade duplicate")
+            .unwrap(),
+        WitnessOutcome::Pending(pending.clone())
+    );
+    // Another operation is refused by the pending barrier before its precondition runs.
+    assert_eq!(
+        device
+            .device
+            .prepare_application(id(3), id(4), 1, b"blocked")
+            .unwrap_err(),
+        PersistenceError::WitnessUnavailable
+    );
+    let TypedResult::Envelope(record) =
+        complete(&device.device, &device.witness, &pending).unwrap()
+    else {
+        panic!("expected envelope");
+    };
+    assert_eq!(
+        device
+            .device
+            .prepare_application(id(1), id(2), 1, b"facade duplicate")
+            .unwrap(),
+        WitnessOutcome::Released(record)
+    );
+    // The daemon side behaves the same way for receives.
+    let sent = device
+        .run(|d| d.prepare_application(id(5), id(6), 1, b"to daemon"))
+        .unwrap();
+    authorize(&fixture.endpoint, &fixture.witness).unwrap();
+    let WitnessOutcome::Pending(receive) = fixture
+        .endpoint
+        .receive_application(id(7), &sent.ciphertext, id(6), 1)
+        .unwrap()
+    else {
+        panic!("expected pending receive");
+    };
+    assert_eq!(
+        fixture
+            .endpoint
+            .receive_application(id(7), &sent.ciphertext, id(6), 1)
+            .unwrap(),
+        WitnessOutcome::Pending(receive.clone())
+    );
+    assert_eq!(
+        fixture
+            .endpoint
+            .prepare_application(id(8), id(9), 1, b"blocked")
+            .unwrap_err(),
+        PersistenceError::WitnessUnavailable
+    );
+    assert!(matches!(
+        complete(&fixture.endpoint, &fixture.witness, &receive).unwrap(),
+        TypedResult::Plaintext(_)
+    ));
+}
+
+#[test]
+fn facade_preconditions_cannot_preempt_same_id_conflict_quarantine() {
+    // Device side: a pending reset leaves the committed successor non-active. Reusing its
+    // operation ID with a different fingerprint must quarantine, not report the pair conflict.
+    let (_, mut device) = activated_pair(235);
+    authorize(&device.device, &device.witness).unwrap();
+    assert!(matches!(
+        device.device.reset(id(1)).unwrap(),
+        WitnessOutcome::Pending(_)
+    ));
+    assert_eq!(
+        device
+            .device
+            .prepare_application(id(1), id(2), 1, b"reused id")
+            .unwrap_err(),
+        PersistenceError::WitnessOperationConflict
+    );
+    assert_eq!(
+        device.device.pending_witness().unwrap_err(),
+        PersistenceError::Quarantined
+    );
+    assert_eq!(
+        device
+            .device
+            .receive_application(id(3), b"anything", id(4), 1)
+            .unwrap_err(),
+        PersistenceError::Quarantined
+    );
+    device.device.store().close().unwrap();
+    device.device.store().reopen().unwrap();
+    assert_eq!(
+        device.device.pending_witness().unwrap_err(),
+        PersistenceError::Quarantined
+    );
+
+    // Daemon side: the same through a completed removal in the operation index. The pair is
+    // no longer active, and the reused ID with another fingerprint still quarantines first.
+    let (mut fixture, mut device) = activated_pair(236);
+    let sent = device
+        .run(|d| d.prepare_application(id(5), id(6), 1, b"before removal"))
+        .unwrap();
+    let removal = fixture
+        .run(|endpoint| endpoint.remove_device(id(7), id(8), 1))
+        .unwrap();
+    assert!(matches!(removal, RemovalOutcome::Commit(_)));
+    authorize(&fixture.endpoint, &fixture.witness).unwrap();
+    // The precondition alone would report the inactive pair.
+    assert_eq!(
+        fixture
+            .endpoint
+            .receive_application(id(9), &sent.ciphertext, id(6), 1)
+            .unwrap_err(),
+        PersistenceError::Conflict
+    );
+    // The reused removal ID with a different fingerprint quarantines before that precondition.
+    assert_eq!(
+        fixture
+            .endpoint
+            .receive_application(id(7), &sent.ciphertext, id(6), 1)
+            .unwrap_err(),
+        PersistenceError::WitnessOperationConflict
+    );
+    assert_eq!(
+        fixture.endpoint.pending_witness().unwrap_err(),
+        PersistenceError::Quarantined
+    );
+    assert_eq!(
+        fixture
+            .endpoint
+            .prepare_application(id(10), id(11), 1, b"frozen")
+            .unwrap_err(),
+        PersistenceError::Quarantined
     );
 }

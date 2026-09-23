@@ -29,6 +29,9 @@ pub mod browser_test_fixtures;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod persistence;
+#[cfg(any(test, feature = "node-test-fixtures"))]
+#[doc(hidden)]
+pub mod test_witness;
 
 /// The only profile accepted by revision 1.
 pub const PROFILE_ID: &str = "axl-e2ee-mls-pq-v1";
