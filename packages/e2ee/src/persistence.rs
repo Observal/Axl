@@ -6,7 +6,9 @@
 //!
 //! One database is permanently bound to one crypto session. Database values contain encrypted
 //! OpenMLS storage images, exact ciphertext, and non-secret routing-independent metadata. Wrapping
-//! keys and rollback anchors are supplied by the platform and never enter redb.
+//! keys are supplied by the platform and never enter redb. Every state-changing operation commits
+//! one sealed witness transition and releases its exact result only after the hosted unanimous
+//! witness barrier and obsolete-key erasure complete.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,11 +29,22 @@ use redb::{
     WriteTransaction,
 };
 
+#[cfg(test)]
+use crate::TransactionalProvider;
 use crate::{
     Clock, CommitMetadata, CoreProvider, Daemon, Endpoint, Error as CoreError, GroupTransaction,
     Id, Identity, MAX_PAST_EPOCHS, MessageClass, PROFILE_ID, PROFILE_REVISION, PairContext,
     PairWelcome, Phone, PhoneKeyPackage, PreparedEnvelope, Role, SUITE, SystemClock,
-    TransactionalProvider,
+    pairing::PairingCredential,
+    witness::{
+        self, EndpointReconciliation, EndpointTerminalState, EndpointWitnessState,
+        FreshQuorumState, QuorumCertificate, ReplicaTrustSet, WitnessError, WitnessLineage,
+        WitnessRequest, WitnessRequestKind,
+    },
+};
+use witness_v2::{
+    ConfirmedWitnessHead, DurableWitnessOperation, ExactResult, WitnessOperationDisposition,
+    WitnessOperationIndex, WitnessRegistrationState,
 };
 
 #[cfg(target_os = "linux")]
@@ -53,6 +66,136 @@ pub use pairing_lifecycle::{
     InvitationPublication, PairLifecycle, PreJoinLifecycle, PreJoinPublication, RePairRequirement,
     RemovalOutcome, ReservationIntent, ReservationOutcome, WelcomeOutcome, WelcomePublication,
 };
+
+/// Immutable descriptor of the one locally committed operation awaiting the witness barrier.
+///
+/// It exposes only the operation ID, the exact signed request bytes, and the request hash. It
+/// never carries candidate ciphertext, plaintext, pairing artifacts, or typed state.
+#[derive(Clone, Eq, PartialEq)]
+pub struct PendingWitnessRequest {
+    operation_id: Id,
+    request: Vec<u8>,
+    request_hash: [u8; 48],
+    kind: WitnessRequestKind,
+}
+
+impl fmt::Debug for PendingWitnessRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingWitnessRequest")
+            .field("operation_id", &self.operation_id)
+            .field("kind", &self.kind)
+            .field("request", &"[opaque]")
+            .finish()
+    }
+}
+
+impl PendingWitnessRequest {
+    pub fn operation_id(&self) -> Id {
+        self.operation_id
+    }
+
+    pub fn request(&self) -> &[u8] {
+        &self.request
+    }
+
+    pub fn request_hash(&self) -> [u8; 48] {
+        self.request_hash
+    }
+
+    pub fn kind(&self) -> WitnessRequestKind {
+        self.kind
+    }
+}
+
+/// Result of a state-changing endpoint call.
+///
+/// `Pending` carries the exact request that must reach all three replicas; the typed result is
+/// withheld until `continue_witness` verifies the unanimous certificate. `Released` carries a
+/// result that needs no new barrier: either a read-only no-change branch or the exact result of
+/// an operation whose barrier already completed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WitnessOutcome<T> {
+    Pending(PendingWitnessRequest),
+    Released(T),
+}
+
+impl<T> WitnessOutcome<T> {
+    pub fn released(self) -> Option<T> {
+        match self {
+            Self::Released(value) => Some(value),
+            Self::Pending(_) => None,
+        }
+    }
+
+    pub fn pending(&self) -> Option<&PendingWitnessRequest> {
+        match self {
+            Self::Pending(value) => Some(value),
+            Self::Released(_) => None,
+        }
+    }
+}
+
+/// Tagged exact result decoded from the authenticated sealed inner payload after the barrier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypedResult {
+    Empty,
+    Envelope(OutboxRecord),
+    Plaintext(DurablePlaintext),
+    Accepted(AcceptedMessageRecord),
+    Commit(CommitMetadata),
+    OutboxAcknowledged(OutboxRecord),
+    ReceiveAcknowledged(AcceptedMessageRecord),
+    Invitation(InvitationPublication),
+    PreJoin(PreJoinPublication),
+    KeyPackage(Vec<u8>),
+    Welcome(WelcomePublication),
+    LegacyWelcome(Vec<u8>),
+    Claim(ClaimSubmission),
+    Reservation(ReservationOutcome),
+    Activation(ActivationAcceptance),
+    EpochReady(EpochReadyAcceptance),
+    InvitationLifecycle(InvitationLifecycle),
+    PreJoinLifecycle(PreJoinLifecycle),
+    PairLifecycle(PairLifecycle),
+    Removal(RemovalOutcome),
+    RePair(RePairRequirement),
+}
+
+/// Version-2 operation kinds from the atomic witness integration specification.
+pub(crate) mod op_kind {
+    pub const DAEMON_INVITATION: u16 = 1;
+    pub const DEVICE_PRE_JOIN: u16 = 2;
+    pub const INVITATION_CANCEL: u16 = 3;
+    pub const CLAIM_SUBMIT: u16 = 4;
+    pub const CLAIM_CONFIRM: u16 = 5;
+    pub const RESERVATION_RELEASE: u16 = 6;
+    pub const WELCOME_CREATE: u16 = 7;
+    pub const WELCOME_JOIN: u16 = 8;
+    pub const ACTIVATION_SEND: u16 = 9;
+    pub const ACTIVATION_RECEIVE: u16 = 10;
+    pub const ACTIVATION_ACK: u16 = 11;
+    pub const APPLICATION_SEND: u16 = 12;
+    pub const APPLICATION_RECEIVE: u16 = 13;
+    pub const PROPOSAL_SEND: u16 = 14;
+    pub const PROPOSAL_RECEIVE: u16 = 15;
+    pub const DAEMON_COMMIT: u16 = 16;
+    pub const COMMIT_APPLY: u16 = 17;
+    pub const EPOCH_READY_SEND: u16 = 18;
+    pub const EPOCH_READY_RECEIVE: u16 = 19;
+    pub const EPOCH_READY_CONFIRM_SEND: u16 = 20;
+    pub const EPOCH_READY_CONFIRM_RECEIVE: u16 = 21;
+    pub const EPOCH_READY_ACK: u16 = 22;
+    pub const REMOVAL_COMMIT: u16 = 23;
+    pub const REMOVAL_APPLY: u16 = 24;
+    pub const LOCAL_REVOCATION: u16 = 25;
+    pub const RESET: u16 = 26;
+    pub const OUTBOX_ACK: u16 = 27;
+    pub const RECEIVE_ACK: u16 = 28;
+    pub const INVITATION_EXPIRY: u16 = 29;
+    pub const PRE_JOIN_EXPIRY: u16 = 30;
+    pub const WELCOME_EXPIRY: u16 = 31;
+    pub const LEGACY_CREATE: u16 = 32;
+}
 
 /// Current Axl native E2EE storage schema.
 pub const STORAGE_SCHEMA_VERSION: u16 = 2;
@@ -85,11 +228,16 @@ const META_WITNESS_REGISTRATION: u8 = 14;
 const META_CURRENT_KEY_ID: u8 = 15;
 const META_OBSOLETE_KEY_ID: u8 = 16;
 const WITNESS_UNREGISTERED: u8 = 0;
+const WITNESS_REGISTERED: u8 = 1;
 const LIFECYCLE_INITIALIZING: u8 = 1;
 const LIFECYCLE_READY: u8 = 2;
+/// Fail-closed terminal markers. They live outside the authenticated header and manifest, so they
+/// cannot rewrite witness-bound state; a fresh quorum read rediscovers the terminal condition.
+const LIFECYCLE_QUARANTINED: u8 = 3;
+const LIFECYCLE_REVOKED: u8 = 4;
 const STATE_CURRENT: u8 = 1;
 const ENDPOINT_METADATA_KEY: &[u8] = b"\0axl-endpoint-metadata-v1";
-const PENDING_PLAINTEXT_PREFIX: &[u8] = b"\0axl-pending-plaintext-v1";
+const EXACT_RESULT_PREFIX: &[u8] = b"\0axl-exact-result-v2";
 const DURABLE_MANIFEST_KEY: &[u8] = b"\0axl-durable-manifest-v1";
 #[cfg(not(test))]
 pub const IDEMPOTENCY_RETENTION_GENERATIONS: u64 = 4096;
@@ -110,12 +258,14 @@ pub(crate) enum FaultPoint {
     BeforeReceiverAcknowledgement,
     AfterAcknowledgementLoss,
     DuringRestartReload,
-    DuringWrappingRecordReplacement,
     DuringWrappingRecordErasure,
     DuringCurrentKeyActivation,
     DuringPreparedKeyReconciliation,
-    BeforeAnchorRecovery,
-    AfterAnchorRecoveryBeforeErasure,
+    BeforeTransitionSealing,
+    AfterTransitionSealingBeforeCommit,
+    BeforeCertificateVerification,
+    AfterCertificateVerificationBeforeErasure,
+    AfterErasureBeforeRelease,
     DuringDuplicateOperation,
     DuringGenerationConflict,
     AfterInitializationMarkerCreation,
@@ -192,27 +342,6 @@ pub fn windows_test_envelope_key_store(
     Ok(Arc::new(
         windows_dpapi::WindowsDpapiEnvelopeKeyStore::for_current_process(root)?,
     ))
-}
-
-/// State held outside the redb snapshot domain by a monotonic platform service.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RollbackState {
-    pub counter: u64,
-    pub epoch: u64,
-    pub epoch_authenticator: Vec<u8>,
-}
-
-/// Platform-owned monotonic rollback anchor.
-pub trait RollbackAnchor: Send + Sync {
-    fn available(&self) -> bool;
-    fn read(&self, crypto_session_id: Id) -> Result<RollbackState, PersistenceError>;
-    fn advance(
-        &self,
-        crypto_session_id: Id,
-        expected: &RollbackState,
-        next: &RollbackState,
-        operation_id: Id,
-    ) -> Result<(), PersistenceError>;
 }
 
 /// Durable exact-ciphertext record. Relay route identifiers are deliberately absent.
@@ -354,9 +483,10 @@ pub(crate) struct PairingOperationRecord {
 pub enum PersistenceError {
     AlreadyAcknowledged,
     AlreadyExists,
-    AnchorUnavailable,
     Conflict,
     Corrupt,
+    EndpointRevoked,
+    FreshWitnessRequired,
     InjectedFault,
     GenerationConflict,
     IdentityMismatch,
@@ -375,6 +505,12 @@ pub enum PersistenceError {
     StateLoss,
     Storage,
     UnsupportedSchema,
+    WitnessConflict,
+    WitnessInvalidExpected,
+    WitnessOperationConflict,
+    WitnessReceiptInvalid,
+    WitnessRegistrationConflict,
+    WitnessUnavailable,
     Core(CoreError),
 }
 
@@ -391,6 +527,20 @@ impl From<CoreError> for PersistenceError {
     }
 }
 
+/// In-memory witness runtime rebuilt from authenticated durable state at every open.
+///
+/// It is a cache of the confirmed head, the one-shot mutation authorization produced by the last
+/// fresh unanimous read, and the read request awaiting its certificate. It is never recovery
+/// authority: the redb database owns the pending operation and the exact request.
+struct WitnessRuntime {
+    state: EndpointWitnessState,
+    /// Fresh signed read requests awaiting their certificates, newest last. Bounded so a caller
+    /// that never presents certificates cannot grow memory; each is matched by request hash.
+    pending_reads: std::collections::VecDeque<([u8; 48], WitnessRequest)>,
+}
+
+const MAX_PENDING_READS: usize = 8;
+
 /// Native transactional provider backed by one redb file per pairwise group.
 pub(crate) struct NativeTransactionalProvider {
     path: PathBuf,
@@ -400,7 +550,8 @@ pub(crate) struct NativeTransactionalProvider {
     database: Mutex<Option<Database>>,
     operation_lock: Mutex<()>,
     envelope_keys: Arc<dyn EnvelopeKeyStore>,
-    rollback_anchor: Arc<dyn RollbackAnchor>,
+    trust: Arc<ReplicaTrustSet>,
+    witness: Mutex<WitnessRuntime>,
     faults: Arc<dyn FaultInjector>,
     clock: Arc<dyn Clock>,
 }
@@ -452,6 +603,9 @@ pub fn discard_interrupted_creation(
             return Err(PersistenceError::Corrupt);
         }
         (LIFECYCLE_READY, _) => return Err(PersistenceError::AlreadyExists),
+        // A terminal endpoint holds committed cryptographic state and is never deleted here.
+        (LIFECYCLE_QUARANTINED, _) => return Err(PersistenceError::Quarantined),
+        (LIFECYCLE_REVOKED, _) => return Err(PersistenceError::EndpointRevoked),
         _ => return Err(PersistenceError::Corrupt),
     }
     drop(database);
@@ -468,27 +622,21 @@ impl NativeTransactionalProvider {
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         faults: Arc<dyn FaultInjector>,
         clock: Arc<dyn Clock>,
     ) -> Result<Arc<Self>, PersistenceError> {
-        require_dependencies(&*envelope_keys, &*rollback_anchor)?;
-        let initial_anchor = rollback_anchor.read(crypto_session_id)?;
-        if initial_anchor
-            != (RollbackState {
-                counter: 0,
-                epoch: 0,
-                epoch_authenticator: Vec::new(),
-            })
-        {
-            return Err(PersistenceError::IdentityMismatch);
-        }
+        require_dependencies(&*envelope_keys)?;
         let root = prepare_storage_root(root, true)?;
         let lifecycle_claim = acquire_session_lifecycle_claim(&root, crypto_session_id)?;
         let path = database_path(&root, crypto_session_id, true, Some(&*faults))?;
         let database = Database::create(&path).map_err(map_database_error)?;
         restrict_file(&path)?;
         let initialization_marker = initializing_marker_for_database(&path);
+        let mut state = EndpointWitnessState::new();
+        state
+            .authorize_initial_registration()
+            .map_err(map_witness_error)?;
         let this = Arc::new(Self {
             path,
             initialization_marker,
@@ -497,7 +645,11 @@ impl NativeTransactionalProvider {
             database: Mutex::new(Some(database)),
             operation_lock: Mutex::new(()),
             envelope_keys,
-            rollback_anchor,
+            trust,
+            witness: Mutex::new(WitnessRuntime {
+                state,
+                pending_reads: std::collections::VecDeque::new(),
+            }),
             faults,
             clock,
         });
@@ -515,11 +667,11 @@ impl NativeTransactionalProvider {
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         faults: Arc<dyn FaultInjector>,
         clock: Arc<dyn Clock>,
     ) -> Result<Arc<Self>, PersistenceError> {
-        require_dependencies(&*envelope_keys, &*rollback_anchor)?;
+        require_dependencies(&*envelope_keys)?;
         let root = prepare_storage_root(root, false)?;
         let lifecycle_claim = acquire_session_lifecycle_claim(&root, crypto_session_id)?;
         let path = database_path(&root, crypto_session_id, false, None)?;
@@ -536,7 +688,10 @@ impl NativeTransactionalProvider {
                 InitializationState::Committed => {}
                 InitializationState::Inconsistent => return Err(PersistenceError::Corrupt),
             }
-        } else if lifecycle != LIFECYCLE_READY {
+        } else if !matches!(
+            lifecycle,
+            LIFECYCLE_READY | LIFECYCLE_QUARANTINED | LIFECYCLE_REVOKED
+        ) {
             return Err(PersistenceError::Corrupt);
         }
         let this = Arc::new(Self {
@@ -547,12 +702,17 @@ impl NativeTransactionalProvider {
             database: Mutex::new(Some(database)),
             operation_lock: Mutex::new(()),
             envelope_keys,
-            rollback_anchor,
+            trust,
+            witness: Mutex::new(WitnessRuntime {
+                state: EndpointWitnessState::new(),
+                pending_reads: std::collections::VecDeque::new(),
+            }),
             faults,
             clock,
         });
-        this.recover_storage()?;
-        if lifecycle == LIFECYCLE_READY {
+        let recovered = this.recover_storage()?;
+        this.rebuild_witness_runtime(recovered)?;
+        if lifecycle != LIFECYCLE_INITIALIZING {
             this.validate_ready()?;
         }
         Ok(this)
@@ -566,6 +726,9 @@ impl NativeTransactionalProvider {
         sync_parent_directory(&self.path)
     }
 
+    /// Finish opening. An `initializing` database whose registration is still pending keeps its
+    /// marker until `continue_witness` completes the counter-1 register. The OS lifecycle claim
+    /// is never released here: it protects the endpoint for its whole open lifetime.
     fn finish_opening(&self) -> Result<(), PersistenceError> {
         let lifecycle = {
             let database = self.database_lock()?;
@@ -573,21 +736,20 @@ impl NativeTransactionalProvider {
             inspect_database_lifecycle(database, self.crypto_session_id)?
         };
         if lifecycle == LIFECYCLE_INITIALIZING {
-            self.mark_ready()
-        } else if lifecycle == LIFECYCLE_READY {
-            self.remove_stale_initialization_marker()?;
-            self.release_lifecycle_claim()
+            let pending = self.read_pending_row()?;
+            match pending {
+                Some(row) if row.disposition == WitnessOperationDisposition::Pending => Ok(()),
+                Some(_) => self.mark_ready(),
+                None => Err(PersistenceError::Corrupt),
+            }
+        } else if matches!(
+            lifecycle,
+            LIFECYCLE_READY | LIFECYCLE_QUARANTINED | LIFECYCLE_REVOKED
+        ) {
+            self.remove_stale_initialization_marker()
         } else {
             Err(PersistenceError::Corrupt)
         }
-    }
-
-    fn release_lifecycle_claim(&self) -> Result<(), PersistenceError> {
-        self.lifecycle_claim
-            .lock()
-            .map_err(|_| PersistenceError::Storage)?
-            .take();
-        Ok(())
     }
 
     fn mark_ready(&self) -> Result<(), PersistenceError> {
@@ -607,8 +769,7 @@ impl NativeTransactionalProvider {
         self.faults
             .check(FaultPoint::AfterInitializationReadyCommit)?;
         fs::remove_file(&self.initialization_marker).map_err(|_| PersistenceError::Io)?;
-        sync_parent_directory(&self.path)?;
-        self.release_lifecycle_claim()
+        sync_parent_directory(&self.path)
     }
 
     fn validate_ready(&self) -> Result<(), PersistenceError> {
@@ -620,10 +781,89 @@ impl NativeTransactionalProvider {
             .map_err(map_transaction_error)?;
         let meta = read.open_table(META).map_err(map_table_error)?;
         match read_bytes(&meta, META_LIFECYCLE)?.as_slice() {
-            [LIFECYCLE_READY] => Ok(()),
+            [LIFECYCLE_READY | LIFECYCLE_QUARANTINED | LIFECYCLE_REVOKED] => Ok(()),
             [LIFECYCLE_INITIALIZING] => Err(PersistenceError::InitializationIncomplete),
             _ => Err(PersistenceError::Corrupt),
         }
+    }
+
+    /// Read-only typed state is withheld while one witness operation is locally committed but not
+    /// confirmed in this process: the locally committed successor is not a released result. After
+    /// restart a `Completed` row is only a cache, so it counts as pending until a fresh unanimous
+    /// head and the exact duplicate certificate confirm it again.
+    pub(crate) fn require_no_pending(&self) -> Result<(), PersistenceError> {
+        let runtime = self.witness_lock()?;
+        if let Some(terminal) = runtime.state.terminal() {
+            return Err(terminal_error(terminal));
+        }
+        if runtime.state.has_pending() {
+            return Err(PersistenceError::WitnessUnavailable);
+        }
+        Ok(())
+    }
+
+    /// The operation whose successor is committed locally but not yet confirmed in this process.
+    fn unconfirmed_operation_id(&self) -> Result<Option<Id>, PersistenceError> {
+        if !self.witness_lock()?.state.has_pending() {
+            return Ok(None);
+        }
+        Ok(self.read_pending_row()?.map(|row| row.operation_id))
+    }
+
+    /// Read-only publications are withheld while the initial registration is still pending.
+    pub(crate) fn require_published(&self) -> Result<(), PersistenceError> {
+        let database = self.database_lock()?;
+        let lifecycle = inspect_database_lifecycle(
+            database.as_ref().ok_or(PersistenceError::Storage)?,
+            self.crypto_session_id,
+        )?;
+        if lifecycle == LIFECYCLE_INITIALIZING {
+            return Err(PersistenceError::InitializationIncomplete);
+        }
+        Ok(())
+    }
+
+    fn persist_terminal_marker(
+        &self,
+        terminal: EndpointTerminalState,
+    ) -> Result<(), PersistenceError> {
+        let marker = match terminal {
+            EndpointTerminalState::Quarantined(_) => LIFECYCLE_QUARANTINED,
+            EndpointTerminalState::Revoked => LIFECYCLE_REVOKED,
+        };
+        let database = self.database_lock()?;
+        let mut write = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_write()
+            .map_err(map_transaction_error)?;
+        configure_transaction(&mut write)?;
+        {
+            let mut meta = write.open_table(META).map_err(map_table_error)?;
+            // A locally detected conflict or invalid certificate is never rediscoverable from the
+            // witness, so the marker is written in every lifecycle, including an interrupted
+            // creation whose registration is still pending.
+            meta.insert(META_LIFECYCLE, &[marker] as &[u8])
+                .map_err(map_storage_error)?;
+        }
+        write.commit().map_err(|_| PersistenceError::Storage)
+    }
+
+    fn durable_terminal_state(&self) -> Result<Option<EndpointTerminalState>, PersistenceError> {
+        let database = self.database_lock()?;
+        let read = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_read()
+            .map_err(map_transaction_error)?;
+        let meta = read.open_table(META).map_err(map_table_error)?;
+        Ok(match read_bytes(&meta, META_LIFECYCLE)?.as_slice() {
+            [LIFECYCLE_QUARANTINED] => Some(EndpointTerminalState::Quarantined(
+                witness::EndpointQuarantineReason::WitnessInconsistent,
+            )),
+            [LIFECYCLE_REVOKED] => Some(EndpointTerminalState::Revoked),
+            _ => None,
+        })
     }
 
     #[cfg(test)]
@@ -636,21 +876,42 @@ impl NativeTransactionalProvider {
         &self.path
     }
 
-    /// Close the database handle. Existing transactions retain their own engine handle and must
-    /// finish before a reopen is attempted.
+    /// Close the database handle and release the OS lifecycle claim. Existing transactions retain
+    /// their own engine handle and must finish before a reopen is attempted. A closed endpoint owns
+    /// nothing until `reopen` acquires the claim again.
     pub(crate) fn close(&self) -> Result<(), PersistenceError> {
         *self
             .database
             .lock()
             .map_err(|_| PersistenceError::Storage)? = None;
+        self.lifecycle_claim
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?
+            .take();
         Ok(())
     }
 
+    /// Simulated restart: acquire the lifecycle claim again, reopen, and rebuild the witness
+    /// runtime from durable state alone.
     #[cfg(test)]
     pub(crate) fn reopen(&self) -> Result<(), PersistenceError> {
         self.faults.check(FaultPoint::DuringRestartReload)?;
+        {
+            let mut claim = self
+                .lifecycle_claim
+                .lock()
+                .map_err(|_| PersistenceError::Storage)?;
+            if claim.is_none() {
+                let root = self.path.parent().ok_or(PersistenceError::Io)?;
+                *claim = Some(acquire_session_lifecycle_claim(
+                    root,
+                    self.crypto_session_id,
+                )?);
+            }
+        }
         self.reopen_database_only()?;
-        self.recover_storage()?;
+        let recovered = self.recover_storage()?;
+        self.rebuild_witness_runtime(recovered)?;
         self.validate_ready()
     }
 
@@ -663,29 +924,61 @@ impl NativeTransactionalProvider {
         Ok(())
     }
 
-    fn recover_storage(&self) -> Result<(), PersistenceError> {
-        require_dependencies(&*self.envelope_keys, &*self.rollback_anchor)?;
+    /// Authenticate committed state, activate or verify the committed current key, and rebuild the
+    /// in-memory witness runtime from the durable confirmed head and pending row. It never erases
+    /// the obsolete key and never exposes a pending request whose key activation is uncertain.
+    fn recover_storage(&self) -> Result<RecoveredWitnessState, PersistenceError> {
+        require_dependencies(&*self.envelope_keys)?;
         self.validate_binding()?;
         self.faults
             .check(FaultPoint::DuringPreparedKeyReconciliation)?;
-        self.activate_and_validate_current_state()?;
-        self.reconcile_anchor_only()?;
-        self.finish_pending_erasure()
+        self.activate_and_validate_current_state()
     }
 
+    /// Rebuild the in-memory witness runtime from authenticated durable state. Called only at
+    /// open, explicit reopen, and uncertain-commit recovery; a live continuation keeps its verified
+    /// head and certificate hash until the next sealed commit persists them.
+    fn rebuild_witness_runtime(
+        &self,
+        recovered: RecoveredWitnessState,
+    ) -> Result<(), PersistenceError> {
+        let mut runtime = self.witness_lock()?;
+        let mut state = EndpointWitnessState::from_confirmed(
+            recovered.confirmed.counter,
+            recovered.confirmed.commitment,
+            recovered.confirmed.previous_certificate_hash,
+        );
+        if let Some(pending) = recovered.pending {
+            state.recover_pending(pending).map_err(map_witness_error)?;
+        }
+        if let Some(terminal) = self.durable_terminal_state()? {
+            state.set_terminal(terminal);
+        }
+        runtime.state = state;
+        runtime.pending_reads.clear();
+        Ok(())
+    }
+
+    fn witness_lock(&self) -> Result<std::sync::MutexGuard<'_, WitnessRuntime>, PersistenceError> {
+        self.witness.lock().map_err(|_| PersistenceError::Storage)
+    }
+
+    fn read_pending_row(&self) -> Result<Option<DurableWitnessOperation>, PersistenceError> {
+        let database = self.database_lock()?;
+        witness_v2::read_pending_operation(database.as_ref().ok_or(PersistenceError::Storage)?)
+    }
+
+    #[cfg(test)]
     pub(crate) fn generation(&self) -> Result<u64, PersistenceError> {
         self.read_u64_meta(META_GENERATION)
     }
 
+    #[cfg(test)]
     pub(crate) fn rollback_counter(&self) -> Result<u64, PersistenceError> {
         self.read_u64_meta(META_ROLLBACK_COUNTER)
     }
 
     #[cfg(test)]
-    pub(crate) fn rollback_state(&self) -> Result<RollbackState, PersistenceError> {
-        self.database_rollback_state()
-    }
-
     pub(crate) fn operation(
         &self,
         operation_id: Id,
@@ -738,6 +1031,7 @@ impl NativeTransactionalProvider {
     }
 
     fn pending_outbox(&self) -> Result<Vec<OutboxRecord>, PersistenceError> {
+        let withheld = self.unconfirmed_operation_id()?;
         let database = self.database_lock()?;
         let read = database
             .as_ref()
@@ -755,7 +1049,8 @@ impl NativeTransactionalProvider {
             {
                 return Err(PersistenceError::IdentityMismatch);
             }
-            if record.retry_state == RetryState::Pending {
+            // A record whose creating operation still awaits the witness is not transmittable.
+            if record.retry_state == RetryState::Pending && withheld != Some(record.operation_id) {
                 records.push(record);
             }
         }
@@ -884,7 +1179,9 @@ impl NativeTransactionalProvider {
         Ok(())
     }
 
-    fn activate_and_validate_current_state(&self) -> Result<(), PersistenceError> {
+    fn activate_and_validate_current_state(
+        &self,
+    ) -> Result<RecoveredWitnessState, PersistenceError> {
         let database = self.database_lock()?;
         let read = database
             .as_ref()
@@ -894,6 +1191,7 @@ impl NativeTransactionalProvider {
         let meta = read.open_table(META).map_err(map_table_error)?;
         let generation = read_u64(&meta, META_GENERATION)?;
         let current_key_id = read_bytes(&meta, META_CURRENT_KEY_ID)?;
+        let confirmed = read_confirmed_head(&meta)?;
         let aad = state_aad(&meta)?;
         drop(meta);
         let state = read.open_table(STATE).map_err(map_table_error)?;
@@ -907,9 +1205,15 @@ impl NativeTransactionalProvider {
             witness_v2::read_pending_operation_from_table(&table)?
         };
         let Some(blob) = state_blob else {
+            if pending.is_some() {
+                return Err(PersistenceError::Corrupt);
+            }
             self.envelope_keys
                 .reconcile_prepared(self.crypto_session_id, None)?;
-            return Ok(());
+            return Ok(RecoveredWitnessState {
+                confirmed,
+                pending: None,
+            });
         };
         let sealed = SealedState::decode(&blob)?;
         if current_key_id.as_slice() != sealed.key_id {
@@ -944,49 +1248,55 @@ impl NativeTransactionalProvider {
                 return Err(error);
             }
         };
-        let pending_validation = (|| {
-            let Some(pending) = pending else {
-                return Ok(());
-            };
-            let metadata = decode_endpoint_metadata(
-                values
-                    .get(ENDPOINT_METADATA_KEY)
-                    .ok_or(PersistenceError::Corrupt)?,
-            )?;
-            let provider = CoreProvider::from_storage_values(values.clone())
-                .map_err(|_| PersistenceError::Corrupt)?;
-            let signer = SignatureKeyPair::read(
-                provider.storage(),
-                &metadata.signer_public,
-                SUITE.signature_algorithm(),
-            )
-            .ok_or(PersistenceError::Corrupt)?;
-            let credential =
-                crate::pairing::PairingCredential::new(metadata.identity.clone(), &signer)
+        let pending_validation =
+            (|| -> Result<Option<witness::PendingWitnessOperation>, PersistenceError> {
+                let Some(pending) = pending else {
+                    return Ok(None);
+                };
+                let provider = CoreProvider::from_storage_values(values.clone())
                     .map_err(|_| PersistenceError::Corrupt)?;
-            let lineage = crate::witness::WitnessLineage::from_identity(
-                &metadata.identity,
-                self.crypto_session_id,
-            )
-            .map_err(|_| PersistenceError::Corrupt)?;
-            let operations = read.open_table(OPERATIONS).map_err(map_table_error)?;
-            let operation_bytes = operations
-                .get(pending.operation_id.as_slice())
-                .map_err(map_storage_error)?
-                .ok_or(PersistenceError::Corrupt)?;
-            let (operation_index, _) =
-                witness_v2::WitnessOperationIndex::decode_prefix(operation_bytes.value())?;
-            pending.open_and_validate(
-                &key,
-                &lineage,
-                &credential,
-                generation,
-                &plaintext,
-                &operation_index,
-            )
-        })();
+                let signing = endpoint_signing(&provider, self.crypto_session_id)?;
+                let operations = read.open_table(OPERATIONS).map_err(map_table_error)?;
+                let operation_bytes = operations
+                    .get(pending.operation_id.as_slice())
+                    .map_err(map_storage_error)?
+                    .ok_or(PersistenceError::Corrupt)?;
+                let (operation_index, _) =
+                    WitnessOperationIndex::decode_prefix(operation_bytes.value())?;
+                pending.open_and_validate(
+                    &key,
+                    &signing.lineage,
+                    &signing.credential,
+                    generation,
+                    &plaintext,
+                    &operation_index,
+                )?;
+                let expected_result = values
+                    .get(&exact_result_key(pending.operation_id))
+                    .ok_or(PersistenceError::Corrupt)?;
+                let (_, recovered) = witness::open_committed_transition(
+                    &pending.committed_transition,
+                    &key,
+                    &signing.lineage,
+                    &signing.credential,
+                )
+                .map_err(|_| PersistenceError::Corrupt)?;
+                if recovered.exact_result != *expected_result {
+                    return Err(PersistenceError::Corrupt);
+                }
+                let operation = witness::recover_committed_transition(
+                    &pending.committed_transition,
+                    &key,
+                    &signing.lineage,
+                    &signing.credential,
+                    true,
+                    pending.obsolete_key_id.is_none(),
+                )
+                .map_err(|_| PersistenceError::Corrupt)?;
+                Ok(Some(operation))
+            })();
         key.fill(0);
-        pending_validation?;
+        let pending = pending_validation?;
         let expected_manifest = values
             .get(DURABLE_MANIFEST_KEY)
             .ok_or(PersistenceError::Corrupt)?;
@@ -994,38 +1304,13 @@ impl NativeTransactionalProvider {
         if expected_manifest.as_slice() != actual_manifest {
             return Err(PersistenceError::Quarantined);
         }
-        Ok(())
+        Ok(RecoveredWitnessState { confirmed, pending })
     }
 
-    fn reconcile_anchor_only(&self) -> Result<(), PersistenceError> {
-        if !self.rollback_anchor.available() {
-            return Err(PersistenceError::AnchorUnavailable);
-        }
-        let database_state = self.database_rollback_state()?;
-        let anchor_state = self.rollback_anchor.read(self.crypto_session_id)?;
-        if database_state == anchor_state {
-            return Ok(());
-        }
-        if database_state.counter == anchor_state.counter.saturating_add(1) {
-            let operation_id = self
-                .latest_operation_id()?
-                .ok_or(PersistenceError::Corrupt)?;
-            self.faults.check(FaultPoint::BeforeAnchorRecovery)?;
-            self.rollback_anchor.advance(
-                self.crypto_session_id,
-                &anchor_state,
-                &database_state,
-                operation_id,
-            )?;
-            self.faults
-                .check(FaultPoint::AfterAnchorRecoveryBeforeErasure)?;
-            return Ok(());
-        }
-        Err(PersistenceError::Quarantined)
-    }
-
-    fn finish_pending_erasure(&self) -> Result<(), PersistenceError> {
-        let pending = {
+    /// Erase the obsolete key named by authenticated committed metadata and verify that it is no
+    /// longer loadable. Callers invoke this only after a matching unanimous certificate.
+    fn erase_and_verify_obsolete_key(&self, key_id: Id) -> Result<(), PersistenceError> {
+        let (current_key_id, aad) = {
             let database = self.database_lock()?;
             let read = database
                 .as_ref()
@@ -1033,73 +1318,53 @@ impl NativeTransactionalProvider {
                 .begin_read()
                 .map_err(map_transaction_error)?;
             let meta = read.open_table(META).map_err(map_table_error)?;
-            read_bytes(&meta, META_PENDING_ERASE)?
+            (read_bytes(&meta, META_CURRENT_KEY_ID)?, state_aad(&meta)?)
         };
-        if pending.is_empty() {
-            return Ok(());
+        if current_key_id.as_slice() == key_id {
+            return Err(PersistenceError::Quarantined);
         }
-        let key_id: [u8; 16] = pending.try_into().map_err(|_| PersistenceError::Corrupt)?;
-        let current_key_id = {
+        self.faults.check(FaultPoint::DuringWrappingRecordErasure)?;
+        self.envelope_keys.erase(self.crypto_session_id, key_id)?;
+        match self
+            .envelope_keys
+            .load(self.crypto_session_id, key_id, &aad)
+        {
+            Err(PersistenceError::KeyUnavailable | PersistenceError::KeyRecordMissing) => Ok(()),
+            Err(PersistenceError::IdentityMismatch) => {
+                Err(PersistenceError::SecureStoreUnavailable)
+            }
+            Ok(mut leaked) => {
+                leaked.fill(0);
+                Err(PersistenceError::SecureStoreUnavailable)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Verify that the successor key named by authenticated committed state is active.
+    fn verify_current_key_active(&self, key_id: Id) -> Result<(), PersistenceError> {
+        let (current_key_id, aad) = {
             let database = self.database_lock()?;
             let read = database
                 .as_ref()
                 .ok_or(PersistenceError::Storage)?
                 .begin_read()
                 .map_err(map_transaction_error)?;
-            let state = read.open_table(STATE).map_err(map_table_error)?;
-            state
-                .get(STATE_CURRENT)
-                .map_err(map_storage_error)?
-                .map(|value| SealedState::decode(value.value()).map(|sealed| sealed.key_id))
-                .transpose()?
+            let meta = read.open_table(META).map_err(map_table_error)?;
+            (read_bytes(&meta, META_CURRENT_KEY_ID)?, state_aad(&meta)?)
         };
-        if current_key_id == Some(key_id) {
-            return Err(PersistenceError::Quarantined);
+        if current_key_id.as_slice() != key_id {
+            return Err(PersistenceError::Corrupt);
         }
-        self.faults.check(FaultPoint::DuringWrappingRecordErasure)?;
-        self.envelope_keys.erase(self.crypto_session_id, key_id)
+        let mut key = self
+            .envelope_keys
+            .load(self.crypto_session_id, key_id, &aad)
+            .map_err(map_current_key_error)?;
+        key.fill(0);
+        Ok(())
     }
 
-    fn latest_operation_id(&self) -> Result<Option<Id>, PersistenceError> {
-        let database = self.database_lock()?;
-        let read = database
-            .as_ref()
-            .ok_or(PersistenceError::Storage)?
-            .begin_read()
-            .map_err(map_transaction_error)?;
-        let table = read.open_table(OPERATIONS).map_err(map_table_error)?;
-        let mut latest: Option<(u64, Id)> = None;
-        for entry in table.iter().map_err(map_storage_error)? {
-            let (key, value) = entry.map_err(map_storage_error)?;
-            let generation = decode_operation_generation(value.value())?;
-            let id: Id = key
-                .value()
-                .try_into()
-                .map_err(|_| PersistenceError::Corrupt)?;
-            let operation = decode_operation(value.value())?;
-            validate_operation_binding(&operation, id, self.crypto_session_id)?;
-            if latest.is_none_or(|(current, _)| generation > current) {
-                latest = Some((generation, id));
-            }
-        }
-        Ok(latest.map(|(_, id)| id))
-    }
-
-    fn database_rollback_state(&self) -> Result<RollbackState, PersistenceError> {
-        let database = self.database_lock()?;
-        let read = database
-            .as_ref()
-            .ok_or(PersistenceError::Storage)?
-            .begin_read()
-            .map_err(map_transaction_error)?;
-        let meta = read.open_table(META).map_err(map_table_error)?;
-        Ok(RollbackState {
-            counter: read_u64(&meta, META_ROLLBACK_COUNTER)?,
-            epoch: read_u64(&meta, META_EPOCH)?,
-            epoch_authenticator: read_bytes(&meta, META_EPOCH_AUTHENTICATOR)?.to_vec(),
-        })
-    }
-
+    #[cfg(test)]
     fn read_u64_meta(&self, key: u8) -> Result<u64, PersistenceError> {
         let database = self.database_lock()?;
         let read = database
@@ -1124,16 +1389,21 @@ impl NativeTransactionalProvider {
         Ok(guard)
     }
 
+    /// A non-poisoned commit error has an uncertain outcome. Close and reopen the engine, then
+    /// consult the authenticated pending row. Candidate state from this process is never reused.
     fn recover_uncertain(
         &self,
         operation_id: Id,
         prepared_key: Option<[u8; 16]>,
-    ) -> Result<CommittedOperation, PersistenceError> {
+    ) -> Result<PendingWitnessRequest, PersistenceError> {
         self.close()?;
         self.reopen_database_only()?;
-        self.recover_storage()?;
-        if let Some(operation) = self.operation(operation_id)? {
-            return Ok(operation);
+        let recovered = self.recover_storage()?;
+        self.rebuild_witness_runtime(recovered)?;
+        if let Some(row) = self.read_pending_row()?
+            && row.operation_id == operation_id
+        {
+            return pending_request_from_row(&row);
         }
         if let Some(key_id) = prepared_key {
             self.faults.check(FaultPoint::DuringWrappingRecordErasure)?;
@@ -1143,6 +1413,127 @@ impl NativeTransactionalProvider {
     }
 }
 
+/// Authenticated confirmed head and recovered pending operation produced by state recovery.
+struct RecoveredWitnessState {
+    confirmed: ConfirmedWitnessHead,
+    pending: Option<witness::PendingWitnessOperation>,
+}
+
+/// Endpoint lineage, credential, and signer reconstructed from the authenticated image.
+struct EndpointSigning {
+    lineage: WitnessLineage,
+    credential: PairingCredential,
+    signer: SignatureKeyPair,
+}
+
+fn endpoint_signing(
+    provider: &CoreProvider,
+    crypto_session_id: Id,
+) -> Result<EndpointSigning, PersistenceError> {
+    let metadata = decode_endpoint_metadata(
+        &provider
+            .internal(ENDPOINT_METADATA_KEY)
+            .ok_or(PersistenceError::Corrupt)?,
+    )?;
+    let (identity, signer_public) = (metadata.identity, metadata.signer_public);
+    let signer = SignatureKeyPair::read(
+        provider.storage(),
+        &signer_public,
+        SUITE.signature_algorithm(),
+    )
+    .ok_or(PersistenceError::Corrupt)?;
+    let credential =
+        PairingCredential::new(identity.clone(), &signer).map_err(|_| PersistenceError::Corrupt)?;
+    let lineage = WitnessLineage::from_identity(&identity, crypto_session_id)
+        .map_err(|_| PersistenceError::IdentityMismatch)?;
+    Ok(EndpointSigning {
+        lineage,
+        credential,
+        signer,
+    })
+}
+
+fn read_confirmed_head(
+    meta: &impl ReadableTable<u8, &'static [u8]>,
+) -> Result<ConfirmedWitnessHead, PersistenceError> {
+    let registration = match read_bytes(meta, META_WITNESS_REGISTRATION)?.as_slice() {
+        [WITNESS_UNREGISTERED] => WitnessRegistrationState::Unregistered,
+        [WITNESS_REGISTERED] => WitnessRegistrationState::Registered,
+        _ => return Err(PersistenceError::Corrupt),
+    };
+    let confirmed = ConfirmedWitnessHead {
+        counter: read_u64(meta, META_CONFIRMED_WITNESS_COUNTER)?,
+        commitment: read_bytes(meta, META_CONFIRMED_WITNESS_COMMITMENT)?
+            .try_into()
+            .map_err(|_| PersistenceError::Corrupt)?,
+        previous_certificate_hash: read_bytes(meta, META_PREVIOUS_CERTIFICATE_HASH)?
+            .try_into()
+            .map_err(|_| PersistenceError::Corrupt)?,
+        registration,
+    };
+    confirmed.validate()?;
+    Ok(confirmed)
+}
+
+fn pending_request_from_row(
+    row: &DurableWitnessOperation,
+) -> Result<PendingWitnessRequest, PersistenceError> {
+    let request =
+        WitnessRequest::decode(&row.witness_request).map_err(|_| PersistenceError::Corrupt)?;
+    Ok(PendingWitnessRequest {
+        operation_id: row.operation_id,
+        request: row.witness_request.clone(),
+        request_hash: row.request_hash,
+        kind: request.kind(),
+    })
+}
+
+fn exact_result_key(operation_id: Id) -> Vec<u8> {
+    let mut key = EXACT_RESULT_PREFIX.to_vec();
+    key.extend_from_slice(&operation_id);
+    key
+}
+
+fn map_witness_error(error: WitnessError) -> PersistenceError {
+    match error {
+        WitnessError::PendingOperation => PersistenceError::WitnessUnavailable,
+        WitnessError::FreshWitnessRequired | WitnessError::NoPendingOperation => {
+            PersistenceError::FreshWitnessRequired
+        }
+        WitnessError::OperationConflict => PersistenceError::WitnessOperationConflict,
+        WitnessError::RegistrationConflict => PersistenceError::WitnessRegistrationConflict,
+        WitnessError::Revoked => PersistenceError::EndpointRevoked,
+        WitnessError::Forked | WitnessError::StaleExpected => PersistenceError::WitnessConflict,
+        WitnessError::InvalidExpected => PersistenceError::WitnessInvalidExpected,
+        WitnessError::Quarantined => PersistenceError::Quarantined,
+        WitnessError::OutputBlocked => PersistenceError::WitnessUnavailable,
+        WitnessError::GenerationMismatch => PersistenceError::GenerationConflict,
+        WitnessError::CorruptState => PersistenceError::Corrupt,
+        WitnessError::BoundExceeded
+        | WitnessError::Malformed
+        | WitnessError::NonCanonical
+        | WitnessError::ProfileMismatch
+        | WitnessError::LineageMismatch
+        | WitnessError::RoleMismatch
+        | WitnessError::CounterMismatch
+        | WitnessError::CommitmentMismatch
+        | WitnessError::PredecessorMismatch
+        | WitnessError::OperationMismatch
+        | WitnessError::RequestHashMismatch
+        | WitnessError::RevocationMismatch
+        | WitnessError::CredentialMismatch
+        | WitnessError::InvalidSignature
+        | WitnessError::InvalidQuorum
+        | WitnessError::DuplicateReplica
+        | WitnessError::InvalidTrustSet
+        | WitnessError::UnpinnedKey
+        | WitnessError::MixedReceipts
+        | WitnessError::UnexpectedResult => PersistenceError::WitnessReceiptInvalid,
+        WitnessError::Crypto => PersistenceError::Storage,
+    }
+}
+
+#[cfg(test)]
 impl TransactionalProvider for Arc<NativeTransactionalProvider> {
     type TransactionError = PersistenceError;
     type Transaction<'a>
@@ -1160,11 +1551,35 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             .operation_lock
             .lock()
             .map_err(|_| PersistenceError::Storage)?;
+        self.begin_transaction_locked(
+            operation_guard,
+            crypto_session_id,
+            Some((expected_generation, expected_rollback_counter)),
+        )
+    }
+}
+
+/// Result of the pre-transition lookup performed by the witness runner.
+pub(crate) enum Lookup<'a> {
+    /// The same operation is locally committed and awaiting the witness barrier.
+    Pending(PendingWitnessRequest),
+    /// The same operation completed within the retention horizon; this is its exact result.
+    Released(TypedResult),
+    /// No prior record exists; the caller may perform at most one transition in this transaction.
+    Fresh(Box<NativeGroupTransaction<'a>>),
+}
+
+impl NativeTransactionalProvider {
+    fn begin_transaction_locked<'a>(
+        self: &'a Arc<Self>,
+        operation_guard: std::sync::MutexGuard<'a, ()>,
+        crypto_session_id: Id,
+        expected: Option<(u64, u64)>,
+    ) -> Result<NativeGroupTransaction<'a>, PersistenceError> {
         self.recover_storage()?;
         if crypto_session_id != self.crypto_session_id {
             return Err(PersistenceError::IdentityMismatch);
         }
-        require_dependencies(&*self.envelope_keys, &*self.rollback_anchor)?;
         let database = self.database_lock()?;
         let mut write = database
             .as_ref()
@@ -1176,9 +1591,15 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             let meta = write.open_table(META).map_err(map_table_error)?;
             let generation = read_u64(&meta, META_GENERATION)?;
             let rollback_counter = read_u64(&meta, META_ROLLBACK_COUNTER)?;
-            if generation != expected_generation || rollback_counter != expected_rollback_counter {
+            if let Some((expected_generation, expected_rollback_counter)) = expected
+                && (generation != expected_generation
+                    || rollback_counter != expected_rollback_counter)
+            {
                 self.faults.check(FaultPoint::DuringGenerationConflict)?;
                 return Err(PersistenceError::GenerationConflict);
+            }
+            if generation != rollback_counter {
+                return Err(PersistenceError::Corrupt);
             }
             let epoch = read_u64(&meta, META_EPOCH)?;
             let authenticator = read_bytes(&meta, META_EPOCH_AUTHENTICATOR)?.to_vec();
@@ -1198,13 +1619,6 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
                 state_blob,
             )
         };
-        let anchor = self.rollback_anchor.read(self.crypto_session_id)?;
-        if anchor.counter != rollback_counter
-            || anchor.epoch != epoch
-            || anchor.epoch_authenticator != authenticator
-        {
-            return Err(PersistenceError::Quarantined);
-        }
         let (provider, old_key_id) = if let Some(blob) = state_blob {
             let sealed = SealedState::decode(&blob)?;
             let mut key = self
@@ -1252,6 +1666,7 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             old_epoch: epoch,
             old_authenticator: authenticator,
             operation_id: None,
+            operation_kind: None,
             operation_fingerprint: None,
             staged: None,
             next_epoch: epoch,
@@ -1265,6 +1680,543 @@ impl TransactionalProvider for Arc<NativeTransactionalProvider> {
             _operation_guard: operation_guard,
         })
     }
+
+    /// Common witness transaction runner entry.
+    ///
+    /// Holds the endpoint operation mutex, refuses terminal endpoints, blocks every later mutation
+    /// while one witness operation is pending without opening a write transaction, resolves
+    /// duplicate operation IDs before any transition, and requires one unconsumed mutation
+    /// authorization from a fresh unanimous read before returning a fresh transaction.
+    pub(crate) fn begin_witnessed(
+        self: &Arc<Self>,
+        operation_id: Id,
+        operation_kind: u16,
+        fingerprint: [u8; 48],
+    ) -> Result<Lookup<'_>, PersistenceError> {
+        if operation_id == [0; 16] {
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        let operation_guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?;
+        {
+            let runtime = self.witness_lock()?;
+            if let Some(terminal) = runtime.state.terminal() {
+                return Err(terminal_error(terminal));
+            }
+        }
+        if let Some(row) = self.read_pending_row()? {
+            if row.operation_id == operation_id {
+                if row.fingerprint != fingerprint {
+                    self.quarantine_locally()?;
+                    return Err(PersistenceError::WitnessOperationConflict);
+                }
+                return match row.disposition {
+                    WitnessOperationDisposition::Pending => {
+                        self.ensure_pending_key_active(&row)?;
+                        Ok(Lookup::Pending(pending_request_from_row(&row)?))
+                    }
+                    WitnessOperationDisposition::Completed => {
+                        self.faults.check(FaultPoint::DuringDuplicateOperation)?;
+                        let runtime = self.witness_lock()?;
+                        let confirmed_live = !runtime.state.has_pending()
+                            && runtime.state.head().counter
+                                == row.confirmed_head.counter.saturating_add(1);
+                        drop(runtime);
+                        if !confirmed_live {
+                            // The completion cache is not witness authority after restart.
+                            return Err(PersistenceError::FreshWitnessRequired);
+                        }
+                        self.released_result(operation_id, row.operation_kind)
+                            .map(Lookup::Released)
+                    }
+                };
+            }
+            if row.disposition == WitnessOperationDisposition::Pending {
+                return Err(PersistenceError::WitnessUnavailable);
+            }
+        }
+        if let Some((index, _)) = self.operation_index(operation_id)? {
+            self.faults.check(FaultPoint::DuringDuplicateOperation)?;
+            if index.fingerprint != fingerprint {
+                self.quarantine_locally()?;
+                return Err(PersistenceError::WitnessOperationConflict);
+            }
+            if self.witness_lock()?.state.has_pending() {
+                // A restored snapshot is not validated until a fresh head confirms the cached
+                // completion; no older exact result leaves the crate before that.
+                return Err(PersistenceError::FreshWitnessRequired);
+            }
+            return self
+                .released_result(operation_id, index.operation_kind)
+                .map(Lookup::Released);
+        }
+        {
+            let runtime = self.witness_lock()?;
+            if runtime.state.has_pending() {
+                return Err(PersistenceError::WitnessUnavailable);
+            }
+            if !runtime.state.has_mutation_authorization() {
+                return Err(PersistenceError::FreshWitnessRequired);
+            }
+        }
+        let mut transaction =
+            self.begin_transaction_locked(operation_guard, self.crypto_session_id, None)?;
+        transaction.operation_id = Some(operation_id);
+        transaction.operation_kind = Some(operation_kind);
+        transaction.operation_fingerprint = Some(fingerprint);
+        Ok(Lookup::Fresh(Box::new(transaction)))
+    }
+
+    /// Idempotently finish or verify successor-key activation before exposing the pending
+    /// request. A failed or uncertain first activation leaves committed state recoverable but
+    /// externally invisible until this succeeds.
+    fn ensure_pending_key_active(
+        &self,
+        row: &DurableWitnessOperation,
+    ) -> Result<(), PersistenceError> {
+        let aad = {
+            let database = self.database_lock()?;
+            let read = database
+                .as_ref()
+                .ok_or(PersistenceError::Storage)?
+                .begin_read()
+                .map_err(map_transaction_error)?;
+            let meta = read.open_table(META).map_err(map_table_error)?;
+            if read_bytes(&meta, META_CURRENT_KEY_ID)? != row.successor_key_id {
+                return Err(PersistenceError::Corrupt);
+            }
+            state_aad(&meta)?
+        };
+        self.faults.check(FaultPoint::DuringCurrentKeyActivation)?;
+        self.envelope_keys
+            .activate(self.crypto_session_id, row.successor_key_id, &aad)
+            .map_err(map_current_key_error)?;
+        let mut runtime = self.witness_lock()?;
+        runtime
+            .state
+            .pending_mut()
+            .map_err(map_witness_error)?
+            .current_key_activated();
+        Ok(())
+    }
+
+    fn quarantine_locally(&self) -> Result<(), PersistenceError> {
+        let reason = EndpointTerminalState::Quarantined(
+            witness::EndpointQuarantineReason::CommitmentConflict,
+        );
+        self.witness_lock()?.state.set_terminal(reason);
+        self.persist_terminal_marker(reason)
+    }
+
+    fn operation_index(
+        &self,
+        operation_id: Id,
+    ) -> Result<Option<(WitnessOperationIndex, CommittedOperation)>, PersistenceError> {
+        let database = self.database_lock()?;
+        let read = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_read()
+            .map_err(map_transaction_error)?;
+        let table = read.open_table(OPERATIONS).map_err(map_table_error)?;
+        let value = table
+            .get(operation_id.as_slice())
+            .map_err(map_storage_error)?;
+        value
+            .map(|bytes| {
+                let (index, operation) = decode_operation_index(bytes.value())?;
+                validate_operation_binding(&operation, operation_id, self.crypto_session_id)?;
+                Ok((index, operation))
+            })
+            .transpose()
+    }
+
+    /// Decode the exact typed result of a completed operation from the authenticated image.
+    fn released_result(
+        &self,
+        operation_id: Id,
+        operation_kind: u16,
+    ) -> Result<TypedResult, PersistenceError> {
+        let database = self.database_lock()?;
+        let read = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_read()
+            .map_err(map_transaction_error)?;
+        let meta = read.open_table(META).map_err(map_table_error)?;
+        let aad = state_aad(&meta)?;
+        drop(meta);
+        let state = read.open_table(STATE).map_err(map_table_error)?;
+        let blob = state
+            .get(STATE_CURRENT)
+            .map_err(map_storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(PersistenceError::Corrupt)?;
+        drop(state);
+        let sealed = SealedState::decode(&blob)?;
+        let mut key = self
+            .envelope_keys
+            .load(self.crypto_session_id, sealed.key_id, &aad)
+            .map_err(map_current_key_error)?;
+        let crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
+        let decrypted = crypto.crypto().aead_decrypt(
+            AeadType::Aes256Gcm,
+            &key,
+            &sealed.ciphertext,
+            &sealed.nonce,
+            &aad,
+        );
+        key.fill(0);
+        let plaintext = decrypted.map_err(|_| PersistenceError::Corrupt)?;
+        let values = decode_storage_image(&plaintext)?;
+        let Some(encoded) = values.get(&exact_result_key(operation_id)) else {
+            return Err(if operation_kind == op_kind::APPLICATION_RECEIVE {
+                PersistenceError::AlreadyAcknowledged
+            } else {
+                PersistenceError::Corrupt
+            });
+        };
+        let exact = ExactResult::decode(encoded)?;
+        decode_typed_result(
+            operation_kind,
+            &exact,
+            &values,
+            &read,
+            self.crypto_session_id,
+        )
+    }
+
+    /// Expose the one durable pending request, or `None` when no operation awaits the barrier.
+    pub(crate) fn pending_witness(
+        &self,
+    ) -> Result<Option<PendingWitnessRequest>, PersistenceError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?;
+        let runtime = self.witness_lock()?;
+        if let Some(terminal) = runtime.state.terminal() {
+            return Err(terminal_error(terminal));
+        }
+        if !runtime.state.has_pending() {
+            return Ok(None);
+        }
+        drop(runtime);
+        // A completed cache row is still resent after restart until a fresh head or the exact
+        // duplicate certificate confirms it in this process.
+        match self.read_pending_row()? {
+            Some(row) => {
+                self.ensure_pending_key_active(&row)?;
+                Ok(Some(pending_request_from_row(&row)?))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Construct a fresh signed `read` for reconciliation. The next `reconcile_witness` call must
+    /// present a certificate for exactly these bytes.
+    pub(crate) fn witness_read_request(self: &Arc<Self>) -> Result<Vec<u8>, PersistenceError> {
+        let operation_guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?;
+        let transaction =
+            self.begin_transaction_locked(operation_guard, self.crypto_session_id, None)?;
+        if transaction.expected_generation == 0 {
+            transaction.rollback()?;
+            return Err(PersistenceError::StateLoss);
+        }
+        let signing = endpoint_signing(&transaction.provider, self.crypto_session_id)?;
+        let operation_id = loop {
+            let value = transaction
+                .provider
+                .rand()
+                .random_array::<16>()
+                .map_err(|_| PersistenceError::Storage)?;
+            if value != [0; 16] {
+                break value;
+            }
+        };
+        let nonce = loop {
+            let value = transaction
+                .provider
+                .rand()
+                .random_array::<32>()
+                .map_err(|_| PersistenceError::Storage)?;
+            if value != [0; 32] {
+                break value;
+            }
+        };
+        transaction.rollback()?;
+        let mut runtime = self.witness_lock()?;
+        let request = WitnessRequest::new_read(
+            signing.lineage,
+            operation_id,
+            runtime.state.previous_certificate_hash(),
+            &signing.credential,
+            &signing.signer,
+            nonce,
+        )
+        .map_err(map_witness_error)?;
+        let bytes = request.encode().map_err(map_witness_error)?;
+        let hash = request.request_hash().map_err(map_witness_error)?;
+        if runtime.pending_reads.len() >= MAX_PENDING_READS {
+            runtime.pending_reads.pop_front();
+        }
+        runtime.pending_reads.push_back((hash, request));
+        Ok(bytes)
+    }
+
+    /// Verify a fresh unanimous `read` certificate and reconcile local state against it. A `Ready`
+    /// outcome grants exactly one mutation authorization.
+    pub(crate) fn reconcile_witness(
+        self: &Arc<Self>,
+        certificate: &[u8],
+    ) -> Result<EndpointReconciliation, PersistenceError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?;
+        let (local_state_present, lineage_was_registered) = {
+            let database = self.database_lock()?;
+            let read = database
+                .as_ref()
+                .ok_or(PersistenceError::Storage)?
+                .begin_read()
+                .map_err(map_transaction_error)?;
+            let meta = read.open_table(META).map_err(map_table_error)?;
+            let generation = read_u64(&meta, META_GENERATION)?;
+            let registered = read_bytes(&meta, META_WITNESS_REGISTRATION)? == [WITNESS_REGISTERED];
+            (generation > 0, registered)
+        };
+        let pending_register = self
+            .read_pending_row()?
+            .is_some_and(|row| row.confirmed_head.counter == 0);
+        let mut runtime = self.witness_lock()?;
+        if runtime.pending_reads.is_empty() {
+            return Err(PersistenceError::FreshWitnessRequired);
+        }
+        let certificate = QuorumCertificate::decode(certificate).map_err(|error| {
+            let _ = self.quarantine_after_receipt_failure(&mut runtime.state);
+            map_witness_error(error)
+        })?;
+        let request_hash = certificate.receipts()[0].request_hash();
+        let Some(position) = runtime
+            .pending_reads
+            .iter()
+            .position(|(hash, _)| *hash == request_hash)
+        else {
+            // A certificate for a read this endpoint never signed is not a fresh head.
+            self.quarantine_after_receipt_failure(&mut runtime.state)?;
+            return Err(PersistenceError::WitnessReceiptInvalid);
+        };
+        let (_, request) = runtime
+            .pending_reads
+            .remove(position)
+            .ok_or(PersistenceError::Storage)?;
+        let result = match certificate.verify(&request, &self.trust) {
+            Ok(result) => result,
+            Err(error) => {
+                self.quarantine_after_receipt_failure(&mut runtime.state)?;
+                return Err(map_witness_error(error));
+            }
+        };
+        let quorum = FreshQuorumState::from_verified_read(&certificate, result);
+        let outcome = runtime.state.reconcile(
+            local_state_present,
+            lineage_was_registered || pending_register,
+            quorum,
+        );
+        if let Some(terminal) = runtime.state.terminal() {
+            self.persist_terminal_marker(terminal)?;
+        }
+        Ok(outcome)
+    }
+
+    fn quarantine_after_receipt_failure(
+        &self,
+        state: &mut EndpointWitnessState,
+    ) -> Result<(), PersistenceError> {
+        let terminal = EndpointTerminalState::Quarantined(
+            witness::EndpointQuarantineReason::WitnessInconsistent,
+        );
+        state.set_terminal(terminal);
+        self.persist_terminal_marker(terminal)
+    }
+
+    /// Complete the barrier for the one pending operation.
+    ///
+    /// Order: verify the unanimous certificate against the exact stored request, verify that the
+    /// successor key remains active, erase and verify absence of the obsolete key, mark the exact
+    /// result releasable, and only then decode and return it.
+    pub(crate) fn continue_witness(
+        self: &Arc<Self>,
+        operation_id: Id,
+        certificate: &[u8],
+    ) -> Result<TypedResult, PersistenceError> {
+        let _guard = self
+            .operation_lock
+            .lock()
+            .map_err(|_| PersistenceError::Storage)?;
+        let row = self.read_pending_row()?.ok_or(PersistenceError::NotFound)?;
+        if row.operation_id != operation_id {
+            return Err(PersistenceError::NotFound);
+        }
+        let mut runtime = self.witness_lock()?;
+        if let Some(terminal) = runtime.state.terminal() {
+            return Err(terminal_error(terminal));
+        }
+        if !runtime.state.has_pending() {
+            // The live process already released this result; a fresh head is required before
+            // the cached completion may be reused.
+            return Err(PersistenceError::FreshWitnessRequired);
+        }
+        self.faults
+            .check(FaultPoint::BeforeCertificateVerification)?;
+        {
+            let pending = runtime.state.pending_mut().map_err(map_witness_error)?;
+            if pending.operation_id() != operation_id || pending.request_hash() != row.request_hash
+            {
+                return Err(PersistenceError::Corrupt);
+            }
+            if let Err(error) = pending.confirm_quorum(certificate, &self.trust) {
+                let mapped = map_witness_error(error.clone());
+                match error {
+                    WitnessError::Revoked => {
+                        runtime.state.set_terminal(EndpointTerminalState::Revoked);
+                        self.persist_terminal_marker(EndpointTerminalState::Revoked)?;
+                    }
+                    WitnessError::OperationConflict
+                    | WitnessError::RegistrationConflict
+                    | WitnessError::Forked
+                    | WitnessError::StaleExpected
+                    | WitnessError::InvalidExpected => {
+                        let terminal = EndpointTerminalState::Quarantined(
+                            witness::EndpointQuarantineReason::CommitmentConflict,
+                        );
+                        runtime.state.set_terminal(terminal);
+                        self.persist_terminal_marker(terminal)?;
+                    }
+                    WitnessError::UnexpectedResult => {}
+                    _ => self.quarantine_after_receipt_failure(&mut runtime.state)?,
+                }
+                return Err(mapped);
+            }
+        }
+        self.faults
+            .check(FaultPoint::AfterCertificateVerificationBeforeErasure)?;
+        drop(runtime);
+        self.verify_current_key_active(row.successor_key_id)?;
+        let mut runtime = self.witness_lock()?;
+        if let Some(obsolete) = row.obsolete_key_id {
+            self.erase_and_verify_obsolete_key(obsolete)?;
+        }
+        runtime
+            .state
+            .pending_mut()
+            .map_err(map_witness_error)?
+            .obsolete_key_erased()
+            .map_err(map_witness_error)?;
+        self.faults.check(FaultPoint::AfterErasureBeforeRelease)?;
+        self.mark_operation_completed(&row)?;
+        let exact_result = runtime
+            .state
+            .release_and_advance()
+            .map_err(map_witness_error)?;
+        drop(runtime);
+        let lifecycle = {
+            let database = self.database_lock()?;
+            inspect_database_lifecycle(
+                database.as_ref().ok_or(PersistenceError::Storage)?,
+                self.crypto_session_id,
+            )?
+        };
+        if lifecycle == LIFECYCLE_INITIALIZING {
+            self.faults.check(FaultPoint::BeforeInitializationReady)?;
+            self.mark_ready()?;
+        }
+        let exact = ExactResult::decode(&exact_result)?;
+        if exact.kind() != row.exact_result_kind {
+            return Err(PersistenceError::Corrupt);
+        }
+        let database = self.database_lock()?;
+        let read = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_read()
+            .map_err(map_transaction_error)?;
+        let values = self.authenticated_values(&read)?;
+        decode_typed_result(
+            row.operation_kind,
+            &exact,
+            &values,
+            &read,
+            self.crypto_session_id,
+        )
+    }
+
+    fn authenticated_values(
+        &self,
+        read: &redb::ReadTransaction,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, PersistenceError> {
+        let meta = read.open_table(META).map_err(map_table_error)?;
+        let aad = state_aad(&meta)?;
+        drop(meta);
+        let state = read.open_table(STATE).map_err(map_table_error)?;
+        let blob = state
+            .get(STATE_CURRENT)
+            .map_err(map_storage_error)?
+            .map(|value| value.value().to_vec())
+            .ok_or(PersistenceError::Corrupt)?;
+        drop(state);
+        let sealed = SealedState::decode(&blob)?;
+        let mut key = self
+            .envelope_keys
+            .load(self.crypto_session_id, sealed.key_id, &aad)
+            .map_err(map_current_key_error)?;
+        let crypto = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
+        let decrypted = crypto.crypto().aead_decrypt(
+            AeadType::Aes256Gcm,
+            &key,
+            &sealed.ciphertext,
+            &sealed.nonce,
+            &aad,
+        );
+        key.fill(0);
+        let plaintext = decrypted.map_err(|_| PersistenceError::Corrupt)?;
+        decode_storage_image(&plaintext)
+    }
+
+    /// Persist the releasable marker. It is a recovery cache: losing it forces re-verification,
+    /// never a second mutation or result loss.
+    fn mark_operation_completed(
+        &self,
+        row: &DurableWitnessOperation,
+    ) -> Result<(), PersistenceError> {
+        if row.disposition == WitnessOperationDisposition::Completed {
+            return Ok(());
+        }
+        let mut completed = row.clone();
+        completed.disposition = WitnessOperationDisposition::Completed;
+        let database = self.database_lock()?;
+        let mut write = database
+            .as_ref()
+            .ok_or(PersistenceError::Storage)?
+            .begin_write()
+            .map_err(map_transaction_error)?;
+        configure_transaction(&mut write)?;
+        witness_v2::write_pending_operation(&write, &completed)?;
+        write.commit().map_err(|_| PersistenceError::Storage)
+    }
+}
+
+fn terminal_error(terminal: EndpointTerminalState) -> PersistenceError {
+    match terminal {
+        EndpointTerminalState::Quarantined(_) => PersistenceError::Quarantined,
+        EndpointTerminalState::Revoked => PersistenceError::EndpointRevoked,
+    }
 }
 
 /// One strict redb transaction and its transaction-local OpenMLS provider.
@@ -1277,6 +2229,7 @@ pub(crate) struct NativeGroupTransaction<'a> {
     old_epoch: u64,
     old_authenticator: Vec<u8>,
     operation_id: Option<Id>,
+    operation_kind: Option<u16>,
     operation_fingerprint: Option<[u8; 48]>,
     staged: Option<CommittedOperation>,
     next_epoch: u64,
@@ -1291,39 +2244,16 @@ pub(crate) struct NativeGroupTransaction<'a> {
 }
 
 impl NativeGroupTransaction<'_> {
-    /// Bind an idempotency key and canonical input hash before mutation.
-    fn bind_operation(
-        &mut self,
-        operation_id: Id,
-        fingerprint: [u8; 48],
-    ) -> Result<Option<CommittedOperation>, PersistenceError> {
-        let write = self.write.as_ref().ok_or(PersistenceError::Storage)?;
-        let table = write.open_table(OPERATIONS).map_err(map_table_error)?;
-        let existing = table
-            .get(operation_id.as_slice())
-            .map_err(map_storage_error)?
-            .map(|value| value.value().to_vec());
-        drop(table);
-        if let Some(bytes) = existing {
-            self.owner
-                .faults
-                .check(FaultPoint::DuringDuplicateOperation)?;
-            let (stored_fingerprint, operation) = decode_operation_with_fingerprint(&bytes)?;
-            validate_operation_binding(&operation, operation_id, self.owner.crypto_session_id)?;
-            if stored_fingerprint != fingerprint {
-                return Err(PersistenceError::Conflict);
-            }
-            return Ok(Some(operation));
-        }
-        self.operation_id = Some(operation_id);
-        self.operation_fingerprint = Some(fingerprint);
-        Ok(None)
-    }
-
     fn set_successor_epoch(&mut self, epoch: u64, authenticator: &[u8]) {
         self.next_epoch = epoch;
         self.next_authenticator.clear();
         self.next_authenticator.extend_from_slice(authenticator);
+    }
+
+    fn keep_epoch(&mut self) {
+        let epoch = self.old_epoch;
+        let authenticator = self.old_authenticator.clone();
+        self.set_successor_epoch(epoch, &authenticator);
     }
 
     fn write(&mut self) -> Result<&mut WriteTransaction, PersistenceError> {
@@ -1368,14 +2298,13 @@ impl NativeGroupTransaction<'_> {
             .get(operation_id.as_slice())
             .map_err(map_storage_error)?
             .ok_or(PersistenceError::NotFound)?;
-        let (fingerprint, generation, existing) = decode_operation_record(bytes.value())?;
+        let (mut index, existing) = decode_operation_index(bytes.value())?;
         validate_operation_binding(&existing, operation_id, self.owner.crypto_session_id)?;
         drop(bytes);
         drop(table);
-        self.operation_updates.push((
-            operation_id,
-            encode_operation(fingerprint, generation, &operation)?,
-        ));
+        index.disposition = WitnessOperationDisposition::Completed;
+        self.operation_updates
+            .push((operation_id, encode_operation_index(&index, &operation)?));
         Ok(())
     }
 
@@ -1390,12 +2319,21 @@ impl NativeGroupTransaction<'_> {
         Ok(())
     }
 
-    fn commit_inner(mut self) -> Result<CommittedOperation, PersistenceError> {
+    /// Commit the complete successor image, exact result, operation index, pending marker,
+    /// committed transition, and affected retry records atomically, then activate the successor
+    /// key. Returns only the exact pending request; the typed result stays sealed.
+    fn commit_witnessed(
+        mut self,
+        result: TypedResult,
+    ) -> Result<PendingWitnessRequest, PersistenceError> {
         let operation_id = self.operation_id.ok_or(PersistenceError::Conflict)?;
+        let operation_kind = self.operation_kind.ok_or(PersistenceError::Conflict)?;
         let fingerprint = self
             .operation_fingerprint
             .ok_or(PersistenceError::Conflict)?;
         let operation = self.staged.clone().ok_or(PersistenceError::Conflict)?;
+        let exact = result.encode()?;
+        let exact_bytes = exact.encode()?;
         let next_generation = self
             .expected_generation
             .checked_add(1)
@@ -1404,6 +2342,34 @@ impl NativeGroupTransaction<'_> {
             .expected_rollback_counter
             .checked_add(1)
             .ok_or(PersistenceError::Corrupt)?;
+
+        // Confirmed predecessor head from the live runtime. The authorization was granted by a
+        // fresh unanimous read (or the initial registration grant) and is consumed below.
+        let (confirmed, previous_certificate_hash) = {
+            let runtime = self.owner.witness_lock()?;
+            if let Some(terminal) = runtime.state.terminal() {
+                return Err(terminal_error(terminal));
+            }
+            if runtime.state.has_pending() {
+                return Err(PersistenceError::WitnessUnavailable);
+            }
+            let head = runtime.state.head();
+            (head, runtime.state.previous_certificate_hash())
+        };
+        if confirmed.counter != self.expected_rollback_counter {
+            return Err(PersistenceError::FreshWitnessRequired);
+        }
+        let confirmed_head = ConfirmedWitnessHead {
+            counter: confirmed.counter,
+            commitment: confirmed.commitment,
+            previous_certificate_hash,
+            registration: if confirmed.counter == 0 {
+                WitnessRegistrationState::Unregistered
+            } else {
+                WitnessRegistrationState::Registered
+            },
+        };
+        confirmed_head.validate()?;
 
         self.owner
             .faults
@@ -1417,8 +2383,17 @@ impl NativeGroupTransaction<'_> {
         let accepted_updates = self.accepted_updates.clone();
         let outbox_updates = self.outbox_updates.clone();
         let operation_updates = self.operation_updates.clone();
+        let index = WitnessOperationIndex {
+            operation_kind,
+            fingerprint,
+            generation: next_generation,
+            disposition: WitnessOperationDisposition::Pending,
+            exact_result_kind: exact.kind(),
+        };
         {
             let write = self.write()?;
+            witness_v2::remove_completed_operation(write)?;
+            mark_previous_pending_index_completed(write, operation_id)?;
             for (accepted_id, record) in &accepted_updates {
                 let bytes = encode_accepted(record);
                 let mut accepted = write.open_table(ACCEPTED).map_err(map_table_error)?;
@@ -1458,7 +2433,7 @@ impl NativeGroupTransaction<'_> {
                 | CommittedOperation::ReceiveAcknowledged(_)
                 | CommittedOperation::Pairing(_) => {}
             }
-            let bytes = encode_operation(fingerprint, next_generation, &operation)?;
+            let bytes = encode_operation_index(&index, &operation)?;
             let mut operations = write.open_table(OPERATIONS).map_err(map_table_error)?;
             operations
                 .insert(operation_id.as_slice(), bytes.as_slice())
@@ -1475,21 +2450,51 @@ impl NativeGroupTransaction<'_> {
                 .map_err(map_storage_error)?;
             meta.insert(META_PENDING_ERASE, pending_erase.as_slice())
                 .map_err(map_storage_error)?;
+            meta.insert(
+                META_CONFIRMED_WITNESS_COUNTER,
+                confirmed_head.counter.to_be_bytes().as_slice(),
+            )
+            .map_err(map_storage_error)?;
+            meta.insert(
+                META_CONFIRMED_WITNESS_COMMITMENT,
+                confirmed_head.commitment.as_slice(),
+            )
+            .map_err(map_storage_error)?;
+            meta.insert(
+                META_PREVIOUS_CERTIFICATE_HASH,
+                confirmed_head.previous_certificate_hash.as_slice(),
+            )
+            .map_err(map_storage_error)?;
+            meta.insert(
+                META_WITNESS_REGISTRATION,
+                &[confirmed_head.registration as u8] as &[u8],
+            )
+            .map_err(map_storage_error)?;
         }
         self.owner
             .faults
             .check(FaultPoint::AfterCiphertextInsertion)?;
-        prune_durable_records(self.write()?, next_generation)?;
+        let pruned = prune_durable_records(self.write()?, next_generation)?;
+        for pruned_id in pruned {
+            self.provider.remove_internal(&exact_result_key(pruned_id));
+        }
+        self.provider
+            .insert_internal(exact_result_key(operation_id), exact_bytes.clone());
         let mut data_key = self
             .provider
             .rand()
             .random_array::<32>()
             .map_err(|_| PersistenceError::Storage)?;
-        let key_id = self
-            .provider
-            .rand()
-            .random_array::<16>()
-            .map_err(|_| PersistenceError::Storage)?;
+        let key_id = loop {
+            let value = self
+                .provider
+                .rand()
+                .random_array::<16>()
+                .map_err(|_| PersistenceError::Storage)?;
+            if value != [0; 16] && Some(value) != self.old_key_id {
+                break value;
+            }
+        };
         let nonce = self
             .provider
             .rand()
@@ -1514,6 +2519,50 @@ impl NativeGroupTransaction<'_> {
             .insert_internal(DURABLE_MANIFEST_KEY.to_vec(), manifest.to_vec());
 
         let plaintext = encode_storage_image(&self.provider.storage_values())?;
+        self.owner
+            .faults
+            .check(FaultPoint::BeforeTransitionSealing)?;
+        let signing = endpoint_signing(&self.provider, self.owner.crypto_session_id)?;
+        let mut epoch_authenticator = [0_u8; 48];
+        if next_authenticator.len() == 48 {
+            epoch_authenticator.copy_from_slice(&next_authenticator);
+        } else if !next_authenticator.is_empty() {
+            data_key.fill(0);
+            return Err(PersistenceError::Corrupt);
+        }
+        let prepared = {
+            let mut runtime = self.owner.witness_lock()?;
+            runtime.state.prepare(witness::TransitionMaterial {
+                lineage: signing.lineage.clone(),
+                counter: next_counter,
+                generation: next_generation,
+                epoch: self.next_epoch,
+                epoch_authenticator,
+                current_key_id: key_id,
+                predecessor_commitment: confirmed.commitment,
+                previous_certificate_hash,
+                operation_id,
+                inner_state: &plaintext,
+                exact_result: &exact_bytes,
+                data_key: &data_key,
+                credential: &signing.credential,
+                signer: &signing.signer,
+            })
+        };
+        let prepared = match prepared {
+            Ok(value) => value,
+            Err(error) => {
+                data_key.fill(0);
+                return Err(map_witness_error(error));
+            }
+        };
+        let committed_transition = match prepared.committed_record() {
+            Ok(value) => value,
+            Err(error) => {
+                data_key.fill(0);
+                return Err(map_witness_error(error));
+            }
+        };
         let crypto = self.provider.crypto();
         let encrypted =
             crypto.aead_encrypt(AeadType::Aes256Gcm, &data_key, &plaintext, &nonce, &aad);
@@ -1525,26 +2574,78 @@ impl NativeGroupTransaction<'_> {
             ciphertext,
         }
         .encode()?;
+        let row = DurableWitnessOperation {
+            operation_id,
+            operation_kind,
+            fingerprint,
+            witness_request: prepared.request_bytes().to_vec(),
+            request_hash: prepared.request_hash(),
+            committed_transition,
+            confirmed_head,
+            successor_key_id: key_id,
+            obsolete_key_id: self.old_key_id,
+            disposition: WitnessOperationDisposition::Pending,
+            exact_result_kind: exact.kind(),
+        };
+        if prepared.is_register() != self.old_key_id.is_none() {
+            return Err(PersistenceError::Corrupt);
+        }
         {
             let write = self.write()?;
             let mut state = write.open_table(STATE).map_err(map_table_error)?;
             state
                 .insert(STATE_CURRENT, sealed.as_slice())
                 .map_err(map_storage_error)?;
+            drop(state);
+            witness_v2::write_pending_operation(write, &row)?;
         }
+        self.owner
+            .faults
+            .check(FaultPoint::AfterTransitionSealingBeforeCommit)?;
         self.owner.faults.check(FaultPoint::BeforeCommit)?;
         let write = self.write.take().ok_or(PersistenceError::Storage)?;
         self.prepared_key_id = None;
         if write.commit().is_err() {
             return self.owner.recover_uncertain(operation_id, Some(key_id));
         }
-        self.owner
+        let request = PendingWitnessRequest {
+            operation_id,
+            request: prepared.request_bytes().to_vec(),
+            request_hash: prepared.request_hash(),
+            kind: if prepared.is_register() {
+                WitnessRequestKind::Register
+            } else {
+                WitnessRequestKind::Advance
+            },
+        };
+        {
+            let mut runtime = self.owner.witness_lock()?;
+            runtime
+                .state
+                .local_commit_complete(prepared)
+                .map_err(map_witness_error)?;
+        }
+        if self
+            .owner
             .faults
-            .check(FaultPoint::DuringCurrentKeyActivation)?;
+            .check(FaultPoint::DuringCurrentKeyActivation)
+            .is_err()
+        {
+            // Committed but activation did not run: recoverable pending state, no exposure.
+            return Err(PersistenceError::InjectedFault);
+        }
         self.owner
             .envelope_keys
             .activate(self.owner.crypto_session_id, key_id, &aad)
             .map_err(map_current_key_error)?;
+        {
+            let mut runtime = self.owner.witness_lock()?;
+            runtime
+                .state
+                .pending_mut()
+                .map_err(map_witness_error)?
+                .current_key_activated();
+        }
         if self
             .owner
             .faults
@@ -1553,33 +2654,10 @@ impl NativeGroupTransaction<'_> {
         {
             return self.owner.recover_uncertain(operation_id, None);
         }
-        let expected_anchor = RollbackState {
-            counter: self.expected_rollback_counter,
-            epoch: self.old_epoch,
-            epoch_authenticator: self.old_authenticator.clone(),
-        };
-        let next_anchor = RollbackState {
-            counter: next_counter,
-            epoch: self.next_epoch,
-            epoch_authenticator: self.next_authenticator.clone(),
-        };
-        self.owner.faults.check(FaultPoint::BeforeAnchorRecovery)?;
-        self.owner.rollback_anchor.advance(
-            self.owner.crypto_session_id,
-            &expected_anchor,
-            &next_anchor,
-            operation_id,
-        )?;
         self.owner
             .faults
-            .check(FaultPoint::AfterAnchorRecoveryBeforeErasure)?;
-        if self.old_key_id.is_some() {
-            self.owner
-                .faults
-                .check(FaultPoint::DuringWrappingRecordReplacement)?;
-            self.owner.finish_pending_erasure()?;
-        }
-        Ok(operation)
+            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
+        Ok(request)
     }
 }
 
@@ -1622,14 +2700,45 @@ impl GroupTransaction for NativeGroupTransaction<'_> {
     }
 }
 
-impl NativeGroupTransaction<'_> {
-    fn commit_operation(self) -> Result<CommittedOperation, PersistenceError> {
-        self.commit_inner()
+/// Flip the index of the previously pending operation to `Completed` inside the successor's
+/// sealed manifest. Only one such index may exist, and it must not be the current operation.
+fn mark_previous_pending_index_completed(
+    write: &WriteTransaction,
+    current_operation_id: Id,
+) -> Result<(), PersistenceError> {
+    let mut pending_entries = Vec::new();
+    {
+        let table = write.open_table(OPERATIONS).map_err(map_table_error)?;
+        for entry in table.iter().map_err(map_storage_error)? {
+            let (key, value) = entry.map_err(map_storage_error)?;
+            let (index, operation) = decode_operation_index(value.value())?;
+            if index.disposition == WitnessOperationDisposition::Pending {
+                pending_entries.push((key.value().to_vec(), index, operation));
+            }
+        }
     }
+    if pending_entries.len() > 1
+        || pending_entries
+            .iter()
+            .any(|(key, _, _)| key.as_slice() == current_operation_id)
+    {
+        return Err(PersistenceError::Corrupt);
+    }
+    for (key, mut index, operation) in pending_entries {
+        index.disposition = WitnessOperationDisposition::Completed;
+        let bytes = encode_operation_index(&index, &operation)?;
+        write
+            .open_table(OPERATIONS)
+            .map_err(map_table_error)?
+            .insert(key.as_slice(), bytes.as_slice())
+            .map_err(map_storage_error)?;
+    }
+    Ok(())
 }
 
 /// Durable daemon endpoint. Every method reloads committed MLS state after opening its redb
-/// transaction; no `MlsGroup` survives a failed or completed operation.
+/// transaction; no `MlsGroup` survives a failed or completed operation. Every state change returns
+/// a pending witness request; the typed result is released by `continue_witness`.
 #[derive(Clone)]
 pub(crate) struct DurableDaemon {
     store: Arc<NativeTransactionalProvider>,
@@ -1641,7 +2750,7 @@ pub(crate) struct DurablePhone {
     store: Arc<NativeTransactionalProvider>,
 }
 
-/// Plaintext released only after receive-state and accepted-message commit complete.
+/// Plaintext released only after receive-state commit and the witness barrier complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DurablePlaintext {
     pub operation_id: Id,
@@ -1656,6 +2765,86 @@ impl DurablePlaintext {
     }
 }
 
+/// Endpoint-owned witness operations shared by every durable facade.
+pub trait WitnessEndpoint {
+    /// Build a fresh signed `read` request for pre-mutation reconciliation.
+    fn witness_read_request(&self) -> Result<Vec<u8>, PersistenceError>;
+    /// Verify the unanimous `read` certificate and reconcile; `Ready` grants one mutation.
+    fn reconcile_witness(
+        &self,
+        certificate: &[u8],
+    ) -> Result<EndpointReconciliation, PersistenceError>;
+    /// Recover the one durable pending request, if any.
+    fn pending_witness(&self) -> Result<Option<PendingWitnessRequest>, PersistenceError>;
+    /// Verify the certificate, finish key lifecycle, and release the exact typed result.
+    fn continue_witness(
+        &self,
+        operation_id: Id,
+        certificate: &[u8],
+    ) -> Result<TypedResult, PersistenceError>;
+}
+
+macro_rules! impl_witness_endpoint {
+    ($type:ty) => {
+        impl WitnessEndpoint for $type {
+            fn witness_read_request(&self) -> Result<Vec<u8>, PersistenceError> {
+                self.store.witness_read_request()
+            }
+
+            fn reconcile_witness(
+                &self,
+                certificate: &[u8],
+            ) -> Result<EndpointReconciliation, PersistenceError> {
+                self.store.reconcile_witness(certificate)
+            }
+
+            fn pending_witness(&self) -> Result<Option<PendingWitnessRequest>, PersistenceError> {
+                self.store.pending_witness()
+            }
+
+            fn continue_witness(
+                &self,
+                operation_id: Id,
+                certificate: &[u8],
+            ) -> Result<TypedResult, PersistenceError> {
+                self.store.continue_witness(operation_id, certificate)
+            }
+        }
+    };
+}
+pub(crate) use impl_witness_endpoint;
+
+impl_witness_endpoint!(DurableDaemon);
+impl_witness_endpoint!(DurablePhone);
+
+/// Resolve a runner lookup into either an early return or a fresh transaction.
+macro_rules! fresh_or_return {
+    ($lookup:expr) => {
+        match $lookup {
+            Lookup::Pending(request) => return Ok(WitnessOutcome::Pending(request)),
+            Lookup::Released(result) => {
+                return result
+                    .try_into()
+                    .map(WitnessOutcome::Released)
+                    .map_err(|_| PersistenceError::Corrupt);
+            }
+            Lookup::Fresh(transaction) => *transaction,
+        }
+    };
+}
+pub(crate) use fresh_or_return;
+
+fn optional_field(value: Option<&[u8]>) -> Vec<u8> {
+    match value {
+        Some(bytes) => {
+            let mut out = vec![1];
+            out.extend_from_slice(bytes);
+            out
+        }
+        None => vec![0],
+    }
+}
+
 #[allow(dead_code)]
 impl DurableDaemon {
     pub fn create(
@@ -1664,15 +2853,15 @@ impl DurableDaemon {
         context: PairContext,
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
-    ) -> Result<Self, PersistenceError> {
+        trust: Arc<ReplicaTrustSet>,
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         Self::create_with_runtime(
             root,
             identity,
             context,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -1686,19 +2875,30 @@ impl DurableDaemon {
         context: PairContext,
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
-    ) -> Result<Self, PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         let store = NativeTransactionalProvider::create(
             root,
             context.crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
-        let mut transaction = store.begin_transaction(context.crypto_session_id, 0, 0)?;
-        transaction.bind_operation(operation_id, operation_fingerprint(1, &[])?)?;
+        let fingerprint = witness_v2::operation_fingerprint(
+            op_kind::LEGACY_CREATE,
+            &[
+                &[identity.role as u8],
+                &encode_identity_bytes(&identity),
+                &encode_context_bytes(&context),
+            ],
+        )?;
+        let mut transaction =
+            match store.begin_witnessed(operation_id, op_kind::LEGACY_CREATE, fingerprint)? {
+                Lookup::Fresh(transaction) => *transaction,
+                Lookup::Pending(_) | Lookup::Released(_) => return Err(PersistenceError::Conflict),
+            };
         store.faults.check(FaultPoint::BeforeOpenMlsStateWrites)?;
         let mut daemon = Daemon::create(identity, context)?;
         daemon.endpoint.clock = Arc::clone(&store.clock);
@@ -1714,23 +2914,21 @@ impl DurableDaemon {
         );
         transaction
             .stage_accepted_record(initialized_record(operation_id, store.crypto_session_id))?;
-        transaction.commit_operation()?;
-        store.faults.check(FaultPoint::BeforeInitializationReady)?;
-        store.mark_ready()?;
-        Ok(Self { store })
+        let request = transaction.commit_witnessed(TypedResult::Empty)?;
+        Ok((Self { store }, request))
     }
 
     pub fn open(
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
     ) -> Result<Self, PersistenceError> {
         Self::open_with_runtime(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -1742,21 +2940,19 @@ impl DurableDaemon {
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
     ) -> Result<Self, PersistenceError> {
         let store = NativeTransactionalProvider::open(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
         // Loading inside a read-write transaction validates all committed OpenMLS and signer state.
-        let generation = store.generation()?;
-        let rollback = store.rollback_counter()?;
-        let transaction = store.begin_transaction(crypto_session_id, generation, rollback)?;
+        let transaction = begin_current(&store)?;
         let _ = load_daemon(
             &transaction.provider,
             Arc::clone(&store.clock),
@@ -1772,17 +2968,20 @@ impl DurableDaemon {
         &self.store
     }
 
+    /// Legacy test-only Welcome creation. Its canonical input is the exact KeyPackage. The
+    /// released result is the exact Welcome bytes; the caller supplies the pair context.
     pub fn consume_key_package(
         &mut self,
         operation_id: Id,
         package: PhoneKeyPackage,
-    ) -> Result<PairWelcome, PersistenceError> {
-        let fingerprint = operation_fingerprint(2, package.bytes())?;
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return welcome_from_operation(existing, transaction_metadata_from_store(&self.store)?);
-        }
+    ) -> Result<WitnessOutcome<Vec<u8>>, PersistenceError> {
+        let fingerprint =
+            witness_v2::operation_fingerprint(op_kind::WELCOME_CREATE, &[package.bytes()])?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::WELCOME_CREATE,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -1814,11 +3013,9 @@ impl DurableDaemon {
             commit: None,
         });
         transaction.stage_operation(CommittedOperation::Envelope(record))?;
-        transaction.commit_operation()?;
-        self.store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        Ok(welcome)
+        let request =
+            transaction.commit_witnessed(TypedResult::LegacyWelcome(welcome.bytes.to_vec()))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn prepare_application(
@@ -1827,11 +3024,12 @@ impl DurableDaemon {
         logical_message_id: Id,
         hosted_generation: u64,
         plaintext: &[u8],
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
-            operation_fingerprint_parts(
-                3,
+            op_kind::APPLICATION_SEND,
+            witness_v2::operation_fingerprint(
+                op_kind::APPLICATION_SEND,
                 &[
                     &logical_message_id,
                     &hosted_generation.to_be_bytes(),
@@ -1848,11 +3046,11 @@ impl DurableDaemon {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<DurablePlaintext, PersistenceError> {
+    ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
         self.receive_operation(
             operation_id,
-            operation_fingerprint_parts(
-                4,
+            witness_v2::operation_fingerprint(
+                op_kind::APPLICATION_RECEIVE,
                 &[
                     &logical_message_id,
                     &hosted_generation.to_be_bytes(),
@@ -1874,23 +3072,20 @@ impl DurableDaemon {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<AcceptedMessageRecord, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            5,
+    ) -> Result<WitnessOutcome<AcceptedMessageRecord>, PersistenceError> {
+        let fingerprint = witness_v2::operation_fingerprint(
+            op_kind::PROPOSAL_RECEIVE,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 ciphertext,
             ],
         )?;
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                CommittedOperation::Accepted(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::PROPOSAL_RECEIVE,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -1919,15 +3114,15 @@ impl DurableDaemon {
             acknowledged: false,
         };
         transaction.stage_accepted_record(record.clone())?;
-        transaction.commit_operation()?;
-        Ok(record)
+        let request = transaction.commit_witnessed(TypedResult::Accepted(record))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn acknowledge_receive(
         &mut self,
         acknowledgement_operation_id: Id,
         receive_operation_id: Id,
-    ) -> Result<AcceptedMessageRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<AcceptedMessageRecord>, PersistenceError> {
         acknowledge_receive(
             &self.store,
             acknowledgement_operation_id,
@@ -1939,7 +3134,7 @@ impl DurableDaemon {
         &mut self,
         acknowledgement_operation_id: Id,
         outbox_operation_id: Id,
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         acknowledge_outbox(
             &self.store,
             acknowledgement_operation_id,
@@ -1953,11 +3148,12 @@ impl DurableDaemon {
         logical_message_id: Id,
         hosted_generation: u64,
         plaintext: &[u8],
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
-            operation_fingerprint_parts(
-                30,
+            op_kind::EPOCH_READY_CONFIRM_SEND,
+            witness_v2::operation_fingerprint(
+                op_kind::EPOCH_READY_CONFIRM_SEND,
                 &[
                     &logical_message_id,
                     &hosted_generation.to_be_bytes(),
@@ -1975,35 +3171,30 @@ impl DurableDaemon {
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
-            operation_fingerprint_parts(
-                6,
+            op_kind::DAEMON_COMMIT,
+            witness_v2::operation_fingerprint(
+                op_kind::DAEMON_COMMIT,
                 &[&logical_message_id, &hosted_generation.to_be_bytes()],
             )?,
             |daemon| daemon.prepare_commit(logical_message_id, hosted_generation),
         )
     }
 
-    fn begin_current(&self) -> Result<NativeGroupTransaction<'_>, PersistenceError> {
-        begin_current(&self.store)
-    }
-
     fn send_operation(
         &mut self,
         operation_id: Id,
+        operation_kind: u16,
         fingerprint: [u8; 48],
         operation: impl FnOnce(&mut Daemon) -> Result<PreparedEnvelope, CoreError>,
-    ) -> Result<OutboxRecord, PersistenceError> {
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                CommittedOperation::Envelope(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            operation_kind,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -2023,14 +3214,11 @@ impl DurableDaemon {
             &daemon.endpoint.epoch_authenticator()?,
         );
         transaction.stage_envelope(&envelope)?;
-        let committed = transaction.commit_operation()?;
-        self.store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        match committed {
-            CommittedOperation::Envelope(record) => Ok(record),
-            _ => Err(PersistenceError::Corrupt),
-        }
+        let request = transaction.commit_witnessed(TypedResult::Envelope(envelope_record(
+            operation_id,
+            &envelope,
+        )))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     fn receive_operation(
@@ -2039,13 +3227,12 @@ impl DurableDaemon {
         fingerprint: [u8; 48],
         class: MessageClass,
         operation: impl FnOnce(&mut Daemon) -> Result<crate::PreparedPlaintext, CoreError>,
-    ) -> Result<DurablePlaintext, PersistenceError> {
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            let plaintext = pending_plaintext(&transaction.provider, operation_id)?;
-            transaction.rollback()?;
-            return durable_plaintext(existing, plaintext);
-        }
+    ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::APPLICATION_RECEIVE,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -2058,10 +3245,6 @@ impl DurableDaemon {
         self.store
             .faults
             .check(FaultPoint::DuringOpenMlsProviderWrites)?;
-        daemon.endpoint.provider.insert_internal(
-            pending_plaintext_key(operation_id),
-            prepared.plaintext.to_vec(),
-        );
         persist_endpoint_metadata(&daemon.endpoint, &daemon.endpoint.provider);
         transaction.replace_provider_values(daemon.endpoint.provider.storage_values())?;
         transaction.set_successor_epoch(
@@ -2077,21 +3260,52 @@ impl DurableDaemon {
             profile_revision: PROFILE_REVISION,
             acknowledged: false,
         };
-        transaction.stage_accepted_record(record.clone())?;
-        transaction.commit_operation()?;
+        transaction.stage_accepted_record(record)?;
+        let request = transaction.commit_witnessed(TypedResult::Plaintext(DurablePlaintext {
+            operation_id,
+            logical_message_id: prepared.logical_message_id,
+            epoch: prepared.epoch,
+            plaintext: prepared.plaintext.to_vec(),
+        }))?;
         self.store
             .faults
             .check(FaultPoint::BeforeReceiverAcknowledgement)?;
         self.store
             .faults
             .check(FaultPoint::AfterAcknowledgementLoss)?;
-        Ok(DurablePlaintext {
-            operation_id,
-            logical_message_id: prepared.logical_message_id,
-            epoch: prepared.epoch,
-            plaintext: prepared.plaintext.to_vec(),
-        })
+        Ok(WitnessOutcome::Pending(request))
     }
+}
+
+fn envelope_record(operation_id: Id, envelope: &PreparedEnvelope) -> OutboxRecord {
+    OutboxRecord::new(OutboxRecordFields {
+        operation_id,
+        crypto_session_id: envelope.crypto_session_id,
+        logical_message_id: envelope.logical_message_id,
+        class: envelope.class,
+        epoch: envelope.epoch,
+        hosted_generation: envelope.hosted_generation,
+        profile_revision: PROFILE_REVISION,
+        retry_state: RetryState::Pending,
+        ciphertext: envelope.ciphertext.to_vec(),
+        commit: envelope.commit.clone(),
+    })
+}
+
+fn encode_identity_bytes(identity: &Identity) -> Vec<u8> {
+    let mut out = Vec::with_capacity(49);
+    encode_identity(&mut out, identity);
+    out
+}
+
+fn encode_context_bytes(context: &PairContext) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 * 4 + 32);
+    out.extend_from_slice(&context.crypto_session_id);
+    out.extend_from_slice(&context.group_id);
+    out.extend_from_slice(&context.account_id);
+    out.extend_from_slice(&context.installation_id);
+    out.extend_from_slice(&context.device_id);
+    out
 }
 
 #[allow(dead_code)]
@@ -2102,15 +3316,15 @@ impl DurablePhone {
         crypto_session_id: Id,
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
-    ) -> Result<(Self, PhoneKeyPackage), PersistenceError> {
+        trust: Arc<ReplicaTrustSet>,
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         Self::create_with_runtime(
             root,
             identity,
             crypto_session_id,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -2124,19 +3338,30 @@ impl DurablePhone {
         crypto_session_id: Id,
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
-    ) -> Result<(Self, PhoneKeyPackage), PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         let store = NativeTransactionalProvider::create(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
-        let mut transaction = store.begin_transaction(crypto_session_id, 0, 0)?;
-        transaction.bind_operation(operation_id, operation_fingerprint(10, &[])?)?;
+        let fingerprint = witness_v2::operation_fingerprint(
+            op_kind::LEGACY_CREATE,
+            &[
+                &[identity.role as u8],
+                &encode_identity_bytes(&identity),
+                &crypto_session_id,
+            ],
+        )?;
+        let mut transaction =
+            match store.begin_witnessed(operation_id, op_kind::LEGACY_CREATE, fingerprint)? {
+                Lookup::Fresh(transaction) => *transaction,
+                Lookup::Pending(_) | Lookup::Released(_) => return Err(PersistenceError::Conflict),
+            };
         store.faults.check(FaultPoint::BeforeOpenMlsStateWrites)?;
         let (phone, package) = Phone::create_with_clock(identity.clone(), store.clock.as_ref())?;
         let provider = &phone.provider;
@@ -2157,23 +3382,22 @@ impl DurablePhone {
             ciphertext: package.bytes.to_vec().into_boxed_slice(),
         };
         transaction.stage_envelope(&envelope)?;
-        transaction.commit_operation()?;
-        store.faults.check(FaultPoint::BeforeInitializationReady)?;
-        store.mark_ready()?;
-        Ok((Self { store }, package))
+        let request =
+            transaction.commit_witnessed(TypedResult::KeyPackage(package.bytes.to_vec()))?;
+        Ok((Self { store }, request))
     }
 
     pub fn open(
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
     ) -> Result<Self, PersistenceError> {
         Self::open_with_runtime(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -2185,22 +3409,18 @@ impl DurablePhone {
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
     ) -> Result<Self, PersistenceError> {
         let store = NativeTransactionalProvider::open(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
-        let transaction = store.begin_transaction(
-            crypto_session_id,
-            store.generation()?,
-            store.rollback_counter()?,
-        )?;
+        let transaction = begin_current(&store)?;
         let _ = load_phone(
             &transaction.provider,
             Arc::clone(&store.clock),
@@ -2216,21 +3436,32 @@ impl DurablePhone {
         &self.store
     }
 
+    /// Legacy test-only join. Fingerprint kind 8 with the group ID present and no claim or expiry.
     pub fn join(
         &mut self,
         operation_id: Id,
         welcome: PairWelcome,
         expected: &PairContext,
-    ) -> Result<(), PersistenceError> {
-        let fingerprint = operation_fingerprint(11, welcome.bytes())?;
-        let mut transaction = self.begin_current()?;
-        if transaction
-            .bind_operation(operation_id, fingerprint)?
-            .is_some()
-        {
-            transaction.rollback()?;
-            return Ok(());
-        }
+    ) -> Result<WitnessOutcome<()>, PersistenceError> {
+        let fingerprint = witness_v2::operation_fingerprint(
+            op_kind::WELCOME_JOIN,
+            &[
+                welcome.bytes(),
+                &optional_field(Some(&expected.group_id)),
+                &optional_field(None),
+                &optional_field(None),
+            ],
+        )?;
+        let mut transaction =
+            match self
+                .store
+                .begin_witnessed(operation_id, op_kind::WELCOME_JOIN, fingerprint)?
+            {
+                Lookup::Pending(request) => return Ok(WitnessOutcome::Pending(request)),
+                Lookup::Released(TypedResult::Empty) => return Ok(WitnessOutcome::Released(())),
+                Lookup::Released(_) => return Err(PersistenceError::Corrupt),
+                Lookup::Fresh(transaction) => transaction,
+            };
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -2254,8 +3485,8 @@ impl DurablePhone {
             operation_id,
             self.store.crypto_session_id,
         ))?;
-        transaction.commit_operation()?;
-        Ok(())
+        let request = transaction.commit_witnessed(TypedResult::Empty)?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn prepare_application(
@@ -2264,11 +3495,12 @@ impl DurablePhone {
         logical_message_id: Id,
         hosted_generation: u64,
         plaintext: &[u8],
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
-            operation_fingerprint_parts(
-                12,
+            op_kind::APPLICATION_SEND,
+            witness_v2::operation_fingerprint(
+                op_kind::APPLICATION_SEND,
                 &[
                     &logical_message_id,
                     &hosted_generation.to_be_bytes(),
@@ -2283,7 +3515,7 @@ impl DurablePhone {
         &mut self,
         acknowledgement_operation_id: Id,
         receive_operation_id: Id,
-    ) -> Result<AcceptedMessageRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<AcceptedMessageRecord>, PersistenceError> {
         acknowledge_receive(
             &self.store,
             acknowledgement_operation_id,
@@ -2295,7 +3527,7 @@ impl DurablePhone {
         &mut self,
         acknowledgement_operation_id: Id,
         outbox_operation_id: Id,
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         acknowledge_outbox(
             &self.store,
             acknowledgement_operation_id,
@@ -2312,40 +3544,40 @@ impl DurablePhone {
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
         self.send_operation(
             operation_id,
-            operation_fingerprint_parts(
-                13,
+            op_kind::PROPOSAL_SEND,
+            witness_v2::operation_fingerprint(
+                op_kind::PROPOSAL_SEND,
                 &[&logical_message_id, &hosted_generation.to_be_bytes()],
             )?,
             |phone| phone.prepare_self_update(logical_message_id, hosted_generation),
         )
     }
 
+    /// Legacy commit application without an epoch-ready send: exactly one commit transition.
     pub fn apply_commit(
         &mut self,
         operation_id: Id,
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<AcceptedMessageRecord, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            14,
+    ) -> Result<WitnessOutcome<AcceptedMessageRecord>, PersistenceError> {
+        let fingerprint = witness_v2::operation_fingerprint(
+            op_kind::COMMIT_APPLY,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 ciphertext,
+                &optional_field(None),
             ],
         )?;
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                CommittedOperation::Accepted(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::COMMIT_APPLY,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -2372,8 +3604,8 @@ impl DurablePhone {
             acknowledged: false,
         };
         transaction.stage_accepted_record(record.clone())?;
-        transaction.commit_operation()?;
-        Ok(record)
+        let request = transaction.commit_witnessed(TypedResult::Accepted(record))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn receive_application(
@@ -2382,21 +3614,20 @@ impl DurablePhone {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<DurablePlaintext, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            15,
+    ) -> Result<WitnessOutcome<DurablePlaintext>, PersistenceError> {
+        let fingerprint = witness_v2::operation_fingerprint(
+            op_kind::APPLICATION_RECEIVE,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 ciphertext,
             ],
         )?;
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            let plaintext = pending_plaintext(&transaction.provider, operation_id)?;
-            transaction.rollback()?;
-            return durable_plaintext(existing, plaintext);
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::APPLICATION_RECEIVE,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -2408,10 +3639,6 @@ impl DurablePhone {
         let prepared =
             phone.receive_application(ciphertext, logical_message_id, hosted_generation)?;
         let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
-        endpoint.provider.insert_internal(
-            pending_plaintext_key(operation_id),
-            prepared.plaintext.to_vec(),
-        );
         persist_phone_metadata(&phone, &endpoint.provider, Some(&endpoint.context), 0);
         transaction.replace_provider_values(endpoint.provider.storage_values())?;
         transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
@@ -2425,39 +3652,33 @@ impl DurablePhone {
             acknowledged: false,
         };
         transaction.stage_accepted_record(record)?;
-        transaction.commit_operation()?;
+        let request = transaction.commit_witnessed(TypedResult::Plaintext(DurablePlaintext {
+            operation_id,
+            logical_message_id: prepared.logical_message_id,
+            epoch: prepared.epoch,
+            plaintext: prepared.plaintext.to_vec(),
+        }))?;
         self.store
             .faults
             .check(FaultPoint::BeforeReceiverAcknowledgement)?;
         self.store
             .faults
             .check(FaultPoint::AfterAcknowledgementLoss)?;
-        Ok(DurablePlaintext {
-            operation_id,
-            logical_message_id: prepared.logical_message_id,
-            epoch: prepared.epoch,
-            plaintext: prepared.plaintext.to_vec(),
-        })
-    }
-
-    fn begin_current(&self) -> Result<NativeGroupTransaction<'_>, PersistenceError> {
-        begin_current(&self.store)
+        Ok(WitnessOutcome::Pending(request))
     }
 
     fn send_operation(
         &mut self,
         operation_id: Id,
+        operation_kind: u16,
         fingerprint: [u8; 48],
         operation: impl FnOnce(&mut Phone) -> Result<PreparedEnvelope, CoreError>,
-    ) -> Result<OutboxRecord, PersistenceError> {
-        let mut transaction = self.begin_current()?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                CommittedOperation::Envelope(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+    ) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            operation_kind,
+            fingerprint
+        )?);
         self.store
             .faults
             .check(FaultPoint::BeforeOpenMlsStateWrites)?;
@@ -2475,50 +3696,41 @@ impl DurablePhone {
         transaction.replace_provider_values(endpoint.provider.storage_values())?;
         transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
         transaction.stage_envelope(&envelope)?;
-        let committed = transaction.commit_operation()?;
-        self.store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        match committed {
-            CommittedOperation::Envelope(record) => Ok(record),
-            _ => Err(PersistenceError::Corrupt),
-        }
+        let request = transaction.commit_witnessed(TypedResult::Envelope(envelope_record(
+            operation_id,
+            &envelope,
+        )))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 }
 
+/// Read-only transaction over committed state. Callers roll it back; it never commits.
 fn begin_current(
     store: &Arc<NativeTransactionalProvider>,
 ) -> Result<NativeGroupTransaction<'_>, PersistenceError> {
-    loop {
-        let generation = store.generation()?;
-        let rollback = store.rollback_counter()?;
-        match store.begin_transaction(store.crypto_session_id, generation, rollback) {
-            Err(PersistenceError::GenerationConflict) => continue,
-            result => return result,
-        }
-    }
+    let operation_guard = store
+        .operation_lock
+        .lock()
+        .map_err(|_| PersistenceError::Storage)?;
+    store.begin_transaction_locked(operation_guard, store.crypto_session_id, None)
 }
 
 fn acknowledge_outbox(
     store: &Arc<NativeTransactionalProvider>,
     acknowledgement_operation_id: Id,
     outbox_operation_id: Id,
-) -> Result<OutboxRecord, PersistenceError> {
-    let fingerprint = operation_fingerprint_parts(19, &[&outbox_operation_id])?;
-    let mut transaction = begin_current(store)?;
-    if let Some(existing) = transaction.bind_operation(acknowledgement_operation_id, fingerprint)? {
-        transaction.rollback()?;
-        return match existing {
-            CommittedOperation::OutboxAcknowledged(mut record) => {
-                record.operation_id = outbox_operation_id;
-                Ok(record)
-            }
-            _ => Err(PersistenceError::Conflict),
-        };
-    }
+) -> Result<WitnessOutcome<OutboxRecord>, PersistenceError> {
+    let fingerprint =
+        witness_v2::operation_fingerprint(op_kind::OUTBOX_ACK, &[&outbox_operation_id])?;
+    let mut transaction = fresh_or_return!(store.begin_witnessed(
+        acknowledgement_operation_id,
+        op_kind::OUTBOX_ACK,
+        fingerprint
+    )?);
     let mut record = read_outbox_in_transaction(&transaction, outbox_operation_id)?
         .ok_or(PersistenceError::NotFound)?;
     if record.retry_state == RetryState::Acknowledged {
+        transaction.rollback()?;
         return Err(PersistenceError::Conflict);
     }
     record.retry_state = RetryState::Acknowledged;
@@ -2526,38 +3738,34 @@ fn acknowledge_outbox(
         outbox_operation_id,
         CommittedOperation::Envelope(record.clone()),
     )?;
-    transaction.set_successor_epoch(
-        transaction.old_epoch,
-        &transaction.old_authenticator.clone(),
-    );
+    transaction.keep_epoch();
     transaction.update_outbox(outbox_operation_id, record.clone());
     let mut result = record.clone();
     result.operation_id = acknowledgement_operation_id;
     transaction.stage_operation(CommittedOperation::OutboxAcknowledged(result))?;
-    transaction.commit_operation()?;
-    Ok(record)
+    let request = transaction.commit_witnessed(TypedResult::OutboxAcknowledged(record))?;
+    Ok(WitnessOutcome::Pending(request))
 }
 
 fn acknowledge_receive(
     store: &Arc<NativeTransactionalProvider>,
     acknowledgement_operation_id: Id,
     receive_operation_id: Id,
-) -> Result<AcceptedMessageRecord, PersistenceError> {
+) -> Result<WitnessOutcome<AcceptedMessageRecord>, PersistenceError> {
     store
         .faults
         .check(FaultPoint::BeforeReceiverAcknowledgement)?;
-    let fingerprint = operation_fingerprint_parts(20, &[&receive_operation_id])?;
-    let mut transaction = begin_current(store)?;
-    if let Some(existing) = transaction.bind_operation(acknowledgement_operation_id, fingerprint)? {
-        transaction.rollback()?;
-        return match existing {
-            CommittedOperation::ReceiveAcknowledged(record) => Ok(record),
-            _ => Err(PersistenceError::Conflict),
-        };
-    }
+    let fingerprint =
+        witness_v2::operation_fingerprint(op_kind::RECEIVE_ACK, &[&receive_operation_id])?;
+    let mut transaction = fresh_or_return!(store.begin_witnessed(
+        acknowledgement_operation_id,
+        op_kind::RECEIVE_ACK,
+        fingerprint
+    )?);
     let mut accepted = read_accepted_in_transaction(&transaction, receive_operation_id)?
         .ok_or(PersistenceError::NotFound)?;
     if accepted.acknowledged {
+        transaction.rollback()?;
         return Err(PersistenceError::Conflict);
     }
     accepted.acknowledged = true;
@@ -2565,24 +3773,20 @@ fn acknowledge_receive(
         receive_operation_id,
         CommittedOperation::Accepted(accepted.clone()),
     )?;
+    // Sealed receive plaintext is deleted from the next encrypted image after acknowledgement.
     transaction
         .provider
-        .remove_internal(&pending_plaintext_key(receive_operation_id));
-    transaction.set_successor_epoch(
-        transaction.old_epoch,
-        &transaction.old_authenticator.clone(),
-    );
+        .remove_internal(&exact_result_key(receive_operation_id));
+    transaction.keep_epoch();
     transaction.update_accepted(receive_operation_id, accepted.clone());
     let acknowledgement = AcceptedMessageRecord {
         operation_id: acknowledgement_operation_id,
-        ..accepted
+        ..accepted.clone()
     };
-    transaction.stage_operation(CommittedOperation::ReceiveAcknowledged(
-        acknowledgement.clone(),
-    ))?;
-    transaction.commit_operation()?;
+    transaction.stage_operation(CommittedOperation::ReceiveAcknowledged(acknowledgement))?;
+    let request = transaction.commit_witnessed(TypedResult::ReceiveAcknowledged(accepted))?;
     store.faults.check(FaultPoint::AfterAcknowledgementLoss)?;
-    Ok(acknowledgement)
+    Ok(WitnessOutcome::Pending(request))
 }
 
 fn initialized_record(operation_id: Id, session: Id) -> AcceptedMessageRecord {
@@ -2871,87 +4075,329 @@ fn decode_identity(cursor: &mut BinaryCursor<'_>) -> Result<Identity, Persistenc
     Ok(identity)
 }
 
-fn operation_fingerprint(kind: u8, bytes: &[u8]) -> Result<[u8; 48], PersistenceError> {
-    operation_fingerprint_parts(kind, &[bytes])
-}
+const RESULT_TAG_INVITATION: u8 = 1;
+const RESULT_TAG_PRE_JOIN: u8 = 2;
+const RESULT_TAG_WELCOME: u8 = 3;
+const RESULT_TAG_LEGACY_WELCOME: u8 = 4;
+const RESULT_TAG_KEY_PACKAGE: u8 = 5;
+const RESULT_TAG_CLAIM: u8 = 1;
+const RESULT_TAG_RESERVATION: u8 = 2;
+const RESULT_TAG_ACTIVATION: u8 = 1;
+const RESULT_TAG_EPOCH_READY: u8 = 2;
+const RESULT_TAG_INVITATION_LIFECYCLE: u8 = 1;
+const RESULT_TAG_PRE_JOIN_LIFECYCLE: u8 = 2;
+const RESULT_TAG_PAIR_LIFECYCLE: u8 = 3;
+const RESULT_TAG_REMOVAL: u8 = 4;
+const RESULT_TAG_RE_PAIR: u8 = 5;
+const RESULT_TAG_COMMIT: u8 = 6;
 
-fn operation_fingerprint_parts(kind: u8, parts: &[&[u8]]) -> Result<[u8; 48], PersistenceError> {
-    let provider = CoreProvider::new().map_err(|_| PersistenceError::Storage)?;
-    let mut input = vec![kind];
-    for part in parts {
-        put_bytes(&mut input, part)?;
+impl TypedResult {
+    /// Canonical private encoding into the sealed exact result. Envelope, receive, and
+    /// acknowledgement results are references into authenticated successor records.
+    fn encode(&self) -> Result<ExactResult, PersistenceError> {
+        Ok(match self {
+            Self::Empty => ExactResult::EmptySuccess,
+            Self::Envelope(record) => ExactResult::EnvelopeReference(record.operation_id),
+            Self::Plaintext(plaintext) => ExactResult::Receive {
+                operation_id: plaintext.operation_id,
+                plaintext: plaintext.plaintext.clone(),
+            },
+            Self::Accepted(record) => ExactResult::Receive {
+                operation_id: record.operation_id,
+                plaintext: Vec::new(),
+            },
+            Self::Commit(commit) => {
+                let mut out = vec![RESULT_TAG_COMMIT];
+                out.extend_from_slice(&commit.commit_id);
+                out.extend_from_slice(&commit.target_epoch.to_be_bytes());
+                out.extend_from_slice(&commit.epoch_authenticator);
+                ExactResult::Lifecycle(out)
+            }
+            Self::OutboxAcknowledged(record) => {
+                ExactResult::AcknowledgementReference(record.operation_id)
+            }
+            Self::ReceiveAcknowledged(record) => {
+                ExactResult::AcknowledgementReference(record.operation_id)
+            }
+            Self::Invitation(publication) => ExactResult::PairingPublication(tagged(
+                RESULT_TAG_INVITATION,
+                &pairing_lifecycle::encode_invitation_publication(publication)?,
+            )),
+            Self::PreJoin(publication) => ExactResult::PairingPublication(tagged(
+                RESULT_TAG_PRE_JOIN,
+                &pairing_lifecycle::encode_prejoin_publication(publication)?,
+            )),
+            Self::Welcome(publication) => ExactResult::PairingPublication(tagged(
+                RESULT_TAG_WELCOME,
+                &pairing_lifecycle::encode_welcome_publication(publication)?,
+            )),
+            Self::LegacyWelcome(bytes) => {
+                ExactResult::PairingPublication(tagged(RESULT_TAG_LEGACY_WELCOME, bytes))
+            }
+            Self::KeyPackage(bytes) => {
+                ExactResult::PairingPublication(tagged(RESULT_TAG_KEY_PACKAGE, bytes))
+            }
+            Self::Claim(submission) => ExactResult::PairingDecision(tagged(
+                RESULT_TAG_CLAIM,
+                &pairing_lifecycle::encode_claim_submission(submission)?,
+            )),
+            Self::Reservation(outcome) => ExactResult::PairingDecision(tagged(
+                RESULT_TAG_RESERVATION,
+                &pairing_lifecycle::encode_reservation_outcome(outcome)?,
+            )),
+            Self::Activation(acceptance) => ExactResult::ProtectedAcceptance(tagged(
+                RESULT_TAG_ACTIVATION,
+                &pairing_lifecycle::encode_activation_acceptance(acceptance),
+            )),
+            Self::EpochReady(acceptance) => ExactResult::ProtectedAcceptance(tagged(
+                RESULT_TAG_EPOCH_READY,
+                &pairing_lifecycle::encode_epoch_ready_acceptance(acceptance),
+            )),
+            Self::InvitationLifecycle(state) => {
+                ExactResult::Lifecycle(vec![RESULT_TAG_INVITATION_LIFECYCLE, *state as u8])
+            }
+            Self::PreJoinLifecycle(state) => {
+                ExactResult::Lifecycle(vec![RESULT_TAG_PRE_JOIN_LIFECYCLE, *state as u8])
+            }
+            Self::PairLifecycle(state) => {
+                ExactResult::Lifecycle(vec![RESULT_TAG_PAIR_LIFECYCLE, *state as u8])
+            }
+            Self::Removal(outcome) => ExactResult::Lifecycle(tagged(
+                RESULT_TAG_REMOVAL,
+                &pairing_lifecycle::encode_removal_outcome(outcome)?,
+            )),
+            Self::RePair(requirement) => ExactResult::Lifecycle(tagged(
+                RESULT_TAG_RE_PAIR,
+                &pairing_lifecycle::encode_re_pair_requirement(requirement),
+            )),
+        })
     }
-    provider
-        .crypto()
-        .hash(SUITE.hash_algorithm(), &input)
-        .map_err(|_| PersistenceError::Storage)?
-        .try_into()
-        .map_err(|_| PersistenceError::Storage)
 }
 
-fn pending_plaintext_key(operation_id: Id) -> Vec<u8> {
-    let mut key = PENDING_PLAINTEXT_PREFIX.to_vec();
-    key.extend_from_slice(&operation_id);
-    key
+fn tagged(tag: u8, bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() + 1);
+    out.push(tag);
+    out.extend_from_slice(bytes);
+    out
 }
 
-fn pending_plaintext(
-    provider: &CoreProvider,
-    operation_id: Id,
-) -> Result<Vec<u8>, PersistenceError> {
-    provider
-        .internal(&pending_plaintext_key(operation_id))
-        .ok_or(PersistenceError::AlreadyAcknowledged)
-}
-
-fn durable_plaintext(
-    operation: CommittedOperation,
-    plaintext: Vec<u8>,
-) -> Result<DurablePlaintext, PersistenceError> {
-    match operation {
-        CommittedOperation::Accepted(record) => Ok(DurablePlaintext {
-            operation_id: record.operation_id,
-            logical_message_id: record.logical_message_id,
-            epoch: record.epoch,
-            plaintext,
-        }),
-        _ => Err(PersistenceError::Conflict),
-    }
-}
-
-#[allow(dead_code)]
-fn welcome_from_operation(
-    operation: CommittedOperation,
-    metadata: EndpointMetadata,
-) -> Result<PairWelcome, PersistenceError> {
-    let CommittedOperation::Envelope(record) = operation else {
-        return Err(PersistenceError::Conflict);
+/// Decode the exact typed result. References resolve through the authenticated outbox and
+/// accepted-message tables of the same committed successor.
+fn decode_typed_result(
+    operation_kind: u16,
+    exact: &ExactResult,
+    values: &BTreeMap<Vec<u8>, Vec<u8>>,
+    read: &redb::ReadTransaction,
+    crypto_session_id: Id,
+) -> Result<TypedResult, PersistenceError> {
+    let outbox_row = |operation_id: Id| -> Result<OutboxRecord, PersistenceError> {
+        let table = read.open_table(OUTBOX).map_err(map_table_error)?;
+        let record = table
+            .get(operation_id.as_slice())
+            .map_err(map_storage_error)?
+            .map(|value| decode_outbox(value.value()))
+            .transpose()?
+            .ok_or(PersistenceError::Corrupt)?;
+        if record.operation_id != operation_id || record.crypto_session_id != crypto_session_id {
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        Ok(record)
     };
-    Ok(PairWelcome {
-        bytes: record.ciphertext.into_boxed_slice(),
-        context: metadata.context.ok_or(PersistenceError::Corrupt)?,
-        daemon_identity: metadata.identity,
-        device_identity: metadata.peer,
+    let accepted_row = |operation_id: Id| -> Result<AcceptedMessageRecord, PersistenceError> {
+        let table = read.open_table(ACCEPTED).map_err(map_table_error)?;
+        let record = table
+            .get(operation_id.as_slice())
+            .map_err(map_storage_error)?
+            .map(|value| decode_accepted(value.value()))
+            .transpose()?
+            .ok_or(PersistenceError::Corrupt)?;
+        if record.operation_id != operation_id || record.crypto_session_id != crypto_session_id {
+            return Err(PersistenceError::IdentityMismatch);
+        }
+        Ok(record)
+    };
+    let _ = values;
+    Ok(match exact {
+        ExactResult::EmptySuccess => TypedResult::Empty,
+        ExactResult::EnvelopeReference(operation_id) => {
+            TypedResult::Envelope(outbox_row(*operation_id)?)
+        }
+        ExactResult::Receive {
+            operation_id,
+            plaintext,
+        } => {
+            let record = accepted_row(*operation_id)?;
+            if operation_kind == op_kind::APPLICATION_RECEIVE {
+                TypedResult::Plaintext(DurablePlaintext {
+                    operation_id: *operation_id,
+                    logical_message_id: record.logical_message_id,
+                    epoch: record.epoch,
+                    plaintext: plaintext.clone(),
+                })
+            } else if plaintext.is_empty() {
+                TypedResult::Accepted(record)
+            } else {
+                return Err(PersistenceError::Corrupt);
+            }
+        }
+        ExactResult::AcknowledgementReference(operation_id) => match operation_kind {
+            op_kind::OUTBOX_ACK => TypedResult::OutboxAcknowledged(outbox_row(*operation_id)?),
+            op_kind::RECEIVE_ACK => TypedResult::ReceiveAcknowledged(accepted_row(*operation_id)?),
+            _ => return Err(PersistenceError::Corrupt),
+        },
+        ExactResult::PairingPublication(bytes) => {
+            let (tag, body) = bytes.split_first().ok_or(PersistenceError::Corrupt)?;
+            match *tag {
+                RESULT_TAG_INVITATION => {
+                    TypedResult::Invitation(pairing_lifecycle::decode_invitation_publication(body)?)
+                }
+                RESULT_TAG_PRE_JOIN => {
+                    TypedResult::PreJoin(pairing_lifecycle::decode_prejoin_publication(body)?)
+                }
+                RESULT_TAG_WELCOME => {
+                    TypedResult::Welcome(pairing_lifecycle::decode_welcome_publication(body)?)
+                }
+                RESULT_TAG_LEGACY_WELCOME if !body.is_empty() => {
+                    TypedResult::LegacyWelcome(body.to_vec())
+                }
+                RESULT_TAG_KEY_PACKAGE if !body.is_empty() => {
+                    TypedResult::KeyPackage(body.to_vec())
+                }
+                _ => return Err(PersistenceError::Corrupt),
+            }
+        }
+        ExactResult::PairingDecision(bytes) => {
+            let (tag, body) = bytes.split_first().ok_or(PersistenceError::Corrupt)?;
+            match *tag {
+                RESULT_TAG_CLAIM => {
+                    TypedResult::Claim(pairing_lifecycle::decode_claim_submission(body)?)
+                }
+                RESULT_TAG_RESERVATION => {
+                    TypedResult::Reservation(pairing_lifecycle::decode_reservation_outcome(body)?)
+                }
+                _ => return Err(PersistenceError::Corrupt),
+            }
+        }
+        ExactResult::ProtectedAcceptance(bytes) => {
+            let (tag, body) = bytes.split_first().ok_or(PersistenceError::Corrupt)?;
+            match *tag {
+                RESULT_TAG_ACTIVATION => {
+                    TypedResult::Activation(pairing_lifecycle::decode_activation_acceptance(body)?)
+                }
+                RESULT_TAG_EPOCH_READY => {
+                    TypedResult::EpochReady(pairing_lifecycle::decode_epoch_ready_acceptance(body)?)
+                }
+                _ => return Err(PersistenceError::Corrupt),
+            }
+        }
+        ExactResult::Lifecycle(bytes) => {
+            let (tag, body) = bytes.split_first().ok_or(PersistenceError::Corrupt)?;
+            match (*tag, body) {
+                (RESULT_TAG_INVITATION_LIFECYCLE, [value]) => TypedResult::InvitationLifecycle(
+                    pairing_lifecycle::decode_invitation_lifecycle(*value)?,
+                ),
+                (RESULT_TAG_PRE_JOIN_LIFECYCLE, [value]) => TypedResult::PreJoinLifecycle(
+                    pairing_lifecycle::decode_prejoin_lifecycle(*value)?,
+                ),
+                (RESULT_TAG_PAIR_LIFECYCLE, [value]) => {
+                    TypedResult::PairLifecycle(pairing_lifecycle::decode_pair_lifecycle(*value)?)
+                }
+                (RESULT_TAG_REMOVAL, body) => {
+                    TypedResult::Removal(pairing_lifecycle::decode_removal_outcome(body)?)
+                }
+                (RESULT_TAG_RE_PAIR, body) => {
+                    TypedResult::RePair(pairing_lifecycle::decode_re_pair_requirement(body)?)
+                }
+                (RESULT_TAG_COMMIT, body) if body.len() == 48 + 8 + 48 => {
+                    TypedResult::Commit(CommitMetadata {
+                        commit_id: body[..48]
+                            .try_into()
+                            .map_err(|_| PersistenceError::Corrupt)?,
+                        target_epoch: u64::from_be_bytes(
+                            body[48..56]
+                                .try_into()
+                                .map_err(|_| PersistenceError::Corrupt)?,
+                        ),
+                        epoch_authenticator: body[56..]
+                            .try_into()
+                            .map_err(|_| PersistenceError::Corrupt)?,
+                    })
+                }
+                _ => return Err(PersistenceError::Corrupt),
+            }
+        }
     })
 }
 
-#[allow(dead_code)]
-fn transaction_metadata_from_store(
-    store: &Arc<NativeTransactionalProvider>,
-) -> Result<EndpointMetadata, PersistenceError> {
-    let transaction = store.begin_transaction(
-        store.crypto_session_id,
-        store.generation()?,
-        store.rollback_counter()?,
-    )?;
-    let metadata = decode_endpoint_metadata(
-        &transaction
-            .provider
-            .internal(ENDPOINT_METADATA_KEY)
-            .ok_or(PersistenceError::Corrupt)?,
-    )?;
-    transaction.rollback()?;
-    Ok(metadata)
+macro_rules! typed_result_conversion {
+    ($type:ty, $variant:ident) => {
+        impl TryFrom<TypedResult> for $type {
+            type Error = PersistenceError;
+
+            fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+                match value {
+                    TypedResult::$variant(inner) => Ok(inner),
+                    _ => Err(PersistenceError::Corrupt),
+                }
+            }
+        }
+    };
+}
+
+typed_result_conversion!(DurablePlaintext, Plaintext);
+typed_result_conversion!(InvitationPublication, Invitation);
+typed_result_conversion!(PreJoinPublication, PreJoin);
+typed_result_conversion!(ClaimSubmission, Claim);
+typed_result_conversion!(ReservationOutcome, Reservation);
+typed_result_conversion!(EpochReadyAcceptance, EpochReady);
+typed_result_conversion!(InvitationLifecycle, InvitationLifecycle);
+typed_result_conversion!(PreJoinLifecycle, PreJoinLifecycle);
+typed_result_conversion!(PairLifecycle, PairLifecycle);
+typed_result_conversion!(RePairRequirement, RePair);
+typed_result_conversion!(CommitMetadata, Commit);
+
+impl TryFrom<TypedResult> for OutboxRecord {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::Envelope(inner) | TypedResult::OutboxAcknowledged(inner) => Ok(inner),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
+}
+
+impl TryFrom<TypedResult> for AcceptedMessageRecord {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::Accepted(inner) | TypedResult::ReceiveAcknowledged(inner) => Ok(inner),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
+}
+
+impl TryFrom<TypedResult> for Vec<u8> {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::LegacyWelcome(inner) | TypedResult::KeyPackage(inner) => Ok(inner),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
+}
+
+impl TryFrom<TypedResult> for () {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::Empty => Ok(()),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -3001,15 +4447,9 @@ fn map_current_key_error(error: PersistenceError) -> PersistenceError {
     }
 }
 
-fn require_dependencies(
-    envelope_keys: &dyn EnvelopeKeyStore,
-    rollback_anchor: &dyn RollbackAnchor,
-) -> Result<(), PersistenceError> {
+fn require_dependencies(envelope_keys: &dyn EnvelopeKeyStore) -> Result<(), PersistenceError> {
     if !envelope_keys.available() {
         return Err(PersistenceError::KeyUnavailable);
-    }
-    if !rollback_anchor.available() {
-        return Err(PersistenceError::AnchorUnavailable);
     }
     Ok(())
 }
@@ -3168,7 +4608,12 @@ fn inspect_database_lifecycle(
         return Err(PersistenceError::IdentityMismatch);
     }
     match read_bytes(&meta, META_LIFECYCLE)?.as_slice() {
-        [lifecycle @ (LIFECYCLE_INITIALIZING | LIFECYCLE_READY)] => Ok(*lifecycle),
+        [
+            lifecycle @ (LIFECYCLE_INITIALIZING
+            | LIFECYCLE_READY
+            | LIFECYCLE_QUARANTINED
+            | LIFECYCLE_REVOKED),
+        ] => Ok(*lifecycle),
         _ => Err(PersistenceError::Corrupt),
     }
 }
@@ -3274,12 +4719,11 @@ fn inspect_initialization_state(
             return Ok(InitializationState::Inconsistent);
         };
         let (key, value) = entry.map_err(map_storage_error)?;
-        let (fingerprint, operation_generation, operation) =
-            decode_operation_record(value.value())?;
+        let (index, operation) = decode_operation_index(value.value())?;
         Some((
             key.value().to_vec(),
-            fingerprint,
-            operation_generation,
+            index.operation_kind,
+            index.generation,
             operation,
         ))
     } else {
@@ -3287,7 +4731,7 @@ fn inspect_initialization_state(
     };
 
     let valid_creation_shape = match creation_operation {
-        Some((key, fingerprint, 1, CommittedOperation::Envelope(record))) => {
+        Some((key, kind, 1, CommittedOperation::Envelope(record))) => {
             let outbox = read.open_table(OUTBOX).map_err(map_table_error)?;
             let persisted = outbox
                 .get(record.operation_id.as_slice())
@@ -3299,7 +4743,7 @@ fn inspect_initialization_state(
                 && outbox_entries == 1
                 && accepted_entries == 0
                 && key.as_slice() == record.operation_id
-                && fingerprint == operation_fingerprint(10, &[])?
+                && kind == op_kind::LEGACY_CREATE
                 && record.crypto_session_id == crypto_session_id
                 && record.logical_message_id == record.operation_id
                 && record.class == MessageClass::PairActivation
@@ -3310,7 +4754,7 @@ fn inspect_initialization_state(
                 && record.commit.is_none()
                 && persisted.as_ref() == Some(&record)
         }
-        Some((key, fingerprint, 1, CommittedOperation::Accepted(record))) => {
+        Some((key, kind, 1, CommittedOperation::Accepted(record))) => {
             let accepted = read.open_table(ACCEPTED).map_err(map_table_error)?;
             let persisted = accepted
                 .get(record.operation_id.as_slice())
@@ -3321,12 +4765,13 @@ fn inspect_initialization_state(
                 && outbox_entries == 0
                 && accepted_entries == 1
                 && key.as_slice() == record.operation_id
-                && fingerprint == operation_fingerprint(1, &[])?
+                && kind == op_kind::LEGACY_CREATE
                 && record == initialized_record(record.operation_id, crypto_session_id)
                 && persisted.as_ref() == Some(&record)
         }
-        Some((key, _, 1, CommittedOperation::Pairing(record))) => {
-            epoch == 0
+        Some((key, kind, 1, CommittedOperation::Pairing(record))) => {
+            matches!(kind, op_kind::DAEMON_INVITATION | op_kind::DEVICE_PRE_JOIN)
+                && epoch == 0
                 && authenticator.is_empty()
                 && outbox_entries == 0
                 && accepted_entries == 0
@@ -3760,7 +5205,7 @@ fn load_accepted_ids(
 fn prune_durable_records(
     write: &mut WriteTransaction,
     next_generation: u64,
-) -> Result<(), PersistenceError> {
+) -> Result<Vec<Id>, PersistenceError> {
     let cutoff = next_generation.saturating_sub(IDEMPOTENCY_RETENTION_GENERATIONS);
     let entries = {
         let operations = write.open_table(OPERATIONS).map_err(map_table_error)?;
@@ -3810,12 +5255,18 @@ fn prune_durable_records(
     if pending > IDEMPOTENCY_RETENTION_GENERATIONS as usize {
         return Err(PersistenceError::RetentionExceeded);
     }
+    let mut pruned = Vec::with_capacity(remove.len());
     for (key, operation) in remove {
         write
             .open_table(OPERATIONS)
             .map_err(map_table_error)?
             .remove(key.as_slice())
             .map_err(map_storage_error)?;
+        pruned.push(
+            key.as_slice()
+                .try_into()
+                .map_err(|_| PersistenceError::Corrupt)?,
+        );
         match operation {
             CommittedOperation::Envelope(record) => {
                 write
@@ -3836,7 +5287,7 @@ fn prune_durable_records(
             | CommittedOperation::Pairing(_) => {}
         }
     }
-    Ok(())
+    Ok(pruned)
 }
 
 fn read_outbox_in_transaction(
@@ -3940,102 +5391,50 @@ pub(crate) fn validate_pairing_operation_discriminants_for_test(
     pairing_lifecycle::validate_pairing_operation_kind(kind, outcome)
 }
 
-fn encode_operation(
-    fingerprint: [u8; 48],
-    generation: u64,
+/// `operations_v1` value: the version-2 witness operation index followed by the bounded legacy
+/// record locator that identifies which outbox, accepted-message, or pairing rows belong to it.
+fn encode_operation_index(
+    index: &WitnessOperationIndex,
     operation: &CommittedOperation,
 ) -> Result<Vec<u8>, PersistenceError> {
-    use witness_v2::{ExactResultKind, WitnessOperationDisposition};
-
-    let (kind, result_kind, result) = match operation {
-        CommittedOperation::Envelope(record) => (
-            1,
-            ExactResultKind::EnvelopeReference,
-            encode_outbox(record)?,
-        ),
-        CommittedOperation::Accepted(record) => {
-            (2, ExactResultKind::Receive, encode_accepted(record))
-        }
-        CommittedOperation::OutboxAcknowledged(record) => (
-            3,
-            ExactResultKind::AcknowledgementReference,
-            encode_outbox(record)?,
-        ),
-        CommittedOperation::ReceiveAcknowledged(record) => (
-            4,
-            ExactResultKind::AcknowledgementReference,
-            encode_accepted(record),
-        ),
-        CommittedOperation::Pairing(record) => (
-            5,
-            ExactResultKind::PairingDecision,
-            encode_pairing_operation(record),
-        ),
+    let (kind, result) = match operation {
+        CommittedOperation::Envelope(record) => (1, encode_outbox(record)?),
+        CommittedOperation::Accepted(record) => (2, encode_accepted(record)),
+        CommittedOperation::OutboxAcknowledged(record) => (3, encode_outbox(record)?),
+        CommittedOperation::ReceiveAcknowledged(record) => (4, encode_accepted(record)),
+        CommittedOperation::Pairing(record) => (5, encode_pairing_operation(record)),
     };
-    let mut out = Vec::new();
-    out.extend_from_slice(&witness_v2::RECORD_VERSION.to_be_bytes());
-    out.extend_from_slice(&32_u16.to_be_bytes());
-    out.extend_from_slice(&fingerprint);
-    out.extend_from_slice(&generation.to_be_bytes());
-    out.push(WitnessOperationDisposition::Completed as u8);
-    out.push(result_kind as u8);
+    let mut out = index.encode()?;
     out.push(kind);
     put_bytes(&mut out, &result)?;
     Ok(out)
 }
 
-fn decode_operation_record(
+fn decode_operation_index(
     bytes: &[u8],
-) -> Result<([u8; 48], u64, CommittedOperation), PersistenceError> {
-    use witness_v2::{ExactResultKind, WitnessOperationDisposition};
-
-    let mut cursor = BinaryCursor::new(bytes);
-    if cursor.u16()? != witness_v2::RECORD_VERSION {
-        return Err(PersistenceError::UnsupportedSchema);
-    }
-    if cursor.u16()? != 32 {
-        return Err(PersistenceError::Corrupt);
-    }
-    let fingerprint = cursor.array()?;
-    let generation = cursor.u64()?;
-    if cursor.u8()? != WitnessOperationDisposition::Completed as u8 {
-        return Err(PersistenceError::Corrupt);
-    }
-    let result_kind = ExactResultKind::try_from(cursor.u8()?)?;
+) -> Result<(WitnessOperationIndex, CommittedOperation), PersistenceError> {
+    let (index, consumed) = WitnessOperationIndex::decode_prefix(bytes)?;
+    let mut cursor = BinaryCursor::new(bytes.get(consumed..).ok_or(PersistenceError::Corrupt)?);
     let kind = cursor.u8()?;
     let result = cursor.bytes()?;
     cursor.finish()?;
-    let operation = match (kind, result_kind) {
-        (1, ExactResultKind::EnvelopeReference) => {
-            CommittedOperation::Envelope(decode_outbox(result)?)
-        }
-        (2, ExactResultKind::Receive) => CommittedOperation::Accepted(decode_accepted(result)?),
-        (3, ExactResultKind::AcknowledgementReference) => {
-            CommittedOperation::OutboxAcknowledged(decode_outbox(result)?)
-        }
-        (4, ExactResultKind::AcknowledgementReference) => {
-            CommittedOperation::ReceiveAcknowledged(decode_accepted(result)?)
-        }
-        (5, ExactResultKind::PairingDecision) => {
-            CommittedOperation::Pairing(decode_pairing_operation(result)?)
-        }
+    let operation = match kind {
+        1 => CommittedOperation::Envelope(decode_outbox(result)?),
+        2 => CommittedOperation::Accepted(decode_accepted(result)?),
+        3 => CommittedOperation::OutboxAcknowledged(decode_outbox(result)?),
+        4 => CommittedOperation::ReceiveAcknowledged(decode_accepted(result)?),
+        5 => CommittedOperation::Pairing(decode_pairing_operation(result)?),
         _ => return Err(PersistenceError::Corrupt),
     };
-    Ok((fingerprint, generation, operation))
-}
-
-fn decode_operation_with_fingerprint(
-    bytes: &[u8],
-) -> Result<([u8; 48], CommittedOperation), PersistenceError> {
-    decode_operation_record(bytes).map(|(fingerprint, _, operation)| (fingerprint, operation))
+    Ok((index, operation))
 }
 
 fn decode_operation(bytes: &[u8]) -> Result<CommittedOperation, PersistenceError> {
-    decode_operation_record(bytes).map(|(_, _, operation)| operation)
+    decode_operation_index(bytes).map(|(_, operation)| operation)
 }
 
 fn decode_operation_generation(bytes: &[u8]) -> Result<u64, PersistenceError> {
-    decode_operation_record(bytes).map(|(_, generation, _)| generation)
+    decode_operation_index(bytes).map(|(index, _)| index.generation)
 }
 
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), PersistenceError> {
