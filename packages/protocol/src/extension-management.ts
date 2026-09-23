@@ -4,7 +4,7 @@
 import type { EventId, JsonObject, SessionId } from "./event-envelope.ts";
 import { ProtocolValidationError, parseEventId, parseSessionId } from "./event-envelope.ts";
 
-export type ExtensionSourceKind = "global" | "explicit" | "project" | "package";
+export type ExtensionSourceKind = "builtin" | "global" | "explicit" | "project" | "package";
 
 export interface ExtensionRecord {
   readonly id: string;
@@ -214,7 +214,7 @@ function parseExtensionRecord(value: unknown, path: string): ExtensionRecord {
     "packageName",
     "error",
   ]);
-  if (!["global", "explicit", "project", "package"].includes(input.source as string)) {
+  if (!["builtin", "global", "explicit", "project", "package"].includes(input.source as string)) {
     throw new ProtocolValidationError(`${path}.source`, "must be a known extension source");
   }
   if (typeof input.enabled !== "boolean") {

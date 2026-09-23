@@ -63,6 +63,34 @@ export default {
   assert.equal(await readFile(marker, "utf8"), "done\ndone\n");
 });
 
+test("built-in entries use the same loader and cannot activate when disabled or missing", async () => {
+  const builtin = {
+    manifest: { id: "axl.skills", name: "Skills", capabilities: [] },
+    activate: () => undefined,
+  } as const;
+  const inventory: ExtensionListResult = {
+    configPath: "/local/extensions.json",
+    project: { root: "/local", trusted: false },
+    commands: [],
+    extensions: [
+      {
+        id: "axl.skills",
+        path: "builtin:axl.skills",
+        tuiPath: "builtin:axl.skills",
+        source: "builtin",
+        enabled: false,
+      },
+    ],
+  };
+  assert.deepEqual(await loadTerminalExtensions(inventory), []);
+  const enabled = {
+    ...inventory,
+    extensions: inventory.extensions.map((entry) => ({ ...entry, enabled: true })),
+  };
+  await assert.rejects(loadTerminalExtensions(enabled), /unavailable from this client/);
+  assert.deepEqual(await loadTerminalExtensions(enabled, [builtin]), [builtin]);
+});
+
 test("disabled terminal entries never import, and mismatched identities fail visibly", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-tui-loader-"));
   context.after(() => rm(root, { recursive: true, force: true }));

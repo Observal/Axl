@@ -18,6 +18,7 @@ import {
   TerminalExtensionHost,
   type TerminalLine,
   type TerminalTheme,
+  type TerminalThemeRole,
   type TerminalUi,
 } from "@axl/extension-api";
 import type {
@@ -385,6 +386,10 @@ function openExternalUrl(url: string, onError: (error: Error) => void): void {
 
 const TUI_COMMANDS: readonly { readonly name: string; readonly description: string }[] = [
   { name: "theme", description: "select a color theme" },
+  {
+    name: "reload-tui",
+    description: "reload terminal extensions without rebuilding the daemon session",
+  },
   { name: "settings", description: "change persistent terminal preferences" },
   { name: "details", description: "set transcript detail: compact, full, or focus" },
   { name: "fullscreen", description: "switch to fullscreen transcript mode" },
@@ -1347,6 +1352,43 @@ export class AxlApp {
     return this.view.palette.dim(text);
   }
 
+  private terminalTheme(assertActive: () => void = () => undefined): TerminalTheme {
+    const app = this;
+    return {
+      get name() {
+        assertActive();
+        return app.currentTheme;
+      },
+      roles: () => {
+        assertActive();
+        return Object.keys(app.view.palette).filter(
+          (role) => role !== "thinking",
+        ) as TerminalThemeRole[];
+      },
+      style: (role, text) => {
+        assertActive();
+        const apply = Object.hasOwn(app.view.palette, role) ? app.view.palette[role] : undefined;
+        if (typeof apply !== "function")
+          throw new Error(`Theme ${app.currentTheme} has no ${role} role`);
+        return apply(sanitizeTerminalText(text));
+      },
+      thinking: (level, text) => {
+        assertActive();
+        const apply = app.view.palette.thinking;
+        if (apply === undefined) throw new Error(`Theme ${app.currentTheme} has no thinking role`);
+        return apply(level, sanitizeTerminalText(text));
+      },
+      fg: (tone, text) => {
+        assertActive();
+        return app.styledExtensionLine({ tone, text });
+      },
+      bold: (text) => {
+        assertActive();
+        return (app.view.palette.bold ?? ((value) => value))(sanitizeTerminalText(text));
+      },
+    };
+  }
+
   private renderExtensionEditor(width: number): string[] {
     const component = this.extensionHost.editor();
     if (component === undefined) {
@@ -1359,11 +1401,7 @@ export class AxlApp {
         draft: this.editor.text,
         model: this.view.modelLabel(),
         working: this.view.working,
-        theme: {
-          fg: (tone, text) => this.styledExtensionLine({ tone, text }),
-          bold: (text) =>
-            (this.view.palette.bold ?? ((value) => value))(sanitizeTerminalText(text)),
-        },
+        theme: this.terminalTheme(),
       });
       if (
         !Array.isArray(rendered?.lines) ||
@@ -2227,14 +2265,7 @@ export class AxlApp {
         }),
       get theme(): TerminalTheme {
         assertActive();
-        return {
-          fg(tone, text) {
-            return app.styledExtensionLine({ text, tone });
-          },
-          bold(text) {
-            return (app.view.palette.bold ?? ((value) => value))(sanitizeTerminalText(text));
-          },
-        };
+        return app.terminalTheme(assertActive);
       },
       themes: () => {
         assertActive();
@@ -2910,6 +2941,11 @@ export class AxlApp {
         return;
       case "edit":
         void this.openExternalEditor();
+        return;
+      case "reload-tui":
+        await this.replaceTerminalExtensions(this.client, this.sessionId);
+        this.notice = this.view.palette.accent("· terminal extensions reloaded");
+        this.redraw();
         return;
       case "web": {
         if (this.openWeb === undefined) throw new Error("Web launch is unavailable from this host");

@@ -273,7 +273,14 @@ test("terminal presentation registrations are capability-scoped, owned, and canc
       draft: "",
       model: "",
       working: false,
-      theme: { fg: (_tone, text) => text, bold: (text) => text },
+      theme: {
+        name: "plain",
+        roles: () => ["accent"],
+        style: (_role, text) => text,
+        thinking: (_level, text) => text,
+        fg: (_tone, text) => text,
+        bold: (text) => text,
+      },
     }).lines[0]?.text,
     "Custom editor",
   );

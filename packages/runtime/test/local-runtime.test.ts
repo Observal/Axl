@@ -712,8 +712,18 @@ test("manages global, explicit, and trusted project daemon extensions through th
   const initialExtensions = await client.listExtensions({ sessionId: opened.sessionId });
   assert.deepEqual(
     initialExtensions.extensions.map((item) => item.id),
-    ["global"],
+    ["axl.prompt-templates", "axl.skills", "global"],
   );
+  assert.equal(initialExtensions.extensions[0]?.source, "builtin");
+  const disabledBuiltin = await client.disableExtension({
+    sessionId: opened.sessionId,
+    extensionId: "axl.prompt-templates",
+  });
+  assert.equal(disabledBuiltin.extensions[0]?.enabled, false);
+  await client.enableExtension({
+    sessionId: opened.sessionId,
+    extensionId: "axl.prompt-templates",
+  });
   assert.deepEqual(
     initialExtensions.commands.map((command) => command.name),
     ["extensions", "global-command"],
@@ -762,7 +772,7 @@ test("manages global, explicit, and trusted project daemon extensions through th
   assert.equal(trusted.project.trusted, true);
   assert.deepEqual(
     trusted.extensions.map((item) => item.id),
-    ["global", "project"],
+    ["axl.prompt-templates", "axl.skills", "global", "project"],
   );
   assert.deepEqual(
     await client.invokeExtensionCommand({

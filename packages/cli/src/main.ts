@@ -1223,15 +1223,7 @@ async function main(): Promise<void> {
     return settingsWrite;
   };
 
-  const [
-    { AxlApp, loadTerminalExtensions },
-    { promptTemplatesExtension },
-    { skillTerminalExtension },
-  ] = await Promise.all([
-    tuiModule ?? import("@axl/tui"),
-    import("@axl/extension-prompts"),
-    import("@axl/extension-skills"),
-  ]);
+  const { AxlApp, loadTerminalExtensions } = await (tuiModule ?? import("@axl/tui"));
   timing.mark("TUI modules");
   const app = await AxlApp.start({
     client,
@@ -1262,12 +1254,28 @@ async function main(): Promise<void> {
     workspaceReview: settings.workspaceReview ?? false,
     imageDisplay: settings.imageDisplay ?? "auto",
     globalThemeDirectory: join(axlHome, "themes"),
-    extensions: [
-      promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),
-      skillTerminalExtension,
-    ],
-    loadExtensions: async (terminalClient, sessionId) =>
-      loadTerminalExtensions(await terminalClient.listExtensions({ sessionId })),
+    loadExtensions: async (terminalClient, sessionId) => {
+      const inventory = await terminalClient.listExtensions({ sessionId });
+      const builtins = await Promise.all(
+        inventory.extensions
+          .filter((entry) => entry.enabled && entry.source === "builtin")
+          .map(async (entry) => {
+            if (entry.id === "axl.prompt-templates") {
+              const { promptTemplatesExtension } = await import("@axl/extension-prompts");
+              return promptTemplatesExtension({
+                cwd: cli.cwd,
+                globalDirectory: join(axlHome, "prompts"),
+              });
+            }
+            if (entry.id === "axl.skills") {
+              const { skillTerminalExtension } = await import("@axl/extension-skills");
+              return skillTerminalExtension;
+            }
+            throw new Error(`Unknown built-in terminal extension ${entry.id}`);
+          }),
+      );
+      return loadTerminalExtensions(inventory, builtins);
+    },
     clearStartupLine: startupIndicator,
     reconnectClient: () => connectTarget(currentTarget),
     openWeb: openWebForTarget(currentTarget),

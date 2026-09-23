@@ -11,10 +11,19 @@ import type { ExtensionListResult } from "@axl/protocol";
 /** Loads only daemon-approved, enabled terminal entry points on the local client host. */
 export async function loadTerminalExtensions(
   inventory: ExtensionListResult,
+  builtins: readonly TerminalExtension[] = [],
 ): Promise<readonly TerminalExtension[]> {
   const loaded: TerminalExtension[] = [];
   for (const entry of inventory.extensions) {
     if (!entry.enabled || entry.tuiPath === undefined) continue;
+    if (entry.source === "builtin") {
+      const builtin = builtins.find((definition) => definition.manifest.id === entry.id);
+      if (builtin === undefined || entry.tuiPath !== `builtin:${entry.id}`) {
+        throw new Error(`Built-in terminal extension ${entry.id} is unavailable from this client`);
+      }
+      loaded.push(builtin);
+      continue;
+    }
     const path = await realpath(entry.tuiPath);
     if (path !== entry.tuiPath) {
       throw new Error(

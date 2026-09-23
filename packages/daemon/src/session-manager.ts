@@ -49,13 +49,13 @@ import {
   MAX_WIRE_MESSAGE_BYTES,
   type ModelRequestSettings,
   type OperationId,
+  ProtocolValidationError,
   parseEvent,
   parseEventId,
   parseOperationId,
   parseSessionConfiguration,
   parseSessionId,
   parseUserQuestionRequest,
-  ProtocolValidationError,
   parseUserQuestionResponse,
   type RestoredQueueItem,
   type SessionActivityFrame,
@@ -168,7 +168,7 @@ export type SessionRuntimeFactory = (input: {
     extensions(): Promise<{
       readonly extensions: readonly {
         readonly id: string;
-        readonly source: "global" | "explicit" | "project" | "package";
+        readonly source: "builtin" | "global" | "explicit" | "project" | "package";
         readonly enabled: boolean;
         readonly error?: string;
       }[];

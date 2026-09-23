@@ -1574,6 +1574,13 @@ export default {
   await until(() => text().includes("the answer"), "provider reply in installed terminal session");
   await new Promise((resolve) => setTimeout(resolve, 80));
   await screenshot("01-session-reply");
+  const eventLog = join(directory, "data", "sessions", `${app.sessionId}.jsonl`);
+  const beforeTerminalReload = await readFile(eventLog, "utf8");
+  await write("terminal-only");
+  input.write("/reload-tui\r");
+  await until(() => text().includes("terminal-only widget"), "TUI-only changed-source reload");
+  assert.equal(await readFile(eventLog, "utf8"), beforeTerminalReload);
+  assert.equal(await readFile(cleanup, "utf8"), "disposed\n");
   await write("installed second");
   await client.reloadExtension({ sessionId: app.sessionId, extensionId: "installed" });
   await until(
@@ -1583,15 +1590,17 @@ export default {
   await screenshot("02-reloaded");
   input.write("/installed\r");
   await until(() => text().includes("installed second"), "reloaded command");
-  assert.equal(await readFile(cleanup, "utf8"), "disposed\n");
+  assert.equal(await readFile(cleanup, "utf8"), "disposed\ndisposed\n");
   input.write("/reload\r");
   await until(
-    () => existsSync(cleanup) && readFileSync(cleanup, "utf8") === "disposed\ndisposed\n",
+    () => existsSync(cleanup) && readFileSync(cleanup, "utf8") === "disposed\ndisposed\ndisposed\n",
     "local reload cleanup",
   );
   await client.disableExtension({ sessionId: app.sessionId, extensionId: "installed" });
   await until(
-    () => existsSync(cleanup) && readFileSync(cleanup, "utf8") === "disposed\ndisposed\ndisposed\n",
+    () =>
+      existsSync(cleanup) &&
+      readFileSync(cleanup, "utf8") === "disposed\ndisposed\ndisposed\ndisposed\n",
     "disabled extension cleanup",
   );
   assert.equal(
@@ -1601,7 +1610,7 @@ export default {
   await new Promise((resolve) => setTimeout(resolve, 80)); // Wait for the scheduled terminal repaint.
   await screenshot("03-disabled");
   app.stop();
-  assert.equal(await readFile(cleanup, "utf8"), "disposed\ndisposed\ndisposed\n");
+  assert.equal(await readFile(cleanup, "utf8"), "disposed\ndisposed\ndisposed\ndisposed\n");
 });
 
 test("every TUI command has an explicit owner", async (context) => {
@@ -1644,6 +1653,7 @@ test("every TUI command has an explicit owner", async (context) => {
       "history",
       "hotkeys",
       "regular",
+      "reload-tui",
       "settings",
       "stash",
       "status",
@@ -3259,6 +3269,17 @@ test("terminal extension prompts, custom component, autocomplete and markdown ru
       ],
     },
     activate(api) {
+      assert.equal(api.ui.theme.name, "plain");
+      assert.ok(api.ui.theme.roles().includes("accent"));
+      assert.equal(api.ui.theme.style("accent", "safe\u001b[31m"), "safe");
+      assert.throws(
+        () => api.ui.theme.style("syntaxString", "missing"),
+        /has no syntaxString role/,
+      );
+      assert.throws(
+        () => api.ui.theme.style("constructor" as "accent", "unsafe"),
+        /has no constructor role/,
+      );
       api.registerHeader("head", { render: () => [{ text: "HEADER SLOT" }] });
       api.registerFooter("foot", { render: () => [{ text: "FOOTER SLOT" }] });
       api.registerMarkdownTransformer((markdown) =>

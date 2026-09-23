@@ -54,6 +54,29 @@ test("resolves global, explicit, and trusted project extensions with determinist
   assert.equal((await registry.list(project)).extensions[0]?.source, "global");
 });
 
+test("built-in terminal entries share inventory, enablement, and reserved identity", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-builtin-registry-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const registry = new DaemonExtensionRegistry(home, undefined, ["axl.skills"]);
+  assert.deepEqual((await registry.list(root)).extensions, [
+    {
+      id: "axl.skills",
+      path: "builtin:axl.skills",
+      tuiPath: "builtin:axl.skills",
+      source: "builtin",
+      enabled: true,
+    },
+  ]);
+  assert.deepEqual(await registry.entries(root), []);
+  await registry.setEnabled("axl.skills", false);
+  assert.equal((await registry.list(root)).extensions[0]?.enabled, false);
+  await registry.setEnabled("axl.skills", true);
+  await assert.rejects(registry.remove("axl.skills"), /cannot be removed/);
+  await module(join(home, "extensions", "axl.skills.js"));
+  await assert.rejects(registry.list(root), /reserved for a built-in extension/);
+});
+
 test("TUI-only packages require trust, remain disabled before import, and resolve inside their root", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-terminal-registry-"));
   context.after(() => rm(root, { recursive: true, force: true }));

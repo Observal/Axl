@@ -57,7 +57,53 @@ export interface TerminalUi extends TerminalCommandContext {
   setTheme(name: string): void;
 }
 
+export type TerminalThemeRole =
+  | "dim"
+  | "accent"
+  | "error"
+  | "bold"
+  | "border"
+  | "success"
+  | "warning"
+  | "text"
+  | "userMessage"
+  | "selection"
+  | "searchMatch"
+  | "searchCurrent"
+  | "toolBackground"
+  | "toolPendingBackground"
+  | "toolSuccessBackground"
+  | "toolErrorBackground"
+  | "toolDeniedBackground"
+  | "diffAdded"
+  | "diffRemoved"
+  | "diffContext"
+  | "diffAddedBackground"
+  | "diffRemovedBackground"
+  | "mdHeading"
+  | "mdCode"
+  | "mdCodeBlockBorder"
+  | "mdQuote"
+  | "mdQuoteBorder"
+  | "mdListBullet"
+  | "syntaxComment"
+  | "syntaxKeyword"
+  | "syntaxFunction"
+  | "syntaxVariable"
+  | "syntaxString"
+  | "syntaxNumber"
+  | "syntaxType"
+  | "syntaxOperator"
+  | "syntaxPunctuation"
+  | "keyword"
+  | "literal";
+
 export interface TerminalTheme {
+  readonly name: string;
+  /** Only roles available in the selected palette are listed. Missing roles fail explicitly. */
+  roles(): readonly TerminalThemeRole[];
+  style(role: TerminalThemeRole, text: string): string;
+  thinking(level: string, text: string): string;
   fg(tone: TerminalTone, text: string): string;
   bold(text: string): string;
 }
@@ -408,7 +454,7 @@ export interface DaemonExtensionSession {
   extensions(): Promise<{
     readonly extensions: readonly {
       readonly id: string;
-      readonly source: "global" | "explicit" | "project" | "package";
+      readonly source: "builtin" | "global" | "explicit" | "project" | "package";
       readonly enabled: boolean;
       readonly error?: string;
     }[];

@@ -302,7 +302,10 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     commandCatalog(new Set(WIRE_CAPABILITIES)).commands.map((command) => command.name),
   );
   const { DaemonExtensionRegistry } = await import("@axl/extension-host");
-  const extensionRegistry = new DaemonExtensionRegistry(axlHome);
+  const extensionRegistry = new DaemonExtensionRegistry(axlHome, undefined, [
+    "axl.prompt-templates",
+    "axl.skills",
+  ]);
   const {
     McpConfigStore,
     mcpCapabilityCachePath,

@@ -5,8 +5,8 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   lstat,
-  readdir,
   mkdir,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -336,10 +336,21 @@ export class DaemonExtensionRegistry {
   readonly packageDirectory: string;
   private pending = Promise.resolve();
   private readonly run: CommandRunner;
+  private readonly builtins: readonly RegistryEntry[];
   private readonly failures = new Map<string, string>();
 
-  constructor(axlHome: string, run: CommandRunner = execute) {
+  constructor(axlHome: string, run: CommandRunner = execute, builtinIds: readonly string[] = []) {
     this.run = run;
+    this.builtins = builtinIds.map((id) => {
+      parseExtensionId(id, "builtin extension id");
+      return {
+        id,
+        path: `builtin:${id}`,
+        tuiPath: `builtin:${id}`,
+        source: "builtin",
+        daemon: false,
+      };
+    });
     this.configPath = join(axlHome, "extensions.json");
     this.globalDirectory = join(axlHome, "extensions");
     this.packageDirectory = join(this.globalDirectory, ".packages");
@@ -402,6 +413,7 @@ export class DaemonExtensionRegistry {
     config: ExtensionConfiguration,
   ): Promise<{ readonly root: string; readonly entries: readonly RegistryEntry[] }> {
     const groups: RegistryEntry[][] = [
+      [...this.builtins],
       await this.directoryEntries(this.globalDirectory, "global"),
       await Promise.all(
         config.packages.map(async (item): Promise<RegistryEntry> => {
@@ -442,6 +454,15 @@ export class DaemonExtensionRegistry {
     const selected = new Map<string, RegistryEntry>();
     for (const group of groups) {
       for (const entry of group) {
+        if (
+          entry.source !== "builtin" &&
+          this.builtins.some((builtin) => builtin.id === entry.id)
+        ) {
+          throw new DaemonExtensionError(
+            entry.path,
+            `extension id ${entry.id} is reserved for a built-in extension`,
+          );
+        }
         if (!entry.missing) selected.set(entry.id, entry);
       }
     }
@@ -516,6 +537,12 @@ export class DaemonExtensionRegistry {
   async install(source: ExtensionInstallSource, signal?: AbortSignal): Promise<string> {
     if (source.type === "path") {
       const entry = await pathEntry(source.path, "explicit");
+      if (this.builtins.some((builtin) => builtin.id === entry.id)) {
+        throw new DaemonExtensionError(
+          entry.path,
+          `extension id ${entry.id} is reserved for a built-in extension`,
+        );
+      }
       const installedPath =
         entry.packageName === undefined ? entry.path : await realpath(source.path);
       await this.mutate((config) => ({
@@ -540,6 +567,12 @@ export class DaemonExtensionRegistry {
       if (packageName === undefined)
         throw new Error("Installed Git package could not be identified");
       const entry = await packageEntry(join(this.packageDirectory, "node_modules", packageName));
+      if (this.builtins.some((builtin) => builtin.id === entry.id)) {
+        throw new DaemonExtensionError(
+          entry.path,
+          `extension id ${entry.id} is reserved for a built-in extension`,
+        );
+      }
       const config = await readConfiguration(this.configPath);
       await this.write({
         ...config,
@@ -574,6 +607,9 @@ export class DaemonExtensionRegistry {
 
   async remove(id: string, signal?: AbortSignal): Promise<void> {
     parseExtensionId(id, "extensionId");
+    if (this.builtins.some((entry) => entry.id === id)) {
+      throw new Error(`Built-in extension ${id} cannot be removed; disable it instead`);
+    }
     await this.serial(async () => {
       const config = await readConfiguration(this.configPath);
       const installed = config.packages.find((item) => item.id === id);
