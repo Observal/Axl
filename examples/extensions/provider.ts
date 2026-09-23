@@ -18,7 +18,7 @@ const model = {
   pricing: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 } as const;
 
-const extension: DaemonExtensionFactory = (axl) =>
+const extension: DaemonExtensionFactory = (axl) => {
   axl.registerProvider({
     id: "example-provider",
     displayName: "Example provider",
@@ -33,5 +33,6 @@ const extension: DaemonExtensionFactory = (axl) =>
       };
     },
   });
+};
 
 export default extension;
