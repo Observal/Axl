@@ -826,7 +826,8 @@ mod tests {
     use super::*;
     use crate::{
         Identity,
-        persistence::{DurablePhone, RollbackAnchor, RollbackState},
+        persistence::DurablePhone,
+        witness::{ReplicaKey, ReplicaTrust, ReplicaTrustSet},
     };
 
     #[derive(Default)]
@@ -940,41 +941,29 @@ mod tests {
         }
     }
 
-    struct TestAnchor(Mutex<RollbackState>);
-
-    impl TestAnchor {
-        fn new() -> Arc<Self> {
-            Arc::new(Self(Mutex::new(RollbackState {
-                counter: 0,
-                epoch: 0,
-                epoch_authenticator: Vec::new(),
-            })))
-        }
+    /// Placeholder pinned trust for a store whose register barrier is never completed here.
+    fn unused_trust() -> Arc<ReplicaTrustSet> {
+        Arc::new(
+            ReplicaTrustSet::new(
+                (1..=3_u8)
+                    .map(|index| {
+                        ReplicaTrust::new(
+                            [index; 16],
+                            vec![ReplicaKey::new([index + 10; 16], [index + 20; 32]).unwrap()],
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+        )
     }
 
-    impl RollbackAnchor for TestAnchor {
-        fn available(&self) -> bool {
-            true
-        }
-
-        fn read(&self, _crypto_session_id: Id) -> Result<RollbackState, PersistenceError> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-
-        fn advance(
-            &self,
-            _crypto_session_id: Id,
-            expected: &RollbackState,
-            next: &RollbackState,
-            _operation_id: Id,
-        ) -> Result<(), PersistenceError> {
-            let mut state = self.0.lock().unwrap();
-            if &*state != expected || next.counter != expected.counter + 1 {
-                return Err(PersistenceError::Quarantined);
-            }
-            *state = next.clone();
-            Ok(())
-        }
+    fn uuid_v7(seed: u8) -> [u8; 16] {
+        let mut value = [seed; 16];
+        value[6] = 0x70 | (seed & 0x0f);
+        value[8] = 0x80 | (seed & 0x3f);
+        value
     }
 
     fn store(keychain: Arc<FakeKeychain>) -> MacOsKeychainEnvelopeKeyStore {
@@ -1201,27 +1190,23 @@ mod tests {
         let root = temp_root("state-loss");
         let keychain = FakeKeychain::available();
         let store = Arc::new(store(Arc::clone(&keychain)));
-        let anchor = TestAnchor::new();
-        let session = [0x71; 16];
-        let identity = Identity::device([0x72; 16], [0x73; 16], [0x74; 16]).unwrap();
+        let trust = unused_trust();
+        let session = uuid_v7(0x71);
+        let identity = Identity::device([0x72; 16], uuid_v7(0x73), uuid_v7(0x74)).unwrap();
         let (phone, _) = DurablePhone::create(
             &root,
             identity,
             session,
             [0x75; 16],
             Arc::clone(&store) as Arc<dyn EnvelopeKeyStore>,
-            Arc::clone(&anchor) as Arc<dyn RollbackAnchor>,
+            Arc::clone(&trust),
         )
         .unwrap();
         phone.store().close().unwrap();
+        drop(phone);
         keychain.items.lock().unwrap().clear();
         assert!(matches!(
-            DurablePhone::open(
-                &root,
-                session,
-                store as Arc<dyn EnvelopeKeyStore>,
-                anchor as Arc<dyn RollbackAnchor>,
-            ),
+            DurablePhone::open(&root, session, store as Arc<dyn EnvelopeKeyStore>, trust,),
             Err(PersistenceError::StateLoss)
         ));
         fs::remove_dir_all(root).unwrap();

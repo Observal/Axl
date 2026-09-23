@@ -9,9 +9,10 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_traits::{OpenMlsProvider, random::OpenMlsRand as _};
 
 use super::{
-    CoreProvider, EnvelopeKeyStore, FaultPoint, NativeTransactionalProvider, NoFaults,
-    PairingOperationRecord, PersistenceError, RollbackAnchor, RuntimeHooks, SystemClock,
-    TransactionalProvider, begin_current, operation_fingerprint, operation_fingerprint_parts,
+    CoreProvider, EnvelopeKeyStore, FaultPoint, Lookup, NativeTransactionalProvider, NoFaults,
+    PairingOperationRecord, PendingWitnessRequest, PersistenceError, RuntimeHooks, SystemClock,
+    TypedResult, WitnessEndpoint, WitnessOutcome, begin_current, fresh_or_return,
+    impl_witness_endpoint, op_kind, optional_field, witness_v2::operation_fingerprint,
 };
 use crate::{
     CommitMetadata, Daemon, GroupTransaction, Id, Identity, PROFILE_ID, PROFILE_REVISION,
@@ -21,11 +22,12 @@ use crate::{
         PAIRING_MAX_FAILED_CLAIMS, PairingClaimAccountant, PairingClaimV1, PairingCredential,
         PairingInvitation, comparison_value, sha384,
     },
+    witness::{EndpointReconciliation, ReplicaTrustSet},
 };
 
 const DAEMON_PAIRING_KEY: &[u8] = b"\0axl-daemon-pairing-v1";
 const DEVICE_PREJOIN_KEY: &[u8] = b"\0axl-device-prejoin-v1";
-const PAIRING_RECORD_VERSION: u16 = 1;
+const PAIRING_RECORD_VERSION: u16 = 2;
 const OP_ISSUE_INVITATION: u8 = 1;
 const OP_PREPARE_CLAIM: u8 = 2;
 const OP_SUBMIT_CLAIM: u8 = 3;
@@ -452,6 +454,9 @@ struct DevicePreJoinRecord {
     activation: Option<Vec<u8>>,
     pair_lifecycle: Option<PairLifecycle>,
     pending_commit: Option<CommitMetadata>,
+    /// True once the epoch-ready message for `pending_commit` has been created. A received
+    /// commit is applied in one operation; the epoch-ready send is a separate operation.
+    epoch_ready_prepared: bool,
     forbidden_group_id: Option<[u8; 32]>,
 }
 
@@ -479,15 +484,15 @@ impl DurablePendingInvitation {
         crypto_session_id: Id,
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
-    ) -> Result<(Self, InvitationPublication), PersistenceError> {
+        trust: Arc<ReplicaTrustSet>,
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         Self::issue_with_runtime(
             root,
             identity,
             crypto_session_id,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -501,9 +506,9 @@ impl DurablePendingInvitation {
         crypto_session_id: Id,
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
-    ) -> Result<(Self, InvitationPublication), PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         if identity.role != Role::Daemon {
             return Err(PersistenceError::IdentityMismatch);
         }
@@ -511,12 +516,24 @@ impl DurablePendingInvitation {
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
-        let mut transaction = store.begin_transaction(crypto_session_id, 0, 0)?;
-        transaction.bind_operation(operation_id, operation_fingerprint(21, &[])?)?;
+        let fingerprint = operation_fingerprint(
+            op_kind::DAEMON_INVITATION,
+            &[
+                &[identity.role as u8],
+                &identity.account_id,
+                &identity.installation_id,
+                &crypto_session_id,
+            ],
+        )?;
+        let mut transaction =
+            match store.begin_witnessed(operation_id, op_kind::DAEMON_INVITATION, fingerprint)? {
+                Lookup::Fresh(transaction) => *transaction,
+                Lookup::Pending(_) | Lookup::Released(_) => return Err(PersistenceError::Conflict),
+            };
         store.faults.check(FaultPoint::BeforeOpenMlsStateWrites)?;
         let (_, signer) = crate::make_credential(&transaction.provider, &identity)?;
         let pairing_credential = PairingCredential::new(identity.clone(), &signer)
@@ -561,6 +578,19 @@ impl DurablePendingInvitation {
         transaction
             .provider
             .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
+        // The daemon has no group yet. Its witness lineage and request signer are still named by
+        // endpoint metadata so every later transition reconstructs them from one place.
+        transaction.provider.insert_internal(
+            super::ENDPOINT_METADATA_KEY.to_vec(),
+            super::encode_endpoint_metadata(
+                identity.clone(),
+                identity.clone(),
+                None,
+                signer.public(),
+                &BTreeMap::new(),
+                invitation.issued_at_ms(),
+            ),
+        );
         transaction.set_successor_epoch(0, &[]);
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
@@ -571,27 +601,24 @@ impl DurablePendingInvitation {
                 artifact_hash: invitation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        store.faults.check(FaultPoint::BeforeInitializationReady)?;
-        store.mark_ready()?;
-        let publication = publication(&record);
-        store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        Ok((Self { store }, publication))
+        // The database stays `initializing` and the invitation stays withheld until the
+        // counter-1 register certificate completes through `continue_witness`.
+        let request =
+            transaction.commit_witnessed(TypedResult::Invitation(publication(&record)))?;
+        Ok((Self { store }, request))
     }
 
     pub fn open(
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
     ) -> Result<Self, PersistenceError> {
         Self::open_with_runtime(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -603,14 +630,14 @@ impl DurablePendingInvitation {
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
     ) -> Result<Self, PersistenceError> {
         let store = NativeTransactionalProvider::open(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
@@ -635,14 +662,17 @@ impl DurablePendingInvitation {
             }
         }
         transaction.rollback()?;
+        // Opening reconciles and publishes committed state only. It never creates a successor,
+        // so a due expiry waits for the next witnessed mutation.
         store.finish_opening()?;
-        let mut endpoint = Self { store };
-        endpoint.expire_if_needed()?;
-        Ok(endpoint)
+        Ok(Self { store })
     }
 
+    /// Read-only. Returns the committed invitation; it does not persist a due expiry. An
+    /// interrupted initial registration keeps the invitation withheld.
     pub fn publication(&mut self) -> Result<InvitationPublication, PersistenceError> {
-        self.expire_if_needed()?;
+        self.store.require_published()?;
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let result = match record.state {
@@ -656,8 +686,9 @@ impl DurablePendingInvitation {
         result
     }
 
+    /// Read-only committed lifecycle. A due but not yet witnessed expiry is not reported here.
     pub fn lifecycle(&mut self) -> Result<InvitationLifecycle, PersistenceError> {
-        self.expire_if_needed()?;
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let state = daemon_record(&transaction.provider, self.store.crypto_session_id)?.state;
         transaction.rollback()?;
@@ -668,19 +699,21 @@ impl DurablePendingInvitation {
         &mut self,
         operation_id: Id,
         claim_bytes: &[u8],
-    ) -> Result<ClaimSubmission, PersistenceError> {
+    ) -> Result<WitnessOutcome<ClaimSubmission>, PersistenceError> {
         if claim_bytes.len() > PAIRING_CLAIM_MAX_BYTES {
-            return Ok(ClaimSubmission::Rejected { reason: None });
+            return Ok(WitnessOutcome::Released(ClaimSubmission::Rejected {
+                reason: None,
+            }));
         }
-        self.expire_if_needed()?;
-        let fingerprint = operation_fingerprint(22, claim_bytes)?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-            let result = claim_result_from_operation(existing, &record)?;
-            transaction.rollback()?;
-            return Ok(result);
+        if let Some(expiry) = self.expire_if_needed()? {
+            return Ok(WitnessOutcome::Pending(expiry));
         }
+        let fingerprint = operation_fingerprint(op_kind::CLAIM_SUBMIT, &[claim_bytes])?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::CLAIM_SUBMIT,
+            fingerprint
+        )?);
         let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = self.store.clock.now_ms().map_err(PersistenceError::Core)?;
         if now < record.last_now_ms {
@@ -700,7 +733,7 @@ impl DurablePendingInvitation {
                     .unwrap_or(ClaimSubmission::Consumed)
             };
             transaction.rollback()?;
-            return Ok(result);
+            return Ok(WitnessOutcome::Released(result));
         }
         let invitation =
             PairingInvitation::decode(&record.invitation).map_err(map_pairing_error)?;
@@ -708,7 +741,9 @@ impl DurablePendingInvitation {
         let (outcome, artifact_hash, result, changed) = match classification {
             ClassifiedClaim::NonCounting => {
                 transaction.rollback()?;
-                return Ok(ClaimSubmission::Rejected { reason: None });
+                return Ok(WitnessOutcome::Released(ClaimSubmission::Rejected {
+                    reason: None,
+                }));
             }
             ClassifiedClaim::EligibleFailure { claim_hash, reason } => {
                 if let Some(failed) = record
@@ -718,15 +753,15 @@ impl DurablePendingInvitation {
                 {
                     let result = failed_result(failed)?;
                     transaction.rollback()?;
-                    return Ok(result);
+                    return Ok(WitnessOutcome::Released(result));
                 }
                 if record.state == InvitationLifecycle::Expired {
                     transaction.rollback()?;
-                    return Ok(ClaimSubmission::Expired);
+                    return Ok(WitnessOutcome::Released(ClaimSubmission::Expired));
                 }
                 if record.state == InvitationLifecycle::Cancelled {
                     transaction.rollback()?;
-                    return Ok(ClaimSubmission::Cancelled);
+                    return Ok(WitnessOutcome::Released(ClaimSubmission::Cancelled));
                 }
                 if matches!(
                     record.state,
@@ -775,11 +810,11 @@ impl DurablePendingInvitation {
             ClassifiedClaim::Eligible { claim_hash, claim } => {
                 if record.state == InvitationLifecycle::Expired {
                     transaction.rollback()?;
-                    return Ok(ClaimSubmission::Expired);
+                    return Ok(WitnessOutcome::Released(ClaimSubmission::Expired));
                 }
                 if record.state == InvitationLifecycle::Cancelled {
                     transaction.rollback()?;
-                    return Ok(ClaimSubmission::Cancelled);
+                    return Ok(WitnessOutcome::Released(ClaimSubmission::Cancelled));
                 }
                 if let Some((pending_hash, _)) = &record.pending_claim {
                     if *pending_hash == claim_hash {
@@ -804,7 +839,7 @@ impl DurablePendingInvitation {
                             _ => return Err(PersistenceError::Corrupt),
                         };
                         transaction.rollback()?;
-                        return Ok(result);
+                        return Ok(WitnessOutcome::Released(result));
                     }
                     (
                         OUTCOME_CONFLICT,
@@ -838,14 +873,16 @@ impl DurablePendingInvitation {
                 }
             }
         };
-        if changed {
-            transaction
-                .provider
-                .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
+        if !changed && outcome != OUTCOME_CONFLICT {
+            transaction.rollback()?;
+            return Err(PersistenceError::Corrupt);
         }
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        // A recorded conflict changes operation history and the clock state; the remaining
+        // record fields are unchanged. Both are authenticated endpoint state and advance.
+        transaction
+            .provider
+            .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -855,8 +892,8 @@ impl DurablePendingInvitation {
                 artifact_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(result)
+        let request = transaction.commit_witnessed(TypedResult::Claim(result))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn confirm_claim(
@@ -864,17 +901,17 @@ impl DurablePendingInvitation {
         operation_id: Id,
         claim_hash: [u8; 48],
         reservation_id: Id,
-    ) -> Result<ReservationOutcome, PersistenceError> {
-        self.expire_if_needed()?;
-        let fingerprint =
-            operation_fingerprint_parts(OP_CONFIRM_CLAIM, &[&claim_hash, &reservation_id])?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-            let result = reservation_from_operation(existing, &record)?;
-            transaction.rollback()?;
-            return Ok(result);
+    ) -> Result<WitnessOutcome<ReservationOutcome>, PersistenceError> {
+        if let Some(expiry) = self.expire_if_needed()? {
+            return Ok(WitnessOutcome::Pending(expiry));
         }
+        let fingerprint =
+            operation_fingerprint(op_kind::CLAIM_CONFIRM, &[&claim_hash, &reservation_id])?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::CLAIM_CONFIRM,
+            fingerprint
+        )?);
         let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         record.last_now_ms = now;
@@ -956,9 +993,7 @@ impl DurablePendingInvitation {
         transaction
             .provider
             .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -968,50 +1003,42 @@ impl DurablePendingInvitation {
                 artifact_hash: claim_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(result)
+        let request = transaction.commit_witnessed(TypedResult::Reservation(result))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn release_reservation(
         &mut self,
         operation_id: Id,
         reservation_id: Id,
-    ) -> Result<ReservationOutcome, PersistenceError> {
-        self.expire_if_needed()?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(
-            operation_id,
-            operation_fingerprint_parts(OP_RELEASE_RESERVATION, &[&reservation_id])?,
-        )? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record)
-                    if record.kind == OP_RELEASE_RESERVATION
-                        && record.outcome == OUTCOME_REJECTED_KEY_PACKAGE =>
-                {
-                    Ok(ReservationOutcome::Unavailable)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
+    ) -> Result<WitnessOutcome<ReservationOutcome>, PersistenceError> {
+        if let Some(expiry) = self.expire_if_needed()? {
+            return Ok(WitnessOutcome::Pending(expiry));
         }
+        let fingerprint = operation_fingerprint(op_kind::RESERVATION_RELEASE, &[&reservation_id])?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::RESERVATION_RELEASE,
+            fingerprint
+        )?);
         let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         record.last_now_ms = now;
         let Some((stored_id, deadline)) = record.reservation else {
             transaction.rollback()?;
-            return Ok(ReservationOutcome::Unavailable);
+            return Ok(WitnessOutcome::Released(ReservationOutcome::Unavailable));
         };
         if stored_id != reservation_id {
             transaction.rollback()?;
-            return Ok(ReservationOutcome::Busy);
+            return Ok(WitnessOutcome::Released(ReservationOutcome::Busy));
         }
         if record.welcome.is_some() || record.state == InvitationLifecycle::Consumed {
             transaction.rollback()?;
-            return Ok(ReservationOutcome::Consumed);
+            return Ok(WitnessOutcome::Released(ReservationOutcome::Consumed));
         }
         if now >= deadline {
             transaction.rollback()?;
-            return Ok(ReservationOutcome::Expired);
+            return Ok(WitnessOutcome::Released(ReservationOutcome::Expired));
         }
         let released_claim_hash = record
             .accepted_claim_hash
@@ -1023,9 +1050,7 @@ impl DurablePendingInvitation {
         transaction
             .provider
             .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -1035,29 +1060,25 @@ impl DurablePendingInvitation {
                 artifact_hash: released_claim_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(ReservationOutcome::Unavailable)
+        let request = transaction
+            .commit_witnessed(TypedResult::Reservation(ReservationOutcome::Unavailable))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn create_welcome(
         &mut self,
         operation_id: Id,
         reservation_id: Id,
-    ) -> Result<WelcomeOutcome, PersistenceError> {
-        self.expire_if_needed()?;
-        let fingerprint = operation_fingerprint_parts(OP_CREATE_WELCOME, &[&reservation_id])?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-            let now = checked_pairing_now(&self.store, record.last_now_ms)?;
-            let result = if welcome_is_expired(&record, now)? {
-                WelcomeOutcome::Expired
-            } else {
-                welcome_from_pairing_operation(existing, &record, true)?
-            };
-            transaction.rollback()?;
-            return Ok(result);
+    ) -> Result<WitnessOutcome<WelcomeOutcome>, PersistenceError> {
+        if let Some(expiry) = self.expire_if_needed()? {
+            return Ok(WitnessOutcome::Pending(expiry));
         }
+        let fingerprint = operation_fingerprint(op_kind::WELCOME_CREATE, &[&reservation_id])?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::WELCOME_CREATE,
+            fingerprint
+        )?);
         let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         if record.state == InvitationLifecycle::Consumed {
@@ -1069,27 +1090,27 @@ impl DurablePendingInvitation {
                     .unwrap_or(WelcomeOutcome::Consumed)
             };
             transaction.rollback()?;
-            return Ok(result);
+            return Ok(WitnessOutcome::Released(result));
         }
         if record.state == InvitationLifecycle::Expired {
             transaction.rollback()?;
-            return Ok(WelcomeOutcome::Expired);
+            return Ok(WitnessOutcome::Released(WelcomeOutcome::Expired));
         }
         if record.state != InvitationLifecycle::Confirmed {
             transaction.rollback()?;
-            return Ok(WelcomeOutcome::Rejected);
+            return Ok(WitnessOutcome::Released(WelcomeOutcome::Rejected));
         }
         let Some((stored_reservation, deadline)) = record.reservation else {
             transaction.rollback()?;
-            return Ok(WelcomeOutcome::Unavailable);
+            return Ok(WitnessOutcome::Released(WelcomeOutcome::Unavailable));
         };
         if stored_reservation != reservation_id {
             transaction.rollback()?;
-            return Ok(WelcomeOutcome::Busy);
+            return Ok(WitnessOutcome::Released(WelcomeOutcome::Busy));
         }
         if now >= deadline {
             transaction.rollback()?;
-            return Ok(WelcomeOutcome::Expired);
+            return Ok(WitnessOutcome::Released(WelcomeOutcome::Expired));
         }
         let (_, claim_bytes) = record
             .pending_claim
@@ -1165,20 +1186,17 @@ impl DurablePendingInvitation {
                     .ok_or(PersistenceError::Corrupt)?,
             },
         ))?;
-        transaction.commit_operation()?;
-        self.store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        Ok(WelcomeOutcome::Committed(
+        let request = transaction.commit_witnessed(TypedResult::Welcome(
             welcome_publication(&record).ok_or(PersistenceError::Corrupt)?,
-        ))
+        ))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn recover_welcome(
         &mut self,
         claim_hash: [u8; 48],
     ) -> Result<WelcomeOutcome, PersistenceError> {
-        self.expire_welcome_if_needed()?;
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
@@ -1206,28 +1224,17 @@ impl DurablePendingInvitation {
         operation_id: Id,
         logical_message_id: Id,
         ciphertext: &[u8],
-    ) -> Result<ActivationOutcome, PersistenceError> {
+    ) -> Result<WitnessOutcome<ActivationOutcome>, PersistenceError> {
         let ciphertext_hash = sha384(ciphertext).map_err(map_pairing_error)?;
-        let fingerprint =
-            operation_fingerprint_parts(OP_ACCEPT_ACTIVATION, &[&logical_message_id, ciphertext])?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            let result = match existing {
-                super::CommittedOperation::Pairing(operation)
-                    if operation.outcome == OUTCOME_ACTIVATED =>
-                {
-                    let record =
-                        daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-                    Ok(ActivationOutcome::Duplicate(activation_acceptance(
-                        &record,
-                        operation.artifact_hash,
-                    )?))
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-            transaction.rollback()?;
-            return result;
-        }
+        let fingerprint = operation_fingerprint(
+            op_kind::ACTIVATION_RECEIVE,
+            &[&logical_message_id, ciphertext],
+        )?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::ACTIVATION_RECEIVE,
+            fingerprint
+        )?);
         let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         if record.activation_accepted {
@@ -1237,14 +1244,14 @@ impl DurablePendingInvitation {
                 ActivationOutcome::Rejected
             };
             transaction.rollback()?;
-            return Ok(result);
+            return Ok(WitnessOutcome::Released(result));
         }
         if record.state != InvitationLifecycle::Consumed
             || record.welcome.is_none()
             || welcome_is_expired(&record, now)?
         {
             transaction.rollback()?;
-            return Ok(ActivationOutcome::Rejected);
+            return Ok(WitnessOutcome::Released(ActivationOutcome::Rejected));
         }
         let mut daemon = super::load_daemon(
             &transaction.provider,
@@ -1287,8 +1294,8 @@ impl DurablePendingInvitation {
             },
         ))?;
         let acceptance = activation_acceptance(&record, ciphertext_hash)?;
-        transaction.commit_operation()?;
-        Ok(ActivationOutcome::Activated(acceptance))
+        let request = transaction.commit_witnessed(TypedResult::Activation(acceptance))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn prepare_application(
@@ -1297,7 +1304,7 @@ impl DurablePendingInvitation {
         logical_message_id: Id,
         hosted_generation: u64,
         plaintext: &[u8],
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
         self.require_active()?;
         super::DurableDaemon {
             store: Arc::clone(&self.store),
@@ -1316,7 +1323,7 @@ impl DurablePendingInvitation {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<super::DurablePlaintext, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::DurablePlaintext>, PersistenceError> {
         self.require_active()?;
         super::DurableDaemon {
             store: Arc::clone(&self.store),
@@ -1337,7 +1344,7 @@ impl DurablePendingInvitation {
         &mut self,
         acknowledgement_operation_id: Id,
         outbox_operation_id: Id,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
         super::acknowledge_outbox(
             &self.store,
             acknowledgement_operation_id,
@@ -1349,7 +1356,7 @@ impl DurablePendingInvitation {
         &mut self,
         acknowledgement_operation_id: Id,
         receive_operation_id: Id,
-    ) -> Result<super::AcceptedMessageRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::AcceptedMessageRecord>, PersistenceError> {
         super::acknowledge_receive(
             &self.store,
             acknowledgement_operation_id,
@@ -1366,6 +1373,7 @@ impl DurablePendingInvitation {
     }
 
     pub fn pair_lifecycle(&self) -> Result<Option<PairLifecycle>, PersistenceError> {
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let state =
             daemon_record(&transaction.provider, self.store.crypto_session_id)?.pair_lifecycle;
@@ -1379,23 +1387,20 @@ impl DurablePendingInvitation {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<super::AcceptedMessageRecord, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_ACCEPT_UPDATE,
+    ) -> Result<WitnessOutcome<super::AcceptedMessageRecord>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::PROPOSAL_RECEIVE,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 ciphertext,
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Accepted(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::PROPOSAL_RECEIVE,
+            fingerprint
+        )?);
         let mut lifecycle = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         if lifecycle.pair_lifecycle != Some(PairLifecycle::Active) {
             transaction.rollback()?;
@@ -1428,8 +1433,8 @@ impl DurablePendingInvitation {
             acknowledged: false,
         };
         transaction.stage_accepted_record(accepted.clone())?;
-        transaction.commit_operation()?;
-        Ok(accepted)
+        let request = transaction.commit_witnessed(TypedResult::Accepted(accepted))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn create_update_commit(
@@ -1437,7 +1442,7 @@ impl DurablePendingInvitation {
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
         self.create_lifecycle_commit(
             operation_id,
             logical_message_id,
@@ -1453,7 +1458,7 @@ impl DurablePendingInvitation {
         logical_message_id: Id,
         hosted_generation: u64,
         acceptance: &EpochReadyAcceptance,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
         self.require_active()?;
         if acceptance.crypto_session_id != self.store.crypto_session_id {
             return Err(PersistenceError::IdentityMismatch);
@@ -1475,15 +1480,21 @@ impl DurablePendingInvitation {
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<RemovalOutcome, PersistenceError> {
-        self.create_lifecycle_commit(
-            operation_id,
-            logical_message_id,
-            hosted_generation,
-            true,
-            false,
+    ) -> Result<WitnessOutcome<RemovalOutcome>, PersistenceError> {
+        Ok(
+            match self.create_lifecycle_commit(
+                operation_id,
+                logical_message_id,
+                hosted_generation,
+                true,
+                false,
+            )? {
+                WitnessOutcome::Pending(request) => WitnessOutcome::Pending(request),
+                WitnessOutcome::Released(record) => {
+                    WitnessOutcome::Released(RemovalOutcome::Commit(record))
+                }
+            },
         )
-        .map(RemovalOutcome::Commit)
     }
 
     pub fn revoke_device(
@@ -1491,15 +1502,21 @@ impl DurablePendingInvitation {
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<RemovalOutcome, PersistenceError> {
-        self.create_lifecycle_commit(
-            operation_id,
-            logical_message_id,
-            hosted_generation,
-            true,
-            true,
+    ) -> Result<WitnessOutcome<RemovalOutcome>, PersistenceError> {
+        Ok(
+            match self.create_lifecycle_commit(
+                operation_id,
+                logical_message_id,
+                hosted_generation,
+                true,
+                true,
+            )? {
+                WitnessOutcome::Pending(request) => WitnessOutcome::Pending(request),
+                WitnessOutcome::Released(record) => {
+                    WitnessOutcome::Released(RemovalOutcome::Commit(record))
+                }
+            },
         )
-        .map(RemovalOutcome::Commit)
     }
 
     fn create_lifecycle_commit(
@@ -1509,19 +1526,32 @@ impl DurablePendingInvitation {
         hosted_generation: u64,
         removal: bool,
         revoked: bool,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            if removal { OP_REMOVE } else { OP_UPDATE_COMMIT },
-            &[&logical_message_id, &hosted_generation.to_be_bytes()],
-        )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Envelope(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
+        let kind = if removal {
+            op_kind::REMOVAL_COMMIT
+        } else {
+            op_kind::DAEMON_COMMIT
+        };
+        let fingerprint = if removal {
+            operation_fingerprint(
+                kind,
+                &[
+                    &logical_message_id,
+                    &hosted_generation.to_be_bytes(),
+                    &[u8::from(revoked)],
+                ],
+            )?
+        } else {
+            operation_fingerprint(
+                kind,
+                &[&logical_message_id, &hosted_generation.to_be_bytes()],
+            )?
+        };
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            kind,
+            fingerprint
+        )?);
         let mut lifecycle = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let allowed = if removal {
             matches!(
@@ -1568,11 +1598,10 @@ impl DurablePendingInvitation {
             &daemon.endpoint.epoch_authenticator()?,
         );
         transaction.stage_envelope(&envelope)?;
-        let committed = transaction.commit_operation()?;
-        match committed {
-            super::CommittedOperation::Envelope(record) => Ok(record),
-            _ => Err(PersistenceError::Corrupt),
-        }
+        let request = transaction.commit_witnessed(TypedResult::Envelope(
+            super::envelope_record(operation_id, &envelope),
+        ))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn accept_epoch_ready(
@@ -1581,28 +1610,20 @@ impl DurablePendingInvitation {
         logical_message_id: Id,
         hosted_generation: u64,
         ciphertext: &[u8],
-    ) -> Result<EpochReadyAcceptance, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_EPOCH_READY,
+    ) -> Result<WitnessOutcome<EpochReadyAcceptance>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::EPOCH_READY_RECEIVE,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 ciphertext,
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_UPDATED => {
-                    Ok(EpochReadyAcceptance {
-                        crypto_session_id: self.store.crypto_session_id,
-                        commit_id: record.artifact_hash,
-                    })
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::EPOCH_READY_RECEIVE,
+            fingerprint
+        )?);
         let mut lifecycle = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         if lifecycle.pair_lifecycle != Some(PairLifecycle::WaitingForEpochReady) {
             transaction.rollback()?;
@@ -1646,18 +1667,25 @@ impl DurablePendingInvitation {
                 artifact_hash: expected.commit_id,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(EpochReadyAcceptance {
-            crypto_session_id: self.store.crypto_session_id,
-            commit_id: expected.commit_id,
-        })
+        let request =
+            transaction.commit_witnessed(TypedResult::EpochReady(EpochReadyAcceptance {
+                crypto_session_id: self.store.crypto_session_id,
+                commit_id: expected.commit_id,
+            }))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
-    pub fn reset(&mut self, operation_id: Id) -> Result<RemovalOutcome, PersistenceError> {
+    pub fn reset(
+        &mut self,
+        operation_id: Id,
+    ) -> Result<WitnessOutcome<RemovalOutcome>, PersistenceError> {
         self.finish_locally(operation_id, false)
     }
 
-    pub fn mark_revoked(&mut self, operation_id: Id) -> Result<RemovalOutcome, PersistenceError> {
+    pub fn mark_revoked(
+        &mut self,
+        operation_id: Id,
+    ) -> Result<WitnessOutcome<RemovalOutcome>, PersistenceError> {
         self.finish_locally(operation_id, true)
     }
 
@@ -1665,27 +1693,22 @@ impl DurablePendingInvitation {
         &mut self,
         operation_id: Id,
         revoked: bool,
-    ) -> Result<RemovalOutcome, PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        let existing = transaction.bind_operation(
+    ) -> Result<WitnessOutcome<RemovalOutcome>, PersistenceError> {
+        let kind = if revoked {
+            op_kind::LOCAL_REVOCATION
+        } else {
+            op_kind::RESET
+        };
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
             operation_id,
-            operation_fingerprint(OP_RESET, &[u8::from(revoked)])?,
-        )?;
+            kind,
+            operation_fingerprint(kind, &[])?
+        )?);
         let mut lifecycle = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-        if let Some(existing) = existing {
-            let result = match existing {
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_REMOVED => {
-                    RemovalOutcome::Revoked
-                }
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_RESET => {
-                    RemovalOutcome::RePairRequired(re_pair_requirement(&lifecycle)?)
-                }
-                _ => return Err(PersistenceError::Conflict),
-            };
+        if lifecycle.group_id.is_none() {
             transaction.rollback()?;
-            return Ok(result);
+            return Err(PersistenceError::Conflict);
         }
-        lifecycle.group_id.ok_or(PersistenceError::Conflict)?;
         lifecycle.pair_lifecycle = Some(if revoked {
             PairLifecycle::Revoked
         } else {
@@ -1696,9 +1719,7 @@ impl DurablePendingInvitation {
             DAEMON_PAIRING_KEY.to_vec(),
             encode_daemon_record(&lifecycle)?,
         );
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -1712,36 +1733,31 @@ impl DurablePendingInvitation {
                 artifact_hash: lifecycle.accepted_claim_hash.unwrap_or([0; 48]),
             },
         ))?;
-        transaction.commit_operation()?;
-        let requirement = re_pair_requirement(&lifecycle)?;
-        Ok(if revoked {
+        let result = if revoked {
             RemovalOutcome::Revoked
         } else {
-            RemovalOutcome::RePairRequired(requirement)
-        })
+            RemovalOutcome::RePairRequired(re_pair_requirement(&lifecycle)?)
+        };
+        let request = transaction.commit_witnessed(TypedResult::Removal(result))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn close(&self) -> Result<(), PersistenceError> {
         self.store.close()
     }
 
-    pub fn cancel(&mut self, operation_id: Id) -> Result<InvitationLifecycle, PersistenceError> {
-        self.expire_if_needed()?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(
-            operation_id,
-            operation_fingerprint(OP_CANCEL_INVITATION, &[])?,
-        )? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record)
-                    if record.outcome == OUTCOME_CANCELLED =>
-                {
-                    Ok(InvitationLifecycle::Cancelled)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
+    pub fn cancel(
+        &mut self,
+        operation_id: Id,
+    ) -> Result<WitnessOutcome<InvitationLifecycle>, PersistenceError> {
+        if let Some(expiry) = self.expire_if_needed()? {
+            return Ok(WitnessOutcome::Pending(expiry));
         }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::INVITATION_CANCEL,
+            operation_fingerprint(op_kind::INVITATION_CANCEL, &[])?
+        )?);
         let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = self.store.clock.now_ms().map_err(PersistenceError::Core)?;
         if now < record.last_now_ms {
@@ -1760,11 +1776,11 @@ impl DurablePendingInvitation {
             }
             InvitationLifecycle::Cancelled => {
                 transaction.rollback()?;
-                return Ok(InvitationLifecycle::Cancelled);
+                return Ok(WitnessOutcome::Released(InvitationLifecycle::Cancelled));
             }
             InvitationLifecycle::Expired => {
                 transaction.rollback()?;
-                return Ok(InvitationLifecycle::Expired);
+                return Ok(WitnessOutcome::Released(InvitationLifecycle::Expired));
             }
             InvitationLifecycle::Confirmed | InvitationLifecycle::Consumed => {
                 transaction.rollback()?;
@@ -1786,34 +1802,45 @@ impl DurablePendingInvitation {
                 artifact_hash: record.invitation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(InvitationLifecycle::Cancelled)
+        let request = transaction.commit_witnessed(TypedResult::InvitationLifecycle(
+            InvitationLifecycle::Cancelled,
+        ))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
-    fn expire_welcome_if_needed(&mut self) -> Result<(), PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-        let now = checked_pairing_now(&self.store, record.last_now_ms)?;
-        let Some(expires_at_ms) = record.welcome_expires_at_ms else {
+    /// Durably expire an unacknowledged Welcome once its deadline passes. Returns the pending
+    /// request of the deterministic expiry operation, or `None` when nothing is due.
+    pub fn expire_welcome_if_needed(
+        &mut self,
+    ) -> Result<Option<PendingWitnessRequest>, PersistenceError> {
+        let (record, now) = {
+            let transaction = begin_current(&self.store)?;
+            let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
+            let now = checked_pairing_now(&self.store, record.last_now_ms)?;
             transaction.rollback()?;
-            return Ok(());
+            (record, now)
+        };
+        let Some(expires_at_ms) = record.welcome_expires_at_ms else {
+            return Ok(None);
         };
         if now < expires_at_ms || record.activation_accepted {
-            transaction.rollback()?;
-            return Ok(());
+            return Ok(None);
         }
         let operation_id = expiry_operation_id(b"welcome", record.invitation_hash)?;
-        let fingerprint = operation_fingerprint_parts(
-            OP_EXPIRE_WELCOME,
+        let fingerprint = operation_fingerprint(
+            op_kind::WELCOME_EXPIRY,
             &[&record.invitation_hash, &expires_at_ms.to_be_bytes()],
         )?;
-        if transaction
-            .bind_operation(operation_id, fingerprint)?
-            .is_some()
-        {
-            transaction.rollback()?;
-            return Ok(());
-        }
+        let mut transaction =
+            match self
+                .store
+                .begin_witnessed(operation_id, op_kind::WELCOME_EXPIRY, fingerprint)?
+            {
+                Lookup::Pending(request) => return Ok(Some(request)),
+                Lookup::Released(_) => return Ok(None),
+                Lookup::Fresh(transaction) => transaction,
+            };
+        let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         record.last_now_ms = now;
         record.welcome = None;
         record.welcome_expires_at_ms = None;
@@ -1822,9 +1849,7 @@ impl DurablePendingInvitation {
         transaction
             .provider
             .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -1834,16 +1859,23 @@ impl DurablePendingInvitation {
                 artifact_hash: record.invitation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(())
+        let state = record.state;
+        let request = transaction.commit_witnessed(TypedResult::InvitationLifecycle(state))?;
+        Ok(Some(request))
     }
 
-    fn expire_if_needed(&mut self) -> Result<(), PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
-        let now = self.store.clock.now_ms().map_err(PersistenceError::Core)?;
-        if now < record.last_now_ms {
+    /// Durably expire the invitation once its deadline passes. Expiry is a witnessed operation
+    /// with its deterministic operation ID; it cannot bypass a pending operation. Returns the
+    /// pending expiry request, or `None` when nothing is due or expiry already completed.
+    pub fn expire_if_needed(&mut self) -> Result<Option<PendingWitnessRequest>, PersistenceError> {
+        let (record, now) = {
+            let transaction = begin_current(&self.store)?;
+            let record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
+            let now = self.store.clock.now_ms().map_err(PersistenceError::Core)?;
             transaction.rollback()?;
+            (record, now)
+        };
+        if now < record.last_now_ms {
             return Err(PersistenceError::Core(crate::Error::ClockRollback));
         }
         if now < record.expires_at_ms
@@ -1854,33 +1886,33 @@ impl DurablePendingInvitation {
                     | InvitationLifecycle::Expired
             )
         {
-            transaction.rollback()?;
-            return Ok(());
+            return Ok(None);
         }
+        let operation_id = expiry_operation_id(b"daemon", record.invitation_hash)?;
+        let fingerprint = operation_fingerprint(
+            op_kind::INVITATION_EXPIRY,
+            &[&record.invitation_hash, &record.expires_at_ms.to_be_bytes()],
+        )?;
+        let mut transaction = match self.store.begin_witnessed(
+            operation_id,
+            op_kind::INVITATION_EXPIRY,
+            fingerprint,
+        )? {
+            Lookup::Pending(request) => return Ok(Some(request)),
+            Lookup::Released(_) => return Ok(None),
+            Lookup::Fresh(transaction) => *transaction,
+        };
+        let mut record = daemon_record(&transaction.provider, self.store.crypto_session_id)?;
         record.last_now_ms = now;
         record.state = InvitationLifecycle::Expired;
         record.pending_claim = None;
         record.accepted_claim_hash = None;
         record.accepted_result = None;
         record.reservation = None;
-        let operation_id = expiry_operation_id(b"daemon", record.invitation_hash)?;
-        let fingerprint = operation_fingerprint_parts(
-            OP_EXPIRE_INVITATION,
-            &[&record.invitation_hash, &record.expires_at_ms.to_be_bytes()],
-        )?;
-        if transaction
-            .bind_operation(operation_id, fingerprint)?
-            .is_some()
-        {
-            transaction.rollback()?;
-            return Ok(());
-        }
         transaction
             .provider
             .insert_internal(DAEMON_PAIRING_KEY.to_vec(), encode_daemon_record(&record)?);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -1890,8 +1922,10 @@ impl DurablePendingInvitation {
                 artifact_hash: record.invitation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(())
+        let request = transaction.commit_witnessed(TypedResult::InvitationLifecycle(
+            InvitationLifecycle::Expired,
+        ))?;
+        Ok(Some(request))
     }
 
     #[cfg(test)]
@@ -1914,15 +1948,19 @@ impl DurablePendingInvitation {
         &self,
         operation_id: Id,
         bytes: &[u8],
-    ) -> Result<(), PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        transaction.bind_operation(operation_id, operation_fingerprint(255, bytes)?)?;
+    ) -> Result<PendingWitnessRequest, PersistenceError> {
+        let mut transaction = match self.store.begin_witnessed(
+            operation_id,
+            op_kind::LEGACY_CREATE,
+            operation_fingerprint(op_kind::LEGACY_CREATE, &[b"replace-record", bytes])?,
+        )? {
+            Lookup::Fresh(transaction) => *transaction,
+            _ => return Err(PersistenceError::Conflict),
+        };
         transaction
             .provider
             .insert_internal(DAEMON_PAIRING_KEY.to_vec(), bytes.to_vec());
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -1932,7 +1970,7 @@ impl DurablePendingInvitation {
                 artifact_hash: sha384(bytes).map_err(map_pairing_error)?,
             },
         ))?;
-        transaction.commit_operation().map(|_| ())
+        transaction.commit_witnessed(TypedResult::Empty)
     }
 
     #[cfg(test)]
@@ -1971,13 +2009,20 @@ impl DurablePendingInvitation {
     }
 
     #[cfg(test)]
-    pub(crate) fn remove_record_for_test(&self, operation_id: Id) -> Result<(), PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        transaction.bind_operation(operation_id, operation_fingerprint(254, &[])?)?;
+    pub(crate) fn remove_record_for_test(
+        &self,
+        operation_id: Id,
+    ) -> Result<PendingWitnessRequest, PersistenceError> {
+        let mut transaction = match self.store.begin_witnessed(
+            operation_id,
+            op_kind::LEGACY_CREATE,
+            operation_fingerprint(op_kind::LEGACY_CREATE, &[b"remove-record"])?,
+        )? {
+            Lookup::Fresh(transaction) => *transaction,
+            _ => return Err(PersistenceError::Conflict),
+        };
         transaction.provider.remove_internal(DAEMON_PAIRING_KEY);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -1987,7 +2032,7 @@ impl DurablePendingInvitation {
                 artifact_hash: [0; 48],
             },
         ))?;
-        transaction.commit_operation().map(|_| ())
+        transaction.commit_witnessed(TypedResult::Empty)
     }
 }
 
@@ -1998,15 +2043,15 @@ impl DurablePreJoinDevice {
         invitation_bytes: &[u8],
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
-    ) -> Result<(Self, PreJoinPublication), PersistenceError> {
+        trust: Arc<ReplicaTrustSet>,
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         Self::prepare_with_runtime_and_requirement(
             root,
             identity,
             invitation_bytes,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             DevicePreparation {
                 runtime: RuntimeHooks {
                     faults: Arc::new(NoFaults),
@@ -2023,16 +2068,16 @@ impl DurablePreJoinDevice {
         invitation_bytes: &[u8],
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         requirement: &RePairRequirement,
-    ) -> Result<(Self, PreJoinPublication), PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         Self::prepare_with_runtime_and_requirement(
             root,
             identity,
             invitation_bytes,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             DevicePreparation {
                 runtime: RuntimeHooks {
                     faults: Arc::new(NoFaults),
@@ -2050,9 +2095,9 @@ impl DurablePreJoinDevice {
         invitation_bytes: &[u8],
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime_and_requirement: (RuntimeHooks, &RePairRequirement),
-    ) -> Result<(Self, PreJoinPublication), PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         let (runtime, requirement) = runtime_and_requirement;
         Self::prepare_with_runtime_and_requirement(
             root,
@@ -2060,7 +2105,7 @@ impl DurablePreJoinDevice {
             invitation_bytes,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             DevicePreparation {
                 runtime,
                 requirement: Some(requirement),
@@ -2075,16 +2120,16 @@ impl DurablePreJoinDevice {
         invitation_bytes: &[u8],
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
-    ) -> Result<(Self, PreJoinPublication), PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         Self::prepare_with_runtime_and_requirement(
             root,
             identity,
             invitation_bytes,
             operation_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             DevicePreparation {
                 runtime,
                 requirement: None,
@@ -2098,9 +2143,9 @@ impl DurablePreJoinDevice {
         invitation_bytes: &[u8],
         operation_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         preparation: DevicePreparation<'_>,
-    ) -> Result<(Self, PreJoinPublication), PersistenceError> {
+    ) -> Result<(Self, PendingWitnessRequest), PersistenceError> {
         let DevicePreparation {
             runtime,
             requirement,
@@ -2121,12 +2166,27 @@ impl DurablePreJoinDevice {
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
-        let mut transaction = store.begin_transaction(crypto_session_id, 0, 0)?;
-        transaction.bind_operation(operation_id, operation_fingerprint(23, invitation_bytes)?)?;
+        let requirement_field = requirement.map(encode_re_pair_requirement);
+        let fingerprint = operation_fingerprint(
+            op_kind::DEVICE_PRE_JOIN,
+            &[
+                &[identity.role as u8],
+                &identity.account_id,
+                &identity.installation_id,
+                &identity.device_id,
+                invitation_bytes,
+                &optional_field(requirement_field.as_deref()),
+            ],
+        )?;
+        let mut transaction =
+            match store.begin_witnessed(operation_id, op_kind::DEVICE_PRE_JOIN, fingerprint)? {
+                Lookup::Fresh(transaction) => *transaction,
+                Lookup::Pending(_) | Lookup::Released(_) => return Err(PersistenceError::Conflict),
+            };
         store.faults.check(FaultPoint::BeforeOpenMlsStateWrites)?;
         let (phone, package) = Phone::create_at(identity.clone(), now_ms)?;
         let key_package_hash = sha384(package.bytes()).map_err(map_pairing_error)?;
@@ -2167,6 +2227,7 @@ impl DurablePreJoinDevice {
             activation: None,
             pair_lifecycle: None,
             pending_commit: None,
+            epoch_ready_prepared: false,
             forbidden_group_id: requirement.and_then(|value| value.group_id),
         };
         super::persist_phone_metadata(&phone, &phone.provider, None, now_ms);
@@ -2184,27 +2245,22 @@ impl DurablePreJoinDevice {
                 artifact_hash: claim.claim_hash().map_err(map_pairing_error)?,
             },
         ))?;
-        transaction.commit_operation()?;
-        store.faults.check(FaultPoint::BeforeInitializationReady)?;
-        store.mark_ready()?;
-        let publication = prejoin_publication(&record);
-        store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        Ok((Self { store }, publication))
+        let request =
+            transaction.commit_witnessed(TypedResult::PreJoin(prejoin_publication(&record)))?;
+        Ok((Self { store }, request))
     }
 
     pub fn open(
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
     ) -> Result<Self, PersistenceError> {
         Self::open_with_runtime(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             RuntimeHooks {
                 faults: Arc::new(NoFaults),
                 clock: Arc::new(SystemClock),
@@ -2216,14 +2272,14 @@ impl DurablePreJoinDevice {
         root: &Path,
         crypto_session_id: Id,
         envelope_keys: Arc<dyn EnvelopeKeyStore>,
-        rollback_anchor: Arc<dyn RollbackAnchor>,
+        trust: Arc<ReplicaTrustSet>,
         runtime: RuntimeHooks,
     ) -> Result<Self, PersistenceError> {
         let store = NativeTransactionalProvider::open(
             root,
             crypto_session_id,
             envelope_keys,
-            rollback_anchor,
+            trust,
             runtime.faults,
             runtime.clock,
         )?;
@@ -2244,30 +2300,28 @@ impl DurablePreJoinDevice {
         }
         transaction.rollback()?;
         store.finish_opening()?;
-        let mut endpoint = Self { store };
-        endpoint.expire_if_needed()?;
-        Ok(endpoint)
+        Ok(Self { store })
     }
 
     pub fn join(
         &mut self,
         operation_id: Id,
         welcome: &WelcomePublication,
-    ) -> Result<PreJoinLifecycle, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_JOIN_WELCOME,
-            &[welcome.bytes(), &welcome.group_id, &welcome.claim_hash],
+    ) -> Result<WitnessOutcome<PreJoinLifecycle>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::WELCOME_JOIN,
+            &[
+                welcome.bytes(),
+                &optional_field(Some(&welcome.group_id)),
+                &optional_field(Some(&welcome.claim_hash)),
+                &optional_field(Some(&welcome.expires_at_ms.to_be_bytes())),
+            ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_JOINED => {
-                    Ok(PreJoinLifecycle::Joined)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::WELCOME_JOIN,
+            fingerprint
+        )?);
         let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         if now >= welcome.expires_at_ms
@@ -2338,8 +2392,9 @@ impl DurablePreJoinDevice {
                 artifact_hash: welcome.claim_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(PreJoinLifecycle::Joined)
+        let request = transaction
+            .commit_witnessed(TypedResult::PreJoinLifecycle(PreJoinLifecycle::Joined))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn join_published_welcome(
@@ -2349,29 +2404,24 @@ impl DurablePreJoinDevice {
         claim_hash: [u8; 48],
         welcome_hash: [u8; 48],
         expires_at_ms: u64,
-    ) -> Result<PreJoinLifecycle, PersistenceError> {
+    ) -> Result<WitnessOutcome<PreJoinLifecycle>, PersistenceError> {
         if sha384(welcome_bytes).map_err(map_pairing_error)? != welcome_hash {
             return Err(PersistenceError::IdentityMismatch);
         }
-        let fingerprint = operation_fingerprint_parts(
-            OP_JOIN_WELCOME,
+        let fingerprint = operation_fingerprint(
+            op_kind::WELCOME_JOIN,
             &[
                 welcome_bytes,
-                &claim_hash,
-                &welcome_hash,
-                &expires_at_ms.to_be_bytes(),
+                &optional_field(None),
+                &optional_field(Some(&claim_hash)),
+                &optional_field(Some(&expires_at_ms.to_be_bytes())),
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_JOINED => {
-                    Ok(PreJoinLifecycle::Joined)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::WELCOME_JOIN,
+            fingerprint
+        )?);
         let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         if now >= expires_at_ms
@@ -2431,31 +2481,26 @@ impl DurablePreJoinDevice {
                 artifact_hash: claim_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(PreJoinLifecycle::Joined)
+        let request = transaction
+            .commit_witnessed(TypedResult::PreJoinLifecycle(PreJoinLifecycle::Joined))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn prepare_activation(
         &mut self,
         operation_id: Id,
         logical_message_id: Id,
-    ) -> Result<ActivationOutcome, PersistenceError> {
-        let fingerprint =
-            operation_fingerprint_parts(OP_CREATE_ACTIVATION, &[&logical_message_id])?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Envelope(record) => {
-                    Ok(ActivationOutcome::Prepared(record))
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+    ) -> Result<WitnessOutcome<ActivationOutcome>, PersistenceError> {
+        let fingerprint = operation_fingerprint(op_kind::ACTIVATION_SEND, &[&logical_message_id])?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::ACTIVATION_SEND,
+            fingerprint
+        )?);
         let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
         if record.state != PreJoinLifecycle::Joined {
             transaction.rollback()?;
-            return Ok(ActivationOutcome::Rejected);
+            return Ok(WitnessOutcome::Released(ActivationOutcome::Rejected));
         }
         let now = checked_pairing_now(&self.store, record.last_now_ms)?;
         if now
@@ -2464,7 +2509,7 @@ impl DurablePreJoinDevice {
                 .ok_or(PersistenceError::Corrupt)?
         {
             transaction.rollback()?;
-            return Ok(ActivationOutcome::Rejected);
+            return Ok(WitnessOutcome::Released(ActivationOutcome::Rejected));
         }
         let group_id = record.group_id.ok_or(PersistenceError::Corrupt)?;
         let claim_hash = sha384(&record.claim).map_err(map_pairing_error)?;
@@ -2485,23 +2530,19 @@ impl DurablePreJoinDevice {
         transaction.replace_provider_values(endpoint.provider.storage_values())?;
         transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
         transaction.stage_envelope(&envelope)?;
-        let committed = transaction.commit_operation()?;
-        self.store
-            .faults
-            .check(FaultPoint::AfterCommitBeforeNetworkSend)?;
-        match committed {
-            super::CommittedOperation::Envelope(record) => Ok(ActivationOutcome::Prepared(record)),
-            _ => Err(PersistenceError::Corrupt),
-        }
+        let request = transaction.commit_witnessed(TypedResult::Envelope(
+            super::envelope_record(operation_id, &envelope),
+        ))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn acknowledge_activation(
         &mut self,
         operation_id: Id,
         acceptance: &ActivationAcceptance,
-    ) -> Result<PairLifecycle, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_ACCEPT_ACTIVATION,
+    ) -> Result<WitnessOutcome<PairLifecycle>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::ACTIVATION_ACK,
             &[
                 &acceptance.crypto_session_id,
                 &acceptance.group_id,
@@ -2509,20 +2550,11 @@ impl DurablePreJoinDevice {
                 &acceptance.activation_hash,
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record)
-                    if record.kind == OP_ACCEPT_ACTIVATION
-                        && record.outcome == OUTCOME_ACTIVATED
-                        && record.artifact_hash == acceptance.activation_hash =>
-                {
-                    Ok(PairLifecycle::Active)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::ACTIVATION_ACK,
+            fingerprint
+        )?);
         let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let activation = record
             .activation
@@ -2545,9 +2577,7 @@ impl DurablePreJoinDevice {
         transaction
             .provider
             .insert_internal(DEVICE_PREJOIN_KEY.to_vec(), encode_device_record(&record)?);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -2557,8 +2587,9 @@ impl DurablePreJoinDevice {
                 artifact_hash: activation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(PairLifecycle::Active)
+        let request =
+            transaction.commit_witnessed(TypedResult::PairLifecycle(PairLifecycle::Active))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn prepare_application(
@@ -2567,7 +2598,7 @@ impl DurablePreJoinDevice {
         logical_message_id: Id,
         hosted_generation: u64,
         plaintext: &[u8],
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
         self.require_active()?;
         super::DurablePhone {
             store: Arc::clone(&self.store),
@@ -2586,7 +2617,7 @@ impl DurablePreJoinDevice {
         ciphertext: &[u8],
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<super::DurablePlaintext, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::DurablePlaintext>, PersistenceError> {
         self.require_active()?;
         super::DurablePhone {
             store: Arc::clone(&self.store),
@@ -2607,7 +2638,7 @@ impl DurablePreJoinDevice {
         &mut self,
         acknowledgement_operation_id: Id,
         outbox_operation_id: Id,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
         super::acknowledge_outbox(
             &self.store,
             acknowledgement_operation_id,
@@ -2619,7 +2650,7 @@ impl DurablePreJoinDevice {
         &mut self,
         acknowledgement_operation_id: Id,
         receive_operation_id: Id,
-    ) -> Result<super::AcceptedMessageRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<super::AcceptedMessageRecord>, PersistenceError> {
         super::acknowledge_receive(
             &self.store,
             acknowledgement_operation_id,
@@ -2636,6 +2667,7 @@ impl DurablePreJoinDevice {
     }
 
     pub fn pair_lifecycle(&self) -> Result<Option<PairLifecycle>, PersistenceError> {
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let state =
             device_record(&transaction.provider, self.store.crypto_session_id)?.pair_lifecycle;
@@ -2648,19 +2680,16 @@ impl DurablePreJoinDevice {
         operation_id: Id,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_SELF_UPDATE,
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::PROPOSAL_SEND,
             &[&logical_message_id, &hosted_generation.to_be_bytes()],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Envelope(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::PROPOSAL_SEND,
+            fingerprint
+        )?);
         let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
         if lifecycle.pair_lifecycle != Some(PairLifecycle::Active) {
             transaction.rollback()?;
@@ -2682,46 +2711,44 @@ impl DurablePreJoinDevice {
         transaction.replace_provider_values(endpoint.provider.storage_values())?;
         transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
         transaction.stage_envelope(&envelope)?;
-        let committed = transaction.commit_operation()?;
-        match committed {
-            super::CommittedOperation::Envelope(record) => Ok(record),
-            _ => Err(PersistenceError::Corrupt),
-        }
+        let request = transaction.commit_witnessed(TypedResult::Envelope(
+            super::envelope_record(operation_id, &envelope),
+        ))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
+    /// Apply a typed commit record. Exactly one OpenMLS transition; the epoch-ready message is a
+    /// separate operation (`prepare_epoch_ready`).
     pub fn apply_update_commit(
         &mut self,
         operation_id: Id,
         commit: &super::OutboxRecord,
         commit_logical_message_id: Id,
         hosted_generation: u64,
-        epoch_ready_logical_message_id: Id,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<CommitMetadata>, PersistenceError> {
         let expected = commit.commit.as_ref().ok_or(PersistenceError::Corrupt)?;
         self.apply_update_commit_inner(
             operation_id,
             &commit.ciphertext,
             commit_logical_message_id,
             hosted_generation,
-            epoch_ready_logical_message_id,
             Some(expected),
         )
     }
 
+    /// Apply received commit ciphertext. Exactly one OpenMLS transition.
     pub fn apply_received_update_commit(
         &mut self,
         operation_id: Id,
         ciphertext: &[u8],
         commit_logical_message_id: Id,
         hosted_generation: u64,
-        epoch_ready_logical_message_id: Id,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
+    ) -> Result<WitnessOutcome<CommitMetadata>, PersistenceError> {
         self.apply_update_commit_inner(
             operation_id,
             ciphertext,
             commit_logical_message_id,
             hosted_generation,
-            epoch_ready_logical_message_id,
             None,
         )
     }
@@ -2732,26 +2759,23 @@ impl DurablePreJoinDevice {
         ciphertext: &[u8],
         commit_logical_message_id: Id,
         hosted_generation: u64,
-        epoch_ready_logical_message_id: Id,
-        expected: Option<&crate::CommitMetadata>,
-    ) -> Result<super::OutboxRecord, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_APPLY_COMMIT,
+        expected: Option<&CommitMetadata>,
+    ) -> Result<WitnessOutcome<CommitMetadata>, PersistenceError> {
+        let expected_field = expected.map(encode_commit_metadata);
+        let fingerprint = operation_fingerprint(
+            op_kind::COMMIT_APPLY,
             &[
                 &commit_logical_message_id,
                 &hosted_generation.to_be_bytes(),
-                &epoch_ready_logical_message_id,
                 ciphertext,
+                &optional_field(expected_field.as_deref()),
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Envelope(record) => Ok(record),
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::COMMIT_APPLY,
+            fingerprint
+        )?);
         let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
         if lifecycle.pair_lifecycle != Some(PairLifecycle::ReplacementProposed) {
             transaction.rollback()?;
@@ -2762,25 +2786,88 @@ impl DurablePreJoinDevice {
             Arc::clone(&self.store.clock),
             transaction.accepted_ids.clone(),
         )?;
+        self.store
+            .faults
+            .check(FaultPoint::BeforeOpenMlsStateWrites)?;
         let metadata =
             phone.apply_commit(ciphertext, commit_logical_message_id, hosted_generation)?;
         if expected.is_some_and(|value| value != &metadata) {
+            transaction.rollback()?;
             return Err(PersistenceError::IdentityMismatch);
         }
         phone.continue_pending_transaction()?;
+        let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
+        lifecycle.pair_lifecycle = Some(PairLifecycle::WaitingForEpochReady);
+        lifecycle.pending_commit = Some(metadata.clone());
+        lifecycle.epoch_ready_prepared = false;
+        endpoint.provider.insert_internal(
+            DEVICE_PREJOIN_KEY.to_vec(),
+            encode_device_record(&lifecycle)?,
+        );
+        super::persist_phone_metadata(&phone, &endpoint.provider, Some(&endpoint.context), 0);
+        transaction.replace_provider_values(endpoint.provider.storage_values())?;
+        transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
+        transaction.stage_accepted_record(super::AcceptedMessageRecord {
+            operation_id,
+            crypto_session_id: self.store.crypto_session_id,
+            logical_message_id: commit_logical_message_id,
+            class: crate::MessageClass::Commit,
+            epoch: endpoint.epoch()?,
+            profile_revision: PROFILE_REVISION,
+            acknowledged: true,
+        })?;
+        let request = transaction.commit_witnessed(TypedResult::Commit(metadata))?;
+        Ok(WitnessOutcome::Pending(request))
+    }
+
+    /// Create the epoch-ready message for the applied commit. Exactly one OpenMLS application
+    /// send. It requires the commit to be applied and refuses a second epoch-ready under another
+    /// operation ID.
+    pub fn prepare_epoch_ready(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        hosted_generation: u64,
+        commit: &CommitMetadata,
+    ) -> Result<WitnessOutcome<super::OutboxRecord>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::EPOCH_READY_SEND,
+            &[
+                &logical_message_id,
+                &hosted_generation.to_be_bytes(),
+                &encode_commit_metadata(commit),
+            ],
+        )?;
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::EPOCH_READY_SEND,
+            fingerprint
+        )?);
+        let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
+        if lifecycle.pair_lifecycle != Some(PairLifecycle::WaitingForEpochReady)
+            || lifecycle.pending_commit.as_ref() != Some(commit)
+            || lifecycle.epoch_ready_prepared
+        {
+            transaction.rollback()?;
+            return Err(PersistenceError::Conflict);
+        }
+        let mut phone = super::load_phone(
+            &transaction.provider,
+            Arc::clone(&self.store.clock),
+            transaction.accepted_ids.clone(),
+        )?;
         let payload = epoch_ready_payload(
             lifecycle.crypto_session_id,
             lifecycle.group_id.ok_or(PersistenceError::Corrupt)?,
-            &metadata,
+            commit,
         );
-        let envelope = phone.prepare_epoch_ready(
-            epoch_ready_logical_message_id,
-            hosted_generation,
-            &payload,
-        )?;
+        self.store
+            .faults
+            .check(FaultPoint::BeforeOpenMlsStateWrites)?;
+        let envelope =
+            phone.prepare_epoch_ready(logical_message_id, hosted_generation, &payload)?;
         let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
-        lifecycle.pair_lifecycle = Some(PairLifecycle::WaitingForEpochReady);
-        lifecycle.pending_commit = Some(metadata);
+        lifecycle.epoch_ready_prepared = true;
         endpoint.provider.insert_internal(
             DEVICE_PREJOIN_KEY.to_vec(),
             encode_device_record(&lifecycle)?,
@@ -2789,11 +2876,10 @@ impl DurablePreJoinDevice {
         transaction.replace_provider_values(endpoint.provider.storage_values())?;
         transaction.set_successor_epoch(endpoint.epoch()?, &endpoint.epoch_authenticator()?);
         transaction.stage_envelope(&envelope)?;
-        let committed = transaction.commit_operation()?;
-        match committed {
-            super::CommittedOperation::Envelope(record) => Ok(record),
-            _ => Err(PersistenceError::Corrupt),
-        }
+        let request = transaction.commit_witnessed(TypedResult::Envelope(
+            super::envelope_record(operation_id, &envelope),
+        ))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn accept_epoch_ready_confirmation(
@@ -2802,28 +2888,20 @@ impl DurablePreJoinDevice {
         logical_message_id: Id,
         hosted_generation: u64,
         ciphertext: &[u8],
-    ) -> Result<PairLifecycle, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_CONFIRM_EPOCH_READY,
+    ) -> Result<WitnessOutcome<PairLifecycle>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::EPOCH_READY_CONFIRM_RECEIVE,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 ciphertext,
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record)
-                    if record.kind == OP_CONFIRM_EPOCH_READY
-                        && record.outcome == OUTCOME_UPDATED =>
-                {
-                    Ok(PairLifecycle::Active)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::EPOCH_READY_CONFIRM_RECEIVE,
+            fingerprint
+        )?);
         let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let pending = lifecycle
             .pending_commit
@@ -2847,6 +2925,7 @@ impl DurablePreJoinDevice {
         )?;
         lifecycle.pair_lifecycle = Some(PairLifecycle::Active);
         lifecycle.pending_commit = None;
+        lifecycle.epoch_ready_prepared = false;
         let endpoint = phone.endpoint.as_ref().ok_or(PersistenceError::Corrupt)?;
         endpoint.provider.insert_internal(
             DEVICE_PREJOIN_KEY.to_vec(),
@@ -2864,31 +2943,25 @@ impl DurablePreJoinDevice {
                 artifact_hash: pending.commit_id,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(PairLifecycle::Active)
+        let request =
+            transaction.commit_witnessed(TypedResult::PairLifecycle(PairLifecycle::Active))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn acknowledge_epoch_ready(
         &mut self,
         operation_id: Id,
         acceptance: &EpochReadyAcceptance,
-    ) -> Result<PairLifecycle, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_EPOCH_READY,
+    ) -> Result<WitnessOutcome<PairLifecycle>, PersistenceError> {
+        let fingerprint = operation_fingerprint(
+            op_kind::EPOCH_READY_ACK,
             &[&acceptance.crypto_session_id, &acceptance.commit_id],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record)
-                    if record.kind == OP_EPOCH_READY && record.outcome == OUTCOME_UPDATED =>
-                {
-                    Ok(PairLifecycle::Active)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::EPOCH_READY_ACK,
+            fingerprint
+        )?);
         let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let pending = lifecycle
             .pending_commit
@@ -2903,13 +2976,12 @@ impl DurablePreJoinDevice {
         }
         lifecycle.pair_lifecycle = Some(PairLifecycle::Active);
         lifecycle.pending_commit = None;
+        lifecycle.epoch_ready_prepared = false;
         transaction.provider.insert_internal(
             DEVICE_PREJOIN_KEY.to_vec(),
             encode_device_record(&lifecycle)?,
         );
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -2919,8 +2991,9 @@ impl DurablePreJoinDevice {
                 artifact_hash: acceptance.commit_id,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(PairLifecycle::Active)
+        let request =
+            transaction.commit_witnessed(TypedResult::PairLifecycle(PairLifecycle::Active))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn apply_removal(
@@ -2929,25 +3002,22 @@ impl DurablePreJoinDevice {
         commit: &super::OutboxRecord,
         logical_message_id: Id,
         hosted_generation: u64,
-    ) -> Result<RemovalOutcome, PersistenceError> {
-        let fingerprint = operation_fingerprint_parts(
-            OP_APPLY_REMOVAL,
+    ) -> Result<WitnessOutcome<RemovalOutcome>, PersistenceError> {
+        let commit_field = commit.commit.as_ref().map(encode_commit_metadata);
+        let fingerprint = operation_fingerprint(
+            op_kind::REMOVAL_APPLY,
             &[
                 &logical_message_id,
                 &hosted_generation.to_be_bytes(),
                 &commit.ciphertext,
+                &optional_field(commit_field.as_deref()),
             ],
         )?;
-        let mut transaction = begin_current(&self.store)?;
-        if let Some(existing) = transaction.bind_operation(operation_id, fingerprint)? {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_REMOVED => {
-                    Ok(RemovalOutcome::Removed)
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::REMOVAL_APPLY,
+            fingerprint
+        )?);
         let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
         if !matches!(
             lifecycle.pair_lifecycle,
@@ -2966,6 +3036,7 @@ impl DurablePreJoinDevice {
         lifecycle.state = PreJoinLifecycle::Removed;
         lifecycle.pair_lifecycle = Some(PairLifecycle::Removed);
         lifecycle.pending_commit = None;
+        lifecycle.epoch_ready_prepared = false;
         endpoint.provider.insert_internal(
             DEVICE_PREJOIN_KEY.to_vec(),
             encode_device_record(&lifecycle)?,
@@ -2986,41 +3057,32 @@ impl DurablePreJoinDevice {
                     .ok_or(PersistenceError::Corrupt)?,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(RemovalOutcome::Removed)
+        let request =
+            transaction.commit_witnessed(TypedResult::Removal(RemovalOutcome::Removed))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
-    pub fn reset(&mut self, operation_id: Id) -> Result<RePairRequirement, PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        let existing =
-            transaction.bind_operation(operation_id, operation_fingerprint(OP_RESET, &[])?)?;
+    pub fn reset(
+        &mut self,
+        operation_id: Id,
+    ) -> Result<WitnessOutcome<RePairRequirement>, PersistenceError> {
+        let mut transaction = fresh_or_return!(self.store.begin_witnessed(
+            operation_id,
+            op_kind::RESET,
+            operation_fingerprint(op_kind::RESET, &[])?
+        )?);
         let mut lifecycle = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let group_id = lifecycle.group_id;
         let key_package_hash = sha384(&lifecycle.key_package).map_err(map_pairing_error)?;
-        if let Some(existing) = existing {
-            transaction.rollback()?;
-            return match existing {
-                super::CommittedOperation::Pairing(record) if record.outcome == OUTCOME_RESET => {
-                    Ok(RePairRequirement {
-                        device_id: lifecycle.device_id,
-                        crypto_session_id: lifecycle.crypto_session_id,
-                        group_id,
-                        key_package_hash,
-                    })
-                }
-                _ => Err(PersistenceError::Conflict),
-            };
-        }
         lifecycle.state = PreJoinLifecycle::Reset;
         lifecycle.pair_lifecycle = Some(PairLifecycle::Reset);
         lifecycle.pending_commit = None;
+        lifecycle.epoch_ready_prepared = false;
         transaction.provider.insert_internal(
             DEVICE_PREJOIN_KEY.to_vec(),
             encode_device_record(&lifecycle)?,
         );
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -3030,21 +3092,24 @@ impl DurablePreJoinDevice {
                 artifact_hash: lifecycle.invitation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(RePairRequirement {
+        let request = transaction.commit_witnessed(TypedResult::RePair(RePairRequirement {
             device_id: lifecycle.device_id,
             crypto_session_id: lifecycle.crypto_session_id,
             group_id,
             key_package_hash,
-        })
+        }))?;
+        Ok(WitnessOutcome::Pending(request))
     }
 
     pub fn close(&self) -> Result<(), PersistenceError> {
         self.store.close()
     }
 
+    /// Read-only. Returns the committed claim and KeyPackage; it does not persist a due expiry.
+    /// An interrupted initial registration keeps them withheld.
     pub fn publication(&mut self) -> Result<PreJoinPublication, PersistenceError> {
-        self.expire_if_needed()?;
+        self.store.require_published()?;
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let record = device_record(&transaction.provider, self.store.crypto_session_id)?;
         let result = if record.state == PreJoinLifecycle::PreJoin {
@@ -3056,46 +3121,52 @@ impl DurablePreJoinDevice {
         result
     }
 
+    /// Read-only committed lifecycle. A due but not yet witnessed expiry is not reported here.
     pub fn lifecycle(&mut self) -> Result<PreJoinLifecycle, PersistenceError> {
-        self.expire_if_needed()?;
+        self.store.require_no_pending()?;
         let transaction = begin_current(&self.store)?;
         let state = device_record(&transaction.provider, self.store.crypto_session_id)?.state;
         transaction.rollback()?;
         Ok(state)
     }
 
-    fn expire_if_needed(&mut self) -> Result<(), PersistenceError> {
-        let mut transaction = begin_current(&self.store)?;
-        let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
-        let now = self.store.clock.now_ms().map_err(PersistenceError::Core)?;
-        if now < record.last_now_ms {
+    /// Durably expire the pre-join state once the invitation deadline passes. Returns the
+    /// pending expiry request, or `None` when nothing is due or expiry already completed.
+    pub fn expire_if_needed(&mut self) -> Result<Option<PendingWitnessRequest>, PersistenceError> {
+        let (record, now) = {
+            let transaction = begin_current(&self.store)?;
+            let record = device_record(&transaction.provider, self.store.crypto_session_id)?;
+            let now = self.store.clock.now_ms().map_err(PersistenceError::Core)?;
             transaction.rollback()?;
+            (record, now)
+        };
+        if now < record.last_now_ms {
             return Err(PersistenceError::Core(crate::Error::ClockRollback));
         }
         if now < record.expires_at_ms || record.state != PreJoinLifecycle::PreJoin {
-            transaction.rollback()?;
-            return Ok(());
+            return Ok(None);
         }
-        record.last_now_ms = now;
-        record.state = PreJoinLifecycle::Expired;
         let operation_id = expiry_operation_id(b"device", record.invitation_hash)?;
-        let fingerprint = operation_fingerprint_parts(
-            OP_EXPIRE_PREJOIN,
+        let fingerprint = operation_fingerprint(
+            op_kind::PRE_JOIN_EXPIRY,
             &[&record.invitation_hash, &record.expires_at_ms.to_be_bytes()],
         )?;
-        if transaction
-            .bind_operation(operation_id, fingerprint)?
-            .is_some()
-        {
-            transaction.rollback()?;
-            return Ok(());
-        }
+        let mut transaction =
+            match self
+                .store
+                .begin_witnessed(operation_id, op_kind::PRE_JOIN_EXPIRY, fingerprint)?
+            {
+                Lookup::Pending(request) => return Ok(Some(request)),
+                Lookup::Released(_) => return Ok(None),
+                Lookup::Fresh(transaction) => transaction,
+            };
+        let mut record = device_record(&transaction.provider, self.store.crypto_session_id)?;
+        record.last_now_ms = now;
+        record.state = PreJoinLifecycle::Expired;
         transaction
             .provider
             .insert_internal(DEVICE_PREJOIN_KEY.to_vec(), encode_device_record(&record)?);
-        let old_epoch = transaction.old_epoch;
-        let old_authenticator = transaction.old_authenticator.clone();
-        transaction.set_successor_epoch(old_epoch, &old_authenticator);
+        transaction.keep_epoch();
         transaction.stage_operation(super::CommittedOperation::Pairing(
             PairingOperationRecord {
                 operation_id,
@@ -3105,8 +3176,9 @@ impl DurablePreJoinDevice {
                 artifact_hash: record.invitation_hash,
             },
         ))?;
-        transaction.commit_operation()?;
-        Ok(())
+        let request = transaction
+            .commit_witnessed(TypedResult::PreJoinLifecycle(PreJoinLifecycle::Expired))?;
+        Ok(Some(request))
     }
 
     #[cfg(test)]
@@ -3190,24 +3262,6 @@ fn encode_reservation_intent(intent: &ReservationIntent) -> Vec<u8> {
     out
 }
 
-fn reservation_from_operation(
-    operation: super::CommittedOperation,
-    record: &DaemonPairingRecord,
-) -> Result<ReservationOutcome, PersistenceError> {
-    let super::CommittedOperation::Pairing(operation) = operation else {
-        return Err(PersistenceError::Conflict);
-    };
-    match operation.outcome {
-        OUTCOME_RESERVED => Ok(ReservationOutcome::Reserved(reservation_intent(record)?)),
-        OUTCOME_CONFLICT => Ok(ReservationOutcome::Busy),
-        OUTCOME_EXPIRED => Ok(ReservationOutcome::Expired),
-        OUTCOME_WELCOME => Ok(ReservationOutcome::Consumed),
-        OUTCOME_REJECTED_CREDENTIAL => Ok(ReservationOutcome::Rejected),
-        OUTCOME_REJECTED_KEY_PACKAGE => Ok(ReservationOutcome::Unavailable),
-        _ => Err(PersistenceError::Corrupt),
-    }
-}
-
 fn welcome_is_expired(record: &DaemonPairingRecord, now_ms: u64) -> Result<bool, PersistenceError> {
     if record.state != InvitationLifecycle::Consumed || record.activation_accepted {
         return Ok(false);
@@ -3227,28 +3281,6 @@ fn welcome_publication(record: &DaemonPairingRecord) -> Option<WelcomePublicatio
         group_id: record.group_id?,
         claim_hash: record.accepted_claim_hash?,
         expires_at_ms: record.welcome_expires_at_ms?,
-    })
-}
-
-fn welcome_from_pairing_operation(
-    operation: super::CommittedOperation,
-    record: &DaemonPairingRecord,
-    duplicate: bool,
-) -> Result<WelcomeOutcome, PersistenceError> {
-    let super::CommittedOperation::Pairing(operation) = operation else {
-        return Err(PersistenceError::Conflict);
-    };
-    if operation.outcome != OUTCOME_WELCOME {
-        return Err(PersistenceError::Conflict);
-    }
-    let publication = welcome_publication(record).ok_or(PersistenceError::Corrupt)?;
-    if publication.claim_hash != operation.artifact_hash {
-        return Err(PersistenceError::Corrupt);
-    }
-    Ok(if duplicate {
-        WelcomeOutcome::Duplicate(publication)
-    } else {
-        WelcomeOutcome::Committed(publication)
     })
 }
 
@@ -3354,44 +3386,6 @@ fn prejoin_publication(record: &DevicePreJoinRecord) -> PreJoinPublication {
         key_package: record.key_package.clone(),
         invitation_hash: record.invitation_hash,
         expires_at_ms: record.expires_at_ms,
-    }
-}
-
-fn claim_result_from_operation(
-    operation: super::CommittedOperation,
-    record: &DaemonPairingRecord,
-) -> Result<ClaimSubmission, PersistenceError> {
-    let super::CommittedOperation::Pairing(operation) = operation else {
-        return Err(PersistenceError::Conflict);
-    };
-    match operation.outcome {
-        OUTCOME_PENDING => {
-            let (_, bytes) = record
-                .pending_claim
-                .as_ref()
-                .filter(|(hash, _)| *hash == operation.artifact_hash)
-                .ok_or(PersistenceError::Corrupt)?;
-            let invitation =
-                PairingInvitation::decode(&record.invitation).map_err(map_pairing_error)?;
-            let claim = PairingClaimV1::decode(bytes).map_err(map_pairing_error)?;
-            Ok(ClaimSubmission::Pending {
-                claim_hash: operation.artifact_hash,
-                comparison: comparison_value(&invitation, &claim).map_err(map_pairing_error)?,
-            })
-        }
-        OUTCOME_REJECTED_CREDENTIAL => Ok(ClaimSubmission::Rejected {
-            reason: Some(ClaimFailure::Credential),
-        }),
-        OUTCOME_REJECTED_KEY_PACKAGE => Ok(ClaimSubmission::Rejected {
-            reason: Some(ClaimFailure::KeyPackage),
-        }),
-        OUTCOME_REJECTED_SIGNATURE => Ok(ClaimSubmission::Rejected {
-            reason: Some(ClaimFailure::Signature),
-        }),
-        OUTCOME_CANCELLED => Ok(ClaimSubmission::Cancelled),
-        OUTCOME_EXPIRED => Ok(ClaimSubmission::Expired),
-        OUTCOME_CONFLICT => Ok(ClaimSubmission::Conflict),
-        _ => Err(PersistenceError::Corrupt),
     }
 }
 
@@ -3937,6 +3931,7 @@ fn encode_device_record(record: &DevicePreJoinRecord) -> Result<Vec<u8>, Persist
     put_optional_bytes(&mut out, record.activation.as_deref(), 2_048)?;
     put_pair_lifecycle(&mut out, record.pair_lifecycle);
     put_commit_metadata(&mut out, record.pending_commit.as_ref());
+    out.push(u8::from(record.epoch_ready_prepared));
     match record.forbidden_group_id {
         Some(group_id) => {
             out.push(1);
@@ -3986,6 +3981,11 @@ fn decode_device_record(bytes: &[u8]) -> Result<DevicePreJoinRecord, Persistence
         activation: cursor.optional_bytes(2_048)?,
         pair_lifecycle: cursor.pair_lifecycle()?,
         pending_commit: cursor.commit_metadata()?,
+        epoch_ready_prepared: match cursor.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(PersistenceError::Corrupt),
+        },
         forbidden_group_id: match cursor.u8()? {
             0 => None,
             1 => Some(cursor.array()?),
@@ -4097,6 +4097,7 @@ fn validate_device_record(record: &DevicePreJoinRecord) -> Result<(), Persistenc
         || (record.forbidden_group_id.is_some() && record.forbidden_group_id == record.group_id)
         || (record.pair_lifecycle == Some(PairLifecycle::WaitingForEpochReady))
             != record.pending_commit.is_some()
+        || (record.epoch_ready_prepared && record.pending_commit.is_none())
     {
         return Err(PersistenceError::Corrupt);
     }
@@ -4310,6 +4311,389 @@ impl<'a> RecordCursor<'a> {
             Err(PersistenceError::Corrupt)
         }
     }
+}
+
+impl_witness_endpoint!(DurablePendingInvitation);
+impl_witness_endpoint!(DurablePreJoinDevice);
+
+impl TryFrom<TypedResult> for ActivationOutcome {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::Envelope(record) => Ok(Self::Prepared(record)),
+            TypedResult::Activation(acceptance) => Ok(Self::Activated(acceptance)),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
+}
+
+impl TryFrom<TypedResult> for RemovalOutcome {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::Envelope(record) => Ok(Self::Commit(record)),
+            TypedResult::Removal(outcome) => Ok(outcome),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
+}
+
+impl TryFrom<TypedResult> for WelcomeOutcome {
+    type Error = PersistenceError;
+
+    fn try_from(value: TypedResult) -> Result<Self, PersistenceError> {
+        match value {
+            TypedResult::Welcome(publication) => Ok(Self::Committed(publication)),
+            _ => Err(PersistenceError::Corrupt),
+        }
+    }
+}
+
+// ---- Private exact-result codecs for pairing types. These are persistence formats only. ----
+
+pub(super) fn encode_commit_metadata(commit: &CommitMetadata) -> Vec<u8> {
+    let mut out = Vec::with_capacity(48 + 8 + 48);
+    out.extend_from_slice(&commit.commit_id);
+    out.extend_from_slice(&commit.target_epoch.to_be_bytes());
+    out.extend_from_slice(&commit.epoch_authenticator);
+    out
+}
+
+pub(super) fn encode_invitation_publication(
+    value: &InvitationPublication,
+) -> Result<Vec<u8>, PersistenceError> {
+    let mut out = Vec::new();
+    put_bounded(&mut out, &value.bytes, PAIRING_INVITATION_MAX_BYTES)?;
+    out.extend_from_slice(&value.invitation_hash);
+    out.extend_from_slice(&value.expires_at_ms.to_be_bytes());
+    Ok(out)
+}
+
+pub(super) fn decode_invitation_publication(
+    bytes: &[u8],
+) -> Result<InvitationPublication, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = InvitationPublication {
+        bytes: cursor.bytes(PAIRING_INVITATION_MAX_BYTES)?.to_vec(),
+        invitation_hash: cursor.array()?,
+        expires_at_ms: cursor.u64()?,
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+pub(super) fn encode_prejoin_publication(
+    value: &PreJoinPublication,
+) -> Result<Vec<u8>, PersistenceError> {
+    let mut out = Vec::new();
+    put_bounded(&mut out, &value.claim, PAIRING_CLAIM_MAX_BYTES)?;
+    put_bounded(&mut out, &value.key_package, 16_384)?;
+    out.extend_from_slice(&value.invitation_hash);
+    out.extend_from_slice(&value.expires_at_ms.to_be_bytes());
+    Ok(out)
+}
+
+pub(super) fn decode_prejoin_publication(
+    bytes: &[u8],
+) -> Result<PreJoinPublication, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = PreJoinPublication {
+        claim: cursor.bytes(PAIRING_CLAIM_MAX_BYTES)?.to_vec(),
+        key_package: cursor.bytes(16_384)?.to_vec(),
+        invitation_hash: cursor.array()?,
+        expires_at_ms: cursor.u64()?,
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+pub(super) fn encode_welcome_publication(
+    value: &WelcomePublication,
+) -> Result<Vec<u8>, PersistenceError> {
+    let mut out = Vec::new();
+    put_bounded(&mut out, &value.bytes, 16_384)?;
+    out.extend_from_slice(&value.group_id);
+    out.extend_from_slice(&value.claim_hash);
+    out.extend_from_slice(&value.expires_at_ms.to_be_bytes());
+    Ok(out)
+}
+
+pub(super) fn decode_welcome_publication(
+    bytes: &[u8],
+) -> Result<WelcomePublication, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = WelcomePublication {
+        bytes: cursor.bytes(16_384)?.to_vec(),
+        group_id: cursor.array()?,
+        claim_hash: cursor.array()?,
+        expires_at_ms: cursor.u64()?,
+    };
+    cursor.finish()?;
+    if value.group_id == [0; 32] {
+        return Err(PersistenceError::Corrupt);
+    }
+    Ok(value)
+}
+
+pub(super) fn encode_claim_submission(
+    value: &ClaimSubmission,
+) -> Result<Vec<u8>, PersistenceError> {
+    let mut out = Vec::new();
+    match value {
+        ClaimSubmission::Pending {
+            claim_hash,
+            comparison,
+        } => {
+            out.push(1);
+            out.extend_from_slice(claim_hash);
+            put_bounded(&mut out, comparison.as_bytes(), 64)?;
+        }
+        ClaimSubmission::Confirmed(intent) => {
+            out.push(2);
+            out.extend_from_slice(&encode_reservation_intent(intent));
+        }
+        ClaimSubmission::Accepted(publication) => {
+            out.push(3);
+            out.extend_from_slice(&encode_welcome_publication(publication)?);
+        }
+        ClaimSubmission::Consumed => out.push(4),
+        ClaimSubmission::Rejected { reason } => {
+            out.push(5);
+            out.push(match reason {
+                None => 0,
+                Some(ClaimFailure::Credential) => 1,
+                Some(ClaimFailure::KeyPackage) => 2,
+                Some(ClaimFailure::Signature) => 3,
+            });
+        }
+        ClaimSubmission::Cancelled => out.push(6),
+        ClaimSubmission::Expired => out.push(7),
+        ClaimSubmission::Conflict => out.push(8),
+    }
+    Ok(out)
+}
+
+pub(super) fn decode_claim_submission(bytes: &[u8]) -> Result<ClaimSubmission, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = match cursor.u8()? {
+        1 => ClaimSubmission::Pending {
+            claim_hash: cursor.array()?,
+            comparison: String::from_utf8(cursor.bytes(64)?.to_vec())
+                .map_err(|_| PersistenceError::Corrupt)?,
+        },
+        2 => ClaimSubmission::Confirmed(decode_reservation_intent(&mut cursor)?),
+        3 => {
+            let rest = cursor.take(bytes.len() - 1)?;
+            ClaimSubmission::Accepted(decode_welcome_publication(rest)?)
+        }
+        4 => ClaimSubmission::Consumed,
+        5 => ClaimSubmission::Rejected {
+            reason: match cursor.u8()? {
+                0 => None,
+                1 => Some(ClaimFailure::Credential),
+                2 => Some(ClaimFailure::KeyPackage),
+                3 => Some(ClaimFailure::Signature),
+                _ => return Err(PersistenceError::Corrupt),
+            },
+        },
+        6 => ClaimSubmission::Cancelled,
+        7 => ClaimSubmission::Expired,
+        8 => ClaimSubmission::Conflict,
+        _ => return Err(PersistenceError::Corrupt),
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+fn decode_reservation_intent(
+    cursor: &mut RecordCursor<'_>,
+) -> Result<ReservationIntent, PersistenceError> {
+    Ok(ReservationIntent {
+        reservation_id: cursor.array()?,
+        crypto_session_id: cursor.array()?,
+        account_id: cursor.array()?,
+        installation_id: cursor.array()?,
+        device_id: cursor.array()?,
+        claim_hash: cursor.array()?,
+        key_package_hash: cursor.array()?,
+        expires_at_ms: cursor.u64()?,
+    })
+}
+
+pub(super) fn encode_reservation_outcome(
+    value: &ReservationOutcome,
+) -> Result<Vec<u8>, PersistenceError> {
+    let mut out = Vec::new();
+    match value {
+        ReservationOutcome::Reserved(intent) => {
+            out.push(1);
+            out.extend_from_slice(&encode_reservation_intent(intent));
+        }
+        ReservationOutcome::Busy => out.push(2),
+        ReservationOutcome::Expired => out.push(3),
+        ReservationOutcome::Consumed => out.push(4),
+        ReservationOutcome::Rejected => out.push(5),
+        ReservationOutcome::Unavailable => out.push(6),
+    }
+    Ok(out)
+}
+
+pub(super) fn decode_reservation_outcome(
+    bytes: &[u8],
+) -> Result<ReservationOutcome, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = match cursor.u8()? {
+        1 => ReservationOutcome::Reserved(decode_reservation_intent(&mut cursor)?),
+        2 => ReservationOutcome::Busy,
+        3 => ReservationOutcome::Expired,
+        4 => ReservationOutcome::Consumed,
+        5 => ReservationOutcome::Rejected,
+        6 => ReservationOutcome::Unavailable,
+        _ => return Err(PersistenceError::Corrupt),
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+pub(super) fn encode_activation_acceptance(value: &ActivationAcceptance) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + 32 + 48 + 48);
+    out.extend_from_slice(&value.crypto_session_id);
+    out.extend_from_slice(&value.group_id);
+    out.extend_from_slice(&value.claim_hash);
+    out.extend_from_slice(&value.activation_hash);
+    out
+}
+
+pub(super) fn decode_activation_acceptance(
+    bytes: &[u8],
+) -> Result<ActivationAcceptance, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = ActivationAcceptance {
+        crypto_session_id: cursor.array()?,
+        group_id: cursor.array()?,
+        claim_hash: cursor.array()?,
+        activation_hash: cursor.array()?,
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+pub(super) fn encode_epoch_ready_acceptance(value: &EpochReadyAcceptance) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + 48);
+    out.extend_from_slice(&value.crypto_session_id);
+    out.extend_from_slice(&value.commit_id);
+    out
+}
+
+pub(super) fn decode_epoch_ready_acceptance(
+    bytes: &[u8],
+) -> Result<EpochReadyAcceptance, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = EpochReadyAcceptance {
+        crypto_session_id: cursor.array()?,
+        commit_id: cursor.array()?,
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+pub(super) fn encode_re_pair_requirement(value: &RePairRequirement) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + 16 + 33 + 48);
+    out.extend_from_slice(&value.device_id);
+    out.extend_from_slice(&value.crypto_session_id);
+    match value.group_id {
+        Some(group_id) => {
+            out.push(1);
+            out.extend_from_slice(&group_id);
+        }
+        None => out.push(0),
+    }
+    out.extend_from_slice(&value.key_package_hash);
+    out
+}
+
+pub(super) fn decode_re_pair_requirement(
+    bytes: &[u8],
+) -> Result<RePairRequirement, PersistenceError> {
+    let mut cursor = RecordCursor::new(bytes);
+    let value = RePairRequirement {
+        device_id: cursor.array()?,
+        crypto_session_id: cursor.array()?,
+        group_id: match cursor.u8()? {
+            0 => None,
+            1 => Some(cursor.array()?),
+            _ => return Err(PersistenceError::Corrupt),
+        },
+        key_package_hash: cursor.array()?,
+    };
+    cursor.finish()?;
+    Ok(value)
+}
+
+pub(super) fn encode_removal_outcome(value: &RemovalOutcome) -> Result<Vec<u8>, PersistenceError> {
+    Ok(match value {
+        RemovalOutcome::Commit(_) => return Err(PersistenceError::Corrupt),
+        RemovalOutcome::Removed => vec![1],
+        RemovalOutcome::Revoked => vec![2],
+        RemovalOutcome::RePairRequired(requirement) => {
+            let mut out = vec![3];
+            out.extend_from_slice(&encode_re_pair_requirement(requirement));
+            out
+        }
+    })
+}
+
+pub(super) fn decode_removal_outcome(bytes: &[u8]) -> Result<RemovalOutcome, PersistenceError> {
+    match bytes {
+        [1] => Ok(RemovalOutcome::Removed),
+        [2] => Ok(RemovalOutcome::Revoked),
+        [3, rest @ ..] => Ok(RemovalOutcome::RePairRequired(decode_re_pair_requirement(
+            rest,
+        )?)),
+        _ => Err(PersistenceError::Corrupt),
+    }
+}
+
+pub(super) fn decode_invitation_lifecycle(
+    value: u8,
+) -> Result<InvitationLifecycle, PersistenceError> {
+    Ok(match value {
+        1 => InvitationLifecycle::Issued,
+        2 => InvitationLifecycle::ClaimPending,
+        3 => InvitationLifecycle::Confirmed,
+        4 => InvitationLifecycle::Consumed,
+        5 => InvitationLifecycle::Cancelled,
+        6 => InvitationLifecycle::Expired,
+        _ => return Err(PersistenceError::Corrupt),
+    })
+}
+
+pub(super) fn decode_prejoin_lifecycle(value: u8) -> Result<PreJoinLifecycle, PersistenceError> {
+    Ok(match value {
+        1 => PreJoinLifecycle::PreJoin,
+        2 => PreJoinLifecycle::Expired,
+        3 => PreJoinLifecycle::Cancelled,
+        4 => PreJoinLifecycle::Joined,
+        5 => PreJoinLifecycle::Activated,
+        6 => PreJoinLifecycle::Removed,
+        7 => PreJoinLifecycle::Reset,
+        _ => return Err(PersistenceError::Corrupt),
+    })
+}
+
+pub(super) fn decode_pair_lifecycle(value: u8) -> Result<PairLifecycle, PersistenceError> {
+    Ok(match value {
+        1 => PairLifecycle::AwaitingActivation,
+        2 => PairLifecycle::Active,
+        3 => PairLifecycle::ReplacementProposed,
+        4 => PairLifecycle::WaitingForEpochReady,
+        5 => PairLifecycle::Removed,
+        6 => PairLifecycle::Revoked,
+        7 => PairLifecycle::Reset,
+        _ => return Err(PersistenceError::Corrupt),
+    })
 }
 
 fn map_pairing_error(error: crate::pairing::PairingError) -> PersistenceError {

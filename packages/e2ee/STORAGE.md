@@ -4,7 +4,7 @@
 
 # Native E2EE storage schema
 
-Status: native schema version 2 storage foundation; witness mutation integration remains disabled
+Status: native schema version 2 with the witness transaction runner integrated into every state-changing mutation; production constructors remain disabled
 
 ## Database ownership
 
@@ -90,41 +90,61 @@ state, operation mapping, or exact ciphertext quarantines the group.
 
 ## Transaction order
 
-1. Acquire Axl's per-database operation mutex. It covers external-key reconciliation, state load,
-   the redb writer transaction, anchor advancement, and obsolete-key erasure.
-2. Reconcile prepared external keys, activating the key referenced by committed current state and
-   removing unreferenced inactive records.
-3. Authenticate the durable-record manifest, reconcile the monotonic anchor, and only then erase
-   the obsolete active key referenced by committed metadata.
-4. Start a read-write transaction with immediate durability and two-phase commit.
-5. Compare the expected generation and rollback counter with both the database and injected anchor.
-6. Decrypt and load only the committed provider image, persisted clock state, and retained replay
-   identities.
-7. Check the operation ID and canonical input fingerprint.
-8. Run the state-advancing OpenMLS operation against transaction-local storage.
-9. Insert the exact outbox or accepted-message record, operation result, successor generation,
-   rollback counter, epoch, authenticator, and obsolete wrapping-record reference.
-10. Compact acknowledged operation, outbox, accepted-message, and fingerprint records beyond the
-    retry horizon, then calculate their authenticated manifest.
-11. Generate a fresh state DEK and nonce with the libcrux provider and prepare its external inactive
-    wrapping record.
-12. Encrypt the complete successor state and manifest with upstream AES-256-GCM and insert it into
-    the same redb transaction.
-13. Commit redb durably.
-14. Activate the committed current-state key.
-15. Advance the external monotonic anchor.
-16. Only then erase the obsolete active key.
-17. Only then return bytes for transmission or plaintext for processing.
+Every state-changing native operation runs through one common witness transaction runner. The
+runner holds the per-database operation mutex from lookup through result release or pending return.
+
+1. Refuse a quarantined or revoked endpoint. Refuse every operation while another witness
+   operation is locally committed but unconfirmed, without opening a write transaction.
+2. Resolve the operation ID before any transition: the same ID and fingerprint returns the exact
+   pending request or the exact completed result; the same ID with another fingerprint is
+   `WitnessOperationConflict` and quarantines the endpoint.
+3. Require the one-shot mutation authorization produced by the last fresh unanimous `read`
+   reconciliation (`witness_read_request` then `reconcile_witness`). Creation holds the initial
+   registration grant instead because no endpoint credential exists before the first transition.
+4. Reconcile prepared external keys, activating the key referenced by committed current state and
+   removing unreferenced inactive records, then authenticate the durable-record manifest.
+5. Start a read-write transaction with immediate durability and two-phase commit and decrypt only
+   the committed provider image.
+6. Run zero or one state-advancing OpenMLS transition against transaction-local storage. A
+   received update commit is applied in one operation; the epoch-ready message is created by a
+   separate operation.
+7. Insert the exact outbox or accepted-message record, the version-2 operation index with a
+   `Pending` disposition, the previous operation's `Completed` disposition, successor generation,
+   local witness counter, epoch, authenticator, confirmed predecessor head, current and obsolete
+   key references, and the exact typed result inside the encrypted image.
+8. Compact acknowledged records beyond the retry horizon and calculate the authenticated manifest.
+9. Prepare a fresh inactive DEK, seal the complete image, seal the acyclic inner and outer
+   transition with `witness::prepare_transition`, and write the `pending_witness_v2` row.
+10. Commit redb durably, then activate the committed successor key.
+11. Return only the exact pending request. Nothing typed, no ciphertext, no plaintext, and no
+    pairing artifact leaves the crate.
+12. `continue_witness` verifies the unanimous certificate against the exact stored request,
+    verifies the successor key is active, erases and verifies absence of the obsolete key, marks
+    the pending row `Completed`, publishes an initializing database, and only then decodes and
+    returns the exact typed result.
+
+Read-only accessors (`publication`, `lifecycle`, `pair_lifecycle`, `recover_welcome`,
+`pending_outbox`) never persist expiry and never expose a locally committed successor while its
+barrier is pending. After restart a `Completed` pending row is only a cache: the same accessors,
+duplicate lookups of older operations, and the row's own outbox record stay withheld until a fresh
+unanimous read and the exact duplicate certificate confirm the transition in this process. Expiry is a witnessed operation with its deterministic operation ID, entered
+through `expire_if_needed` and `expire_welcome_if_needed` or by the next mutator.
+
+Locally detected terminal states (`witness_operation_conflict`, invalid receipts, revocation, and
+fork or stale-state quarantine) are persisted as a non-authenticated lifecycle marker in every
+lifecycle, including an `initializing` database whose registration is still pending. Opening a
+terminal database succeeds, removes a stale initialization marker, refuses every mutation, pending
+request, continuation, and typed read, and cleanup never deletes it.
 
 A non-poisoned commit error has an uncertain outcome. Recovery closes and reopens redb, activates
 and validates the key referenced by committed current state, authenticates the durable manifest,
-advances or verifies the external anchor, and only then erases the obsolete key. It finally reads
-the authenticated operation record and returns its exact result when present. `load` accepts active
-keys only; prepared-but-inactive keys become loadable solely through idempotent committed-key
-activation or prepared-record reconciliation.
-Every operation reconstructs `MlsGroup` and its signer from the committed encrypted image after the
-transaction starts. Failed, rolled-back, and completed operations retain no reusable in-memory group
-or prepared handle.
+rebuilds the in-memory witness runtime from the confirmed head and pending row, and returns the
+exact pending request when the row belongs to the interrupted operation. Opening never erases the
+obsolete key and never creates a successor. The OS lifecycle claim acquired by creation or opening
+is held for the endpoint's whole open lifetime; a competing creator, opener, or cleanup receives
+`LifecycleBusy` until the endpoint is closed or dropped. After restart the completed marker is a cache: a fresh
+unanimous read and the exact duplicate certificate confirm the transition again before its result
+is reused or another mutation is authorized.
 
 ## Browser transaction equivalence
 
@@ -187,9 +207,10 @@ produces one initial-registration authorization. Preparation consumes it. Restar
 unavailability, resend, accepted-operation recovery, conflict, revocation, and quarantine hold no
 mutation authority.
 
-The native and browser test adapters still use their pre-production injected anchor paths. The
-production browser store accepts only a worker-private certificate verifier and is not constructed
-by the page protocol. The shared witness state machine and storage foundation do not make endpoint
+The native adapter now runs every mutation through the witness runner against an injected pinned
+`ReplicaTrustSet`; the test-only `RollbackAnchor` is gone from native storage. The production
+browser store accepts only a worker-private certificate verifier and is not constructed by the
+page protocol. The shared witness state machine and storage integration do not make endpoint
 constructors production-ready. Private WASM finalization, production trust, hosted transport, and
 required runtime evidence remain mandatory before enablement.
 
@@ -329,8 +350,9 @@ paths as handles, reject reparse points and UNC or device forms, compare final h
 apply and verify a protected owner-only DACL. The production factory remains absent until the
 installer provisions and verifies the dedicated non-roaming identity policy.
 
-The injected `RollbackAnchor` keeps monotonic state outside the database snapshot domain. Both
-dependencies must report availability or the adapter fails closed.
+The hosted witness quorum keeps monotonic state outside the database snapshot domain. The envelope
+key store must report availability and the quorum must answer with three matching pinned receipts
+or the adapter fails closed.
 
 The implementation uses the pinned libcrux provider's CSPRNG and AES-256-GCM. It defines no KDF or
 new cryptographic primitive. A fresh 256-bit DEK protects each successor state image. AAD binds the
@@ -350,7 +372,7 @@ Windows implementation is unwired and both Windows rows remain unsupported pendi
 ACL, reparse, NTFS/ReFS, reboot, restore, addon, signing, and installer evidence on x64 and ARM64.
 Android Keystore, generated mobile SDKs, and production mobile applications remain later work.
 
-The monotonic anchor detects a database older than the last anchored commit. The peer epoch
+The witness quorum detects a database older than the last confirmed head. The peer epoch
 authenticator detects a divergent epoch once authenticated peer evidence is available. Rollback of
 the database and anchor together, rollback before anchor advancement becomes durable, and loss of
 all peer evidence are not claimed to be detectable.
