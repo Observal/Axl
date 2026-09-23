@@ -21,6 +21,23 @@ function style(line: TerminalLine, palette: Palette): string {
   return palette.dim(text);
 }
 
+export function renderExtensionLines(
+  lines: readonly TerminalLine[],
+  width: number,
+  palette: Palette,
+): string[] {
+  return lines
+    .slice(0, 64)
+    .flatMap((line) =>
+      wrapLine(
+        style({ ...line, text: line.text.slice(0, MAX_WIDGET_LINE_CHARS) }, palette),
+        Math.max(1, width),
+      ),
+    )
+    .slice(0, 64)
+    .map((line) => truncateToWidth(line, width, ""));
+}
+
 /** Width-bounds extension widgets and keeps their lifecycle in the public host. */
 export class ExtensionWidgetsComponent implements Component {
   private readonly host: TerminalExtensionHost;

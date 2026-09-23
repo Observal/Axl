@@ -124,6 +124,15 @@ test("terminal extension expands prompts and reloads for the active workspace", 
     async select() {
       return "review";
     },
+    confirm: async () => {
+      throw new Error("Unexpected confirmation");
+    },
+    input: async () => {
+      throw new Error("Unexpected input prompt");
+    },
+    editor: async () => {
+      throw new Error("Unexpected editor prompt");
+    },
     getEditorText: () => editor,
     setEditorText: (text: string) => {
       editor = text;

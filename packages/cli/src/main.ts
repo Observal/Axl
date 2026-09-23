@@ -1223,7 +1223,11 @@ async function main(): Promise<void> {
     return settingsWrite;
   };
 
-  const [{ AxlApp }, { promptTemplatesExtension }, { skillTerminalExtension }] = await Promise.all([
+  const [
+    { AxlApp, loadTerminalExtensions },
+    { promptTemplatesExtension },
+    { skillTerminalExtension },
+  ] = await Promise.all([
     tuiModule ?? import("@axl/tui"),
     import("@axl/extension-prompts"),
     import("@axl/extension-skills"),
@@ -1262,6 +1266,8 @@ async function main(): Promise<void> {
       promptTemplatesExtension({ cwd: cli.cwd, globalDirectory: join(axlHome, "prompts") }),
       skillTerminalExtension,
     ],
+    loadExtensions: async (terminalClient, sessionId) =>
+      loadTerminalExtensions(await terminalClient.listExtensions({ sessionId })),
     clearStartupLine: startupIndicator,
     reconnectClient: () => connectTarget(currentTarget),
     openWeb: openWebForTarget(currentTarget),

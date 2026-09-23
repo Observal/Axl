@@ -34,10 +34,16 @@ export class LiveAssistantComponent implements Component {
   private maxRows: number | undefined;
   private readonly palette: () => Palette;
   private readonly thinkingDisplay: () => ThinkingDisplay;
+  private readonly transform: (text: string) => string;
 
-  constructor(palette: () => Palette, thinkingDisplay: () => ThinkingDisplay) {
+  constructor(
+    palette: () => Palette,
+    thinkingDisplay: () => ThinkingDisplay,
+    transform: (text: string) => string = (text) => text,
+  ) {
     this.palette = palette;
     this.thinkingDisplay = thinkingDisplay;
+    this.transform = transform;
   }
 
   get active(): boolean {
@@ -122,7 +128,9 @@ export class LiveAssistantComponent implements Component {
         rows.push(palette.dim(`  ∴ Thinking · ${lines} line${lines === 1 ? "" : "s"}`));
       }
     }
-    const text = sanitizeTerminalText(this.textChunks.slice(this.textStart).join(""));
+    const text = sanitizeTerminalText(
+      this.transform(this.textChunks.slice(this.textStart).join("")),
+    );
     if (text) {
       rows.push(
         ...renderMarkdown(text, contentWidth, palette).map(

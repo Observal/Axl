@@ -8,9 +8,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-
-import { ConversationProjector } from "@axl/sdk";
 import { parseOperationId, parseSessionId, type SessionActivityFrame } from "@axl/protocol";
+import { ConversationProjector } from "@axl/sdk";
 
 import {
   detectImageMediaType,
@@ -240,4 +239,25 @@ test("one hundred thousand deltas remain bounded and render the latest tail", ()
   assert.equal(rows.join("\n").includes("t1 "), false);
   assert.equal(rows.join("\n").includes("t100000 "), true);
   assert.equal(rows.length < 10_000, true);
+});
+
+test("streaming Markdown uses the same display transformer as settled assistant text", () => {
+  let prefix = "live";
+  const component = new LiveAssistantComponent(
+    () => PLAIN_PALETTE,
+    () => "hide",
+    (text) => `${prefix} ${text}`,
+  );
+  const operationId = parseOperationId("123e4567-e89b-42d3-a456-426614174001");
+  const projector = new ConversationProjector();
+  projectActivity(projector, component, {
+    operationId,
+    sequence: 1,
+    type: "text_delta",
+    text: "answer",
+  });
+  assert.match(component.render(80).join("\n"), /live answer/);
+  prefix = "reloaded";
+  component.invalidate();
+  assert.match(component.render(80).join("\n"), /reloaded answer/);
 });

@@ -34,6 +34,7 @@ export class PickerOverlay implements Overlay {
   private readonly windowSize: number;
   private filter = "";
   private index: number;
+  private settled = false;
 
   constructor(options: PickerOptions) {
     this.options = options;
@@ -90,7 +91,14 @@ export class PickerOverlay implements Overlay {
     return { row: this.options.title ? 4 : 2, column: 4 + visibleWidth(this.filter) };
   }
 
+  dispose(): void {
+    if (this.settled) return;
+    this.settled = true;
+    this.options.onCancel();
+  }
+
   handleKey(data: string): void {
+    if (this.settled) return;
     for (let at = 0; at < data.length; ) {
       const decoded = decodeOneKey(data, at);
       at = decoded.next;
@@ -104,8 +112,12 @@ export class PickerOverlay implements Overlay {
         this.previewSelection();
       } else if (key.kind === "enter") {
         const selected = list[this.index];
-        if (selected) this.options.onPick(selected.value);
+        if (selected) {
+          this.settled = true;
+          this.options.onPick(selected.value);
+        }
       } else if (key.kind === "escape" || (key.kind === "ctrl" && key.char === "c")) {
+        this.settled = true;
         this.options.onCancel();
       } else if (key.kind === "backspace") {
         this.filter = this.filter.slice(0, -1);
@@ -113,6 +125,7 @@ export class PickerOverlay implements Overlay {
         this.previewSelection();
       } else if (key.kind === "char") {
         if (/^[1-9]$/.test(key.char) && !this.filter && Number(key.char) <= list.length) {
+          this.settled = true;
           this.options.onPick((list[Number(key.char) - 1] as PickerItem).value);
         } else {
           this.filter += key.char;

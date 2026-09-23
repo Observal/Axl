@@ -240,6 +240,10 @@ export class LineEditor {
     return this.buffer;
   }
 
+  get textBeforeCursor(): string {
+    return this.buffer.slice(0, this.cursor);
+  }
+
   get isPasting(): boolean {
     return this.pasting;
   }
@@ -623,10 +627,10 @@ export class LineEditor {
     this.cursor = this.buffer.length;
   }
 
-  setText(text: string): void {
+  setText(text: string, cursor = text.length): void {
     if (text !== this.buffer) this.snapshot();
     this.buffer = text;
-    this.cursor = text.length;
+    this.cursor = previousBoundary(text, Math.min(Math.max(0, cursor + 1), text.length + 1));
     this.selectionAnchor = undefined;
     this.historyIndex = -1;
   }

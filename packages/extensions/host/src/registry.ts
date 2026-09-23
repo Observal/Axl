@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   lstat,
+  readdir,
   mkdir,
   readFile,
   realpath,
@@ -64,7 +65,7 @@ interface PackageManifest {
 interface AxlManifest {
   readonly id: string;
   readonly apiVersion: 1;
-  readonly daemon: string;
+  readonly daemon?: string;
   readonly tui?: string;
   readonly web?: string;
 }
@@ -74,6 +75,8 @@ interface RegistryEntry extends DiscoveredDaemonExtension {
   readonly version?: string;
   readonly packageName?: string;
   readonly missing?: boolean;
+  readonly daemon?: boolean;
+  readonly tuiPath?: string;
 }
 
 type CommandRunner = (
@@ -206,20 +209,22 @@ function parseManifest(
   if (axl.apiVersion !== API_VERSION) {
     throw new DaemonExtensionError(path, `axl.apiVersion must be ${API_VERSION}`);
   }
-  if (typeof axl.daemon !== "string" || axl.daemon.length === 0) {
-    throw new DaemonExtensionError(path, "axl.daemon must be a non-empty relative path");
+  if (axl.daemon === undefined && axl.tui === undefined && axl.web === undefined) {
+    throw new DaemonExtensionError(path, "at least one axl entry point is required");
   }
-  if (isAbsolute(axl.daemon)) throw new DaemonExtensionError(path, "axl.daemon must be relative");
-  for (const key of ["tui", "web"] as const) {
-    if (axl[key] !== undefined && (typeof axl[key] !== "string" || isAbsolute(axl[key]))) {
-      throw new DaemonExtensionError(path, `axl.${key} must be a relative path`);
+  for (const key of ["daemon", "tui", "web"] as const) {
+    if (
+      axl[key] !== undefined &&
+      (typeof axl[key] !== "string" || axl[key].length === 0 || isAbsolute(axl[key]))
+    ) {
+      throw new DaemonExtensionError(path, `axl.${key} must be a non-empty relative path`);
     }
   }
   return {
     manifest: {
       id,
       apiVersion: API_VERSION,
-      daemon: axl.daemon,
+      ...(typeof axl.daemon === "string" ? { daemon: axl.daemon } : {}),
       ...(typeof axl.tui === "string" ? { tui: axl.tui } : {}),
       ...(typeof axl.web === "string" ? { web: axl.web } : {}),
     },
@@ -232,21 +237,34 @@ async function packageEntry(packageDirectory: string): Promise<RegistryEntry> {
   const root = await realpath(packageDirectory);
   const manifestPath = join(root, "package.json");
   const parsed = parseManifest(await readJson(manifestPath), manifestPath);
-  const path = await realpath(resolve(root, parsed.manifest.daemon));
-  if (
-    !within(root, path) ||
-    !(await stat(path)).isFile() ||
-    !MODULE_EXTENSIONS.has(extname(path))
-  ) {
-    throw new DaemonExtensionError(
-      path,
-      "daemon entry must be a JavaScript or TypeScript file inside the package",
-    );
-  }
+  const entry = async (kind: "daemon" | "tui"): Promise<string | undefined> => {
+    const declared = parsed.manifest[kind];
+    if (declared === undefined) return undefined;
+    const requested = resolve(root, declared);
+    if (!within(root, requested)) {
+      throw new DaemonExtensionError(requested, `${kind} entry must be inside the package`);
+    }
+    const canonical = await realpath(requested);
+    if (
+      !within(root, canonical) ||
+      !(await stat(canonical)).isFile() ||
+      !MODULE_EXTENSIONS.has(extname(canonical))
+    ) {
+      throw new DaemonExtensionError(
+        requested,
+        `${kind} entry must be a JavaScript or TypeScript file inside the package`,
+      );
+    }
+    return canonical;
+  };
+  const daemonPath = await entry("daemon");
+  const tuiPath = await entry("tui");
   return {
     id: parsed.manifest.id,
-    path,
+    path: daemonPath ?? tuiPath ?? root,
     source: "package",
+    daemon: daemonPath !== undefined,
+    ...(tuiPath === undefined ? {} : { tuiPath }),
     packageName: parsed.packageName,
     ...(parsed.version === undefined ? {} : { version: parsed.version }),
   };
@@ -327,15 +345,64 @@ export class DaemonExtensionRegistry {
     this.packageDirectory = join(this.globalDirectory, ".packages");
   }
 
+  private async directoryEntries(
+    directory: string,
+    source: "global" | "project",
+  ): Promise<RegistryEntry[]> {
+    const plain = (await discoverDaemonExtensions(directory)).map((entry) => ({
+      ...entry,
+      source,
+    }));
+    const names = await readdir(directory, { withFileTypes: true }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      },
+    );
+    if (source === "project" && names.length > 0) {
+      const canonicalDirectory = await realpath(directory);
+      if (!within(await realpath(dirname(dirname(directory))), canonicalDirectory)) {
+        throw new DaemonExtensionError(
+          directory,
+          "project extension directory escapes the trusted project",
+        );
+      }
+      for (const entry of plain) {
+        if (!within(canonicalDirectory, entry.path)) {
+          throw new DaemonExtensionError(
+            entry.path,
+            "project extension symlink escapes the trusted directory",
+          );
+        }
+      }
+    }
+    for (const name of names.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (name.name.startsWith(".") || !name.isDirectory()) continue;
+      const root = join(directory, name.name);
+      try {
+        await stat(join(root, "package.json"));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      const packaged = await packageEntry(root);
+      if (packaged.id !== name.name) {
+        throw new DaemonExtensionError(
+          root,
+          `manifest id ${packaged.id} does not match directory ${name.name}`,
+        );
+      }
+      plain.push({ ...packaged, source });
+    }
+    return plain;
+  }
+
   private async selectedEntries(
     cwd: string,
     config: ExtensionConfiguration,
   ): Promise<{ readonly root: string; readonly entries: readonly RegistryEntry[] }> {
     const groups: RegistryEntry[][] = [
-      (await discoverDaemonExtensions(this.globalDirectory)).map((entry) => ({
-        ...entry,
-        source: "global" as const,
-      })),
+      await this.directoryEntries(this.globalDirectory, "global"),
       await Promise.all(
         config.packages.map(async (item): Promise<RegistryEntry> => {
           const path = join(this.packageDirectory, "node_modules", item.name);
@@ -370,12 +437,7 @@ export class DaemonExtensionRegistry {
     ];
     const root = await projectRoot(cwd);
     if (config.trustedProjects.includes(root)) {
-      groups.push(
-        (await discoverDaemonExtensions(join(root, ".axl", "extensions"))).map((entry) => ({
-          ...entry,
-          source: "project" as const,
-        })),
-      );
+      groups.push(await this.directoryEntries(join(root, ".axl", "extensions"), "project"));
     }
     const selected = new Map<string, RegistryEntry>();
     for (const group of groups) {
@@ -393,7 +455,7 @@ export class DaemonExtensionRegistry {
     const config = await readConfiguration(this.configPath);
     const selected = await this.selectedEntries(cwd, config);
     return selected.entries.filter(
-      (entry) => !entry.missing && !config.disabled.includes(entry.id),
+      (entry) => !entry.missing && entry.daemon !== false && !config.disabled.includes(entry.id),
     );
   }
 
@@ -410,6 +472,7 @@ export class DaemonExtensionRegistry {
           path: entry.path,
           source: entry.source,
           enabled: !entry.missing && !config.disabled.includes(entry.id),
+          ...(entry.tuiPath === undefined ? {} : { tuiPath: entry.tuiPath }),
           ...(entry.version === undefined ? {} : { version: entry.version }),
           ...(entry.packageName === undefined ? {} : { packageName: entry.packageName }),
           ...(error === undefined ? {} : { error }),
@@ -453,9 +516,11 @@ export class DaemonExtensionRegistry {
   async install(source: ExtensionInstallSource, signal?: AbortSignal): Promise<string> {
     if (source.type === "path") {
       const entry = await pathEntry(source.path, "explicit");
+      const installedPath =
+        entry.packageName === undefined ? entry.path : await realpath(source.path);
       await this.mutate((config) => ({
         ...config,
-        paths: [...new Set([...config.paths, entry.path])].sort(),
+        paths: [...new Set([...config.paths, installedPath])].sort(),
       }));
       return entry.id;
     }

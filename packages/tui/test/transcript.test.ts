@@ -308,3 +308,52 @@ test("presents the language-neutral corpus from the shared SDK projection", () =
   assert.equal(view.thinking, projector.state.thinking);
   assert.equal(view.totalCostUsd, projector.state.usage.costUsd);
 });
+
+test("extension entry and message renderers project canonical events without changing the log", async () => {
+  const { TerminalExtensionHost } = await import("@axl/extension-api");
+  const host = new TerminalExtensionHost([
+    {
+      manifest: { id: "test.entries", name: "Entries", capabilities: ["terminal.entries"] },
+      activate(api) {
+        api.registerEntryRenderer("state", (value) => [{ text: `state=${String(value)}` }]);
+        api.registerEntryRenderer("pulse", (value) => [{ text: `event=${String(value)}` }]);
+        api.registerMessageRenderer("greeting", (value) => [{ text: `message=${String(value)}` }]);
+      },
+    },
+  ]);
+  await host.activate();
+  const view = new SessionView(80, PLAIN_PALETTE, undefined, undefined, undefined, () => host);
+  assert.deepEqual(
+    view.apply(
+      makeEvent("extension.state", { extensionId: "test.entries", key: "state", value: 3 }),
+    ),
+    ["", "  state=3"],
+  );
+  assert.deepEqual(
+    view.apply(
+      makeEvent("extension.event", { extensionId: "test.entries", channel: "pulse", value: "ok" }),
+    ),
+    ["", "  event=ok"],
+  );
+  assert.deepEqual(
+    view.apply(
+      makeEvent("context.extension", {
+        extensionId: "test.entries",
+        source: "greeting",
+        content: "hello",
+      }),
+    ),
+    ["", "  message=hello"],
+  );
+  await host.dispose();
+  assert.deepEqual(
+    view.apply(
+      makeEvent("extension.event", {
+        extensionId: "test.entries",
+        channel: "pulse",
+        value: "later",
+      }),
+    ),
+    [],
+  );
+});

@@ -7,8 +7,8 @@ import test from "node:test";
 
 import {
   ExtensionRegistrationError,
-  TerminalExtensionHost,
   type TerminalExtension,
+  TerminalExtensionHost,
 } from "../src/index.ts";
 
 function fixture(state: {
@@ -227,4 +227,71 @@ test("listener failures are surfaced without preventing other listeners", async 
   assert.equal(reached, true);
   assert.match(errors[0]?.message ?? "", /test\.events.*broken listener/);
   await host.dispose();
+});
+
+test("terminal presentation registrations are capability-scoped, owned, and cancelled", async () => {
+  let prompts = 0;
+  const host = new TerminalExtensionHost([
+    {
+      manifest: {
+        id: "test.presentation",
+        name: "Presentation",
+        capabilities: [
+          "terminal.ui",
+          "terminal.widgets",
+          "terminal.markdown",
+          "terminal.entries",
+          "terminal.events",
+        ],
+      },
+      activate(api) {
+        assert.equal(api.ui.hasUI, false);
+        assert.throws(() => api.ui.notify("hello"), /unavailable/);
+        api.registerHeader("header", { render: () => [{ text: "HEAD" }] });
+        api.registerFooter("footer", { render: () => [{ text: "FOOT" }] });
+        api.registerMarkdownTransformer((text) => text.replace("before", "after"));
+        api.registerMessageRenderer("message", (value) => [{ text: `msg:${String(value)}` }]);
+        api.registerEntryRenderer("entry", (value) => [{ text: `entry:${String(value)}` }]);
+        api.registerAutocompleteProvider({
+          complete: () => [{ value: "#123", start: 0, label: "Issue" }],
+        });
+        api.registerEditor({
+          render: () => ({ lines: [{ text: "Custom editor" }], cursor: { row: 0, column: 0 } }),
+          handleKey: () => false,
+        });
+        api.on("ui.prompt.start", () => {
+          prompts += 1;
+        });
+      },
+    },
+  ]);
+  await host.activate();
+  assert.equal(host.header()[0]?.render(80)[0]?.text, "HEAD");
+  assert.equal(host.footer()[0]?.render(80)[0]?.text, "FOOT");
+  assert.equal(
+    host.editor()?.render(80, {
+      draft: "",
+      model: "",
+      working: false,
+      theme: { fg: (_tone, text) => text, bold: (text) => text },
+    }).lines[0]?.text,
+    "Custom editor",
+  );
+  assert.equal(host.transformMarkdown("before", "assistant"), "after");
+  assert.equal(host.renderMessage("message", "hi", 80)?.[0]?.text, "msg:hi");
+  assert.equal(host.renderCanonicalEntry("entry", 3, 80)?.[0]?.text, "entry:3");
+  assert.deepEqual(await host.autocomplete()[0]?.complete("#", new AbortController().signal), [
+    { value: "#123", start: 0, label: "Issue" },
+  ]);
+  assert.deepEqual(await host.emit({ type: "ui.prompt.start", prompt: "input" }), []);
+  assert.equal(prompts, 1);
+  await host.dispose();
+  assert.deepEqual(host.header(), []);
+  assert.deepEqual(host.footer(), []);
+  assert.deepEqual(host.autocomplete(), []);
+  assert.equal(host.editor(), undefined);
+  assert.equal(host.transformMarkdown("before", "assistant"), "before");
+  assert.equal(host.renderMessage("message", "hi", 80), undefined);
+  assert.deepEqual(await host.emit({ type: "ui.prompt.start", prompt: "input" }), []);
+  assert.equal(prompts, 1);
 });

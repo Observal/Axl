@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Daemon extensions
+# Extensions
 
 A daemon extension is a TypeScript or JavaScript file you put in `~/.axl/extensions/`. The daemon loads it at session start and runs it inside its own process with the daemon's permissions. Placing a file there is the trust decision. Axl does not sandbox extension code.
 
@@ -103,9 +103,43 @@ An installable package declares its entry points in `package.json`:
 }
 ```
 
-The daemon entry is required for daemon installation and must resolve inside the package. TUI and web declarations are reserved for their separate presentation hosts. Installing a package or trusting a project grants its code full process authority.
+At least one entry point is required. A package with only `tui` runs no daemon extension code. The `daemon` and `tui` entries must resolve to JavaScript or TypeScript files inside the package, including after symlink resolution. A package can live under `~/.axl/extensions/<id>/` or a trusted project's `.axl/extensions/<id>/`, or be installed with `extension.install` from a directory, npm, or pinned Git. The directory name must match the manifest ID. `web` is reserved for the browser host. Installing a package or trusting a project grants its code full process authority.
 
 The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, `reloadExtension`, `installExtension`, `updateExtension`, `removeExtension`, and `trustExtensionProject`. Mutations rebuild the selected session through the same atomic runtime replacement used by `/reload`. Inventory results include source, enablement, package version, and the latest lifecycle diagnostic. `/extensions` renders that inventory through the shared command controller in terminal and web clients.
+
+## Terminal entry points
+
+A terminal entry point default-exports a `TerminalExtension` object. It runs in the **local TUI process**, not in the daemon. The local client reads the daemon's `extension.list` inventory so project trust, precedence, and enablement are shared. A disabled entry is not imported. The public terminal API supports commands, shortcuts, status, working labels, widgets, header/footer slots, tool and canonical-entry renderers, Markdown transforms, asynchronous autocomplete, and session/working/prompt events. Commands can notify, select, confirm, request text or multiline input, and edit prompt text. With `terminal.ui`, `api.ui` exposes an owned custom overlay and theme helpers. Each registration and tracked resource is disposed on reload or exit. See `@observal/axl/extension-api` for types.
+
+```ts
+import type { TerminalExtension } from "@observal/axl/extension-api";
+
+const extension: TerminalExtension = {
+  manifest: {
+    id: "example-tools",
+    name: "Example tools",
+    capabilities: ["terminal.commands", "terminal.widgets", "terminal.ui"],
+  },
+  activate(ui) {
+    ui.registerWidget("summary", {
+      render: () => [{ text: "Extension ready", tone: "accent" }],
+    });
+    ui.registerCommand({
+      name: "hello",
+      description: "Greet from the terminal",
+      run: async (_args, ctx) => {
+        const name = await ctx.input("Who should we greet?", "your name");
+        if (name !== undefined) ctx.notify(`Hello, ${name}!`, "success");
+      },
+    });
+  },
+};
+export default extension;
+```
+
+TUI entries reload when `/reload` runs, the client switches sessions, or the daemon extension inventory changes. The host validates the extension's manifest identity, declared capabilities, and collisions with built-in commands and reserved shortcuts before enabling it. A failed replacement preserves the previous terminal host. User-installed code has full access to the local terminal process; do not install untrusted extensions.
+
+`ctx.input` accepts a single line; `ctx.editor` accepts multiline text. Selection, confirmation, and prompts resolve `undefined` on cancellation (confirmation resolves `false`). `api.ui.custom(title, create)` owns one dialog component with `render`, `handleKey`, optional `cursor`, and optional `dispose`. The `done(value)` callback settles it. Extension dialogs cannot replace an active approval or other dialog. On extension disable, reload, or terminal exit, pending prompts are cancelled and owned components are disposed. Outside an interactive TUI, `api.ui.hasUI` is `false` and UI calls throw an explicit unavailable error. `registerMarkdownTransformer` changes display text only, not the canonical log or model input. `registerMessageRenderer` handles `context.extension` sources; `registerEntryRenderer` handles `extension.state` keys and `extension.event` channels. Both render bounded, sanitized terminal lines. `registerEditor` replaces the main composer without changing daemon state. It receives the retained draft, model label, working state, and theme. Return bounded lines and a cursor, and return `true` from `handleKey` only for keys it consumes. Enter, Escape, interruption, and other safety keys remain built-in; disposing the registration restores the default composer without losing the draft. Autocomplete providers may return `{ value, label?, start? }`, where `start` is an offset in the text before the cursor. Their completion replaces text from that offset to the cursor and preserves the trailing draft. Markdown transformers run for both streaming and settled assistant display. See the [extension parity matrix](architecture/extension-parity.md) for other remaining work.
 
 ## API
 
@@ -183,4 +217,4 @@ The owning daemon operation's signal reaches activation, context discovery, inpu
 
 ## Scope
 
-Daemon extensions load in the `standard` tool profile. Changed source is re-imported when a session runtime reloads. Shared command registration, persistent namespaced state, provider hooks, and the independently loaded TUI and web entry points remain tracked in the extension parity matrix.
+Daemon extensions load in the `standard` tool profile. Changed source is re-imported when a session runtime reloads. The remaining TUI main-editor replacement and browser-safe web host remain tracked in the extension parity matrix.

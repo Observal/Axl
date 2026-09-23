@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -52,6 +52,71 @@ test("resolves global, explicit, and trusted project extensions with determinist
   assert.equal((await registry.list(project)).extensions[0]?.source, "global");
   await registry.remove("shared");
   assert.equal((await registry.list(project)).extensions[0]?.source, "global");
+});
+
+test("TUI-only packages require trust, remain disabled before import, and resolve inside their root", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-terminal-registry-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  await mkdir(join(project, ".git"), { recursive: true });
+  const directory = join(project, ".axl", "extensions", "terminal");
+  await mkdir(directory, { recursive: true });
+  await writeFile(
+    join(directory, "package.json"),
+    JSON.stringify({
+      name: "terminal",
+      axl: {
+        id: "terminal",
+        apiVersion: 1,
+        tui: "./view.mjs",
+      },
+    }),
+  );
+  await writeFile(
+    join(directory, "view.mjs"),
+    "throw new Error('should not import during discovery');\n",
+  );
+  const registry = new DaemonExtensionRegistry(home);
+  assert.deepEqual((await registry.list(project)).extensions, []);
+  await registry.trustProject(project, true);
+  const listed = (await registry.list(project)).extensions[0];
+  assert.equal(listed?.tuiPath, join(directory, "view.mjs"));
+  assert.deepEqual(await registry.entries(project), []);
+  await registry.setEnabled("terminal", false);
+  assert.equal((await registry.list(project)).extensions[0]?.enabled, false);
+  await registry.setEnabled("terminal", true);
+  await registry.trustProject(project, false);
+  assert.equal(await registry.install({ type: "path", path: directory }), "terminal");
+  assert.equal((await registry.list(project)).extensions[0]?.source, "explicit");
+  assert.deepEqual(await registry.entries(project), []);
+  await writeFile(
+    join(directory, "package.json"),
+    JSON.stringify({
+      name: "terminal",
+      axl: {
+        id: "terminal",
+        apiVersion: 1,
+        tui: "../../../outside.mjs",
+      },
+    }),
+  );
+  await assert.rejects(registry.list(project), /must be inside the package/);
+});
+
+test("trusted projects reject extension symlinks outside the project", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-terminal-trust-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const home = join(root, "home");
+  await mkdir(join(project, ".git"), { recursive: true });
+  const directory = join(project, ".axl", "extensions");
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(root, "outside.js"), "throw new Error('escaped');\n");
+  await symlink(join(root, "outside.js"), join(directory, "outside.js"));
+  const registry = new DaemonExtensionRegistry(home);
+  await registry.trustProject(project, true);
+  await assert.rejects(registry.list(project), /symlink escapes the trusted directory/);
 });
 
 test("installs Git extensions from an explicit commit spec", async (context) => {

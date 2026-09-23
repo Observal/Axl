@@ -13,9 +13,12 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
   type TerminalCommandContext,
+  type TerminalCustomComponent,
   type TerminalExtension,
   TerminalExtensionHost,
   type TerminalLine,
+  type TerminalTheme,
+  type TerminalUi,
 } from "@axl/extension-api";
 import type {
   BlobReference,
@@ -53,19 +56,19 @@ import {
   MCP_ADD_SERVER_QUESTIONS,
   MCP_IMPORT_QUESTION,
   type McpImportedServer,
+  type ModelRequestSettings,
+  mcpRequiredEnvironment,
   mcpServerDefinitionFromDraft,
   mcpServerDraftFromAnswers,
-  mcpRequiredEnvironment,
   mcpServerReviewLines,
-  type ModelRequestSettings,
   orderPendingTurnInputs,
-  parseMcpImport,
-  summarizeMcpServers,
   type PresentationCommand,
   ProviderClientError,
+  parseMcpImport,
   restoreQueuedPrompts,
   type SessionSubscription,
   subscribeSession,
+  summarizeMcpServers,
   supportedThinkingLevels,
   THINKING_LEVELS,
   type TrustedProviderHost,
@@ -90,7 +93,8 @@ import {
 } from "./diff-review.ts";
 import { decodeOneKey, LineEditor } from "./editor.ts";
 import { EditorFrameComponent } from "./editor-frame.ts";
-import { ExtensionWidgetsComponent } from "./extension-ui.ts";
+import { ExtensionCustomPrompt, ExtensionTextPrompt } from "./extension-prompt.ts";
+import { ExtensionWidgetsComponent, renderExtensionLines } from "./extension-ui.ts";
 import { editPromptExternally } from "./external-editor.ts";
 import {
   type FloatingDialog,
@@ -102,6 +106,7 @@ import {
 import { isMouseReport } from "./fullscreen-input.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
 import type { LoginDialogDefinition } from "./login-dialog.ts";
+import { McpPanelOverlay } from "./mcp-panel.ts";
 import {
   AttachmentBarComponent,
   detectTerminalMedia,
@@ -113,7 +118,6 @@ import {
 import { type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
-import { McpPanelOverlay } from "./mcp-panel.ts";
 import { QuestionnaireOverlay } from "./questionnaire.ts";
 import {
   AUTOWRAP_OFF,
@@ -554,6 +558,11 @@ export interface AxlAppOptions {
   readonly imageDisplay?: ImageDisplay;
   readonly mediaCapabilities?: TerminalMediaCapabilities;
   readonly extensions?: readonly TerminalExtension[];
+  /** Local process host loads enabled presentation entries from daemon SDK inventory. */
+  readonly loadExtensions?: (
+    client: AxlClient,
+    sessionId: SessionId,
+  ) => Promise<readonly TerminalExtension[]>;
   readonly onPreferenceChange?: (update: {
     providerId?: string;
     modelId?: string;
@@ -635,14 +644,31 @@ export class AxlApp {
   private view: SessionView;
   private readonly editor = new LineEditor();
   private readonly editorFrame: EditorFrameComponent;
+  private readonly editorSurface: Component;
+  private editorSurfaceCursor: CursorPlacement | undefined;
+  private editorCompletions: readonly string[] | undefined;
   private readonly activity: ActivityComponent;
   private readonly liveAssistant: LiveAssistantComponent;
   private readonly attachmentBar: AttachmentBarComponent;
   private readonly mediaCache: MediaCache;
-  private readonly extensionHost: TerminalExtensionHost;
-  private readonly extensionWidgetsAbove: ExtensionWidgetsComponent;
-  private readonly extensionWidgetsBelow: ExtensionWidgetsComponent;
+  private extensionHost: TerminalExtensionHost;
+  private extensionCompletionRequest:
+    | { text: string; prefix: string; controller: AbortController }
+    | undefined;
+  private extensionCompletionResult:
+    | {
+        text: string;
+        prefix: string;
+        values: readonly string[];
+        labels: ReadonlyMap<string, string>;
+        cursors: ReadonlyMap<string, number>;
+      }
+    | undefined;
+  private extensionWidgetsAbove: ExtensionWidgetsComponent;
+  private extensionWidgetsBelow: ExtensionWidgetsComponent;
   private readonly extensionCommandControllers = new Set<AbortController>();
+  private extensionReloading = false;
+  private extensionRefresh = Promise.resolve();
   private readonly fullscreen: FullscreenScreen;
   private tuiMode: "regular" | "fullscreen";
   private fullscreenExitOutput: "transcript" | "resume-hint";
@@ -808,9 +834,13 @@ export class AxlApp {
       options.modelCatalog,
       (reference, mediaWidth, mediaPalette) =>
         this.mediaCache.rows(reference, mediaWidth, this.tuiMode === "fullscreen", mediaPalette),
+      undefined,
+      () => this.extensionHost,
     );
     this.view.toolOutputDisplay = options.toolOutputDisplay ?? "compact";
-    this.extensionHost = new TerminalExtensionHost(options.extensions);
+    this.extensionHost = new TerminalExtensionHost(options.extensions, {
+      uiFor: (signal) => this.extensionCommandContext(signal),
+    });
     this.commandController = this.createCommandController(options.client);
     this.extensionWidgetsAbove = new ExtensionWidgetsComponent(
       this.extensionHost,
@@ -832,10 +862,12 @@ export class AxlApp {
     );
     this.view.thinkingDisplay = options.thinkingDisplay ?? "compact";
     this.editorFrame = new EditorFrameComponent(this.editor, () => this.view);
+    this.editorSurface = { render: (width) => this.renderExtensionEditor(width) };
     this.activity = new ActivityComponent(() => this.view.palette);
     this.liveAssistant = new LiveAssistantComponent(
       () => this.view.palette,
       () => this.view.thinkingDisplay,
+      (text) => this.extensionHost.transformMarkdown(text, "assistant"),
     );
     this.attachmentBar = new AttachmentBarComponent(() => this.view.palette);
     this.developerPanel = new DeveloperPanelComponent(
@@ -1093,7 +1125,11 @@ export class AxlApp {
     );
     try {
       await app.commandController.refresh(opened?.sessionId);
-      await app.extensionHost.activate();
+      if (opened !== undefined && options.loadExtensions !== undefined) {
+        await app.replaceTerminalExtensions(options.client, opened.sessionId);
+      } else {
+        await app.extensionHost.activate();
+      }
       void app.commandController.commands;
       const conflictingShortcut = app.extensionHost
         .shortcuts()
@@ -1167,6 +1203,8 @@ export class AxlApp {
     this.stopThemeWatcher = undefined;
     for (const controller of this.extensionCommandControllers) controller.abort();
     this.extensionCommandControllers.clear();
+    this.extensionCompletionRequest?.controller.abort();
+    this.extensionCompletionRequest = undefined;
     this.providerOperation?.abort();
     this.providerOperation = undefined;
 
@@ -1309,6 +1347,73 @@ export class AxlApp {
     return this.view.palette.dim(text);
   }
 
+  private renderExtensionEditor(width: number): string[] {
+    const component = this.extensionHost.editor();
+    if (component === undefined) {
+      const rows = this.editorFrame.render(width);
+      this.editorSurfaceCursor = this.editorFrame.cursorPlacement();
+      return rows;
+    }
+    try {
+      const rendered = component.render(width, {
+        draft: this.editor.text,
+        model: this.view.modelLabel(),
+        working: this.view.working,
+        theme: {
+          fg: (tone, text) => this.styledExtensionLine({ tone, text }),
+          bold: (text) =>
+            (this.view.palette.bold ?? ((value) => value))(sanitizeTerminalText(text)),
+        },
+      });
+      if (
+        !Array.isArray(rendered?.lines) ||
+        rendered.lines.length > 16 ||
+        rendered.lines.some((line) => typeof line?.text !== "string")
+      )
+        throw new TypeError("Custom editor must return at most 16 terminal lines");
+      const cursor = rendered.cursor;
+      if (
+        cursor !== undefined &&
+        (!Number.isSafeInteger(cursor.row) ||
+          cursor.row < 0 ||
+          cursor.row >= rendered.lines.length ||
+          !Number.isSafeInteger(cursor.column) ||
+          cursor.column < 0 ||
+          cursor.column >= width)
+      )
+        throw new TypeError("Custom editor cursor is outside the rendered frame");
+      this.editorSurfaceCursor =
+        cursor === undefined
+          ? undefined
+          : { ...cursor, row: cursor.row + (this.notice === undefined ? 0 : 1) };
+      return [
+        ...(this.notice === undefined ? [] : [truncateToWidth(this.notice, width, "")]),
+        ...rendered.lines.map((line) => {
+          const text = truncateToWidth(
+            sanitizeTerminalText(line.text).replace(/[\r\n]/gu, " "),
+            width,
+            "",
+          );
+          if (line.tone === "error") return this.view.palette.error(text);
+          if (line.tone === "accent") return this.view.palette.accent(text);
+          if (line.tone === "warning")
+            return (this.view.palette.warning ?? this.view.palette.accent)(text);
+          if (line.tone === "success")
+            return (this.view.palette.success ?? this.view.palette.accent)(text);
+          return line.tone === "muted" ? this.view.palette.dim(text) : text;
+        }),
+        ...(this.editorCompletions ?? []).map((line) => truncateToWidth(line, width, "")),
+      ];
+    } catch (error) {
+      this.editorSurfaceCursor = undefined;
+      return [
+        this.view.palette.error(
+          `✖ custom editor failed · ${extensionSingleLine(error instanceof Error ? error.message : String(error))}`,
+        ),
+      ];
+    }
+  }
+
   private liveFrame(
     includePendingTools = true,
     includeOverlay = true,
@@ -1357,6 +1462,7 @@ export class AxlApp {
       queued: this.queued.length,
     });
     const completion = this.completions();
+    this.editorCompletions = completion;
     const editorMode = this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined;
     this.editorFrame.update({
       ...(this.notice === undefined ? {} : { notice: this.notice }),
@@ -1381,6 +1487,14 @@ export class AxlApp {
     });
     const fixed: Component[] = [
       ...unsafeComponents,
+      {
+        render: (width) =>
+          renderExtensionLines(
+            this.extensionHost.header().flatMap((widget) => widget.render(width)),
+            width,
+            this.view.palette,
+          ),
+      },
       this.extensionWidgetsAbove,
       this.attachmentBar,
       ...(this.developerPanelEnabled ? [this.developerPanel] : []),
@@ -1406,8 +1520,16 @@ export class AxlApp {
         },
       },
       this.activity,
-      this.editorFrame,
+      this.editorSurface,
       this.extensionWidgetsBelow,
+      {
+        render: (width) =>
+          renderExtensionLines(
+            this.extensionHost.footer().flatMap((widget) => widget.render(width)),
+            width,
+            this.view.palette,
+          ),
+      },
     ];
     const measured = fixed.map((component) => component.render(this.width));
     const reservedRows = measured.reduce((total, lines) => total + lines.length, 0);
@@ -1419,7 +1541,7 @@ export class AxlApp {
       includePendingTools ? Math.max(0, this.height - reservedRows - tools.length) : undefined,
     );
     const assistant = includePendingTools ? this.liveAssistant.render(this.width) : [];
-    const editorCursor = this.editorFrame.cursorPlacement();
+    const editorCursor = this.editorSurfaceCursor;
     const lines = [
       ...prefixRows,
       ...tools,
@@ -1432,13 +1554,14 @@ export class AxlApp {
       {
         row:
           measured
-            .slice(0, fixed.indexOf(this.editorFrame))
+            .slice(0, fixed.indexOf(this.editorSurface))
             .reduce((total, rows) => total + rows.length, 0) +
           tools.length +
           assistant.length +
-          editorCursor.row,
-        column: editorCursor.column,
-        visible: !this.view.working && this.connectionState === "connected",
+          (editorCursor?.row ?? 0),
+        column: editorCursor?.column ?? 0,
+        visible:
+          editorCursor !== undefined && !this.view.working && this.connectionState === "connected",
       },
       prefixRows.length,
     );
@@ -1461,13 +1584,14 @@ export class AxlApp {
         try {
           const values = extensionCommand.complete?.(prefix) ?? [];
           if (!Array.isArray(values)) throw new TypeError("completion must return an array");
-          return values
+          const matches = values
             .slice(0, MAX_EXTENSION_COMPLETIONS)
             .flatMap((value) =>
               typeof value === "string"
                 ? [`/${extensionCommand.name} ${extensionSingleLine(value)}`]
                 : [],
             );
+          return matches.length ? matches : this.extensionCompletionCandidates(text);
         } catch (error) {
           this.notice = this.view.palette.error(
             `✖ extension ${extensionCommand.extensionId} completion failed · ${extensionSingleLine(
@@ -1482,7 +1606,7 @@ export class AxlApp {
       /^(\/model|\/providers|\/login|\/logout|\/refresh|\/thinking|\/theme|\/details|\/favorite|\/developer|\/review|\/vim)\s+(\S*)$/.exec(
         text,
       );
-    if (!argument) return [];
+    if (!argument) return this.extensionCompletionCandidates(text);
     const [, command, query = ""] = argument;
     const values =
       command === "/model"
@@ -1515,9 +1639,87 @@ export class AxlApp {
                     : command === "/vim"
                       ? ["on", "off"]
                       : ["compact", "full", "focus"];
-    return values
+    const matches = values
       .filter((value) => value.toLowerCase().startsWith(query.toLowerCase()))
       .map((value) => `${command} ${value}`);
+    return matches.length ? matches : this.extensionCompletionCandidates(text);
+  }
+
+  private extensionCompletionCandidates(text: string): readonly string[] {
+    if (this.extensionHost.autocomplete().length === 0) return [];
+    const prefix = this.editor.textBeforeCursor;
+    if (
+      this.extensionCompletionResult?.text === text &&
+      this.extensionCompletionResult.prefix === prefix
+    )
+      return this.extensionCompletionResult.values;
+    if (
+      this.extensionCompletionRequest?.text === text &&
+      this.extensionCompletionRequest.prefix === prefix
+    )
+      return [];
+    this.extensionCompletionRequest?.controller.abort();
+    const controller = new AbortController();
+    const request = { text, prefix, controller };
+    const host = this.extensionHost;
+    this.extensionCompletionRequest = request;
+    void Promise.all(
+      host
+        .autocomplete()
+        .map((provider) =>
+          Promise.resolve().then(() => provider.complete(prefix, controller.signal)),
+        ),
+    )
+      .then((groups) => {
+        if (
+          controller.signal.aborted ||
+          this.extensionCompletionRequest !== request ||
+          this.extensionHost !== host
+        )
+          return;
+        const labels = new Map<string, string>();
+        const cursors = new Map<string, number>();
+        const values = groups
+          .flatMap((group) => {
+            if (!Array.isArray(group))
+              throw new TypeError("Extension autocomplete must return an array");
+            return group.slice(0, MAX_EXTENSION_COMPLETIONS).flatMap((item) => {
+              if (typeof item?.value !== "string")
+                throw new TypeError("Extension autocomplete value must be a string");
+              const start = item.start ?? 0;
+              if (!Number.isSafeInteger(start) || start < 0 || start > prefix.length)
+                throw new TypeError("Extension autocomplete start is outside the prompt prefix");
+              const value =
+                text.slice(0, start) + extensionSingleLine(item.value) + text.slice(prefix.length);
+              if (value === text || labels.has(value)) return [];
+              if (item.label !== undefined && typeof item.label !== "string")
+                throw new TypeError("Extension autocomplete label must be a string");
+              labels.set(value, item.label === undefined ? "" : extensionSingleLine(item.label));
+              cursors.set(value, start + extensionSingleLine(item.value).length);
+              return [value];
+            });
+          })
+          .slice(0, MAX_EXTENSION_COMPLETIONS);
+        this.extensionCompletionResult = { text, prefix, values, labels, cursors };
+        this.extensionCompletionRequest = undefined;
+        this.redraw();
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted || this.extensionCompletionRequest !== request) return;
+        this.extensionCompletionRequest = undefined;
+        this.extensionCompletionResult = {
+          text,
+          prefix,
+          values: [],
+          labels: new Map(),
+          cursors: new Map(),
+        };
+        this.notice = this.view.palette.error(
+          `✖ extension autocomplete failed · ${extensionSingleLine(error instanceof Error ? error.message : String(error))}`,
+        );
+        this.redraw();
+      });
+    return [];
   }
 
   private completionMatches(): readonly string[] {
@@ -1542,7 +1744,7 @@ export class AxlApp {
     const matches = this.completionMatches();
     const selected = matches[this.completionIndex];
     if (selected === undefined) return false;
-    this.editor.setText(selected);
+    this.editor.setText(selected, this.extensionCompletionResult?.cursors.get(selected));
     this.completionText = selected;
     this.completionIndex = 0;
     return true;
@@ -1563,7 +1765,9 @@ export class AxlApp {
       ...visible.map((value, offset) => {
         const index = start + offset;
         const command = this.availableCommands().find((candidate) => candidate.name === value);
-        const description = command === undefined ? "" : `  ${dim(command.summary)}`;
+        const label = this.extensionCompletionResult?.labels.get(value);
+        const description =
+          command === undefined ? (label ? `  ${dim(label)}` : "") : `  ${dim(command.summary)}`;
         const line = `  ${index === this.completionIndex ? ">" : " "} ${value}${description}`;
         return index === this.completionIndex
           ? (this.view.palette.selection ?? accent)(line)
@@ -1746,6 +1950,22 @@ export class AxlApp {
     if (event.type === "config.dialect" && event.payload.reason === "reload" && !this.hydrating) {
       void this.refreshMcpStatus("reload");
     }
+    // Every runtime replacement records a resource snapshot, even without an AI dialect.
+    if (event.type === "context.resources" && !this.hydrating) {
+      if (this.options.loadExtensions !== undefined && !this.extensionReloading) {
+        const sessionId = this.sessionId;
+        this.extensionRefresh = this.extensionRefresh
+          .then(async () => {
+            if (this.stopped || sessionId !== this.sessionId) return;
+            await this.commandController.refresh(sessionId);
+            await this.replaceTerminalExtensions(this.client, sessionId);
+            this.redraw();
+          })
+          .catch((error: unknown) => {
+            this.reportExtensionErrors([error instanceof Error ? error : new Error(String(error))]);
+          });
+      }
+    }
     if (event.type === "user.message") this.consumePendingTurnInput(event);
 
     if (event.type === "tool.call") {
@@ -1831,48 +2051,200 @@ export class AxlApp {
     this.redraw();
   }
 
-  private extensionCommandContext(controller: AbortController): TerminalCommandContext {
+  private extensionCommandContext(signal: AbortSignal): TerminalUi {
     const assertActive = (): void => {
-      if (controller.signal.aborted || this.stopped) {
+      if (signal.aborted || this.stopped) {
         throw new Error("Extension command context is no longer active");
       }
     };
+    const promptEvent = (
+      type: "ui.prompt.start" | "ui.prompt.end",
+      prompt: "select" | "confirm" | "input" | "editor" | "custom",
+    ): void => {
+      void this.extensionHost
+        .emit({ type, prompt })
+        .then((errors) => this.reportExtensionErrors(errors));
+    };
+    const select = (
+      title: string,
+      items: readonly { value: string; label: string; description?: string }[],
+      kind: "select" | "confirm" = "select",
+    ): Promise<string | undefined> =>
+      new Promise((resolvePromise) => {
+        if (signal.aborted || this.stopped) {
+          resolvePromise(undefined);
+          return;
+        }
+        if (this.overlays.active !== undefined) throw new Error("Terminal UI is busy");
+        promptEvent("ui.prompt.start", kind);
+        let settled = false;
+        const finish = (value: string | undefined): void => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", abort);
+          promptEvent("ui.prompt.end", kind);
+          resolvePromise(value);
+        };
+        const abort = (): void => {
+          finish(undefined);
+          if (this.overlays.active === overlay) {
+            this.overlays.close();
+            this.redraw();
+          }
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        const overlay = this.openPicker({
+          title: extensionSingleLine(title),
+          items: items.slice(0, MAX_EXTENSION_SELECTOR_ITEMS).map((item) => ({
+            value: item.value,
+            label: extensionSingleLine(item.label),
+            ...(item.description === undefined
+              ? {}
+              : { description: extensionSingleLine(item.description) }),
+          })),
+          current: "",
+          onPick: finish,
+          onCancel: () => finish(undefined),
+        });
+        this.redraw();
+      });
+    const prompt = (
+      title: string,
+      initial: string | undefined,
+      multiline: boolean,
+    ): Promise<string | undefined> =>
+      new Promise((resolvePromise) => {
+        if (signal.aborted || this.stopped) {
+          resolvePromise(undefined);
+          return;
+        }
+        if (this.overlays.active !== undefined) throw new Error("Terminal UI is busy");
+        const kind = multiline ? "editor" : "input";
+        promptEvent("ui.prompt.start", kind);
+        let settled = false;
+        const finish = (value: string | undefined): void => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", abort);
+          promptEvent("ui.prompt.end", kind);
+          resolvePromise(value);
+          if (this.overlays.active === overlay) {
+            this.overlays.close();
+            this.openNextInteraction();
+            this.redraw();
+          }
+        };
+        const abort = (): void => finish(undefined);
+        const overlay = new ExtensionTextPrompt({
+          title,
+          ...(initial === undefined
+            ? {}
+            : multiline
+              ? { prefill: initial }
+              : { placeholder: initial }),
+          multiline,
+          palette: () => this.view.palette,
+          finish,
+          refresh: () => this.redraw(),
+        });
+        signal.addEventListener("abort", abort, { once: true });
+        this.overlays.push(overlay);
+        this.redraw();
+      });
+    const app = this;
     return {
-      signal: controller.signal,
+      signal,
+      hasUI: true,
+      mode: "tui",
       notify: (message, tone = "muted") => {
         assertActive();
         this.notice = this.styledExtensionLine({ text: `· ${message}`, tone });
         this.redraw();
       },
-      select: (title, items) =>
-        new Promise<string | undefined>((resolvePromise) => {
-          if (controller.signal.aborted || this.stopped) {
+      select,
+      confirm: async (title, message) =>
+        (await select(
+          `${title} · ${message}`,
+          [
+            { value: "yes", label: "Yes" },
+            { value: "no", label: "No" },
+          ],
+          "confirm",
+        )) === "yes",
+      input: (title, placeholder) => prompt(title, placeholder, false),
+      editor: (title, prefill) => prompt(title, prefill, true),
+      custom: <T>(
+        title: string,
+        create: (done: (value: T | undefined) => void) => TerminalCustomComponent,
+      ): Promise<T | undefined> =>
+        new Promise((resolvePromise) => {
+          if (signal.aborted || this.stopped) {
             resolvePromise(undefined);
             return;
           }
+          if (this.overlays.active !== undefined) throw new Error("Terminal UI is busy");
+          promptEvent("ui.prompt.start", "custom");
           let settled = false;
-          const finish = (value: string | undefined): void => {
+          let overlay: ExtensionCustomPrompt | undefined;
+          const finish = (value: T | undefined): void => {
             if (settled) return;
             settled = true;
-            controller.signal.removeEventListener("abort", abort);
+            signal.removeEventListener("abort", abort);
+            promptEvent("ui.prompt.end", "custom");
             resolvePromise(value);
+            if (overlay !== undefined && this.overlays.active === overlay) {
+              this.overlays.close();
+              this.openNextInteraction();
+              this.redraw();
+            }
           };
           const abort = (): void => finish(undefined);
-          controller.signal.addEventListener("abort", abort, { once: true });
-          this.openPicker({
-            title: extensionSingleLine(title),
-            items: items.slice(0, MAX_EXTENSION_SELECTOR_ITEMS).map((item) => ({
-              value: item.value,
-              label: extensionSingleLine(item.label),
-              ...(item.description === undefined
-                ? {}
-                : { description: extensionSingleLine(item.description) }),
-            })),
-            current: "",
-            onPick: (value) => finish(value),
-            onCancel: () => finish(undefined),
-          });
+          let component: TerminalCustomComponent;
+          try {
+            component = create(finish);
+            if (
+              typeof component?.render !== "function" ||
+              typeof component.handleKey !== "function"
+            )
+              throw new TypeError("Custom component must implement render and handleKey");
+          } catch (error) {
+            if (!settled) promptEvent("ui.prompt.end", "custom");
+            throw error;
+          }
+          if (settled) {
+            component.dispose?.();
+            return;
+          }
+          overlay = new ExtensionCustomPrompt(
+            component,
+            title,
+            () => this.view.palette,
+            () => finish(undefined),
+          );
+          signal.addEventListener("abort", abort, { once: true });
+          this.overlays.push(overlay);
+          this.redraw();
         }),
+      get theme(): TerminalTheme {
+        assertActive();
+        return {
+          fg(tone, text) {
+            return app.styledExtensionLine({ text, tone });
+          },
+          bold(text) {
+            return (app.view.palette.bold ?? ((value) => value))(sanitizeTerminalText(text));
+          },
+        };
+      },
+      themes: () => {
+        assertActive();
+        return themeNames(this.themeDefinitions);
+      },
+      setTheme: (name) => {
+        assertActive();
+        if (this.themes[name] === undefined) throw new Error(`Unknown terminal theme ${name}`);
+        this.selectTheme(name);
+      },
       getEditorText: () => {
         assertActive();
         return this.editor.text;
@@ -1891,7 +2263,7 @@ export class AxlApp {
   ): void {
     const controller = new AbortController();
     this.extensionCommandControllers.add(controller);
-    Promise.resolve(action(this.extensionCommandContext(controller)))
+    Promise.resolve(action(this.extensionCommandContext(controller.signal)))
       .catch((error: unknown) => {
         if (controller.signal.aborted || this.stopped) return;
         const message = sanitizeTerminalText(
@@ -1968,7 +2340,30 @@ export class AxlApp {
       }
       const decoded = decodeOneKey(data, index);
       const key = decoded.key;
+      const rawKey = data.slice(index, decoded.next);
       index = decoded.next;
+      const customEditor = this.extensionHost.editor();
+      if (customEditor !== undefined && !isReservedExtensionShortcut(rawKey)) {
+        try {
+          const handled = customEditor.handleKey(rawKey, {
+            text: this.editor.text,
+            setText: (text) => {
+              this.editor.setText(sanitizeTerminalText(text));
+              this.redraw();
+            },
+          });
+          if (typeof handled !== "boolean")
+            throw new TypeError("Custom editor must return a boolean from handleKey");
+          if (handled) continue;
+        } catch (error) {
+          this.reportExtensionErrors([
+            new Error(
+              `Custom editor failed: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+          ]);
+          return;
+        }
+      }
 
       if (key.kind === "up" && !this.editor.isBrowsingHistory && this.moveCompletion(-1)) {
         // Completion owns navigation only while editing the current draft.
@@ -2010,7 +2405,14 @@ export class AxlApp {
       } else if (key.kind === "shift-tab") {
         void this.cycleThinkingLevel();
       } else if (key.kind === "tab") {
-        if (!this.acceptCompletion()) this.editor.apply(key);
+        if (
+          !this.acceptCompletion() &&
+          !(
+            this.extensionCompletionRequest?.text === this.editor.text &&
+            this.extensionCompletionRequest.prefix === this.editor.textBeforeCursor
+          )
+        )
+          this.editor.apply(key);
       } else if (key.kind === "escape") {
         if (this.providerOperation !== undefined) {
           this.providerOperation.abort();
@@ -2980,6 +3382,8 @@ export class AxlApp {
       this.options.modelCatalog,
       (reference, mediaWidth, mediaPalette) =>
         this.mediaCache.rows(reference, mediaWidth, this.tuiMode === "fullscreen", mediaPalette),
+      undefined,
+      () => this.extensionHost,
     );
     next.thinkingDisplay = previous.thinkingDisplay;
     next.toolOutputDisplay = previous.toolOutputDisplay;
@@ -4550,6 +4954,65 @@ export class AxlApp {
     this.redraw();
   }
 
+  private async replaceTerminalExtensions(client: AxlClient, sessionId: SessionId): Promise<void> {
+    const definitions = [
+      ...(this.options.extensions ?? []),
+      ...(this.options.loadExtensions === undefined
+        ? []
+        : await this.options.loadExtensions(client, sessionId)),
+    ];
+    const replacement = new TerminalExtensionHost(definitions, {
+      uiFor: (signal) => this.extensionCommandContext(signal),
+    });
+    await replacement.activate();
+    try {
+      const conflict = replacement
+        .shortcuts()
+        .find((shortcut) => isReservedExtensionShortcut(shortcut.key));
+      if (conflict !== undefined)
+        throw new Error(
+          `Extension ${conflict.extensionId} conflicts with a reserved terminal shortcut`,
+        );
+      const previousIds = new Set(this.extensionHost.extensionStates().map((state) => state.id));
+      const names = new Set(
+        this.commandController.commands
+          .filter(
+            (command) =>
+              command.source !== "presentation" ||
+              command.extensionId === undefined ||
+              !previousIds.has(command.extensionId),
+          )
+          .flatMap((command) => [command.name, ...command.aliases]),
+      );
+      for (const command of replacement.commands()) {
+        if (names.has(command.name)) throw new Error(`Command name collision: /${command.name}`);
+      }
+    } catch (error) {
+      await replacement.dispose();
+      throw error;
+    }
+    for (const controller of this.extensionCommandControllers) controller.abort();
+    this.extensionCommandControllers.clear();
+    this.extensionCompletionRequest?.controller.abort();
+    this.extensionCompletionRequest = undefined;
+    this.extensionCompletionResult = undefined;
+    const previous = this.extensionHost;
+    this.extensionHost = replacement;
+    this.extensionWidgetsAbove = new ExtensionWidgetsComponent(
+      replacement,
+      "aboveEditor",
+      () => this.view.palette,
+    );
+    this.extensionWidgetsBelow = new ExtensionWidgetsComponent(
+      replacement,
+      "belowEditor",
+      () => this.view.palette,
+    );
+    await previous.dispose();
+    this.liveAssistant.invalidate();
+    if (!this.hydrating) this.rebuildTranscript();
+  }
+
   private async switchSession(
     opened: SessionOpenResult,
     draft: string,
@@ -4582,6 +5045,8 @@ export class AxlApp {
 
     const previousSubscription = this.sessionSubscription;
     try {
+      if (this.options.loadExtensions !== undefined)
+        await this.replaceTerminalExtensions(client, opened.sessionId);
       await previousSubscription?.close();
     } catch (error) {
       await nextSubscription.close().catch(() => undefined);
@@ -4627,6 +5092,8 @@ export class AxlApp {
       this.options.modelCatalog,
       (reference, mediaWidth, mediaPalette) =>
         this.mediaCache.rows(reference, mediaWidth, this.tuiMode === "fullscreen", mediaPalette),
+      undefined,
+      () => this.extensionHost,
     );
     this.view.thinkingDisplay = thinkingDisplay;
     this.view.toolOutputDisplay = toolOutputDisplay;
@@ -4668,25 +5135,25 @@ export class AxlApp {
     readonly onCancel?: () => void;
     readonly onHighlight?: (value: string) => void;
     readonly preview?: (width: number) => readonly string[];
-  }): void {
+  }): PickerOverlay {
     const close = (): void => {
-      this.overlays.close();
+      if (this.overlays.active === overlay) this.overlays.close();
       this.openNextInteraction();
     };
-    this.overlays.replace(
-      new PickerOverlay({
-        ...input,
-        palette: () => this.view.palette,
-        onPick: (value) => {
-          close();
-          input.onPick(value);
-        },
-        onCancel: () => {
-          input.onCancel?.();
-          close();
-        },
-      }),
-    );
+    const overlay = new PickerOverlay({
+      ...input,
+      palette: () => this.view.palette,
+      onPick: (value) => {
+        close();
+        input.onPick(value);
+      },
+      onCancel: () => {
+        input.onCancel?.();
+        close();
+      },
+    });
+    this.overlays.replace(overlay);
+    return overlay;
   }
 
   private openNextInteraction(): void {
@@ -5772,12 +6239,22 @@ export class AxlApp {
   }
 
   private async reload(): Promise<void> {
+    this.extensionReloading = true;
     try {
       await this.commandController.invoke("/reload", this.sessionId);
-      for (const controller of this.extensionCommandControllers) controller.abort();
-      this.extensionCommandControllers.clear();
       this.overlays.clear();
-      await this.extensionHost.reload();
+      if (this.options.loadExtensions === undefined) {
+        for (const controller of this.extensionCommandControllers) controller.abort();
+        this.extensionCommandControllers.clear();
+        this.extensionCompletionRequest?.controller.abort();
+        this.extensionCompletionRequest = undefined;
+        this.extensionCompletionResult = undefined;
+        await this.extensionHost.reload();
+        this.liveAssistant.invalidate();
+      } else {
+        await this.commandController.refresh(this.sessionId);
+        await this.replaceTerminalExtensions(this.client, this.sessionId);
+      }
       try {
         void this.commandController.commands;
       } catch (error) {
@@ -5792,6 +6269,8 @@ export class AxlApp {
         `✖ ${error instanceof Error ? error.message : "reload failed"}`,
       );
       this.redraw();
+    } finally {
+      this.extensionReloading = false;
     }
   }
 }

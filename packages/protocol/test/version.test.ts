@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { EVENT_FORMAT_VERSION, WIRE_PROTOCOL_VERSION } from "../src/index.ts";
 
-test("keeps event format 1 and adds extension management in wire protocol 27", () => {
+test("keeps event format 1 and adds terminal entry inventory in wire protocol 28", () => {
   assert.equal(EVENT_FORMAT_VERSION, 1);
-  assert.equal(WIRE_PROTOCOL_VERSION, 27);
+  assert.equal(WIRE_PROTOCOL_VERSION, 28);
 });

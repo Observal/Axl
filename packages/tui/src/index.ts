@@ -13,6 +13,7 @@ export * from "./diff-review.ts";
 export * from "./editor.ts";
 export * from "./editor-frame.ts";
 export * from "./extension-ui.ts";
+export * from "./extension-loader.ts";
 export * from "./external-editor.ts";
 export * from "./fullscreen.ts";
 export * from "./fullscreen-input.ts";

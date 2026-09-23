@@ -5,6 +5,7 @@
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
 // SPDX-License-Identifier: Apache-2.0
 
+import type { TerminalExtensionHost, TerminalLine } from "@axl/extension-api";
 import type { BlobReference, CanonicalEvent } from "@axl/protocol";
 import {
   type CanonicalPresentationItem,
@@ -13,6 +14,7 @@ import {
   presentCanonicalEvent,
 } from "@axl/sdk";
 
+import { renderExtensionLines } from "./extension-ui.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { sanitizeTerminalText, truncateToWidth, visibleWidth, wrapLine } from "./render.ts";
 import { renderShellPassthrough } from "./tool-display.ts";
@@ -118,6 +120,7 @@ export class SessionView {
   private width: number;
   private models: readonly ClientModelInfo[];
   private readonly renderBlob: BlobRenderer | undefined;
+  private readonly extensionHost: (() => TerminalExtensionHost) | undefined;
   provider: string | undefined;
   model: string | undefined;
   thinking: string | undefined;
@@ -147,12 +150,14 @@ export class SessionView {
     models: readonly ClientModelInfo[] = [],
     renderBlob?: BlobRenderer,
     projection: ConversationProjector = new ConversationProjector(),
+    extensionHost?: () => TerminalExtensionHost,
   ) {
     this.width = width;
     this.palette = palette;
     this.models = models;
     this.renderBlob = renderBlob;
     this.projection = projection;
+    this.extensionHost = extensionHost;
   }
 
   setWidth(width: number): void {
@@ -298,10 +303,7 @@ export class SessionView {
       case "context.resources":
       case "prompt.section":
       case "tool.schema":
-      case "extension.state":
       case "extension.label":
-      case "extension.event":
-      case "context.extension":
       case "capability.searched":
       case "capability.activated":
       case "capability.denied":
@@ -309,9 +311,36 @@ export class SessionView {
       case "interaction.resolved":
       case "child.result":
         return EMPTY_ROWS;
+      case "extension.state":
+        return this.extensionRows(
+          this.extensionHost?.().renderCanonicalEntry(
+            event.payload.key,
+            event.payload.value,
+            this.width,
+          ),
+        );
+      case "extension.event":
+        return this.extensionRows(
+          this.extensionHost?.().renderCanonicalEntry(
+            event.payload.channel,
+            event.payload.value,
+            this.width,
+          ),
+        );
+      case "context.extension":
+        return this.extensionRows(
+          this.extensionHost?.().renderMessage(
+            event.payload.source,
+            event.payload.content,
+            this.width,
+          ),
+        );
       case "user.message":
         return [
-          ...this.userMessage(textOf(event.payload.content)),
+          ...this.userMessage(
+            this.extensionHost?.().transformMarkdown(textOf(event.payload.content), "user") ??
+              textOf(event.payload.content),
+          ),
           ...event.payload.content.flatMap((item) =>
             item.type === "blob" ? this.blobRows(item.blob) : [],
           ),
@@ -385,7 +414,9 @@ export class SessionView {
           } else if (item.type === "text") {
             lines.push(
               ...renderMarkdown(
-                sanitizeTerminalText(item.text),
+                sanitizeTerminalText(
+                  this.extensionHost?.().transformMarkdown(item.text, "assistant") ?? item.text,
+                ),
                 Math.max(1, this.width - 2),
                 this.palette,
               ),
@@ -505,6 +536,17 @@ export class SessionView {
       default:
         return assertNever(event);
     }
+  }
+
+  private extensionRows(lines: readonly TerminalLine[] | undefined): readonly string[] {
+    return lines === undefined || lines.length === 0
+      ? EMPTY_ROWS
+      : [
+          "",
+          ...renderExtensionLines(lines, Math.max(1, this.width - 2), this.palette).map(
+            (line) => `  ${line}`,
+          ),
+        ];
   }
 
   statusLine(sessionId: string, spinner?: string, queued = 0): string {

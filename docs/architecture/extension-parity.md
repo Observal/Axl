@@ -21,7 +21,7 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | Global extension directory | Done | `~/.axl/extensions/` discovers `.ts`, `.mts`, `.js`, and `.mjs` entries deterministically. |
 | Explicit extension paths | Done | `extension.install` records canonical local paths with precedence above global and package sources. |
 | Project-local extensions | Done | `<project>/.axl/extensions/` loads only after a remembered canonical-root trust decision. |
-| Package-provided extensions | Partial | The versioned package manifest declares daemon, TUI, and web entry points; daemon loading is complete and presentation hosts remain. |
+| Package-provided extensions | Partial | Versioned manifests support daemon-only, TUI-only, and combined entries. The local TUI loads enabled, validated entries through daemon inventory; the web host remains. |
 | npm package installation | Done | Daemon-owned install, update, remove, exact version reporting, and SDK methods use a private package root. |
 | Git package installation | Done | Git installs require credential-free HTTPS plus a full commit hash. |
 | Extension-owned dependencies | Done | Installed package entries load from their package directory and use native Node dependency resolution. |
@@ -109,24 +109,24 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 
 | Pi capability | Axl status | Axl evidence or remaining work |
 | --- | --- | --- |
-| Load user and package TUI entry points | Missing | The current host is wired only to first-party extensions. |
-| Commands | Partial | Internal extensions can contribute commands; installable third-party entry points cannot. |
-| Shortcuts | Partial | Internal extensions can register shortcuts with reserved-key checks. |
-| Status and working labels | Partial | Internal extension support exists but is not installable. |
-| Widgets | Partial | Internal extension support exists but lacks the complete positioning contract. |
-| Tool renderers | Partial | Internal extension support exists with bounded fallback rendering. |
-| Event observation | Partial | Internal host events exist; public package loading is missing. |
-| Reload and cleanup | Partial | Internal lifecycle cleanup exists; package-scoped reload is missing. |
-| Notifications | Missing | Add bounded terminal notifications. |
-| Select, confirm, and input dialogs | Missing | Add extension-facing wrappers around the existing interaction components. |
-| Custom dialogs and components | Missing | Add owned overlay/component lifecycle. |
-| Custom editor | Missing | Add replacement editor ownership and restoration. |
-| Header and footer | Missing | Add positioned owned surfaces. |
-| Autocomplete provider | Missing | Add registration, ordering, cancellation, and cleanup. |
-| Message and canonical-entry renderers | Missing | Add public renderer registration for both projections. |
-| Markdown transformers | Missing | Add deterministic transformation and failure isolation. |
-| Theme access | Missing | Add read-only theme roles and safe rendering helpers. |
-| Non-interactive behavior | Missing | Define which UI calls fail, return defaults, or are unavailable. |
+| Load user and package TUI entry points | Done | Enabled global, explicit, npm/Git, and trusted project package entries are selected by daemon inventory, imported locally by the TUI, and identity-checked. |
+| Commands | Done | Installable third-party terminal entries register commands with collision checks and lifecycle cleanup. |
+| Shortcuts | Done | Installed entries use the same reserved-key and duplicate-key checks as first-party entries. |
+| Status and working labels | Done | Installed entries can contribute and clean up both. |
+| Widgets | Done | Installable entries contribute bounded rows above or below the editor and dispose on reload. |
+| Tool renderers | Done | Installed entries use the bounded public renderer registration and fallback rendering. |
+| Event observation | Done | Installed entries receive abortable session and working events. |
+| Reload and cleanup | Partial | Changed-source `/reload`, session switch, and daemon-side mutation reload rebuild the terminal host atomically and dispose old registrations; isolated terminal-only reload remains. |
+| Notifications | Done | `ctx.notify` and `api.ui.notify` show sanitized terminal notices. |
+| Select, confirm, and input dialogs | Done | Commands and UI entries use owned, cancellable selection, confirmation, single-line input, and multiline editor overlays. |
+| Custom dialogs and components | Done | `api.ui.custom` owns a bounded dialog component with keyboard focus, cursor placement, explicit cancellation, and disposal. |
+| Custom editor | Done | `registerEditor` replaces the main composer locally, intercepts non-reserved keys, retains the canonical draft and built-in safety keys, and restores the default on disposal. |
+| Header and footer | Done | Owned `registerHeader` and `registerFooter` surfaces render in the live terminal frame. |
+| Autocomplete provider | Done | Installed async providers return labeled, range-started completions at any cursor position, in registration order, with stale-request cancellation, built-in precedence, cleanup, and cursor-preserving insertion. |
+| Message and canonical-entry renderers | Done | Channel-specific public renderers project canonical context, state, and extension events as bounded terminal lines without changing durable data. |
+| Markdown transformers | Done | Assistant and user canonical messages plus in-flight assistant output transform in registration order with visible failure text. Canonical data and model input remain unchanged. |
+| Theme access | Partial | UI entries can list or select themes and style text with semantic roles. The public surface does not expose every internal theme token. |
+| Non-interactive behavior | Done | Headless terminal hosts report `hasUI: false` and UI methods throw an explicit unavailable error. |
 
 ## Web presentation API
 
@@ -152,7 +152,7 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | First-party web consumer | Missing | Requires the web host. |
 | Runnable examples | Partial | `examples/extensions/daemon-kitchen-sink.ts` covers daemon tools, hooks, state, commands, and progress; presentation examples remain. |
 | Multi-extension ordering and collisions | Done | Tests cover deterministic precedence, collisions, chained mutation, cancellation, disablement, replacement, restart reconstruction, and cleanup. |
-| Installed JavaScript and TypeScript artifact tests | Partial | Packaged JavaScript execution and external TypeScript declaration consumption pass; TUI and web loading remain. |
+| Installed JavaScript and TypeScript artifact tests | Partial | Packaged JavaScript execution and external TypeScript declaration consumption pass; local daemon-backed TUI loader tests pass, but separately installed release TUI and web loading remain. |
 | Live packaged daemon smoke test | Done | An installed release artifact loaded provider hooks and completed a real Azure-backed turn. |
 | Live packaged TUI smoke test | Missing | Exercise an installable TUI extension. |
 | Live packaged web smoke test | Missing | Exercise an installable browser extension. |

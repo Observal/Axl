@@ -228,6 +228,12 @@ export async function discoverDaemonExtensions(
       continue;
     }
     if (metadata.isDirectory()) {
+      try {
+        await stat(join(path, "package.json"));
+        continue; // Package manifests are resolved by the registry, not as index modules.
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
       const entryPath = await entryOf(path);
       if (entryPath === undefined) {
         throw new DaemonExtensionError(

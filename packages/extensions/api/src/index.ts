@@ -8,7 +8,10 @@ export type ExtensionCapability =
   | "terminal.status"
   | "terminal.widgets"
   | "terminal.events"
-  | "terminal.tool-renderers";
+  | "terminal.tool-renderers"
+  | "terminal.ui"
+  | "terminal.markdown"
+  | "terminal.entries";
 
 export interface ExtensionManifest {
   readonly id: string;
@@ -34,8 +37,55 @@ export interface TerminalCommandContext {
       readonly description?: string;
     }[],
   ): Promise<string | undefined>;
+  confirm(title: string, message: string): Promise<boolean>;
+  input(title: string, placeholder?: string): Promise<string | undefined>;
+  editor(title: string, prefill?: string): Promise<string | undefined>;
   getEditorText(): string;
   setEditorText(text: string): void;
+}
+
+export interface TerminalUi extends TerminalCommandContext {
+  readonly hasUI: boolean;
+  readonly mode: "tui" | "headless";
+  /** Prompts resolve undefined on cancellation, replacement, or extension disposal. */
+  custom<T>(
+    title: string,
+    create: (done: (result: T | undefined) => void) => TerminalCustomComponent,
+  ): Promise<T | undefined>;
+  readonly theme: TerminalTheme;
+  themes(): readonly string[];
+  setTheme(name: string): void;
+}
+
+export interface TerminalTheme {
+  fg(tone: TerminalTone, text: string): string;
+  bold(text: string): string;
+}
+
+export interface TerminalCustomComponent {
+  render(width: number): readonly TerminalLine[];
+  handleKey(key: string): void;
+  cursor?(): { readonly row: number; readonly column: number } | undefined;
+  dispose?(): void;
+}
+
+/** Client-local main composer; the built-in editor retains the draft and safety keys. */
+export interface TerminalEditorComponent {
+  render(
+    width: number,
+    state: {
+      readonly draft: string;
+      readonly model: string;
+      readonly working: boolean;
+      readonly theme: TerminalTheme;
+    },
+  ): {
+    readonly lines: readonly TerminalLine[];
+    readonly cursor?: { readonly row: number; readonly column: number };
+  };
+  /** Return false to let the built-in editor handle a key. Reserved keys always stay built-in. */
+  handleKey(key: string, editor: { readonly text: string; setText(text: string): void }): boolean;
+  dispose?(): void | Promise<void>;
 }
 
 export interface TerminalCommand {
@@ -58,6 +108,23 @@ export interface TerminalWidget {
   render(width: number): readonly TerminalLine[];
   dispose?(): void | Promise<void>;
 }
+
+export interface TerminalAutocompleteProvider {
+  /** Each result replaces the prefix from `start` (default 0) to the current cursor. */
+  complete(
+    textBeforeCursor: string,
+    signal: AbortSignal,
+  ):
+    | readonly { readonly value: string; readonly label?: string; readonly start?: number }[]
+    | Promise<
+        readonly { readonly value: string; readonly label?: string; readonly start?: number }[]
+      >;
+}
+
+export type TerminalEntryRenderer = (
+  value: unknown,
+  width: number,
+) => readonly TerminalLine[] | undefined;
 
 export interface TerminalToolRenderInput {
   readonly callId: string;
@@ -84,9 +151,19 @@ export type TerminalToolRenderer = (
 export type TerminalExtensionEventInput =
   | { readonly type: "session.event"; readonly event: unknown }
   | { readonly type: "working.start" }
-  | { readonly type: "working.end" };
+  | { readonly type: "working.end" }
+  | {
+      readonly type: "ui.prompt.start";
+      readonly prompt: "select" | "confirm" | "input" | "editor" | "custom";
+    }
+  | {
+      readonly type: "ui.prompt.end";
+      readonly prompt: "select" | "confirm" | "input" | "editor" | "custom";
+    };
 
-export type TerminalExtensionEvent = TerminalExtensionEventInput & {
+export type TerminalExtensionEvent<
+  Type extends TerminalExtensionEventInput["type"] = TerminalExtensionEventInput["type"],
+> = Extract<TerminalExtensionEventInput, { readonly type: Type }> & {
   readonly signal: AbortSignal;
 };
 
@@ -401,15 +478,25 @@ export interface DaemonExtensionApi {
 export type DaemonExtensionFactory = (api: DaemonExtensionApi) => void | Promise<void>;
 
 export interface TerminalExtensionApi {
+  readonly ui: TerminalUi;
   registerCommand(command: TerminalCommand): ExtensionDisposer;
   registerShortcut(shortcut: TerminalShortcut): ExtensionDisposer;
   registerStatus(key: string, text: TerminalLine): ExtensionDisposer;
   registerWorkingLabel(label: string): ExtensionDisposer;
   registerWidget(key: string, widget: TerminalWidget): ExtensionDisposer;
   registerToolRenderer(toolName: string, renderer: TerminalToolRenderer): ExtensionDisposer;
-  on(
-    event: TerminalExtensionEventInput["type"],
-    handler: (event: TerminalExtensionEvent) => void | Promise<void>,
+  registerHeader(key: string, widget: TerminalWidget): ExtensionDisposer;
+  registerFooter(key: string, widget: TerminalWidget): ExtensionDisposer;
+  registerMarkdownTransformer(
+    transform: (markdown: string, source: "user" | "assistant") => string,
+  ): ExtensionDisposer;
+  registerMessageRenderer(channel: string, renderer: TerminalEntryRenderer): ExtensionDisposer;
+  registerEntryRenderer(channel: string, renderer: TerminalEntryRenderer): ExtensionDisposer;
+  registerAutocompleteProvider(provider: TerminalAutocompleteProvider): ExtensionDisposer;
+  registerEditor(component: TerminalEditorComponent): ExtensionDisposer;
+  on<Type extends TerminalExtensionEventInput["type"]>(
+    event: Type,
+    handler: (event: TerminalExtensionEvent<Type>) => void | Promise<void>,
   ): ExtensionDisposer;
   track(disposer: ExtensionDisposer): ExtensionDisposer;
 }
@@ -451,6 +538,7 @@ interface OwnedListener {
 
 export interface TerminalExtensionHostOptions {
   readonly cleanupTimeoutMs?: number;
+  readonly uiFor?: (signal: AbortSignal) => TerminalUi;
 }
 
 interface OwnedDisposer {
@@ -461,12 +549,55 @@ interface OwnedDisposer {
 const DEFAULT_CLEANUP_TIMEOUT_MS = 5_000;
 const EXTENSION_ID = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const COMMAND_NAME = /^[a-z][a-z0-9-]*$/;
+const ENTRY_CHANNEL = /^[a-z][a-z0-9_.-]{0,127}$/;
+const TERMINAL_CAPABILITIES = new Set<ExtensionCapability>([
+  "terminal.commands",
+  "terminal.shortcuts",
+  "terminal.status",
+  "terminal.widgets",
+  "terminal.events",
+  "terminal.tool-renderers",
+  "terminal.ui",
+  "terminal.markdown",
+  "terminal.entries",
+]);
+const TERMINAL_EVENTS = new Set<TerminalExtensionEventInput["type"]>([
+  "session.event",
+  "working.start",
+  "working.end",
+  "ui.prompt.start",
+  "ui.prompt.end",
+]);
 
 export class ExtensionRegistrationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ExtensionRegistrationError";
   }
+}
+
+function headlessUi(signal: AbortSignal): TerminalUi {
+  const unavailable = (): never => {
+    throw new ExtensionRegistrationError("Terminal UI is unavailable in this host");
+  };
+  return {
+    signal,
+    hasUI: false,
+    mode: "headless",
+    notify: unavailable,
+    select: unavailable,
+    confirm: unavailable,
+    input: unavailable,
+    editor: unavailable,
+    custom: unavailable,
+    getEditorText: unavailable,
+    setEditorText: unavailable,
+    get theme(): TerminalTheme {
+      return unavailable();
+    },
+    themes: unavailable,
+    setTheme: unavailable,
+  };
 }
 
 function once(dispose: ExtensionDisposer): ExtensionDisposer {
@@ -505,6 +636,26 @@ export class TerminalExtensionHost {
   private readonly statusesByKey = new Map<string, OwnedStatus>();
   private readonly widgetsByKey = new Map<string, OwnedWidget>();
   private readonly toolRenderersByName = new Map<string, OwnedTerminalToolRenderer>();
+  private readonly headers = new Map<string, OwnedWidget>();
+  private readonly footers = new Map<string, OwnedWidget>();
+  private readonly markdownTransformers: Array<{
+    extensionId: string;
+    transform: (text: string, source: "user" | "assistant") => string;
+  }> = [];
+  private readonly messageRenderers = new Map<
+    string,
+    { extensionId: string; render: TerminalEntryRenderer }
+  >();
+  private readonly entryRenderers = new Map<
+    string,
+    { extensionId: string; render: TerminalEntryRenderer }
+  >();
+  private readonly autocompleteProviders: Array<{
+    extensionId: string;
+    provider: TerminalAutocompleteProvider;
+  }> = [];
+  private editorComponent: { extensionId: string; component: TerminalEditorComponent } | undefined;
+  private readonly uiFor: TerminalExtensionHostOptions["uiFor"];
   private readonly listenersByEvent = new Map<
     TerminalExtensionEventInput["type"],
     Set<OwnedListener>
@@ -523,6 +674,7 @@ export class TerminalExtensionHost {
     options: TerminalExtensionHostOptions = {},
   ) {
     this.definitions = [...definitions];
+    this.uiFor = options.uiFor;
     this.cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_CLEANUP_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.cleanupTimeoutMs) || this.cleanupTimeoutMs < 1) {
       throw new ExtensionRegistrationError("cleanupTimeoutMs must be a positive integer");
@@ -532,7 +684,18 @@ export class TerminalExtensionHost {
       const { id, name } = definition.manifest;
       if (!EXTENSION_ID.test(id))
         throw new ExtensionRegistrationError(`Invalid extension id ${id}`);
-      if (!name.trim()) throw new ExtensionRegistrationError(`Extension ${id} has no display name`);
+      if (typeof name !== "string" || !name.trim())
+        throw new ExtensionRegistrationError(`Extension ${id} has no display name`);
+      if (
+        !Array.isArray(definition.manifest.capabilities) ||
+        definition.manifest.capabilities.some(
+          (capability) => !TERMINAL_CAPABILITIES.has(capability),
+        )
+      ) {
+        throw new ExtensionRegistrationError(
+          `Extension ${id} declares an unknown terminal capability`,
+        );
+      }
       if (ids.has(id)) throw new ExtensionRegistrationError(`Duplicate extension id ${id}`);
       ids.add(id);
     }
@@ -680,6 +843,78 @@ export class TerminalExtensionHost {
     return this.toolRenderersByName.get(name);
   }
 
+  header(): readonly TerminalWidget[] {
+    return [...this.headers.values()].map((owned) => owned.widget);
+  }
+  footer(): readonly TerminalWidget[] {
+    return [...this.footers.values()].map((owned) => owned.widget);
+  }
+  autocomplete(): readonly TerminalAutocompleteProvider[] {
+    return this.autocompleteProviders.map((entry) => entry.provider);
+  }
+
+  editor(): TerminalEditorComponent | undefined {
+    return this.editorComponent?.component;
+  }
+
+  transformMarkdown(text: string, source: "user" | "assistant"): string {
+    let current = text;
+    for (const { extensionId, transform } of this.markdownTransformers) {
+      try {
+        const result = transform(current, source);
+        if (typeof result !== "string" || result.length > 1_000_000)
+          throw new Error("invalid Markdown transformation");
+        current = result;
+      } catch (error) {
+        return `[Extension ${extensionId} Markdown transformer failed: ${error instanceof Error ? error.message : String(error)}]\n${current}`;
+      }
+    }
+    return current;
+  }
+
+  renderMessage(
+    channel: string,
+    value: unknown,
+    width: number,
+  ): readonly TerminalLine[] | undefined {
+    return this.renderEntry(this.messageRenderers.get(channel), value, width);
+  }
+
+  renderCanonicalEntry(
+    channel: string,
+    value: unknown,
+    width: number,
+  ): readonly TerminalLine[] | undefined {
+    return this.renderEntry(this.entryRenderers.get(channel), value, width);
+  }
+
+  private renderEntry(
+    owned: { extensionId: string; render: TerminalEntryRenderer } | undefined,
+    value: unknown,
+    width: number,
+  ): readonly TerminalLine[] | undefined {
+    if (owned === undefined) return undefined;
+    try {
+      const lines = owned.render(value, width);
+      if (
+        lines !== undefined &&
+        (!Array.isArray(lines) ||
+          lines.length > 64 ||
+          lines.some((line) => typeof line?.text !== "string"))
+      ) {
+        throw new Error("invalid renderer result");
+      }
+      return lines;
+    } catch (error) {
+      return [
+        {
+          text: `Extension ${owned.extensionId} renderer failed: ${error instanceof Error ? error.message : String(error)}`,
+          tone: "error",
+        },
+      ];
+    }
+  }
+
   async emit(input: TerminalExtensionEventInput): Promise<readonly Error[]> {
     if (!this.active) return [];
     const tasks: Promise<Error | undefined>[] = [];
@@ -729,12 +964,53 @@ export class TerminalExtensionHost {
         );
       }
     };
+    const ui = this.uiFor?.(lifecycle.signal) ?? headlessUi(lifecycle.signal);
     const own = (dispose: ExtensionDisposer): ExtensionDisposer => {
       const tracked = once(dispose);
       this.ownedDisposers.push({ extensionId, dispose: tracked });
       return tracked;
     };
+    const registerSurface = (
+      map: Map<string, OwnedWidget>,
+      key: string,
+      widget: TerminalWidget,
+      capability: ExtensionCapability,
+    ): ExtensionDisposer => {
+      requireCapability(capability);
+      const name = `${extensionId}:${key}`;
+      if (map.has(name))
+        throw new ExtensionRegistrationError(`Surface ${name} is already registered`);
+      const owned = { extensionId, widget };
+      map.set(name, owned);
+      this.widgetRevisionValue += 1;
+      return own(async () => {
+        if (map.get(name) !== owned) return;
+        map.delete(name);
+        this.widgetRevisionValue += 1;
+        await widget.dispose?.();
+      });
+    };
+    const registerRenderer = (
+      map: Map<string, { extensionId: string; render: TerminalEntryRenderer }>,
+      channel: string,
+      render: TerminalEntryRenderer,
+    ): ExtensionDisposer => {
+      requireCapability("terminal.entries");
+      if (!ENTRY_CHANNEL.test(channel))
+        throw new ExtensionRegistrationError(`Invalid entry channel ${channel}`);
+      if (map.has(channel))
+        throw new ExtensionRegistrationError(`Entry renderer ${channel} is already registered`);
+      const owned = { extensionId, render };
+      map.set(channel, owned);
+      return own(() => {
+        if (map.get(channel) === owned) map.delete(channel);
+      });
+    };
     return {
+      get ui() {
+        requireCapability("terminal.ui");
+        return ui;
+      },
       registerCommand: (command) => {
         requireCapability("terminal.commands");
         if (!COMMAND_NAME.test(command.name)) {
@@ -798,6 +1074,48 @@ export class TerminalExtensionHost {
           await widget.dispose?.();
         });
       },
+      registerHeader: (key, widget) =>
+        registerSurface(this.headers, key, widget, "terminal.widgets"),
+      registerFooter: (key, widget) =>
+        registerSurface(this.footers, key, widget, "terminal.widgets"),
+      registerMarkdownTransformer: (transform) => {
+        requireCapability("terminal.markdown");
+        const owned = { extensionId, transform };
+        this.markdownTransformers.push(owned);
+        return own(() => {
+          const index = this.markdownTransformers.indexOf(owned);
+          if (index >= 0) this.markdownTransformers.splice(index, 1);
+        });
+      },
+      registerMessageRenderer: (channel, render) =>
+        registerRenderer(this.messageRenderers, channel, render),
+      registerEntryRenderer: (channel, render) =>
+        registerRenderer(this.entryRenderers, channel, render),
+      registerAutocompleteProvider: (provider) => {
+        requireCapability("terminal.ui");
+        const owned = { extensionId, provider };
+        this.autocompleteProviders.push(owned);
+        return own(() => {
+          const index = this.autocompleteProviders.indexOf(owned);
+          if (index >= 0) this.autocompleteProviders.splice(index, 1);
+        });
+      },
+      registerEditor: (component) => {
+        requireCapability("terminal.ui");
+        if (this.editorComponent !== undefined)
+          throw new ExtensionRegistrationError("Terminal editor is already registered");
+        if (typeof component?.render !== "function" || typeof component.handleKey !== "function")
+          throw new ExtensionRegistrationError(
+            "Terminal editor must implement render and handleKey",
+          );
+        const owned = { extensionId, component };
+        this.editorComponent = owned;
+        return own(async () => {
+          if (this.editorComponent !== owned) return;
+          this.editorComponent = undefined;
+          await component.dispose?.();
+        });
+      },
       registerToolRenderer: (toolName, renderer) => {
         requireCapability("terminal.tool-renderers");
         if (this.toolRenderersByName.has(toolName)) {
@@ -813,7 +1131,10 @@ export class TerminalExtensionHost {
       },
       on: (event, handler) => {
         requireCapability("terminal.events");
-        const owned = { extensionId, handler };
+        if (!TERMINAL_EVENTS.has(event))
+          throw new ExtensionRegistrationError(`Unknown terminal event ${event}`);
+        // The event-keyed map preserves the narrowed handler's runtime event type.
+        const owned: OwnedListener = { extensionId, handler: handler as OwnedListener["handler"] };
         const listeners = this.listenersByEvent.get(event) ?? new Set<OwnedListener>();
         listeners.add(owned);
         this.listenersByEvent.set(event, listeners);

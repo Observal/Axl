@@ -9,6 +9,8 @@ export type ExtensionSourceKind = "global" | "explicit" | "project" | "package";
 export interface ExtensionRecord {
   readonly id: string;
   readonly path: string;
+  /** Canonical local entry, present only for packages declaring a terminal component. */
+  readonly tuiPath?: string;
   readonly source: ExtensionSourceKind;
   readonly enabled: boolean;
   readonly version?: string;
@@ -202,7 +204,16 @@ export function parseExtensionTrustParams(value: unknown): ExtensionTrustParams 
 
 function parseExtensionRecord(value: unknown, path: string): ExtensionRecord {
   const input = object(value, path);
-  exact(input, path, ["id", "path", "source", "enabled", "version", "packageName", "error"]);
+  exact(input, path, [
+    "id",
+    "path",
+    "tuiPath",
+    "source",
+    "enabled",
+    "version",
+    "packageName",
+    "error",
+  ]);
   if (!["global", "explicit", "project", "package"].includes(input.source as string)) {
     throw new ProtocolValidationError(`${path}.source`, "must be a known extension source");
   }
@@ -212,6 +223,7 @@ function parseExtensionRecord(value: unknown, path: string): ExtensionRecord {
   return {
     id: parseExtensionId(input.id, `${path}.id`),
     path: text(input.path, `${path}.path`),
+    ...(input.tuiPath === undefined ? {} : { tuiPath: text(input.tuiPath, `${path}.tuiPath`) }),
     source: input.source as ExtensionSourceKind,
     enabled: input.enabled,
     ...(input.version === undefined

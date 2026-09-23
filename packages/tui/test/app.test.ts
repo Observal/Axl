@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +15,7 @@ import test, { type TestContext } from "node:test";
 
 import {
   AxlDaemon,
+  type ExtensionManagementService,
   type ProviderManagementService,
   type SessionInteractionRequest,
 } from "@axl/daemon";
@@ -28,6 +30,7 @@ import {
 import type {
   CanonicalEvent,
   EventPayloadMap,
+  ExtensionListResult,
   JsonObject,
   ModelStreamEvent,
   SessionId,
@@ -37,7 +40,7 @@ import { DEFAULT_MODEL_REQUEST_SETTINGS } from "@axl/protocol";
 import { AxlClientError, subscribeSession, type TrustedProviderHost } from "@axl/sdk";
 import { connectUnixClient, createUnixDaemonHost } from "@axl/sdk/unix";
 
-import { AxlApp, saveClipboardImage, stripAnsi } from "../src/index.ts";
+import { AxlApp, loadTerminalExtensions, saveClipboardImage, stripAnsi } from "../src/index.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class PassThrough extends NodePassThrough {
@@ -76,6 +79,7 @@ async function startStack(
   sandbox?: EventPayloadMap["sandbox.configured"],
   compaction?: Partial<CompactionSettings>,
   providerManagement?: ProviderManagementService,
+  extensionManagement?: ExtensionManagementService,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "axl-tui-"));
   const socketPath = join(directory, "axl.sock");
@@ -83,6 +87,7 @@ async function startStack(
     socketPath,
     dataDirectory: join(directory, "data"),
     ...(providerManagement === undefined ? {} : { providerManagement }),
+    ...(extensionManagement === undefined ? {} : { extensionManagement }),
     runtime: ({ selection, interact }) => ({
       model,
       configRequest: selection.requestSettings ?? DEFAULT_MODEL_REQUEST_SETTINGS,
@@ -125,6 +130,23 @@ function captureOutput(): {
     text += chunk.toString("utf8");
   });
   return { output, text: () => text };
+}
+
+async function screenshotTerminal(text: string, name: string): Promise<void> {
+  const destination = process.env.AXL_TUI_SCREENSHOT_DIR;
+  if (destination === undefined) return;
+  await mkdir(destination, { recursive: true });
+  const terminal = new VirtualTerminal(100, 24);
+  terminal.write(text);
+  const rows = terminal.rows().slice(-24);
+  const escapeXml = (value: string) =>
+    value
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480"><rect width="960" height="480" fill="#10151b"/><g fill="#e4e8ef" font-family="DejaVu Sans Mono,monospace" font-size="15">${rows.map((row, index) => `<text x="16" y="${26 + index * 19}">${escapeXml(row)}</text>`).join("")}</g></svg>`;
+  await writeFile(join(destination, `${name}.svg`), svg);
 }
 
 function until(predicate: () => boolean, label: string): Promise<void> {
@@ -1479,6 +1501,107 @@ test("terminal extensions contribute UI and reload without leaking owned resourc
 
   app.stop();
   await until(() => cleanups === 4, "extension shutdown cleanup");
+});
+
+test("installed TUI entry participates in a real SDK session, reloads changed source, and cleans up", async (context) => {
+  const home = await mkdtemp(join(tmpdir(), "axl-tui-installed-"));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const path = join(home, "installed.mjs");
+  const cleanup = join(home, "cleanup.txt");
+  const write = async (label: string) =>
+    writeFile(
+      path,
+      `import { appendFileSync } from "node:fs";
+export default {
+ manifest: { id: "installed", name: "Installed", capabilities: ["terminal.commands", "terminal.widgets", "terminal.status"] },
+ activate(api) {
+  api.registerCommand({ name: "installed", description: "Installed fixture", run: (_arg, ctx) => ctx.notify(${JSON.stringify(label)}) });
+  api.registerStatus("ready", { text: ${JSON.stringify(label)}, tone: "success" });
+  api.registerWidget("card", { render: () => [{ text: ${JSON.stringify(`${label} widget`)}, tone: "accent" }] });
+  return () => appendFileSync(${JSON.stringify(cleanup)}, "disposed\\n");
+ }
+};\n`,
+    );
+  await write("installed first");
+  let enabled = true;
+  const extensionManagement: ExtensionManagementService = {
+    async list(cwd): Promise<ExtensionListResult> {
+      return {
+        configPath: join(home, "extensions.json"),
+        project: { root: cwd, trusted: true },
+        commands: [],
+        extensions: [{ id: "installed", path, tuiPath: path, source: "explicit", enabled }],
+      };
+    },
+    async setEnabled(_id, value) {
+      enabled = value;
+    },
+    async install() {
+      return "installed";
+    },
+    async update() {},
+    async remove() {},
+    async trustProject() {},
+  };
+  const { socketPath, directory } = await startStack(
+    context,
+    port,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    extensionManagement,
+  );
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const client = await connectUnixClient(socketPath);
+  const app = await AxlApp.start({
+    client,
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    loadExtensions: async (connection, sessionId) =>
+      loadTerminalExtensions(await connection.listExtensions({ sessionId })),
+  });
+  const screenshot = (name: string) => screenshotTerminal(text(), name);
+  assert.match(text(), /installed first widget/);
+  await screenshot("01-installed");
+  input.write("/installed\r");
+  await until(() => text().includes("· installed first"), "installed command");
+  await screenshot("01-command");
+  input.write("hello extension session\r");
+  await until(() => text().includes("the answer"), "provider reply in installed terminal session");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  await screenshot("01-session-reply");
+  await write("installed second");
+  await client.reloadExtension({ sessionId: app.sessionId, extensionId: "installed" });
+  await until(
+    () => text().includes("installed second widget"),
+    "installed source reloaded through SDK",
+  );
+  await screenshot("02-reloaded");
+  input.write("/installed\r");
+  await until(() => text().includes("installed second"), "reloaded command");
+  assert.equal(await readFile(cleanup, "utf8"), "disposed\n");
+  input.write("/reload\r");
+  await until(
+    () => existsSync(cleanup) && readFileSync(cleanup, "utf8") === "disposed\ndisposed\n",
+    "local reload cleanup",
+  );
+  await client.disableExtension({ sessionId: app.sessionId, extensionId: "installed" });
+  await until(
+    () => existsSync(cleanup) && readFileSync(cleanup, "utf8") === "disposed\ndisposed\ndisposed\n",
+    "disabled extension cleanup",
+  );
+  assert.equal(
+    (await client.listExtensions({ sessionId: app.sessionId })).extensions[0]?.enabled,
+    false,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 80)); // Wait for the scheduled terminal repaint.
+  await screenshot("03-disabled");
+  app.stop();
+  assert.equal(await readFile(cleanup, "utf8"), "disposed\ndisposed\ndisposed\n");
 });
 
 test("every TUI command has an explicit owner", async (context) => {
@@ -3113,4 +3236,220 @@ test("request settings are visible, configurable, persisted, and survive resume"
       resumed.text().includes("output    2048") && resumed.text().includes("HTTP idle disabled"),
     "resumed request settings",
   );
+});
+
+test("terminal extension prompts, custom component, autocomplete and markdown run in a daemon-backed session", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const results: string[] = [];
+  const events: string[] = [];
+  let disposed = 0;
+  let editorDisposed = 0;
+  const extension: TerminalExtension = {
+    manifest: {
+      id: "test.ui",
+      name: "UI fixture",
+      capabilities: [
+        "terminal.commands",
+        "terminal.ui",
+        "terminal.widgets",
+        "terminal.events",
+        "terminal.markdown",
+      ],
+    },
+    activate(api) {
+      api.registerHeader("head", { render: () => [{ text: "HEADER SLOT" }] });
+      api.registerFooter("foot", { render: () => [{ text: "FOOTER SLOT" }] });
+      api.registerMarkdownTransformer((markdown) =>
+        markdown.replace("the answer", "transformed answer"),
+      );
+      api.registerAutocompleteProvider({
+        complete: async (prefix) =>
+          prefix.endsWith("#")
+            ? [{ value: "#tag", start: prefix.length - 1, label: "Hashtag" }]
+            : [],
+      });
+      api.registerEditor({
+        render: (_width, state) => ({
+          lines: [{ text: `CUSTOM EDITOR ${state.draft}` }],
+          cursor: { row: 0, column: 14 + state.draft.length },
+        }),
+        handleKey: (key, editor) => {
+          if (key !== "~") return false;
+          editor.setText("custom draft");
+          return true;
+        },
+        dispose: () => {
+          editorDisposed += 1;
+        },
+      });
+      api.on("ui.prompt.start", (event) => {
+        events.push(`start:${event.prompt}`);
+      });
+      api.on("ui.prompt.end", (event) => {
+        events.push(`end:${event.prompt}`);
+      });
+      api.registerCommand({
+        name: "flow",
+        description: "Run UI fixture",
+        run: async (_args, ctx) => {
+          const accepted = await ctx.confirm("Approve", "proceed?");
+          if (!accepted) {
+            results.push("cancelled");
+            return;
+          }
+          const name = await ctx.input("Name", "your name");
+          const draft = await ctx.editor("Draft", "initial");
+          const custom = await api.ui.custom("Custom choice", (done) => ({
+            render: () => [{ text: "Press x to finish" }],
+            handleKey: (key) => {
+              if (key === "x") done("chosen");
+            },
+            dispose: () => {
+              disposed += 1;
+            },
+          }));
+          results.push(`${name}|${draft}|${custom}`);
+          ctx.notify(`Saved ${name}`, "success");
+        },
+      });
+    },
+  };
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    extensions: [extension],
+  });
+  assert.match(text(), /HEADER SLOT/);
+  assert.match(text(), /FOOTER SLOT/);
+  assert.match(text(), /CUSTOM EDITOR/);
+  const screen = (): string => {
+    const terminal = new VirtualTerminal(100, 24);
+    terminal.write(text());
+    return terminal.rows().join("\n");
+  };
+  input.write("#");
+  await until(() => screen().includes("Hashtag"), "labeled extension completion");
+  input.write("\t");
+  await until(() => screen().includes("CUSTOM EDITOR #tag"), "extension completion accepted");
+  input.write("\x15hello #");
+  await until(() => screen().includes("Hashtag"), "completion after prompt prefix");
+  input.write("\t");
+  await until(() => screen().includes("CUSTOM EDITOR hello #tag"), "partial-prefix replacement");
+  input.write("\x01\x0bhello # tail");
+  await until(() => screen().includes("CUSTOM EDITOR hello # tail"), "draft with suffix");
+  input.write("\x1b[H");
+  await until(
+    () =>
+      (app as unknown as { editor: { textBeforeCursor: string } }).editor.textBeforeCursor === "",
+    "home before middle completion",
+  );
+  input.write("\x1b[C".repeat(7));
+  await until(
+    () =>
+      (app as unknown as { editor: { textBeforeCursor: string } }).editor.textBeforeCursor ===
+      "hello #",
+    "middle cursor placement",
+  );
+  await until(() => screen().includes("Hashtag"), "completion at a middle cursor").catch(
+    (error: unknown) => {
+      throw new Error(`${String(error)}: ${screen()}`);
+    },
+  );
+  input.write("\t!");
+  await until(
+    () => screen().includes("CUSTOM EDITOR hello #tag! tail"),
+    "completion retains the suffix and caret",
+  );
+  input.write("\x01\x0b/flow\r");
+  await until(() => text().includes("Approve · proceed?"), "extension confirm");
+  await screenshotTerminal(text(), "04-confirm");
+  input.write("\r");
+  await until(() => text().includes("Name"), "extension input");
+  input.write("Ada\r");
+  await until(() => text().includes("Draft"), "extension editor");
+  await screenshotTerminal(text(), "05-editor");
+  input.write("\x15line one\x1b\rline two\r");
+  await until(() => text().includes("Custom choice"), "extension custom component");
+  await screenshotTerminal(text(), "06-custom");
+  input.write("x");
+  await until(() => results.length === 1, "extension prompt result");
+  assert.deepEqual(results, ["Ada|line one\nline two|chosen"]);
+  assert.deepEqual(events, [
+    "start:confirm",
+    "end:confirm",
+    "start:input",
+    "end:input",
+    "start:editor",
+    "end:editor",
+    "start:custom",
+    "end:custom",
+  ]);
+  assert.equal(disposed, 1);
+  input.write("~");
+  await until(
+    () => text().includes("CUSTOM EDITOR custom draft"),
+    "custom main editor and key handler",
+  );
+  await screenshotTerminal(text(), "08-custom-composer");
+  input.write("\x15hello\r");
+  await until(() => text().includes("transformed answer"), "transformed canonical reply");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const rendered = new VirtualTerminal(100, 24);
+  rendered.write(text());
+  assert.match(
+    rendered.rows().join("\n"),
+    /│ hello/,
+    "expected user transcript after extension editor submitted input",
+  );
+  await screenshotTerminal(text(), "07-transformed-reply");
+  app.stop();
+  await until(() => editorDisposed === 1, "custom editor cleanup");
+});
+
+test("terminal Markdown transformers render an in-flight daemon response before settlement", async (context) => {
+  let release: () => void = () => undefined;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const model: ModelPort = {
+    stream: async function* () {
+      yield { type: "text_delta", text: "the answer" };
+      await held;
+      yield { type: "completed", stopReason: "stop", usage };
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    extensions: [
+      {
+        manifest: { id: "test.stream", name: "Stream", capabilities: ["terminal.markdown"] },
+        activate(api) {
+          api.registerMarkdownTransformer((value) =>
+            value.replace("the answer", "transformed answer"),
+          );
+        },
+      },
+    ],
+  });
+  try {
+    input.write("show stream\r");
+    await until(() => text().includes("transformed answer"), "transformed streaming output");
+    assert.equal(text().includes("  the answer"), false);
+    await screenshotTerminal(text(), "09-stream-transform");
+  } finally {
+    release();
+    app.stop();
+  }
 });
