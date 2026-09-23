@@ -6635,6 +6635,16 @@
     },
     {
       "kind": "error",
+      "id": 3417,
+      "method": "session.send",
+      "error": {
+        "code": "extension_failed",
+        "message": "Fixture session.send error: extension_failed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
       "id": 3501,
       "method": "session.steer",
       "error": {
@@ -6765,6 +6775,16 @@
     },
     {
       "kind": "error",
+      "id": 3514,
+      "method": "session.steer",
+      "error": {
+        "code": "extension_failed",
+        "message": "Fixture session.steer error: extension_failed",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
       "id": 3601,
       "method": "session.followUp",
       "error": {
@@ -6890,6 +6910,16 @@
       "error": {
         "code": "blob_corrupt",
         "message": "Fixture session.followUp error: blob_corrupt",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3614,
+      "method": "session.followUp",
+      "error": {
+        "code": "extension_failed",
+        "message": "Fixture session.followUp error: extension_failed",
         "retryable": false
       }
     },
@@ -7050,6 +7080,16 @@
       "error": {
         "code": "content_too_large",
         "message": "Fixture session.interruptAndDeliver error: content_too_large",
+        "retryable": false
+      }
+    },
+    {
+      "kind": "error",
+      "id": 3717,
+      "method": "session.interruptAndDeliver",
+      "error": {
+        "code": "extension_failed",
+        "message": "Fixture session.interruptAndDeliver error: extension_failed",
         "retryable": false
       }
     },

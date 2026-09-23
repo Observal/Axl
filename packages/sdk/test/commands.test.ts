@@ -268,6 +268,52 @@ test("command controller loads, searches, and invokes typed operations", async (
   ]);
 });
 
+test("extension diagnostics command uses the public SDK", async () => {
+  const client = {
+    request: async (method: string) => {
+      if (method === "command.list") {
+        return {
+          generation: "extensions",
+          commands: [
+            {
+              id: "core.extensions",
+              name: "extensions",
+              aliases: [],
+              description: "List extensions",
+              context: "session",
+              argument: { required: false },
+              requiredCapabilities: ["extension.list"],
+              availability: { state: "available" },
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+    listExtensions: async () => ({
+      configPath: "/home/user/.axl/extensions.json",
+      project: { root: "/workspace", trusted: true },
+      extensions: [
+        {
+          id: "broken",
+          path: "/home/user/.axl/extensions/broken.js",
+          source: "global" as const,
+          enabled: true,
+          error: "activation failed",
+        },
+      ],
+      commands: [],
+    }),
+  } as unknown as AxlClient;
+  const commands = new CommandController(client);
+  await commands.refresh(sessionId);
+  assert.deepEqual(await commands.invoke("/extensions", sessionId), {
+    state: "completed",
+    command: "extensions",
+    content: "enabled broken (global): activation failed",
+  });
+});
+
 test("command controller invokes shared extension commands through typed RPC", async () => {
   const requests: unknown[] = [];
   const client = {

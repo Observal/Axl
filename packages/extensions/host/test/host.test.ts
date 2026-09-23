@@ -272,10 +272,11 @@ test("tool input and result handlers chain in extension order", async (context) 
   );
   const invalid = await load(bad);
   await assert.rejects(
-    invalid.host.afterToolCall?.(
-      { callId: "1", name: "echo", input: {}, content: [], isError: false },
-      signal,
-    ),
+    async () =>
+      invalid.host.afterToolCall?.(
+        { callId: "1", name: "echo", input: {}, content: [], isError: false },
+        signal,
+      ),
     /content/u,
   );
   await invalid.host.dispose();

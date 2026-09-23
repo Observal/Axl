@@ -105,7 +105,7 @@ An installable package declares its entry points in `package.json`:
 
 The daemon entry is required for daemon installation and must resolve inside the package. TUI and web declarations are reserved for their separate presentation hosts. Installing a package or trusting a project grants its code full process authority.
 
-The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, `reloadExtension`, `installExtension`, `updateExtension`, `removeExtension`, and `trustExtensionProject`. Mutations rebuild the selected session through the same atomic runtime replacement used by `/reload`. Inventory results include source, enablement, package version, and the latest lifecycle diagnostic.
+The public SDK exposes `listExtensions`, `enableExtension`, `disableExtension`, `reloadExtension`, `installExtension`, `updateExtension`, `removeExtension`, and `trustExtensionProject`. Mutations rebuild the selected session through the same atomic runtime replacement used by `/reload`. Inventory results include source, enablement, package version, and the latest lifecycle diagnostic. `/extensions` renders that inventory through the shared command controller in terminal and web clients.
 
 ## API
 
