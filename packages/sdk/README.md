@@ -42,7 +42,7 @@ The SDK does not own:
 - provider-specific authentication
 - terminal, browser, desktop, or mobile presentation
 
-Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages. The remote delivery API consumes immutable prepared envelopes. `RemoteDeviceE2ee` now adapts an injected native or browser endpoint to the canonical opaque E2EE frame, while `HostedWitnessClient` submits byte-identical requests and returns certificates only to the matching native continuation. Neither API owns cryptographic state. Production construction remains disabled until the Windows and hosted-deployment gates pass.
+Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages. The remote delivery API consumes immutable prepared envelopes. `RemoteDeviceE2ee` and `NativeEndpointOutbox` consume one shared `WitnessedEndpoint`, which runs every endpoint mutation through the witness barrier (fresh read, reconciliation, mutation, continuation) before any ciphertext, plaintext, or acknowledgement is visible. `HostedWitnessClient` is the transport behind it: it submits byte-identical signed requests and returns the bounded certificate to the endpoint that verifies it. Neither API owns cryptographic state or decides acceptance. Production construction remains disabled until the Windows and hosted-deployment gates pass.
 
 ## Public entry points
 

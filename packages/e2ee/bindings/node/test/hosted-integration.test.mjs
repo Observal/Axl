@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -21,7 +22,12 @@ import {
   parseRemoteRequestId,
   parseRouteId,
 } from "@axl/protocol";
-import { HostedPairingClient, NativeEndpointOutbox, RemoteDeviceE2ee } from "@axl/sdk";
+import {
+  HostedPairingClient,
+  NativeEndpointOutbox,
+  RemoteDeviceE2ee,
+  WitnessedEndpoint,
+} from "@axl/sdk";
 import {
   InMemoryPairingRendezvousStore,
   InMemoryRelayTicketStore,
@@ -31,10 +37,10 @@ import {
 } from "@axl/control-plane";
 
 import * as fixture from "./fixture-loader.mjs";
-import { complete, witnessed, witnessedFacade } from "./witness-driver.mjs";
+import { complete, witnessed } from "./witness-driver.mjs";
 
-// Until the SDK and daemon adapters own witness reconciliation, the test drives every barrier
-// through an in-process quorum and hands the adapters a facade that yields released results only.
+// The pairing lifecycle below is driven directly against the binding. The SDK and daemon adapters
+// then run their own witness barriers against the same in-process quorum through its `respond`.
 const unwrap = (field) => (result) => {
   const value = result[field];
   if (value === undefined || value === null) throw new TypeError(`expected ${field}, got ${result.tag}`);
@@ -92,8 +98,9 @@ async function activatedPair(root) {
   );
   await witnessed(device, witness, () => device.acknowledgeActivation(operation(11), acceptance));
   return {
-    daemon: witnessedFacade(daemon, witness),
-    device: witnessedFacade(device, witness),
+    daemon,
+    device,
+    witness,
     installation,
     session,
     deviceId,
@@ -269,11 +276,18 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
   await authority.registerLocalDevice(deviceId, ["observe"]);
   await authority.applyHostedGrant(deviceId, 1, ["observe"]);
   const waiters = [];
+  const witnessCalls = { daemon: 0, device: 0 };
   const bridge = new WindowsRemoteE2eeBridge({
     daemon,
     deviceId,
     authority,
     endpoint: pair.daemon,
+    witness: {
+      async respond(request) {
+        witnessCalls.daemon += 1;
+        return pair.witness.respond(request);
+      },
+    },
     sender: {
       send(_route, envelope) {
         const waiter = waiters.shift();
@@ -282,8 +296,14 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
       },
     },
   });
+  const witnessedDevice = new WitnessedEndpoint(pair.device, {
+    async respond(request) {
+      witnessCalls.device += 1;
+      return pair.witness.respond(request);
+    },
+  });
   const client = new RemoteDeviceE2ee({
-    endpoint: pair.device,
+    endpoint: witnessedDevice,
     localDeviceId: deviceId,
     daemonDeviceId,
     destinationCryptoSessionId: cryptoSessionId,
@@ -323,7 +343,7 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
     assert.equal(appliedCommit.controlOnly, true);
 
     const nativeOutbox = new NativeEndpointOutbox(
-      pair.device,
+      witnessedDevice,
       { create: () => parseOperationId("23232323-2323-7323-a323-232323232323") },
       { resolve: async () => parseRouteId("20202020-2020-7020-a020-202020202020") },
     );
@@ -341,6 +361,11 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
     const confirmed = await client.open(confirmationEnvelope);
     assert.equal(confirmed.controlOnly, true);
     assert.equal(await pair.device.pairStatus(), "active");
+    // Every adapter mutation went to the quorum twice: one fresh read and one committed advance.
+    assert.ok(witnessCalls.daemon >= 2 * 6, `daemon barrier calls: ${witnessCalls.daemon}`);
+    assert.ok(witnessCalls.device >= 2 * 7, `device barrier calls: ${witnessCalls.device}`);
+    assert.equal(witnessCalls.daemon % 2, 0);
+    assert.equal(witnessCalls.device % 2, 0);
   } finally {
     bridge.close();
     pair.device.close();

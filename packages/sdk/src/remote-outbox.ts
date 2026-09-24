@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -15,6 +16,13 @@ import {
   type RouteId,
   type TransportAttemptId,
 } from "@axl/protocol";
+
+import {
+  releasedField,
+  type WitnessEndpointOperations,
+  type WitnessMutationOutcome,
+  type WitnessedEndpoint,
+} from "./witness.ts";
 
 export interface RemoteOutbox {
   enqueue(value: OpaqueOutboxRecord): Promise<void>;
@@ -230,12 +238,12 @@ export interface NativeDurableOutboxRecord {
   readonly ciphertext: Uint8Array;
 }
 
-export interface NativeDurableOutboxEndpoint {
+export interface NativeDurableOutboxEndpoint extends WitnessEndpointOperations {
   pendingOutbox(): Promise<readonly NativeDurableOutboxRecord[]>;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<NativeDurableOutboxRecord>;
+  ): Promise<WitnessMutationOutcome>;
 }
 
 function uuidText(bytes: Uint8Array): string {
@@ -277,14 +285,14 @@ function nativeEnvelope(record: NativeDurableOutboxRecord): Uint8Array {
  * remains process-local; after reconnect every unacknowledged native record is retried exactly.
  */
 export class NativeEndpointOutbox implements RemoteOutbox {
-  readonly #endpoint: NativeDurableOutboxEndpoint;
+  readonly #endpoint: WitnessedEndpoint<NativeDurableOutboxEndpoint>;
   readonly #attemptIds: TransportAttemptIdFactory;
   readonly #routes: OpaqueRouteResolver;
   readonly #sending = new Set<RequestId>();
   readonly #accepted = new Set<RequestId>();
 
   constructor(
-    endpoint: NativeDurableOutboxEndpoint,
+    endpoint: WitnessedEndpoint<NativeDurableOutboxEndpoint>,
     attemptIds: TransportAttemptIdFactory,
     routes: OpaqueRouteResolver,
   ) {
@@ -295,7 +303,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
 
   async enqueue(value: OpaqueOutboxRecord): Promise<void> {
     const expected = parseOpaqueOutboxRecord(value);
-    const record = (await this.#endpoint.pendingOutbox()).find(
+    const record = (await this.#pending()).find(
       (candidate) => requestIdFor(candidate) === expected.requestId,
     );
     if (record === undefined || !sameBytes(nativeEnvelope(record), expected.opaqueEnvelope)) {
@@ -332,19 +340,19 @@ export class NativeEndpointOutbox implements RemoteOutbox {
     const record = await this.#required(requestId);
     const acknowledgement = record.operationId.slice();
     acknowledgement[0] = (acknowledgement[0] ?? 0) ^ 0x44;
-    await this.#endpoint.acknowledgeOutbox(acknowledgement, record.operationId);
+    await this.#acknowledge(acknowledgement, record.operationId);
     this.#sending.delete(requestId);
     this.#accepted.add(requestId);
   }
 
   async markCompleted(requestId: RequestId): Promise<void> {
-    const record = (await this.#endpoint.pendingOutbox()).find(
+    const record = (await this.#pending()).find(
       (candidate) => requestIdFor(candidate) === requestId,
     );
     if (record === undefined) return;
     const acknowledgement = record.operationId.slice();
     acknowledgement[0] = (acknowledgement[0] ?? 0) ^ 0x49;
-    await this.#endpoint.acknowledgeOutbox(acknowledgement, record.operationId);
+    await this.#acknowledge(acknowledgement, record.operationId);
     this.#sending.delete(requestId);
     this.#accepted.delete(requestId);
   }
@@ -366,9 +374,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
   }
 
   async list(): Promise<readonly OpaqueOutboxRecord[]> {
-    const records = (await this.#endpoint.pendingOutbox()).filter(
-      (record) => record.hostedGrantGeneration > 0n,
-    );
+    const records = (await this.#pending()).filter((record) => record.hostedGrantGeneration > 0n);
     return records.map((record) => {
       const requestId = requestIdFor(record);
       return parseOpaqueOutboxRecord({
@@ -382,8 +388,26 @@ export class NativeEndpointOutbox implements RemoteOutbox {
     });
   }
 
+  #pending(): Promise<readonly NativeDurableOutboxRecord[]> {
+    return this.#endpoint.read((endpoint) => endpoint.pendingOutbox());
+  }
+
+  /** The acknowledgement is a witnessed mutation; its released result is the acknowledged record. */
+  async #acknowledge(acknowledgement: Uint8Array, target: Uint8Array): Promise<void> {
+    const released = releasedField<NativeDurableOutboxRecord>(
+      await this.#endpoint.mutate((endpoint) =>
+        endpoint.acknowledgeOutbox(acknowledgement, target),
+      ),
+      "outbox",
+      "outbox",
+    );
+    if (!sameBytes(released.operationId, target) || released.retryState !== "acknowledged") {
+      throw new OpaqueOutboxError("outbox_conflict", "Native outbox acknowledgement did not match");
+    }
+  }
+
   async #required(requestId: RequestId): Promise<NativeDurableOutboxRecord> {
-    const record = (await this.#endpoint.pendingOutbox()).find(
+    const record = (await this.#pending()).find(
       (candidate) => requestIdFor(candidate) === requestId,
     );
     if (record === undefined) {
