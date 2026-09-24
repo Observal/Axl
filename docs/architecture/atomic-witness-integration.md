@@ -196,6 +196,66 @@ Page JavaScript sees only immutable pending metadata and a final typed result. I
 `innerState`, `outerMetadata`, AAD, state key handles, wrapped DEKs, snapshots, result ciphertext,
 commitment construction inputs, or the `ProductionBrowserStore` object.
 
+### Browser mutation coverage
+
+The browser device endpoint (`witness::browser::endpoint`, driven by the worker-private
+`worker/endpoint.js`) runs the mutations the browser core compiles for `wasm32`. Each performs zero or
+one OpenMLS transition on a transient phone decoded from the authenticated committed image and holds
+its exact typed result in the sealed image index until the barrier completes:
+
+| Kind | Browser operation | Exact result |
+| ---: | --- | --- |
+| 32 | KeyPackage creation at endpoint creation (counter-1 register) | Exact KeyPackage |
+| 8 | Welcome join | Joined epoch |
+| 9 | Activation send | Exact activation ciphertext |
+| 12 | Application send | Exact application ciphertext |
+| 13 | Application receive | Exact plaintext |
+| 14 | Self-Update proposal send | Exact proposal ciphertext |
+| 17 | Received commit apply, one transition | Exact applied-commit metadata |
+| 18 | Epoch-ready send, a separate operation | Exact epoch-ready ciphertext |
+| 21 | Epoch-ready confirmation receive | Exact confirmation plaintext |
+| 24 | Received removal | Exact removal metadata |
+
+The following inventory rows have no browser implementation and remain deferred. Their logic lives
+only in `persistence.rs` and `persistence/pairing_lifecycle.rs`, which are native-only and bound to
+redb tables; redb 4.2 uses `std::fs` and `std::time` outside its file backend and does not run on
+`wasm32-unknown-unknown`. Bringing them to the browser requires a separate decision: either a storage
+abstraction that lets the native lifecycle state machine run over an in-memory backend inside WASM, or
+an independent browser implementation. Neither is part of this series.
+
+- Device pre-join creation from an invitation (`DurablePreJoinDevice::prepare`, `prepare_repair`),
+  claim publication, and pre-join and Welcome expiry (kinds 2, 30, 31). The browser creates its
+  KeyPackage through the legacy direct creation kind 32 and receives the Welcome out of band.
+- Published-Welcome join with claim hash and expiry (`join_published_welcome`, kind 8 with those
+  fields present). The browser join carries only the Welcome bytes and group ID.
+- Activation acknowledgement (kind 11), typed epoch-ready acknowledgement (kind 22), epoch-ready
+  receive (kind 19), and epoch-ready confirmation send (kind 20), which are daemon-side or
+  lifecycle-only operations.
+- Local revocation, reset, outbox acknowledgement, and receive acknowledgement (kinds 25 to 28), and
+  the outbox and accepted-message records they operate on. The browser releases the exact ciphertext
+  or plaintext through the barrier and retains it in the image index; it keeps no separate outbox.
+- All daemon-only operations (kinds 1, 3 to 7, 10, 15, 16, 23, 29).
+
+Two browser fingerprints differ from the native rows because the browser has no claim lifecycle:
+
+- Kind 9 fingerprints the logical message ID and the exact activation plaintext. The native device
+  derives the payload from its validated claim record; the browser takes it as input, so a differing
+  payload under the same operation ID is a conflict rather than a replay of the earlier ciphertext.
+- Kind 18 takes the applied commit's exact metadata, fingerprints it exactly as the native row does,
+  refuses any commit other than the one the image applied and has not yet announced, and derives the
+  canonical epoch-ready plaintext itself. The image carries that pending commit from kind 17 to
+  kind 18; a removal clears it.
+
+The browser image retains completed operations with their exact results for the shared
+`IDEMPOTENCY_RETENTION_GENERATIONS` horizon (4,096 successors), the same constant native storage
+compacts against. Inside the horizon, a duplicate returns the exact typed result without a
+transition. Outside it the endpoint no longer recognizes the ID and prepares a fresh transition; the
+witness lineage index never forgets an operation ID, so that request is refused as
+`witness_operation_conflict` and the endpoint is quarantined rather than releasing a second result
+under an old ID. After a restart the whole restored image is a cache: no retained exact result of
+any age leaves the endpoint until a fresh unanimous head equals the confirmed head or a verified
+certificate advances it.
+
 ## Durable pending operation and schema
 
 ### Native owner
@@ -375,12 +435,15 @@ work. Every `u64` remains `bigint`. Production trust is build-pinned. Production
 ### Browser
 
 The page-facing worker protocol gains only opaque reconciliation, pending, and continuation
-messages. It does not export `ProductionBrowserStore`, `BrowserWitnessVerifier`, private WASM
-finalization, keys, or transition fields. Current `storage.js` is a foundation, not a conforming
-barrier: `commit` accepts caller-selected inner state, outer metadata, request, hash, and exact
-result; its verifier is injected from JavaScript; and `continueWitness` releases decrypted output
-before obsolete-key deletion. All three paths remain unreachable in production until replaced by the
-private endpoint flow.
+messages. It does not export `ProductionBrowserStore`, `BrowserDeviceEndpoint`, private WASM
+finalization, keys, or transition fields. Inside the worker, `worker/endpoint.js` sequences the Rust
+`BrowserEndpoint` and the store: `witnessReadRequest`, `reconcileWitness`, `pendingWitness`,
+`continueWitness`, and one method per supported mutation, each returning either the exact pending
+request or the exact released typed result. Abort, conflict, lock loss, or ambiguous completion after
+a durable transaction may have started destroys the transient endpoint; later calls fail with
+`recovery_required` and recovery reopens from committed IndexedDB data. The production worker still
+rejects endpoint creation and opening with `rollback_anchor_unavailable` because build-pinned
+production replica trust does not exist yet.
 
 ### SDK and daemon
 
@@ -420,11 +483,11 @@ before decoding or projecting a delivery.
 - Native creation and opening release the OS lifecycle claim after publication. The production
   endpoint needs an OS-backed exclusive writer claim for its full open lifetime, not only its
   filesystem creation transition; the in-process mutex alone does not exclude another process.
-- Browser `commit` accepts JavaScript-selected transition internals and request metadata, uses a
-  1 MiB result bound, marks the new key active in the commit, and does not track or erase the obsolete
-  key before release.
-- Browser `continueWitness` persists `committed` before returning but does not bind that marker to
-  verified key erasure. Its injected JavaScript verifier is not a production trust boundary.
+- Resolved: browser `commit` accepts only a Rust-finalized transition, the successor key commits as
+  `prepared` and activates after the transaction completes, the obsolete key is erased and observed
+  absent before Rust releases the exact result, and certificates are verified in WASM against
+  Rust-owned replica trust. The browser device endpoint runs the mutations listed under "Browser
+  mutation coverage"; the native-only lifecycle rows listed there remain deferred.
 - Node's `NativePendingWitness` is constructed only by `testWitnessPending`; its key activation and
   erasure flags are test-selected, and it is not connected to durable endpoints.
 - SDK and daemon endpoint interfaces expect direct ciphertext or plaintext. They do not model

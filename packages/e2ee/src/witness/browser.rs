@@ -28,6 +28,8 @@ use super::{
 };
 use crate::{CoreProvider, Id, pairing::PairingCredential};
 
+pub mod endpoint;
+
 /// AES-256-GCM authentication tag length appended by WebCrypto.
 const AEAD_TAG_BYTES: usize = 16;
 
@@ -48,6 +50,9 @@ pub struct BrowserTransitionMaterial<'a> {
     pub credential: &'a PairingCredential,
     /// Owned copy read from the endpoint's OpenMLS store for this one transition.
     pub signer: SignatureKeyPair,
+    /// Binds this transition to the endpoint candidate that produced it. The endpoint accepts a
+    /// committed transition only when the token matches its one retained candidate.
+    pub token: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +85,7 @@ pub struct BrowserTransition {
     request_hash: [u8; 48],
     outer_len: usize,
     stage: Stage,
+    token: u64,
 }
 
 /// Non-secret result of a completed browser transition. The record is the canonical committed
@@ -95,6 +101,7 @@ pub struct BrowserCommittedTransition {
     pub committed_record: Vec<u8>,
     pub request_bytes: Vec<u8>,
     pub request_hash: [u8; 48],
+    pub token: u64,
 }
 
 impl BrowserTransition {
@@ -167,7 +174,12 @@ impl BrowserTransition {
             request_hash: ZERO_HASH,
             outer_len: 0,
             stage: Stage::PayloadUntaken,
+            token: material.token,
         })
+    }
+
+    pub fn token(&self) -> u64 {
+        self.token
     }
 
     pub fn operation_id(&self) -> Id {
@@ -294,7 +306,18 @@ impl BrowserTransition {
             committed_record,
             request_bytes: std::mem::take(&mut self.request_bytes),
             request_hash: self.request_hash,
+            token: self.token,
         })
+    }
+}
+
+impl std::fmt::Debug for BrowserTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserTransition")
+            .field("operation_id", &self.operation_id)
+            .field("counter", &self.header.counter)
+            .field("stage", &self.stage)
+            .finish_non_exhaustive()
     }
 }
 

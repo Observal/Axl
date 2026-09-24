@@ -91,7 +91,7 @@ impl CoreProvider {
         })
     }
 
-    #[cfg(any(not(target_arch = "wasm32"), feature = "browser-test-fixtures"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser"))]
     pub(crate) fn from_storage_values(
         values: BTreeMap<Vec<u8>, Vec<u8>>,
     ) -> Result<Self, openmls_traits::types::CryptoError> {
@@ -103,7 +103,7 @@ impl CoreProvider {
         })
     }
 
-    #[cfg(any(not(target_arch = "wasm32"), feature = "browser-test-fixtures"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser"))]
     pub(crate) fn storage_values(&self) -> BTreeMap<Vec<u8>, Vec<u8>> {
         self.storage
             .values
@@ -422,6 +422,39 @@ pub struct CommitMetadata {
     pub target_epoch: u64,
     pub epoch_authenticator: [u8; 48],
 }
+
+impl CommitMetadata {
+    /// Canonical fixed-width encoding shared by operation fingerprints and durable records.
+    pub(crate) fn encode(&self) -> [u8; 104] {
+        let mut out = [0u8; 104];
+        out[..48].copy_from_slice(&self.commit_id);
+        out[48..56].copy_from_slice(&self.target_epoch.to_be_bytes());
+        out[56..].copy_from_slice(&self.epoch_authenticator);
+        out
+    }
+}
+
+/// Canonical epoch-ready plaintext a device sends after applying the daemon commit. The daemon
+/// validates the received plaintext byte for byte against the same derivation.
+pub(crate) fn epoch_ready_payload(
+    crypto_session_id: Id,
+    group_id: [u8; 32],
+    commit: &CommitMetadata,
+) -> Vec<u8> {
+    let mut out = b"Axl epoch ready v1".to_vec();
+    out.extend_from_slice(&PROFILE_REVISION.to_be_bytes());
+    out.extend_from_slice(&crypto_session_id);
+    out.extend_from_slice(&group_id);
+    out.extend_from_slice(&commit.encode());
+    out
+}
+
+/// Completed operation IDs, fingerprints, and exact results stay recoverable for this many later
+/// operations on every platform. A repeated operation ID outside the horizon is a fresh operation.
+#[cfg(not(test))]
+pub const IDEMPOTENCY_RETENTION_GENERATIONS: u64 = 4096;
+#[cfg(test)]
+pub const IDEMPOTENCY_RETENTION_GENERATIONS: u64 = 64;
 
 impl PreparedEnvelope {
     pub fn crypto_session_id(&self) -> Id {
@@ -1174,7 +1207,7 @@ impl Daemon {
         Ok(envelope)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser-test-fixtures"))]
     pub(crate) fn prepare_removal(
         &mut self,
         id: Id,
@@ -1258,7 +1291,7 @@ impl Daemon {
             .receive_control(bytes, MessageClass::EpochReady, id, generation)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser-test-fixtures"))]
     pub(crate) fn prepare_resync_control(
         &mut self,
         id: Id,
@@ -1394,11 +1427,7 @@ impl Phone {
                 &mut self.provider,
                 CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?,
             ),
-            signer: std::mem::replace(
-                &mut self.signer,
-                SignatureKeyPair::new(SUITE.signature_algorithm())
-                    .map_err(|_| Error::Crypto("signer initialization failed"))?,
-            ),
+            signer: std::mem::replace(&mut self.signer, generate_signer(&self.provider)?),
             group: Some(group),
             identity: self.identity.clone(),
             peer: welcome.daemon_identity,
@@ -1464,11 +1493,7 @@ impl Phone {
                 &mut self.provider,
                 CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?,
             ),
-            signer: std::mem::replace(
-                &mut self.signer,
-                SignatureKeyPair::new(SUITE.signature_algorithm())
-                    .map_err(|_| Error::Crypto("signer initialization failed"))?,
-            ),
+            signer: std::mem::replace(&mut self.signer, generate_signer(&self.provider)?),
             group: Some(group),
             identity: self.identity.clone(),
             peer: daemon_identity,
@@ -1570,7 +1595,7 @@ impl Phone {
         self.apply_commit_inner(bytes, id, generation, false)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser"))]
     pub(crate) fn apply_removal(
         &mut self,
         bytes: &[u8],
@@ -1678,7 +1703,7 @@ impl Phone {
             .prepare_control(MessageClass::EpochReady, id, generation, plaintext)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "browser"))]
     pub(crate) fn receive_resync_control(
         &mut self,
         bytes: &[u8],
@@ -1703,12 +1728,23 @@ impl Phone {
     }
 }
 
+/// Generate the endpoint signing key from the provider's own DRBG. Every endpoint key in this crate
+/// comes from the one audited randomness path, and the browser artifact links no second OS RNG
+/// backend with its Node.js fallbacks.
+pub(crate) fn generate_signer(provider: &CoreProvider) -> Result<SignatureKeyPair, Error> {
+    let scheme = SUITE.signature_algorithm();
+    let (private, public) = provider
+        .crypto()
+        .signature_key_gen(scheme)
+        .map_err(|_| Error::Crypto("signing key generation failed"))?;
+    Ok(SignatureKeyPair::from_raw(scheme, private, public))
+}
+
 fn make_credential(
     provider: &CoreProvider,
     identity: &Identity,
 ) -> Result<(CredentialWithKey, SignatureKeyPair), Error> {
-    let signer = SignatureKeyPair::new(SUITE.signature_algorithm())
-        .map_err(|_| Error::Crypto("signing key generation failed"))?;
+    let signer = generate_signer(provider)?;
     signer
         .store(provider.storage())
         .map_err(|_| Error::Crypto("signing key storage failed"))?;

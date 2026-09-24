@@ -159,54 +159,99 @@ export function assertPersistenceScenario(result) {
   assert.equal(result.lifecycleEvidence, "not_exposed_by_browser");
 }
 
-export function assertProductionBarrierScenario(result) {
+export function assertDeviceBarrierScenario(result) {
   assert.deepEqual(result, {
+    registerKind: "register",
+    registerStatus: "pending_quorum",
     duplicateCreate: "lifecycle_busy",
     contention: "lifecycle_busy",
-    plainObjectCommit: "invalid_argument",
-    oversizedResult: "bound_exceeded",
-    registerStatus: "pending_quorum",
-    registerRequestBytes: result.registerRequestBytes,
-    requestHashMatches: true,
-    secondWhilePending: "witness_unavailable",
-    duplicateExactRequest: true,
-    keysAfterCommit: ["active"],
-    quarantineWriteFailure: "storage_unavailable",
-    abortedLifecycleWrites: 1,
-    lifecycleAfterFailedQuarantine: "ready",
-    genuineAfterFailedQuarantine: "rollback_detected",
-    pendingAfterFailedQuarantine: "rollback_detected",
-    reopenAfterFailedQuarantine: "ready",
-    forgedCertificate: "witness_receipt_invalid",
-    lifecycleAfterForgery: "quarantined",
-    genuineAfterQuarantine: "rollback_detected",
-    corruptedRequestOpen: ["corrupt_state", "corrupt_state"],
-    reopenReportsPending: true,
+    mutationWhilePending: "witness_unavailable",
+    duplicateWhilePending: true,
+    continueWrongOperation: "not_found",
+    reconcileWithoutRead: "fresh_witness_required",
+    registerResultTag: "key_package",
+    keyPackageBytes: result.keyPackageBytes,
+    mutationWithoutFreshHead: "fresh_witness_required",
+    completedPendingIsNull: true,
+    joined: { tag: "joined", epoch: 1 },
+    activationDelivered: true,
+    sentClass: 1,
+    requestDelivered: true,
+    received: { tag: "plaintext", plaintext: "daemon delivery" },
+    replayRejected: "replay_rejected",
+    duplicateStatus: "completed",
+    duplicateExactBytes: true,
+    headAfterDuplicate: 5,
+    restartPendingStatus: "pending_quorum",
+    closedCode: "endpoint_closed",
     recoveredExactRequest: true,
-    registerResult: "first result",
-    headAfterRegister: 1,
-    pendingAfterRegister: "not_found",
-    repeatedResult: "first result",
-    cachedDuplicate: { status: "completed", exactResult: "first result" },
-    advanceStatus: "pending_quorum",
-    keysAfterAdvanceCommit: ["active", "active"],
-    successorKeyRecorded: true,
-    keyReactivatedOnOpen: "active",
-    unavailable: "witness_unavailable",
-    advanceResult: "second result",
-    keysAfterCompletion: [["successor", "active"]],
-    headAfterAdvance: 2,
-    headCommitmentRecorded: true,
-    completedAfterRestart: "fresh_witness_required",
+    recoveredReconciliation: "resend_pending",
+    mutationWhileRecovering: "witness_unavailable",
+    recoveredDelivered: true,
+    completedAfterRestartPending: true,
+    completedAfterRestartDuplicate: "fresh_witness_required",
+    olderAfterRestartDuplicate: "fresh_witness_required",
+    completedAfterRestartReconciliation: "ready",
+    completedAfterRestartExactBytes: true,
+    olderAfterRestartExactBytes: true,
+    abortedCommit: { code: "storage_unavailable", aborted: 1 },
+    afterAbort: "recovery_required",
+    abortLeftHead: true,
+    abortReopenPending: true,
+    abortRetryDelivered: true,
+    activationFailure: { code: "storage_unavailable", aborted: 1 },
+    keysAfterActivationFailure: ["active", "prepared"],
+    afterActivationFailure: "recovery_required",
+    activationRecoveredPending: true,
+    keysAfterReopen: ["active", "active"],
+    activationRecoveredReconciliation: "resend_pending",
+    activationRecoveredDelivered: true,
+    keysAfterRecoveredCompletion: ["active"],
+    unavailableWitness: "witness_unavailable",
+    unavailableRead: "witness_unavailable",
+    pendingSurvivesUnavailable: true,
+    afterLockLoss: "recovery_required",
+    afterLockLossMutation: "recovery_required",
+    reopenWhileStolen: "lifecycle_busy",
+    reopenAfterLockLoss: true,
+    applied: {
+      tag: "commit_applied",
+      epoch: 2,
+      removal: false,
+      commitIdMatches: true,
+      authenticatorMatches: true,
+    },
+    peerEpochAfterCommit: 2,
+    pendingBetweenSplit: true,
+    epochReadyWrongCommit: "invalid_argument",
+    epochReadyDelivered: true,
+    epochReadySecond: "invalid_argument",
+    confirmation: { tag: "plaintext", messageClass: 7, plaintext: "confirmed" },
+    removed: { tag: "commit_applied", epoch: 3, removal: true },
+    headAfterRemoval: 14,
+    quarantineWriteFailure: { code: "storage_unavailable", aborted: 1 },
+    lifecycleAfterFailedQuarantine: "ready",
+    afterFailedQuarantine: "witness_conflict",
+    storeAfterFailedQuarantine: "witness_conflict",
+    lifecycleBeforeConflict: "ready",
     conflict: "witness_operation_conflict",
     lifecycleAfterConflict: "quarantined",
-    mutationAfterQuarantine: "rollback_detected",
+    mutationAfterConflict: "witness_conflict",
+    reconcileAfterConflict: "quarantined",
+    reopenAfterConflict: "rollback_detected",
+    corruptedRequestOpen: ["corrupt_state", "corrupt_state"],
+    intactRequestReopens: true,
+    forgedCertificate: "witness_receipt_invalid",
+    lifecycleAfterForgery: "quarantined",
+    genuineAfterQuarantine: "witness_conflict",
+    reopenAfterForgery: "rollback_detected",
     versionOneOpen: "unsupported_schema",
     versionOneCreate: "unsupported_schema",
     versionOnePreserved: 1,
     newerOpen: "unsupported_schema",
     newerCreate: "unsupported_schema",
     missingOpen: "state_loss",
+    missingEndpointOpen: "state_loss",
     createAfterFailedOpen: "created",
     schema: {
       version: 2,
@@ -219,7 +264,26 @@ export function assertProductionBarrierScenario(result) {
       ],
     },
   });
-  assert(result.registerRequestBytes > 0 && result.registerRequestBytes <= 1024);
+  assert(result.keyPackageBytes > 0 && result.keyPackageBytes <= 16 * 1024);
+}
+
+export function assertDeviceTerminationScenario(result) {
+  assert.equal(result.exactRequest, true, "the resent request must be byte-identical");
+  assert.deepEqual(
+    { ...result.phaseOne, requestHex: undefined },
+    { status: "pending_quorum", kind: "register", lifecycle: "ready", requestHex: undefined },
+  );
+  assert.deepEqual(
+    { ...result.phaseTwo, requestHex: undefined },
+    {
+      reconciliation: "resend_pending",
+      resultTag: "key_package",
+      keyPackageBytes: result.phaseTwo.keyPackageBytes,
+      head: 1,
+      requestHex: undefined,
+    },
+  );
+  assert.match(result.phaseOne.requestHex, /^[0-9a-f]+$/u);
 }
 
 export function assertAllScenarios(result) {
@@ -227,6 +291,7 @@ export function assertAllScenarios(result) {
   assertNegativeOpenMlsScenario(result.negativeOpenMls);
   assertBoundaryScenario(result.boundaries);
   assertStateScenario(result.state);
-  assertProductionBarrierScenario(result.productionBarrier);
+  assertDeviceBarrierScenario(result.deviceBarrier);
+  assertDeviceTerminationScenario(result.deviceTermination);
   assertPersistenceScenario(result.persistence);
 }

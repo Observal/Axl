@@ -841,12 +841,34 @@ export async function runPersistenceScenario() {
   };
 }
 
-export async function runProductionBarrierScenario() {
+export async function runDeviceBarrierScenario() {
   const worker = testWorker();
   try {
-    return await worker.requestData({ operation: "production_barrier_scenario" });
+    return await worker.requestData({ operation: "device_barrier_scenario" });
   } finally {
     worker.close();
+  }
+}
+
+/**
+ * Real worker termination between a durable pending commit and its completion. The first worker
+ * is terminated while it still holds the endpoint and its Web Lock; a second worker must reopen,
+ * recover the exact request, and complete it.
+ */
+export async function runDeviceTerminationScenario() {
+  const first = testWorker();
+  let phaseOne;
+  try {
+    phaseOne = await first.requestData({ operation: "device_termination_phase_one" });
+  } finally {
+    first.close();
+  }
+  const second = testWorker();
+  try {
+    const phaseTwo = await second.requestData({ operation: "device_termination_phase_two" });
+    return { phaseOne, phaseTwo, exactRequest: phaseOne.requestHex === phaseTwo.requestHex };
+  } finally {
+    second.close();
   }
 }
 
@@ -856,7 +878,8 @@ export async function runAllScenarios() {
     negativeOpenMls: await runNegativeOpenMlsScenario(),
     boundaries: await runBoundaryScenario(),
     state: await runStateScenario(),
-    productionBarrier: await runProductionBarrierScenario(),
+    deviceBarrier: await runDeviceBarrierScenario(),
+    deviceTermination: await runDeviceTerminationScenario(),
     persistence: await runPersistenceScenario(),
   };
 }
