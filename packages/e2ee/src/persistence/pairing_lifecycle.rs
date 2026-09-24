@@ -16,7 +16,7 @@ use super::{
 };
 use crate::{
     CommitMetadata, Daemon, GroupTransaction, Id, Identity, PROFILE_ID, PROFILE_REVISION,
-    PairContext, PairWelcome, Phone, PhoneKeyPackage, Role,
+    PairContext, PairWelcome, Phone, PhoneKeyPackage, Role, epoch_ready_payload,
     pairing::{
         ClassifiedClaim, FailedClaimReason, PAIRING_CLAIM_MAX_BYTES, PAIRING_INVITATION_MAX_BYTES,
         PAIRING_MAX_FAILED_CLAIMS, PairingClaimAccountant, PairingClaimV1, PairingCredential,
@@ -3338,21 +3338,6 @@ fn validate_activation_payload(
     Ok(())
 }
 
-fn epoch_ready_payload(
-    crypto_session_id: Id,
-    group_id: [u8; 32],
-    commit: &CommitMetadata,
-) -> Vec<u8> {
-    let mut out = b"Axl epoch ready v1".to_vec();
-    out.extend_from_slice(&PROFILE_REVISION.to_be_bytes());
-    out.extend_from_slice(&crypto_session_id);
-    out.extend_from_slice(&group_id);
-    out.extend_from_slice(&commit.commit_id);
-    out.extend_from_slice(&commit.target_epoch.to_be_bytes());
-    out.extend_from_slice(&commit.epoch_authenticator);
-    out
-}
-
 fn validate_epoch_ready_payload(
     bytes: &[u8],
     crypto_session_id: Id,
@@ -4370,11 +4355,7 @@ impl TryFrom<TypedResult> for WelcomeOutcome {
 // ---- Private exact-result codecs for pairing types. These are persistence formats only. ----
 
 pub(super) fn encode_commit_metadata(commit: &CommitMetadata) -> Vec<u8> {
-    let mut out = Vec::with_capacity(48 + 8 + 48);
-    out.extend_from_slice(&commit.commit_id);
-    out.extend_from_slice(&commit.target_epoch.to_be_bytes());
-    out.extend_from_slice(&commit.epoch_authenticator);
-    out
+    commit.encode().to_vec()
 }
 
 pub(super) fn encode_invitation_publication(

@@ -8,7 +8,8 @@ import {
   assertLifecycleScenario,
   assertNegativeOpenMlsScenario,
   assertPersistenceScenario,
-  assertProductionBarrierScenario,
+  assertDeviceBarrierScenario,
+  assertDeviceTerminationScenario,
   assertStateScenario,
 } from "./scenario-assertions.mjs";
 
@@ -39,11 +40,17 @@ test("fails closed for randomness, close, fatal state, and malformed responses",
   assertStateScenario(result);
 });
 
-test("runs the production witness barrier in the worker without page-visible storage", async ({
+test("runs every browser device mutation through the witness barrier in the worker", async ({
   page,
 }) => {
-  const result = await page.evaluate(() => window.axlBrowserTest.runProductionBarrierScenario());
-  assertProductionBarrierScenario(result);
+  test.setTimeout(120_000);
+  const result = await page.evaluate(() => window.axlBrowserTest.runDeviceBarrierScenario());
+  assertDeviceBarrierScenario(result);
+});
+
+test("recovers the exact pending request after real worker termination", async ({ page }) => {
+  const result = await page.evaluate(() => window.axlBrowserTest.runDeviceTerminationScenario());
+  assertDeviceTerminationScenario(result);
 });
 
 test("persists prepare-and-compare transitions in real IndexedDB under Web Locks", async ({

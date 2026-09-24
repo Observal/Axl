@@ -29,6 +29,7 @@ export const ERROR_CODES = Object.freeze([
   "lifecycle_busy",
   "not_found",
   "profile_mismatch",
+  "recovery_required",
   "rollback_anchor_unavailable",
   "rollback_detected",
   "secure_random_unavailable",

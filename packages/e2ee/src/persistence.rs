@@ -239,10 +239,7 @@ const STATE_CURRENT: u8 = 1;
 const ENDPOINT_METADATA_KEY: &[u8] = b"\0axl-endpoint-metadata-v1";
 const EXACT_RESULT_PREFIX: &[u8] = b"\0axl-exact-result-v2";
 const DURABLE_MANIFEST_KEY: &[u8] = b"\0axl-durable-manifest-v1";
-#[cfg(not(test))]
-pub const IDEMPOTENCY_RETENTION_GENERATIONS: u64 = 4096;
-#[cfg(test)]
-pub const IDEMPOTENCY_RETENTION_GENERATIONS: u64 = 64;
+pub use crate::IDEMPOTENCY_RETENTION_GENERATIONS;
 
 /// Deterministic fault points exercised by the persistence test matrix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

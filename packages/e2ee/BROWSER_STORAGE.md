@@ -97,33 +97,57 @@ closed with `unsupported_schema`; a failed upgrade aborts and preserves the old 
 | `sealed_transitions_v2` | The one canonical committed-transition record: clear header, both nonces, exact sealed inner state and result, exact sealed outer metadata with the signed request |
 | `witness_operations_v2` | Operation ID, input fingerprint, counter, generation, confirmed predecessor, successor and obsolete key IDs, exact request, request hash, and `pending` or `completed` disposition |
 
-A commit takes a `BrowserTransition` produced by Rust. The store generates and wraps the state key,
-seals the inner payload Rust hands over once with the Rust-chosen nonce and AAD, returns the exact
-sealed bytes to `finalize`, seals the outer metadata Rust returns, and stores the record Rust
-assembles from both. JavaScript never selects a counter, commitment, nonce, key ID, or request. One
-strict transaction rechecks the confirmed head, generation, current key, and absence of a pending
-operation, then writes the `prepared` key, the record, the operation, and the metadata. After it
-completes, a second strict transaction marks the key `active`; only then is the exact pending
-request exposed. Open, `pending()`, and continuation finish an interrupted activation first, then
-decrypt the sealed record and let Rust authenticate it. The operation row's request and hash are a
-cache of the signed request inside that record; a mismatch is `corrupt_state` and nothing is
-exposed for resend. A failed `create()` or `open()` releases the Web Lock before rejecting.
+The store verifies nothing cryptographic. The Rust `BrowserEndpoint` (`witness::browser::endpoint`)
+owns lineage, the authenticated committed image, duplicate lookup, the exact-result index,
+certificate verification against Rust-owned replica trust, and the output gate. The worker-private
+driver `worker/endpoint.js` sequences the two.
 
-Continuation unwraps the state key non-extractable and decrypt-only, decrypts both envelopes, hands
-the plaintexts and record to Rust, which rechecks lineage, commitment, request hash, signature, and
-heads, verifies the certificate against Rust-owned replica trust, and then, in one strict
+A mutation asks Rust for one outcome: the exact pending duplicate, the exact released duplicate, or a
+fresh `BrowserTransition`. For a fresh transition the store generates and wraps the state key, seals
+the inner payload Rust hands over once with the Rust-chosen nonce and AAD, returns the exact sealed
+bytes to `finalize`, seals the outer metadata Rust returns, and stores the record Rust assembles from
+both. JavaScript never selects a counter, commitment, nonce, key ID, or request. One strict
+transaction rechecks the confirmed head, generation, current key, and absence of a pending operation,
+then writes the `prepared` key, the record, the operation, and the metadata. After it completes, a
+second strict transaction marks the key `active`; only then does Rust adopt the successor image and
+expose the exact pending request. Any failure or uncertainty once the strict transaction may have
+started destroys the transient Rust endpoint; later calls fail with `recovery_required`, and
+recovery reopens from committed IndexedDB data.
+
+Open activates or verifies the key named by the committed record's clear header, decrypts both
+envelopes, and hands the plaintexts and record to Rust, which rechecks lineage, image, commitment,
+request hash, signature, heads, and generation and compares the stored request row with the signed
+request inside the record; a mismatch is `corrupt_state` and nothing is exposed for resend. A failed
+`create()` or `open()` releases the Web Lock before rejecting.
+
+Continuation verifies the certificate in Rust against the exact pending request, then, in one strict
 transaction, rechecks the successor key, deletes the obsolete key and observes it absent, marks the
-operation completed, and advances the confirmed head. Rust releases the exact result only after the
-store reports that erasure. A witness decision against the lineage or an invalid certificate
+operation completed, and advances the confirmed head. Rust releases the exact typed result only after
+the store reports that erasure. A witness decision against the lineage or an invalid certificate
 persists a terminal lifecycle marker; a reused operation ID with another fingerprint does the same
 and returns `witness_operation_conflict`. If that marker's write does not complete, the call fails
-with the storage error and the live store refuses every later call, so a later certificate cannot
-be tried against an endpoint whose terminal decision was never recorded. A completed operation is reusable only inside the live
-lifetime that verified it; after restart it returns `fresh_witness_required`.
+with the storage error and both the live endpoint and the store refuse every later call. After a
+restart the whole restored image is a cache, not witness authority: a duplicate of any retained
+operation returns `fresh_witness_required` until a fresh unanimous head confirms the confirmed head
+or a verified certificate advances it, after which the exact result is released from the image index
+without a transition.
 
-The test artifact drives this byte-identical store from the dedicated test worker with a fixture
-lineage and an in-WASM deterministic three-replica witness. Production replica trust is not pinned
-yet, so no production path constructs the store.
+The sealed inner state is the browser device image: identity, signer, joined-group metadata, the
+complete OpenMLS provider storage, the applied commit awaiting its epoch-ready message, and the
+completed operations with exact results inside the shared 4,096-successor idempotency horizon. Every
+supported mutation decodes a transient phone from that image, runs exactly one OpenMLS transition,
+and encodes the successor image; the transient phone is discarded whether or not the commit succeeds.
+
+The test artifact drives the byte-identical driver and store from the dedicated test worker with an
+in-WASM peer daemon and the in-WASM deterministic three-replica witness. Its evidence covers every
+supported mutation, duplicates before and after completion, restart with a pending and with a
+completed operation including an older retained result, an epoch-ready that names another commit or
+repeats an announced one, an activation whose payload differs under a reused ID, an aborted commit
+transaction, a durable commit whose key activation failed,
+witness unavailability, Web Lock loss to another owner, real worker termination between commit and
+completion, an unpersisted quarantine write, a corrupted stored request, a forged certificate, and
+schema handling. Production replica trust is not pinned yet, so no production path constructs the
+endpoint or the store.
 
 ## Prepare-and-compare order
 

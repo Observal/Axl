@@ -3,16 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  BrowserLineage,
-  BrowserReplicaTrust,
   BrowserTransition,
   inspect_committed_transition as inspectCommittedTransition,
-  open_committed_transition as openCommittedTransition,
 } from "../wasm/axl_e2ee_browser.js";
 
 const DATABASE_VERSION = 2;
 const MAX_REQUEST_BYTES = 1_024;
-const MAX_CERTIFICATE_BYTES = 3_072;
 const MAX_RECORD_BYTES = 16 * 1024 * 1024 + 65_497 + 4_096;
 const WRAPPED_KEY_BYTES = 40;
 const ZERO_HASH = "0".repeat(96);
@@ -71,25 +67,19 @@ function isCounter(value) {
 function requestResult(request) {
   return new Promise((resolve, reject) => {
     request.addEventListener("success", () => resolve(request.result), { once: true });
-    request.addEventListener("error", () => reject(request.error ?? failure("storage_unavailable")), {
-      once: true,
-    });
+    request.addEventListener("error", () => reject(storageFailure(request.error)), { once: true });
   });
 }
 
 function transactionResult(transaction) {
   return new Promise((resolve, reject) => {
     transaction.addEventListener("complete", () => resolve(), { once: true });
-    transaction.addEventListener(
-      "abort",
-      () => reject(transaction.error ?? failure("storage_unavailable")),
-      { once: true },
-    );
-    transaction.addEventListener(
-      "error",
-      () => reject(transaction.error ?? failure("storage_unavailable")),
-      { once: true },
-    );
+    transaction.addEventListener("abort", () => reject(storageFailure(transaction.error)), {
+      once: true,
+    });
+    transaction.addEventListener("error", () => reject(storageFailure(transaction.error)), {
+      once: true,
+    });
   });
 }
 
@@ -261,31 +251,54 @@ function validateWrappingKey(value) {
   return value;
 }
 
-function pendingView(operation) {
+/** Immutable view of the metadata row with byte fields as bytes. */
+function metadataView(metadata) {
+  return Object.freeze({
+    lifecycle: metadata.lifecycle,
+    generation: metadata.generation,
+    confirmedCounter: metadata.confirmedCounter,
+    confirmedCommitment: fromHex(metadata.confirmedCommitment),
+    previousCertificateHash: fromHex(metadata.previousCertificateHash),
+    currentKeyId: metadata.currentKeyId === null ? null : fromHex(metadata.currentKeyId),
+    pendingOperationId:
+      metadata.pendingOperationId === null ? null : fromHex(metadata.pendingOperationId),
+  });
+}
+
+/** Immutable view of the one operation row. */
+function operationView(operation) {
   return Object.freeze({
     operationId: fromHex(operation.operationId),
+    fingerprint: fromHex(operation.fingerprint),
+    disposition: operation.disposition,
+    counter: operation.counter,
+    generation: operation.generation,
+    confirmedCounter: operation.confirmedCounter,
+    confirmedCommitment: fromHex(operation.confirmedCommitment),
     witnessRequest: new Uint8Array(operation.request),
     requestHash: new Uint8Array(operation.requestHash),
-    status: "pending_quorum",
   });
 }
 
-function completedView(operation, exactResult) {
-  return Object.freeze({
-    operationId: fromHex(operation.operationId),
-    status: "completed",
-    exactResult,
-  });
+/** Abort a transaction that may already have finished; a second abort must not escape a handler. */
+function abortQuietly(transaction) {
+  try {
+    transaction.abort();
+  } catch {
+    // Already aborted or completed. The transaction outcome is reported by transactionResult.
+  }
 }
 
-function same(left, right) {
-  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
+/** Map any non-Axl failure from IndexedDB or WebCrypto to a typed storage outcome. */
+function storageFailure(cause) {
+  if (cause instanceof Error && cause.message.startsWith("AXL_E2EE:")) return cause;
+  return failure("storage_unavailable");
 }
 
 function strictTransaction(database, storeNames) {
   const transaction = database.transaction(storeNames, "readwrite", { durability: "strict" });
   if (transaction.durability !== "strict") {
-    transaction.abort();
+    abortQuietly(transaction);
     throw failure("strict_durability_unavailable");
   }
   return transaction;
@@ -294,14 +307,15 @@ function strictTransaction(database, storeNames) {
 /**
  * Worker-private production persistence for one endpoint lineage.
  *
- * The page protocol never receives this object, a CryptoKey, a transition, a continuation, a
- * transaction, or a plaintext buffer. `commit` accepts only a Rust-finalized transition: the
- * header, nonces, AADs, key ID, commitment, exact signed request, and canonical record come from
- * WASM, and this class only moves bytes between WebCrypto, WASM, and IndexedDB.
+ * This class moves bytes between IndexedDB, WebCrypto, and the Rust endpoint. It verifies nothing
+ * cryptographic itself: the endpoint owns lineage, commitments, requests, certificates, and the
+ * output gate. The page protocol never receives this object, a CryptoKey, a transition, a
+ * transaction, or a plaintext buffer.
  *
  * Key lifecycle: the successor key record is written `prepared` in the commit transaction, marked
  * `active` only after that transaction completes, and the obsolete key is deleted and observed
- * absent in the completion transaction before the exact result leaves Rust.
+ * absent in the completion transaction. The endpoint releases the exact result only after this
+ * class reports that erasure.
  */
 export class ProductionBrowserStore {
   #session;
@@ -311,22 +325,24 @@ export class ProductionBrowserStore {
   #lockRelease;
   #lockTask;
   #closed = false;
-  #lineage;
-  #trust;
-  /** Certificates verified in this live lifetime, keyed by operation. Never persisted. */
-  #released = new Map();
+  #onLost;
   /** Terminal lifecycle whose persistence failed. Set once; fails every later call closed. */
   #unpersistedLifecycle;
 
-  constructor(sessionId, lineage, trust) {
+  /**
+   * @param sessionId the 16-byte crypto session identifier
+   * @param onLost called once if the lifetime Web Lock is lost while this store is open
+   */
+  constructor(sessionId, onLost) {
     this.#session = fixedBytes(sessionId, 16);
     this.#sessionHex = hex(this.#session);
     this.#databaseName = `axl-e2ee-production-v1:${this.#sessionHex}`;
-    if (!(lineage instanceof BrowserLineage) || !(trust instanceof BrowserReplicaTrust)) {
-      throw failure("invalid_argument");
-    }
-    this.#lineage = lineage;
-    this.#trust = trust;
+    if (onLost !== undefined && typeof onLost !== "function") throw failure("invalid_argument");
+    this.#onLost = onLost;
+  }
+
+  get sessionId() {
+    return new Uint8Array(this.#session);
   }
 
   async #acquireLock() {
@@ -361,6 +377,7 @@ export class ProductionBrowserStore {
       this.#closed = true;
       this.#database?.close();
       this.#database = undefined;
+      this.#onLost?.();
     });
   }
 
@@ -413,7 +430,7 @@ export class ProductionBrowserStore {
       try {
         await transactionResult(transaction);
       } catch (cause) {
-        throw creationFailure ?? cause;
+        throw storageFailure(creationFailure ?? cause);
       }
       this.#database = database;
       return Object.freeze({ generation: 0n });
@@ -443,17 +460,12 @@ export class ProductionBrowserStore {
       validateWrappingKey(await requestResult(transaction.objectStore(STORES.wrapping).get("origin")));
       await transactionResult(transaction);
       this.#database = database;
-      // Restart recovery step: the key named by the committed record is activated or verified,
-      // then the committed record is decrypted and authenticated in Rust against the stored
-      // operation row. The pending request itself is only exposed by pending().
+      // Restart recovery step: the key named by the committed record is activated or verified
+      // before the endpoint may decrypt anything. The record itself is authenticated by the Rust
+      // endpoint through unsealCurrent().
       const pending = await this.#pendingOperation(metadata);
-      if (pending) await this.#authenticatePending(pending);
-      return Object.freeze({
-        opened: true,
-        lifecycle: metadata.lifecycle,
-        generation: metadata.generation,
-        pendingOperationId: pending ? pendingView(pending).operationId : null,
-      });
+      if (pending) await this.#ensureActivated(pending);
+      return metadataView(metadata);
     } catch (cause) {
       database?.close();
       this.#database = undefined;
@@ -462,24 +474,95 @@ export class ProductionBrowserStore {
     }
   }
 
-  /**
-   * Reload the one durable pending request. Exposed only after the successor key is active and
-   * the sealed committed record has been authenticated against the stored request and hash.
-   */
-  async pending() {
-    const metadata = await this.#metadata();
-    this.#requireLive(metadata);
-    const operation = await this.#pendingOperation(metadata);
-    if (!operation) throw failure("not_found");
-    await this.#authenticatePending(operation);
-    return pendingView(operation);
+  /** The metadata row. */
+  async metadata() {
+    return metadataView(await this.#metadata());
   }
 
+  /** The one operation row, or `null` before the first commit. */
+  async currentOperation() {
+    const metadata = await this.#metadata();
+    if (metadata.generation === 0n) return null;
+    const transactionRecord = await this.#currentRecord();
+    const operation = await this.#readOperation(transactionRecord.operationId);
+    if (metadata.pendingOperationId !== null) {
+      if (operation.disposition !== "pending" || metadata.pendingOperationId !== operation.operationId) {
+        throw failure("corrupt_state");
+      }
+    } else if (operation.disposition !== "completed") {
+      throw failure("corrupt_state");
+    }
+    if (metadata.currentKeyId !== operation.keyId || metadata.generation !== operation.generation) {
+      throw failure("corrupt_state");
+    }
+    return operationView(operation);
+  }
+
+  /**
+   * Decrypt the one committed record for the endpoint to authenticate. The key named by the
+   * record's clear header is activated or verified first; plaintexts are handed over exactly once
+   * and the caller erases them.
+   */
+  async unsealCurrent() {
+    const metadata = await this.#metadata();
+    this.#requireLive(metadata);
+    if (metadata.generation === 0n) throw failure("state_loss");
+    const transitionRecord = await this.#currentRecord();
+    const operation = await this.#readOperation(transitionRecord.operationId);
+    if (metadata.currentKeyId !== operation.keyId || metadata.generation !== operation.generation) {
+      throw failure("corrupt_state");
+    }
+    await this.#ensureActivated(operation);
+    const record = new Uint8Array(transitionRecord.record);
+    const envelopes = inspectCommittedTransition(new Uint8Array(record));
+    try {
+      if (
+        hex(envelopes.operation_id()) !== operation.operationId ||
+        hex(envelopes.current_key_id()) !== operation.keyId ||
+        envelopes.counter() !== operation.counter ||
+        envelopes.generation() !== operation.generation
+      ) {
+        throw failure("corrupt_state");
+      }
+      const stateKey = await this.#unwrapStateKey(operation.keyId);
+      const decrypt = (nonce, additionalData, sealed) =>
+        globalThis.crypto.subtle
+          .decrypt({ name: "AES-GCM", iv: nonce, additionalData, tagLength: 128 }, stateKey, sealed)
+          .then((plaintext) => new Uint8Array(plaintext));
+      const innerPlaintext = await decrypt(
+        envelopes.inner_nonce(),
+        envelopes.inner_aad(),
+        envelopes.sealed_inner(),
+      );
+      const outerPlaintext = await decrypt(
+        envelopes.outer_nonce(),
+        envelopes.outer_aad(),
+        envelopes.sealed_outer(),
+      );
+      return {
+        record,
+        innerPlaintext,
+        outerPlaintext,
+        operation: operationView(operation),
+        metadata: metadataView(metadata),
+      };
+    } catch (cause) {
+      if (cause?.name === "OperationError") throw failure("corrupt_state");
+      throw cause;
+    } finally {
+      envelopes.free();
+    }
+  }
+
+  /**
+   * Seal and durably commit one Rust-finalized transition, then activate its key. Returns the
+   * committed transition for the endpoint to adopt. Any rejection after the strict transaction
+   * started means the durable outcome is unknown to the caller.
+   */
   async commit(transition) {
     if (!this.#database || this.#closed) throw failure("endpoint_closed");
     if (!(transition instanceof BrowserTransition)) throw failure("invalid_argument");
-    const operation = fixedBytes(transition.operation_id(), 16);
-    const operationHex = hex(operation);
+    const operationHex = hex(fixedBytes(transition.operation_id(), 16));
     const fingerprintHex = hex(fixedBytes(transition.fingerprint(), 48));
     const keyIdHex = hex(fixedBytes(transition.current_key_id(), 16));
     const counter = transition.counter();
@@ -494,20 +577,6 @@ export class ProductionBrowserStore {
     try {
       const metadata = await this.#metadata();
       this.#requireLive(metadata);
-      const existing = await this.#readOperation(operationHex, true);
-      if (existing) {
-        if (existing.fingerprint !== fingerprintHex) {
-          await this.#quarantine("quarantined");
-          throw failure("witness_operation_conflict");
-        }
-        if (existing.disposition === "pending") {
-          await this.#ensureActivated(existing);
-          return pendingView(existing);
-        }
-        const verified = this.#released.get(operationHex);
-        if (!verified) throw failure("fresh_witness_required");
-        return completedView(existing, await this.#release(metadata, existing, verified));
-      }
       if (metadata.pendingOperationId !== null) throw failure("witness_unavailable");
       if (
         metadata.generation + 1n !== generation ||
@@ -573,18 +642,17 @@ export class ProductionBrowserStore {
         requestHash,
         disposition: "pending",
       };
-      await this.#writeCommit(metadata, operationRecord, {
-        keyId: keyIdHex,
-        lifecycle: "prepared",
-        wrappedKey: new Uint8Array(wrappedKey),
-      }, { operationId: operationHex, generation, keyId: keyIdHex, record });
-      // The successor record supersedes every earlier committed record, so no earlier completed
-      // result can be released from this store again without the endpoint's own retention.
-      for (const verified of this.#released.values()) verified.fill(0);
-      this.#released.clear();
+      await this.#writeCommit(
+        metadata,
+        operationRecord,
+        { keyId: keyIdHex, lifecycle: "prepared", wrappedKey: new Uint8Array(wrappedKey) },
+        { operationId: operationHex, generation, keyId: keyIdHex, record },
+      );
       // Durable local commit precedes successor-key activation, which precedes request exposure.
       await this.#ensureActivated(operationRecord);
-      return pendingView(operationRecord);
+      const adopted = committed;
+      committed = undefined;
+      return adopted;
     } finally {
       for (const value of [wrappedKey, innerPayload, sealedInner, outerPlaintext, sealedOuter]) {
         value?.fill(0);
@@ -594,144 +662,35 @@ export class ProductionBrowserStore {
     }
   }
 
-  async continueWitness(operationId, certificate) {
+  /**
+   * Completion after the endpoint verified the certificate: recheck the successor key is active,
+   * delete the obsolete key and observe it absent, mark the operation completed, and advance the
+   * confirmed head, all in one strict transaction.
+   */
+  async complete(operationId, head) {
     if (!this.#database || this.#closed) throw failure("endpoint_closed");
-    const operation = fixedBytes(operationId, 16);
-    const certificateBytes = bytes(certificate, 1, MAX_CERTIFICATE_BYTES);
-    const operationHex = hex(operation);
-    try {
-      const metadata = await this.#metadata();
-      this.#requireLive(metadata);
-      const record = await this.#readOperation(operationHex);
-      if (record.disposition === "completed") {
-        // A completed marker is a cache. It is reusable only inside the live lifetime that
-        // verified the certificate; after restart a fresh unanimous head is required first.
-        if (!this.#released.has(operationHex)) throw failure("fresh_witness_required");
-      } else if (metadata.pendingOperationId !== operationHex) {
-        throw failure("corrupt_state");
-      }
-      return await this.#release(metadata, record, certificateBytes);
-    } finally {
-      operation.fill(0);
-      certificateBytes.fill(0);
+    const operationHex = hex(fixedBytes(operationId, 16));
+    const metadata = await this.#metadata();
+    this.#requireLive(metadata);
+    if (metadata.pendingOperationId !== operationHex) throw failure("not_found");
+    const operation = await this.#readOperation(operationHex);
+    if (operation.disposition !== "pending") throw failure("corrupt_state");
+    const confirmedCounter = head?.confirmedCounter;
+    if (!isCounter(confirmedCounter) || confirmedCounter !== operation.counter) {
+      throw failure("invalid_argument");
     }
+    await this.#writeCompletion(metadata, operation, {
+      confirmedCounter,
+      confirmedCommitment: hex(fixedBytes(head.confirmedCommitment, 48)),
+      previousCertificateHash: hex(fixedBytes(head.previousCertificateHash, 48)),
+    });
   }
 
-  /**
-   * Fixed order: successor key active, exact record opened and authenticated in Rust, unanimous
-   * certificate verified, completion transaction (obsolete key deleted and observed absent, head
-   * advanced), obsolete erasure reported, and only then the exact result.
-   */
-  async #release(metadata, record, certificateBytes) {
-    let continuation;
-    try {
-      continuation = await this.#openAuthenticated(record);
-      try {
-        continuation.confirm_quorum(new Uint8Array(certificateBytes), this.#trust);
-      } catch (cause) {
-        const terminal = continuation.terminal();
-        if (terminal) await this.#quarantine(terminal);
-        throw cause;
-      }
-      if (record.disposition === "pending") {
-        const certificateHash = continuation.certificate_hash();
-        if (!(certificateHash instanceof Uint8Array) || certificateHash.byteLength !== 48) {
-          throw failure("internal_error");
-        }
-        await this.#writeCompletion(metadata, record, {
-          confirmedCounter: record.counter,
-          confirmedCommitment: hex(continuation.commitment()),
-          previousCertificateHash: hex(certificateHash),
-        });
-        this.#released.set(record.operationId, new Uint8Array(certificateBytes));
-      }
-      if (continuation.has_obsolete_key()) continuation.mark_obsolete_key_erased();
-      return new Uint8Array(continuation.exact_result());
-    } finally {
-      continuation?.free();
-    }
-  }
-
-  /**
-   * Activate or verify the successor key, decrypt the sealed committed record with it, and let
-   * Rust authenticate lineage, commitment, signed request, and heads. The caller frees the
-   * returned continuation. Nothing about the operation is exposed before this succeeds.
-   */
-  async #openAuthenticated(record) {
-    let innerPlaintext;
-    let outerPlaintext;
-    let envelopes;
-    let continuation;
-    try {
-      await this.#ensureActivated(record);
-      const transitionRecord = await this.#transitionRecord(record);
-      envelopes = inspectCommittedTransition(transitionRecord.record);
-      if (
-        hex(envelopes.operation_id()) !== record.operationId ||
-        hex(envelopes.current_key_id()) !== record.keyId ||
-        envelopes.counter() !== record.counter ||
-        envelopes.generation() !== record.generation
-      ) {
-        throw failure("corrupt_state");
-      }
-      const stateKey = await this.#unwrapStateKey(record.keyId);
-      innerPlaintext = new Uint8Array(
-        await globalThis.crypto.subtle.decrypt(
-          {
-            name: "AES-GCM",
-            iv: envelopes.inner_nonce(),
-            additionalData: envelopes.inner_aad(),
-            tagLength: 128,
-          },
-          stateKey,
-          envelopes.sealed_inner(),
-        ),
-      );
-      outerPlaintext = new Uint8Array(
-        await globalThis.crypto.subtle.decrypt(
-          {
-            name: "AES-GCM",
-            iv: envelopes.outer_nonce(),
-            additionalData: envelopes.outer_aad(),
-            tagLength: 128,
-          },
-          stateKey,
-          envelopes.sealed_outer(),
-        ),
-      );
-      continuation = openCommittedTransition(
-        transitionRecord.record,
-        innerPlaintext,
-        outerPlaintext,
-        this.#lineage,
-      );
-      // The stored operation row is a cache of the signed request inside the authenticated
-      // record. It is never sent unless it matches that record byte for byte.
-      if (
-        !same(continuation.request_hash(), record.requestHash) ||
-        !same(continuation.witness_request(), record.request)
-      ) {
-        throw failure("corrupt_state");
-      }
-      continuation.mark_current_key_active();
-      const opened = continuation;
-      continuation = undefined;
-      return opened;
-    } catch (cause) {
-      if (cause?.name === "OperationError") throw failure("corrupt_state");
-      throw cause;
-    } finally {
-      innerPlaintext?.fill(0);
-      outerPlaintext?.fill(0);
-      envelopes?.free();
-      continuation?.free();
-    }
-  }
-
-  /** Restart recovery: a pending request is resent only after the record authenticates. */
-  async #authenticatePending(operation) {
-    const continuation = await this.#openAuthenticated(operation);
-    continuation.free();
+  /** Persist a terminal lifecycle decided by the endpoint. Fails closed if the write fails. */
+  async quarantine(lifecycle) {
+    if (!this.#database || this.#closed) throw failure("endpoint_closed");
+    if (lifecycle !== "quarantined" && lifecycle !== "revoked") throw failure("invalid_argument");
+    await this.#quarantine(lifecycle);
   }
 
   async close() {
@@ -740,8 +699,6 @@ export class ProductionBrowserStore {
     this.#database?.close();
     this.#database = undefined;
     this.#session.fill(0);
-    for (const certificate of this.#released.values()) certificate.fill(0);
-    this.#released.clear();
     await this.#releaseLock();
   }
 
@@ -780,7 +737,7 @@ export class ProductionBrowserStore {
     }
     // The committed record's clear header, not the metadata row, names the key to activate.
     const transitionRecord = await this.#transitionRecord(operation);
-    const envelopes = inspectCommittedTransition(transitionRecord.record);
+    const envelopes = inspectCommittedTransition(new Uint8Array(transitionRecord.record));
     try {
       if (
         hex(envelopes.operation_id()) !== operation.operationId ||
@@ -795,12 +752,23 @@ export class ProductionBrowserStore {
     return operation;
   }
 
-  async #readOperation(operationHex, optional = false) {
+  async #currentRecord() {
+    if (!this.#database || this.#closed) throw failure("endpoint_closed");
+    const transaction = this.#database.transaction(STORES.states, "readonly");
+    const value = await requestResult(transaction.objectStore(STORES.states).get("current"));
+    await transactionResult(transaction);
+    if (value === undefined) throw failure("state_loss");
+    if (!exactRecord(value, ["generation", "keyId", "operationId", "record"]) || !isHex(value.operationId, 32)) {
+      throw failure("corrupt_state");
+    }
+    return validateTransitionRecord(value, value.operationId, value.keyId);
+  }
+
+  async #readOperation(operationHex) {
     if (!this.#database || this.#closed) throw failure("endpoint_closed");
     const transaction = this.#database.transaction(STORES.operations, "readonly");
     const value = await requestResult(transaction.objectStore(STORES.operations).get(operationHex));
     await transactionResult(transaction);
-    if (value === undefined && optional) return undefined;
     if (value === undefined) throw failure("not_found");
     return validateOperation(value, operationHex);
   }
@@ -867,7 +835,7 @@ export class ProductionBrowserStore {
           if (value.lifecycle !== "active") store.put({ ...value, lifecycle: "active" }, operation.keyId);
         } catch (cause) {
           activationFailure = cause;
-          transaction.abort();
+          abortQuietly(transaction);
         }
       },
       { once: true },
@@ -875,7 +843,7 @@ export class ProductionBrowserStore {
     try {
       await transactionResult(transaction);
     } catch (cause) {
-      throw activationFailure ?? cause;
+      throw storageFailure(activationFailure ?? cause);
     }
   }
 
@@ -899,7 +867,7 @@ export class ProductionBrowserStore {
             if (metadata.lifecycle === "ready") store.put({ ...metadata, lifecycle }, "current");
           } catch (cause) {
             writeFailure = cause;
-            transaction.abort();
+            abortQuietly(transaction);
           }
         },
         { once: true },
@@ -907,7 +875,7 @@ export class ProductionBrowserStore {
       await transactionResult(transaction);
     } catch (cause) {
       this.#unpersistedLifecycle = lifecycle;
-      throw writeFailure ?? cause ?? failure("storage_unavailable");
+      throw storageFailure(writeFailure ?? cause);
     }
   }
 
@@ -964,7 +932,7 @@ export class ProductionBrowserStore {
         );
       } catch (cause) {
         commitFailure = cause;
-        transaction.abort();
+        abortQuietly(transaction);
       }
     };
     metadataRequest.addEventListener(
@@ -984,7 +952,7 @@ export class ProductionBrowserStore {
       { once: true },
     );
     return transactionResult(transaction).catch((cause) => {
-      throw commitFailure ?? cause;
+      throw storageFailure(commitFailure ?? cause);
     });
   }
 
@@ -1004,7 +972,7 @@ export class ProductionBrowserStore {
     let completionFailure;
     const fail = (cause) => {
       completionFailure = cause;
-      transaction.abort();
+      abortQuietly(transaction);
     };
     const successorRequest = keyStore.get(operationRecord.keyId);
     successorRequest.addEventListener(
@@ -1071,7 +1039,7 @@ export class ProductionBrowserStore {
       { once: true },
     );
     return transactionResult(transaction).catch((cause) => {
-      throw completionFailure ?? cause;
+      throw storageFailure(completionFailure ?? cause);
     });
   }
 }
