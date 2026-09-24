@@ -322,6 +322,7 @@ test(
       },
       onError: (error) => errors.push(error),
     });
+    assert.equal(await bridge.start(), "ready");
     daemonConnection.onDelivery((delivery) => {
       void bridge
         .receive({ sourceRouteId: delivery.sourceRouteId, opaqueEnvelope: delivery.opaquePayload })

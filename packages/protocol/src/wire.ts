@@ -44,6 +44,10 @@ import {
   parseProviderLoginMethod,
   parseProviderRpcErrorDetails,
 } from "./provider-management.ts";
+import {
+  parseRemoteEndpointWitnessStatuses,
+  type RemoteEndpointWitnessStatus,
+} from "./remote-endpoint-status.ts";
 
 export const MAX_HISTORY_PAGE_EVENTS = 5_000;
 export const MAX_WIRE_MESSAGE_BYTES = 1024 * 1024;
@@ -698,6 +702,8 @@ export interface DaemonInfoResult {
   readonly securityMode: "sandboxed" | "unsafe";
   readonly sandboxProvider: string;
   readonly sandboxImage?: string;
+  /** Witness lifecycle of every remote device endpoint this daemon serves. */
+  readonly remoteEndpoints: readonly RemoteEndpointWitnessStatus[];
 }
 
 export interface RequestCancelParams {
@@ -1195,6 +1201,12 @@ export interface SessionsChangedDelivery {
   readonly generation: number;
 }
 
+/** A remote endpoint changed witness state; clients re-read `daemon.info` for the statuses. */
+export interface RemoteEndpointsChangedDelivery {
+  readonly kind: "remote_endpoints_changed";
+  readonly generation: number;
+}
+
 export interface WireHello {
   readonly kind: "hello";
   readonly wireVersion: number;
@@ -1217,6 +1229,7 @@ export type ServerMessage =
   | WireActivity
   | PresenceDelivery
   | SessionsChangedDelivery
+  | RemoteEndpointsChangedDelivery
   | WireHello;
 
 export interface SessionForkResult extends SessionOpenResult {
@@ -2481,7 +2494,7 @@ export function parseRpcResult<Method extends RpcMethod>(
   let parsed: unknown;
   if (method === "daemon.info") {
     const result = object(value, path);
-    exact(result, path, ["securityMode", "sandboxProvider", "sandboxImage"]);
+    exact(result, path, ["securityMode", "sandboxProvider", "sandboxImage", "remoteEndpoints"]);
     if (result.securityMode !== "sandboxed" && result.securityMode !== "unsafe") {
       throw new ProtocolValidationError(`${path}.securityMode`, "must be sandboxed or unsafe");
     }
@@ -2491,6 +2504,10 @@ export function parseRpcResult<Method extends RpcMethod>(
       ...(result.sandboxImage === undefined
         ? {}
         : { sandboxImage: boundedString(result.sandboxImage, `${path}.sandboxImage`, 1024) }),
+      remoteEndpoints: parseRemoteEndpointWitnessStatuses(
+        result.remoteEndpoints,
+        `${path}.remoteEndpoints`,
+      ),
     };
   } else if (method === "connection.initialize") {
     const result = object(value, path);
@@ -3451,7 +3468,7 @@ export function parseServerMessage(value: unknown): ServerMessage {
       },
     };
   }
-  if (kind === "sessions_changed") {
+  if (kind === "sessions_changed" || kind === "remote_endpoints_changed") {
     exact(message, "message", ["kind", "generation"]);
     return {
       kind,

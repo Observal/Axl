@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
@@ -79,6 +80,11 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly heartbeatIntervalMs?: number;
   readonly presenceTimeoutMs?: number;
   readonly providerManagement?: ProviderManagementService;
+  /**
+   * Durable remote device authority whose endpoint witness lifecycle this daemon reports through
+   * `daemon.info` and `remote_endpoints_changed`. Absent when the daemon serves no remote devices.
+   */
+  readonly remoteAuthority?: RemoteDeviceAuthorityStore;
 }
 
 export interface AuthenticatedRemoteAttachmentOptions {
@@ -240,6 +246,9 @@ export class AxlDaemon {
   private readonly heartbeatIntervalMs: number;
   private readonly presenceTimeoutMs: number;
   private readonly providerManagement: ProviderManagementService | undefined;
+  private readonly remoteAuthority: RemoteDeviceAuthorityStore | undefined;
+  private releaseRemoteAuthorityListener: (() => void) | undefined;
+  private remoteEndpointsGeneration = 0;
   private readonly capabilities: readonly string[];
   private readonly hostOptions: Pick<
     DaemonOptions,
@@ -280,6 +289,10 @@ export class AxlDaemon {
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
     this.presenceTimeoutMs = options.presenceTimeoutMs ?? PRESENCE_TIMEOUT_MS;
     this.providerManagement = options.providerManagement;
+    this.remoteAuthority = options.remoteAuthority;
+    this.releaseRemoteAuthorityListener = this.remoteAuthority?.onEndpointWitnessChanged(() =>
+      this.publishRemoteEndpointsChanged(),
+    );
     this.capabilities =
       this.providerManagement === undefined
         ? WIRE_CAPABILITIES.filter((capability) => !capability.startsWith("provider."))
@@ -506,6 +519,8 @@ export class AxlDaemon {
     await Promise.all([...this.pending]);
     await this.sessions.disposeAll();
     await this.providerManagement?.dispose?.();
+    this.releaseRemoteAuthorityListener?.();
+    this.releaseRemoteAuthorityListener = undefined;
     await this.dataLock?.release({ allowMissing: true });
     this.dataLock = undefined;
     await this.removeOwnedSocket();
@@ -1179,6 +1194,7 @@ export class AxlDaemon {
           securityMode: this.securityMode,
           sandboxProvider: this.sandboxProvider,
           ...(this.sandboxImage === undefined ? {} : { sandboxImage: this.sandboxImage }),
+          remoteEndpoints: this.remoteAuthority?.endpointWitnessStatuses() ?? [],
         };
       case "connection.initialize": {
         return {
@@ -1971,6 +1987,18 @@ export class AxlDaemon {
         state.send({
           kind: "sessions_changed",
           generation: this.sessionCatalogGeneration,
+        });
+      }
+    }
+  }
+
+  private publishRemoteEndpointsChanged(): void {
+    this.remoteEndpointsGeneration += 1;
+    for (const state of this.connectionStates) {
+      if (state.initialized) {
+        state.send({
+          kind: "remote_endpoints_changed",
+          generation: this.remoteEndpointsGeneration,
         });
       }
     }

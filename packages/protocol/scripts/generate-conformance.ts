@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -21,6 +22,7 @@ import {
   parseEventId,
   parseOperationId,
   parseServerMessage,
+  parseDeviceId,
   parseSessionId,
   parseWireRequest,
   RPC_ERROR_CODES,
@@ -280,7 +282,18 @@ const entry = {
   submodule: false,
 } as const;
 const results = {
-  "daemon.info": { securityMode: "sandboxed", sandboxProvider: "bubblewrap" },
+  "daemon.info": {
+    securityMode: "sandboxed",
+    sandboxProvider: "bubblewrap",
+    remoteEndpoints: [
+      {
+        deviceId: parseDeviceId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        state: "quarantined",
+        reason: "commitment_conflict",
+        changedAt: 1_700_000_000_000,
+      },
+    ],
+  },
   "connection.initialize": {
     attachmentId: "attachment-1",
     daemonInstanceId: "daemon-1",
@@ -594,6 +607,7 @@ const serverMessages = [
     frame: { operationId, sequence: 1, type: "text_delta", text: "working" },
   },
   { kind: "sessions_changed", generation: 1 },
+  { kind: "remote_endpoints_changed", generation: 1 },
   {
     kind: "presence",
     attachments: [

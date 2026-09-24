@@ -23,6 +23,14 @@ import {
 
 const fixtures = new URL("../../e2ee/fixtures/v1/", import.meta.url);
 
+function headers(contentType: string): { get(name: string): string | null } {
+  return { get: (name) => (name === "content-type" ? contentType : null) };
+}
+
+function stream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+  return new Blob([bytes.slice()]).stream() as ReadableStream<Uint8Array>;
+}
+
 async function fixture(): Promise<{
   readonly request: Uint8Array;
   readonly certificate: Uint8Array;
@@ -47,13 +55,8 @@ test("submits the exact witness request and returns the bounded certificate", as
       return {
         ok: true,
         status: 200,
-        headers: { get: () => WITNESS_HTTP_CONTENT_TYPE },
-        async arrayBuffer() {
-          return certificate.slice().buffer;
-        },
-        async json() {
-          throw new Error("not JSON");
-        },
+        headers: headers(WITNESS_HTTP_CONTENT_TYPE),
+        body: stream(certificate),
       };
     },
   });
@@ -76,27 +79,61 @@ test("fails closed for transport, service, content-type, and size errors", async
     create({
       ok: false,
       status: 409,
-      headers: { get: () => "application/json" },
-      async arrayBuffer() {
-        return new ArrayBuffer(0);
-      },
-      async json() {
-        return { error: { code: "witness_conflict" } };
-      },
+      headers: headers("application/json"),
+      body: stream(
+        new TextEncoder().encode(JSON.stringify({ error: { code: "witness_conflict" } })),
+      ),
     }).respond(request),
     (cause) => cause instanceof HostedWitnessError && cause.code === "witness_conflict",
   );
   await assert.rejects(
     create({
+      ok: false,
+      status: 409,
+      headers: headers("application/json"),
+      body: stream(
+        new TextEncoder().encode(
+          `{"error":{"code":"witness_conflict","padding":"${"x".repeat(8_192)}"}}`,
+        ),
+      ),
+    }).respond(request),
+    (cause) => cause instanceof HostedWitnessError && cause.code === "witness_unavailable",
+    "an oversized error body is not decoded and keeps the bounded code",
+  );
+  let pulled = 0;
+  await assert.rejects(
+    create({
       ok: true,
       status: 200,
-      headers: { get: () => "application/octet-stream" },
-      async arrayBuffer() {
-        return certificate.slice().buffer;
+      headers: headers(WITNESS_HTTP_CONTENT_TYPE),
+      body: new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled += 1;
+          controller.enqueue(new Uint8Array(1_024));
+        },
+      }),
+    }).respond(request),
+    (cause) => cause instanceof HostedWitnessError && cause.code === "witness_receipt_invalid",
+  );
+  assert.ok(pulled <= 5, `reading stopped at the certificate bound after ${pulled} chunks`);
+  await assert.rejects(
+    create({
+      ok: true,
+      status: 200,
+      headers: {
+        get: (name) => (name === "content-type" ? WITNESS_HTTP_CONTENT_TYPE : "1000000"),
       },
-      async json() {
-        return {};
-      },
+      body: stream(certificate),
+    }).respond(request),
+    (cause) => cause instanceof HostedWitnessError && cause.code === "witness_receipt_invalid",
+    "a declared oversized content length is rejected before reading",
+  );
+  await assert.rejects(
+    create({
+      ok: true,
+      status: 200,
+      headers: headers("application/octet-stream"),
+      body: stream(certificate),
     }).respond(request),
     (cause) => cause instanceof HostedWitnessError && cause.code === "witness_receipt_invalid",
   );
@@ -104,13 +141,8 @@ test("fails closed for transport, service, content-type, and size errors", async
     create({
       ok: true,
       status: 200,
-      headers: { get: () => WITNESS_HTTP_CONTENT_TYPE },
-      async arrayBuffer() {
-        return new ArrayBuffer(0);
-      },
-      async json() {
-        return {};
-      },
+      headers: headers(WITNESS_HTTP_CONTENT_TYPE),
+      body: stream(new Uint8Array()),
     }).respond(new Uint8Array()),
     (cause) => cause instanceof HostedWitnessError && cause.code === "witness_receipt_invalid",
   );
