@@ -8,6 +8,66 @@ import { Conversation } from "@axl/ui/react";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
+test("extension renderers show escaped derived tool, message, and entry text", () => {
+  const records = [
+    {
+      kind: "event",
+      event: {
+        id: "message",
+        type: "context.extension",
+        payload: { extensionId: "example", source: "sample", content: "raw" },
+      },
+    },
+    {
+      kind: "event",
+      event: {
+        id: "entry",
+        type: "extension.event",
+        payload: { extensionId: "example", channel: "sample", value: {} },
+      },
+    },
+    {
+      kind: "event",
+      event: {
+        id: "state",
+        type: "extension.state",
+        payload: { extensionId: "example", key: "sample", value: {} },
+      },
+    },
+    {
+      kind: "event",
+      event: {
+        id: "tool",
+        type: "tool.call",
+        payload: { name: "example", callId: "test", input: {} },
+      },
+    },
+  ];
+  const state = {
+    records,
+    compactedEventIds: [],
+    tools: [
+      { callEventId: "tool", callId: "test", name: "example", input: {}, renderIntent: "tool" },
+    ],
+    interactions: [],
+    queue: [],
+    interruptDeliveries: [],
+  } as unknown as ConversationState;
+  const html = renderToStaticMarkup(
+    createElement(Conversation, {
+      conversation: state,
+      renderMessage: () => "<script>message</script>",
+      renderEntry: () => "<img src=x onerror=alert(1)>",
+      renderTool: () => "<script>tool</script>",
+    }),
+  );
+  assert.match(html, /&lt;script&gt;message&lt;\/script&gt;/u);
+  assert.match(html, /&lt;script&gt;tool&lt;\/script&gt;/u);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/u);
+  assert.doesNotMatch(html, /<script>/u);
+  assert.equal(records[0]?.event.payload.content, "raw");
+});
+
 const conversation = {
   compactedEventIds: [],
   records: [

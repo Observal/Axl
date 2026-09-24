@@ -134,14 +134,14 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | Capability | Axl status | Axl evidence or remaining work |
 | --- | --- | --- |
 | Browser-safe extension entry point | Partial | Version-1 `axl.web` JavaScript entry paths are validated and advertised in daemon inventory, served through the authenticated same-origin gateway, and loaded into a separate browser host. Modules must be self-contained; they run with browser-client authority and require explicit project trust. Browser reload and security testing remain. |
-| Commands and applicable shortcuts | Partial | Local browser extension commands join the SDK command directory; shortcut registration and collision rollback remain. |
-| Notifications and dialogs/forms | Missing | Add owned, accessible UI surfaces with cleanup. |
-| Status and widget slots | Partial | Text-only status and widget slots render as bounded browser surfaces. Rich components and ownership tests remain. |
-| Tool, message, and event renderers | Missing | Add bounded rendering contracts and visible failure fallbacks. |
+| Commands and applicable shortcuts | Partial | Local browser extension commands join the SDK command directory. Shortcuts use canonical `Ctrl+Alt+Shift+Meta+Key` names matched by physical key code, reject duplicates and reserved browser or Axl keys, and do not fire inside inputs or open dialogs. Real-browser keyboard testing remains. |
+| Notifications and dialogs/forms | Partial | Notifications plus native `<dialog>` select, confirm, input, editor, and custom dialogs close on completion, Escape, or disposal, run cleanup once, and restore focus. Real-browser accessibility and stacking tests remain. |
+| Status and widget slots | Partial | Bounded text status and widgets plus mounted DOM widgets with an owned abort signal. Widget cleanup runs exactly once on unmount or host disposal. Real-browser rendering tests remain. |
+| Tool, message, and event renderers | Partial | Tool renderers are keyed by the model-visible tool name, as in the TUI. Message and entry renderers are keyed by extension ID and source or channel. Output is bounded plain text rendered as React text, and failures show visible error text. Real-browser rendering tests remain. |
 | Markdown transforms | Done | The browser host applies bounded ordered text transforms to derived user and assistant records and live assistant output, without changing canonical SDK state. Failures show visible error text. |
-| Theme access | Missing | Expose browser-safe semantic theme tokens. |
-| Lifecycle and cleanup | Partial | Host registration disposal and abort signals exist; session switching, gateway verification, and failure replacement need end-to-end tests. |
-| Daemon state parity | Partial | The browser reads typed SDK inventory on session selection and canonical reload events; management and diagnostics UI remain. |
+| Theme access | Partial | Extensions read the current theme name and CSS semantic tokens and can select light, dark, or system. Visual verification remains. |
+| Lifecycle and cleanup | Partial | Duplicate extension identities are rejected before import, activation failure disposes the partial host and keeps the previous host, and event dispatch isolates handler failures and stops after disposal. Session switching and gateway verification need end-to-end tests. |
+| Daemon state parity | Partial | The browser reads typed SDK inventory on session selection and canonical reload events. The first-party `/browser-extensions` command inspects, enables, disables, and reloads extensions through typed SDK calls. End-to-end reload and disable testing remains. |
 | Terminal/browser parity mapping | Missing | Document explicit equivalents or maintainer-approved exclusions. |
 
 ## Release evidence
@@ -150,10 +150,10 @@ Daemon-global session selection, tree-navigation UI, and UI prompt lifecycle are
 | --- | --- | --- |
 | First-party daemon consumer | Done | The built-in `/extensions` diagnostics command is registered through the same `DaemonExtensionFactory` API as third-party commands. |
 | First-party TUI consumer | Done | Prompt templates and skills load from public package exports only when enabled in daemon inventory and use the same `TerminalExtension` host and lifecycle as installed entries. |
-| First-party web consumer | Missing | The browser host exists, but first-party browser features have not been migrated through its public API. |
-| Runnable examples | Partial | `examples/extensions/daemon-kitchen-sink.ts`, `examples/extensions/terminal.ts`, and `examples/extensions/browser.mjs` cover daemon, terminal, and a browser-safe entry point; full web presentation examples remain. |
+| First-party web consumer | Done | The `/browser-extensions` management command is registered through the public `WebExtension` API and activated by the same host as installed modules. |
+| Runnable examples | Partial | [`examples/extensions/README.md`](../../examples/extensions/README.md) indexes daemon, provider, terminal, and paired browser and daemon examples. The browser example is loaded by unit tests; a separately installed browser run remains. |
 | Multi-extension ordering and collisions | Done | Tests cover deterministic precedence, collisions, chained mutation, cancellation, disablement, replacement, restart reconstruction, and cleanup. |
-| Installed JavaScript and TypeScript artifact tests | Partial | Packaged JavaScript execution and external TypeScript declaration consumption pass; local daemon-backed TUI loader tests pass, but separately installed release TUI and web loading remain. |
+| Installed JavaScript and TypeScript artifact tests | Partial | Packaged JavaScript execution and external TypeScript declaration consumption pass. A separately installed release artifact loads the paired TypeScript daemon and JavaScript browser example. Local daemon-backed TUI loader tests pass, but separately installed release TUI loading remains. |
 | Live packaged daemon smoke test | Done | An installed release artifact loaded provider hooks and completed a real Azure-backed turn. |
 | Live packaged TUI smoke test | Missing | Exercise an installable TUI extension. |
-| Live packaged web smoke test | Missing | Exercise an installable browser extension. |
+| Live packaged web smoke test | Partial | A separately installed release artifact served the paired example to Firefox through the authenticated gateway with a keyless loopback provider. The widget, select, input, and editor dialogs, commands, shortcut, tool, message, and entry renderers, `/browser-extensions`, disablement without importing the entry, and re-enablement passed at desktop and mobile widths. After a runtime reload the gateway closes the browser socket with `Rate limit exceeded` because the SDK acknowledges each replayed event separately; this affects `/reload` as well and remains open. |

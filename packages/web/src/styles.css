@@ -283,7 +283,23 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .composer-submit.stop svg { width:18px; height:18px; stroke-width:1.6; }
 .composer-submit:disabled { opacity:.38; cursor:not-allowed; }
 .extension-statuses { display:flex; flex-wrap:wrap; gap:8px; padding:6px 24px; border-bottom:1px solid var(--line-soft); color:var(--muted); font-size:11px; }
-.extension-widget { margin:12px 0; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text); overflow-wrap:anywhere; }
+.extension-widget { margin:12px 0; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text); font-size:13px; overflow-wrap:anywhere; }
+.extension-widget button { padding:7px 12px; border:1px solid var(--line); border-radius:6px; background:var(--raised); color:var(--text); cursor:pointer; }
+.extension-widget button:hover { background:var(--selected); }
+.extension-dialog { width:min(480px,calc(100vw - 32px)); max-height:min(80vh,640px); padding:20px; font-size:13px; border:1px solid var(--line); border-radius:10px; background:var(--panel); color:var(--text); box-shadow:0 24px 70px var(--shadow); }
+.extension-dialog::backdrop { background:var(--scrim); }
+.extension-dialog h2 { margin:0 0 16px; font-size:16px; line-height:1.4; }
+.extension-dialog p { color:var(--text-soft); line-height:1.5; }
+.extension-dialog form,.extension-dialog-choices { display:grid; gap:8px; margin-bottom:16px; }
+.extension-dialog input,.extension-dialog textarea { width:100%; padding:10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--text); }
+.extension-dialog textarea { min-height:140px; resize:vertical; }
+.extension-dialog button { width:100%; padding:9px 12px; border:1px solid var(--line); border-radius:6px; background:var(--raised); color:var(--text); text-align:left; cursor:pointer; }
+.extension-dialog button:hover { background:var(--selected); }
+.extension-dialog form button,.extension-dialog > button { width:auto; }
+.extension-dialog form button { justify-self:end; background:var(--accent); color:#fff; }
+.extension-entry { margin:12px 0; padding:12px; border:1px solid var(--line); border-radius:8px; background:var(--panel); color:var(--text); font-size:13px; }
+.extension-entry strong { color:var(--muted); font-size:12px; font-weight:600; }
+.extension-entry pre,.extension-rendered { overflow:auto; margin:8px 0; color:var(--text); white-space:pre-wrap; overflow-wrap:anywhere; }
 .unsafe-banner { position:absolute; z-index:2; top:56px; right:0; left:0; display:flex; justify-content:center; gap:8px; padding:7px 16px; border-bottom:1px solid #5b4d25; background:#211d12; color:#cdbd85; font-size:11px; }
 .unsafe-banner strong { color:#ead58a; font-weight:650; }
 .connection-banner { position:absolute; z-index:2; top:68px; right:32px; display:flex; align-items:center; gap:16px; padding:10px 12px; border:1px solid #5b4d25; border-radius:8px; background:#211d12; color:#e7cf7c; font-size:12px; }

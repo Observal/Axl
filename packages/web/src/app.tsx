@@ -59,7 +59,8 @@ import {
 } from "./commands.ts";
 import type { ControlCenterTab } from "./control-center.tsx";
 import { Dock } from "./dock.tsx";
-import { WebExtensionHost } from "./extension-host.ts";
+import { WebExtensionHost, webShortcutKey } from "./extension-host.ts";
+import { extensionManagement } from "./extension-management.ts";
 import { trapDialogFocus } from "./dialog-focus.ts";
 import {
   browserProviderHost,
@@ -278,6 +279,20 @@ export interface WebPreview {
   readonly workspaceClient?: WorkspaceOperations;
 }
 
+function WebWidgetView({ host, widgetKey, onError }: { readonly host: WebExtensionHost; readonly widgetKey: string; readonly onError: (message: string) => void }): React.JSX.Element {
+  const root = useRef<HTMLDivElement>(null);
+  const report = useRef(onError);
+  report.current = onError;
+  useEffect(() => {
+    if (root.current === null) return;
+    let cleanup: () => Promise<void>;
+    try { cleanup = host.mountWidget(widgetKey, root.current); }
+    catch (cause) { report.current(cause instanceof Error ? cause.message : String(cause)); return; }
+    return () => { void cleanup().catch((cause: unknown) => report.current(cause instanceof Error ? cause.message : String(cause))); };
+  }, [host, widgetKey]);
+  return <aside className="extension-widget" ref={root} />;
+}
+
 export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): React.JSX.Element {
   const initialLayout = useRef(preview === undefined ? DEFAULT_LAYOUT : previewLayout()).current;
   const [client, setClient] = useState<AxlClient>();
@@ -378,8 +393,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [actionNotice, setActionNotice] = useState<string>();
   const [commands, setCommands] = useState<readonly EffectiveCommand[]>(preview?.commands ?? []);
   const [webExtensions, setWebExtensions] = useState<WebExtensionHost>();
+  const [extensionRevision, setExtensionRevision] = useState(0);
   const webExtensionRef = useRef<WebExtensionHost>(undefined);
   const webExtensionSession = useRef<SessionId>(undefined);
+  const workingExtension = useRef<{ host: WebExtensionHost | undefined; operation: string | undefined }>({ host: undefined, operation: undefined });
   const [extensionEpoch, setExtensionEpoch] = useState(0);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteError, setCommandPaletteError] = useState<string>();
@@ -495,6 +512,11 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       let live = false;
       const nextSubscription = await subscribeSession(current, next.sessionId, {
         onEvent: (event) => {
+          if (live && webExtensionSession.current === sessionId) {
+            void webExtensionRef.current?.dispatch("session.event", event).catch((cause: unknown) =>
+              setError(cause instanceof Error ? cause.message : String(cause)),
+            );
+          }
           if (live && event.type === "config.dialect" && event.payload.reason === "reload") {
             setExtensionEpoch((epoch) => epoch + 1);
             void providerDirectoryController.current?.load(true).catch(() => undefined);
@@ -671,7 +693,10 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     let cancelled = false;
     void (async () => {
       const inventory = await client.listExtensions({ sessionId });
-      const next = await WebExtensionHost.load(inventory, sessionId, document.baseURI, showActionNotice);
+      const next = await WebExtensionHost.load(
+        inventory, sessionId, document.baseURI, showActionNotice, undefined, setTheme,
+        client.connection.grantedCapabilities.includes("extension.list") ? [extensionManagement(client, sessionId)] : [],
+      );
       if (cancelled) { await next.dispose(); return; }
       const previous = webExtensionRef.current;
       webExtensionRef.current = next;
@@ -685,12 +710,30 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
         throw cause;
       }
       setWebExtensions(next);
+      const unsubscribe = next.subscribe(() => {
+        if (webExtensionRef.current !== next) return;
+        setExtensionRevision((revision) => revision + 1);
+        void refreshCommandDirectory(sessionId).catch((cause: unknown) =>
+          setError(cause instanceof Error ? cause.message : String(cause)),
+        );
+      });
       await previous?.dispose();
+      if (cancelled) unsubscribe();
     })().catch((cause: unknown) => {
       if (!cancelled) setError(cause instanceof Error ? cause.message : "Could not load web extensions");
     });
     return () => { cancelled = true; };
   }, [client, opened?.sessionId, extensionEpoch, preview]);
+  useEffect(() => {
+    const previous = workingExtension.current;
+    const operation = conversation.activeOperationId;
+    if (previous.host === webExtensions && previous.operation === operation) return;
+    workingExtension.current = { host: webExtensions, operation };
+    if (previous.host === webExtensions && previous.operation !== undefined)
+      void webExtensions?.dispatch("working.end").catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+    if (operation !== undefined)
+      void webExtensions?.dispatch("working.start").catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+  }, [conversation.activeOperationId, webExtensions]);
   useEffect(() => () => {
     void webExtensionRef.current?.dispose().catch((cause: unknown) =>
       console.error("Web extension cleanup failed", cause),
@@ -845,6 +888,16 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       } else if (event.altKey && event.key === "ArrowUp" && opened !== undefined) {
         event.preventDefault();
         void restoreQueuedInputs(false);
+      } else if (!event.repeat && webExtensionRef.current !== undefined && opened !== undefined &&
+        !document.querySelector("dialog[open]") &&
+        !(event.target instanceof Element && event.target.closest("input,textarea,select,[contenteditable]") !== null) &&
+        !commandPaletteOpen && controlCenter === undefined) {
+        const key = webShortcutKey(event);
+        const run = key === undefined ? undefined : webExtensionRef.current.shortcut(key);
+        if (run !== undefined) {
+          event.preventDefault();
+          void Promise.resolve().then(run).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)));
+        }
       } else if (event.key === "Escape") {
         if (commandPaletteOpen || transcriptSearchOpen || usageOpen || controlCenter !== undefined || sidebarOpen || mobileDock || requeueOpen || newSessionOpen) {
           setCommandPaletteOpen(false);
@@ -1742,6 +1795,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       }
       if (outcome.state === "completed") {
         if (outcome.command === "rename" && client !== undefined) await refreshSessions(client);
+        // Browser extension commands report their own result through api.ui.notify.
+        if (webExtensionRef.current?.commands().some((command) => command.name === outcome.command)) return;
         showActionNotice(
           outcome.content ??
             (compacting && directCancellationRequested.current
@@ -2223,7 +2278,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const usageStats = useMemo(() => sessionUsageStats(conversation), [conversation]);
   const displayConversation = useMemo(
     () => webExtensions?.display(conversation) ?? conversation,
-    [conversation, webExtensions],
+    [conversation, webExtensions, extensionRevision],
   );
   const stateHistory = useMemo(() => sessionStateHistory(conversation), [conversation]);
   const pausedQueue = useMemo(() => pausedQueueItems(conversation.queue), [conversation.queue]);
@@ -2368,7 +2423,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       {usageOpen && <section ref={usagePanel} className="session-usage" aria-label="Session usage"><header><strong>Session usage</strong><button type="button" aria-label="Close session usage" onClick={() => setUsageOpen(false)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></header><p>{conversation.provider && conversation.model ? `${conversation.provider} / ${conversation.model}` : conversation.model ?? "No model selected"}{conversation.thinking ? ` · ${conversation.thinking}` : ""}</p><dl><div><dt>Input</dt><dd>{compactNumber(conversation.usage.inputTokens)}</dd></div><div><dt>Output</dt><dd>{compactNumber(conversation.usage.outputTokens)}</dd></div><div><dt>Cache read</dt><dd>{compactNumber(conversation.usage.cacheReadTokens)}</dd></div><div><dt>Cache hit</dt><dd>{usageStats.cacheHitPercent.toFixed(1)}%</dd></div><div><dt>Reasoning</dt><dd>{compactNumber(conversation.usage.reasoningTokens)}</dd></div><div><dt>Throughput</dt><dd>{usageStats.tokensPerSecond === undefined ? "Unknown" : `${usageStats.tokensPerSecond.toFixed(1)} tok/s`}</dd></div><div><dt>Recorded cost</dt><dd>${conversation.usage.costUsd.toFixed(4)}</dd></div></dl>{usageStats.unknownCostResponses > 0 && <small>{usageStats.unknownCostResponses} response{usageStats.unknownCostResponses === 1 ? " has" : "s have"} no cost data.</small>}{stateHistory.length > 0 && <details className="state-history"><summary>Configuration history</summary><ol>{stateHistory.map((entry) => <li key={entry.id}><span><strong>{entry.label}</strong><small>{entry.detail}</small></span><time>{new Date(entry.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></li>)}</ol></details>}</section>}
       {transcriptSearchOpen && <div className="transcript-search" role="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25" /><path d="m10.25 10.25 3 3" /></svg><input autoFocus type="search" aria-label="Search transcript" placeholder="Search transcript" value={transcriptQuery} onChange={(event) => setTranscriptQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); moveTranscriptMatch(event.shiftKey ? -1 : 1); } }} /><span>{transcriptQuery.trim() ? `${transcriptMatches.length === 0 ? 0 : Math.max(0, transcriptMatch + 1)} / ${transcriptMatches.length}` : ""}</span><button type="button" aria-label="Previous result" disabled={transcriptMatches.length === 0} onClick={() => moveTranscriptMatch(-1)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4" /></svg></button><button type="button" aria-label="Next result" disabled={transcriptMatches.length === 0} onClick={() => moveTranscriptMatch(1)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" /></svg></button><button type="button" aria-label="Close transcript search" onClick={() => { setTranscriptSearchOpen(false); setTranscriptQuery(""); }}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>}
       <div className="thread" ref={transcript} onScroll={trackTranscriptScroll}>
-        {opened ? <div className="thread-inner"><div className="thread-title"><h1>{currentTitle}</h1>{opened.profile !== "chat" && <p>{opened.cwd}</p>}</div>{webExtensions?.widgets().map((text, index) => <aside className="extension-widget" key={index}>{text}</aside>)}<Suspense fallback={null}><Conversation conversation={displayConversation} searchQuery={transcriptQuery} resolveBlobUrl={(blob) => preview?.resolveBlobUrl?.(blob.sha256) ?? blobUrls.get(blob.sha256)} loadFullToolOutput={hasCapability("session.blob.read") && (preview?.readBlob !== undefined || client !== undefined) ? loadFullToolOutput : undefined} onRespondInteraction={hasCapability("session.interaction.respond") ? respondInteraction : undefined} onCopyMessage={(text) => void copyMessage(text)} onForkMessage={hasCapability("session.fork") ? (eventId) => void forkMessage(eventId) : undefined} /></Suspense>{conversation.activity && <article className="message assistant live"><span className="avatar axl">A</span><div><header><strong>Axl</strong><time>working</time></header>{conversation.activity.thinking && <details><summary>Thinking</summary><p>{conversation.activity.thinking}</p></details>}<p className="waiting-response">{conversation.activity.text ? (webExtensions?.safeTransform(conversation.activity.text, "assistant") ?? conversation.activity.text) : "Waiting for response"}<span className="waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span></p></div></article>}</div> : <div className="empty"><span className="brand-mark large">A</span><h1>No session selected</h1><p>Resume a durable session or start one in this workspace.</p><button title={canCreate ? undefined : "Unavailable because session creation was not granted"} disabled={!canCreate} onClick={() => openNewSession()}>New session</button></div>}
+        {opened ? <div className="thread-inner"><div className="thread-title"><h1>{currentTitle}</h1>{opened.profile !== "chat" && <p>{opened.cwd}</p>}</div>{webExtensions?.widgetEntries().map(({ key, widget }) => typeof widget === "string" ? <aside className="extension-widget" key={key}>{widget}</aside> : <WebWidgetView key={key} host={webExtensions} widgetKey={key} onError={(message) => setError(message)} />)}<Suspense fallback={null}><Conversation conversation={displayConversation} renderTool={webExtensions ? (tool) => webExtensions.renderTool(tool.name, tool) : undefined} renderMessage={webExtensions ? (extensionId, source, event) => webExtensions.renderMessage(extensionId, source, event) : undefined} renderEntry={webExtensions ? (extensionId, channel, event) => webExtensions.renderEntry(extensionId, channel, event) : undefined} searchQuery={transcriptQuery} resolveBlobUrl={(blob) => preview?.resolveBlobUrl?.(blob.sha256) ?? blobUrls.get(blob.sha256)} loadFullToolOutput={hasCapability("session.blob.read") && (preview?.readBlob !== undefined || client !== undefined) ? loadFullToolOutput : undefined} onRespondInteraction={hasCapability("session.interaction.respond") ? respondInteraction : undefined} onCopyMessage={(text) => void copyMessage(text)} onForkMessage={hasCapability("session.fork") ? (eventId) => void forkMessage(eventId) : undefined} /></Suspense>{conversation.activity && <article className="message assistant live"><span className="avatar axl">A</span><div><header><strong>Axl</strong><time>working</time></header>{conversation.activity.thinking && <details><summary>Thinking</summary><p>{conversation.activity.thinking}</p></details>}<p className="waiting-response">{conversation.activity.text ? (webExtensions?.safeTransform(conversation.activity.text, "assistant") ?? conversation.activity.text) : "Waiting for response"}<span className="waiting-dots" aria-hidden="true"><i></i><i></i><i></i></span></p></div></article>}</div> : <div className="empty"><span className="brand-mark large">A</span><h1>No session selected</h1><p>Resume a durable session or start one in this workspace.</p><button title={canCreate ? undefined : "Unavailable because session creation was not granted"} disabled={!canCreate} onClick={() => openNewSession()}>New session</button></div>}
       </div>
       {promptBreakpoints.length > 1 && <nav className={`prompt-breakpoints${transcriptNavigationVisible || transcriptSearchOpen ? " visible" : ""}`} aria-label="Conversation prompts" onMouseEnter={() => { if (transcriptNavigationTimer.current !== undefined) clearTimeout(transcriptNavigationTimer.current); setTranscriptNavigationVisible(true); }} onMouseLeave={() => setTranscriptNavigationVisible(false)}>{promptBreakpoints.map((point) => <button type="button" key={point.id} className={point.id === activePromptId ? "active" : ""} title={point.text} onClick={() => jumpToMessage(point.id)}><span>{point.text}</span></button>)}</nav>}
       {!connected && <div className="connection-banner" role="status" aria-live="polite"><span>{connection === "disconnected" ? "Connection to the daemon was lost." : connection === "incompatible" ? "The browser and daemon versions are incompatible." : "Connecting to the daemon…"}</span>{connection === "disconnected" && client !== undefined && <button onClick={() => void reconnect()}>Reconnect</button>}</div>}

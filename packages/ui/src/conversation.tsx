@@ -200,16 +200,17 @@ function ToolBody({ tool }: { readonly tool: ProjectedToolCall }): React.JSX.Ele
   return <CodeBlock text={output || JSON.stringify(tool.input, null, 2)} {...(output ? {} : { language: "json" })} />;
 }
 
-export function ToolEntry({ tool, loadFullOutput }: { readonly tool: ProjectedToolCall; readonly loadFullOutput?: ToolOutputLoader | undefined }): React.JSX.Element {
+export function ToolEntry({ tool, loadFullOutput, renderTool }: { readonly tool: ProjectedToolCall; readonly loadFullOutput?: ToolOutputLoader | undefined; readonly renderTool?: ((tool: ProjectedToolCall) => string | undefined) | undefined }): React.JSX.Element {
   const details = resultDetails(tool);
   const truncated = details?.truncated === true || typeof details?.overflowPath === "string" || blobReference(details?.overflowBlob) !== undefined;
   const [open, setOpen] = useState(tool.name.toLocaleLowerCase() === "edit" || truncated);
   const status = tool.result === undefined ? "running" : tool.result.isError ? "failed" : "complete";
   const output = resultText(tool);
+  const rendered = renderTool?.(tool);
   return <details className={`tool-item ${status}`} open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary><span className="tool-chevron"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3.5 4.5 4.5L6 12.5" /></svg></span><span className="tool-icon"><ToolIcon intent={tool.renderIntent} name={tool.name} /></span><span className="tool-heading"><strong>{toolVerb(tool)}</strong><small>{toolTarget(tool)}</small></span><span className="tool-status" aria-label={status}>{status === "running" ? <i></i> : status === "failed" ? <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg> : <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8 3 3 7-7" /></svg>}</span></summary>
     <div className="tool-body">
-      <ToolBody tool={tool} />
+      {rendered === undefined ? <ToolBody tool={tool} /> : <pre className="extension-rendered">{rendered}</pre>}
       <JsonInspector label="Complete input" value={tool.input} />
       {details && <JsonInspector label="Result metadata" value={details} />}
       <TruncationNotice tool={tool} loadFullOutput={loadFullOutput} />
@@ -247,7 +248,7 @@ function assertNever(value: never): never {
   throw new Error(`Unhandled conversation presentation item: ${JSON.stringify(value)}`);
 }
 
-function EventRow({ item, tool, queue, interruption, interaction, attribution, resolveBlobUrl, loadFullToolOutput, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly item: ConversationPresentationItem; readonly tool?: ProjectedToolCall | undefined; readonly queue?: ProjectedQueueItem | undefined; readonly interruption?: ProjectedInterruptDelivery | undefined; readonly interaction?: ProjectedInteraction | undefined; readonly attribution?: ResponseAttribution | undefined; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element | null {
+function EventRow({ item, tool, queue, interruption, interaction, attribution, resolveBlobUrl, loadFullToolOutput, renderTool, renderMessage, renderEntry, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly item: ConversationPresentationItem; readonly tool?: ProjectedToolCall | undefined; readonly queue?: ProjectedQueueItem | undefined; readonly interruption?: ProjectedInterruptDelivery | undefined; readonly interaction?: ProjectedInteraction | undefined; readonly attribution?: ResponseAttribution | undefined; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly renderTool?: ((tool: ProjectedToolCall) => string | undefined) | undefined; readonly renderMessage?: ((extensionId: string, source: string, event: unknown) => string | undefined) | undefined; readonly renderEntry?: ((extensionId: string, channel: string, event: unknown) => string | undefined) | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element | null {
   switch (item.kind) {
     case "user.message": {
       const event = item.event;
@@ -266,7 +267,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     case "model.retry_scheduled":
       return <SystemNotice title={`Retrying model request ${item.event.payload.attempt}/${item.event.payload.maxAttempts}`} detail={`${item.event.payload.code} · ${(item.event.payload.delayMs / 1000).toFixed(item.event.payload.delayMs < 1000 ? 1 : 0)}s`} tone="warning" />;
     case "tool.call":
-      return tool === undefined ? <SystemNotice title="Tool call unavailable" detail={item.event.payload.name} tone="error" alert /> : <ToolEntry tool={tool} loadFullOutput={loadFullToolOutput} />;
+      return tool === undefined ? <SystemNotice title="Tool call unavailable" detail={item.event.payload.name} tone="error" alert /> : <ToolEntry tool={tool} loadFullOutput={loadFullToolOutput} renderTool={renderTool} />;
     case "config.thinking":
       return item.event.payload.clamped ? <SystemNotice title={`Thinking adjusted to ${item.event.payload.effective}`} detail={`Requested ${item.event.payload.requested}`} /> : null;
     case "config.dialect":
@@ -283,6 +284,18 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
       return <SystemNotice title={`Sandbox denied ${item.event.payload.capability}`} detail={item.event.payload.reason} tone="warning" alert />;
     case "context.injected":
       return <SystemNotice title="Context added" detail={item.event.payload.source} />;
+    case "context.extension": {
+      const { extensionId, source } = item.event.payload;
+      const rendered = renderMessage?.(extensionId, source, item.event);
+      return rendered === undefined ? null : <article className="extension-entry" aria-label={`Extension message from ${extensionId}`}><strong>{extensionId}</strong><pre>{rendered}</pre></article>;
+    }
+    case "extension.event":
+    case "extension.state": {
+      const { extensionId } = item.event.payload;
+      const key = item.event.type === "extension.event" ? item.event.payload.channel : item.event.payload.key;
+      const rendered = renderEntry?.(extensionId, key, item.event);
+      return rendered === undefined ? null : <article className="extension-entry" aria-label={`Extension entry from ${extensionId}`}><strong>{extensionId}</strong><pre>{rendered}</pre></article>;
+    }
     case "compaction.queued":
       return <SystemNotice title="Compaction queued" detail="It will run after the active response." />;
     case "compaction.failed":
@@ -317,10 +330,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
     case "context.resources":
     case "prompt.section":
     case "tool.schema":
-    case "extension.state":
     case "extension.label":
-    case "extension.event":
-    case "context.extension":
     case "capability.searched":
     case "capability.activated":
     case "capability.denied":
@@ -332,7 +342,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
   }
 }
 
-export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly conversation: ConversationState; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element {
+export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput, renderTool, renderMessage, renderEntry, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly conversation: ConversationState; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly renderTool?: ((tool: ProjectedToolCall) => string | undefined) | undefined; readonly renderMessage?: ((extensionId: string, source: string, event: unknown) => string | undefined) | undefined; readonly renderEntry?: ((extensionId: string, channel: string, event: unknown) => string | undefined) | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element {
   const compacted = useMemo(() => new Set(conversation.compactedEventIds), [conversation.compactedEventIds]);
   const tools = useMemo(() => new Map(conversation.tools.map((tool) => [tool.callEventId, tool])), [conversation.tools]);
   const queue = useMemo(() => new Map(conversation.queue.map((entry) => [entry.queueItemId, entry])), [conversation.queue]);
@@ -360,6 +370,6 @@ export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput,
   return <>{conversation.records.map((record) => {
     if (record.kind === "unknown_event") return <EventRow key={record.event.id} item={presentUnknownEvent(record.event)} />;
     if (compacted.has(record.event.id)) return null;
-    return <EventRow key={record.event.id} item={presentCanonicalEvent(record.event)} tool={record.event.type === "tool.call" ? tools.get(record.event.id) : undefined} queue={queue.get(record.event.id)} interruption={interruptions.get(record.event.id)} interaction={interactions.get(record.event.id)} attribution={attributions.get(record.event.id)} resolveBlobUrl={resolveBlobUrl} loadFullToolOutput={loadFullToolOutput} searchQuery={searchQuery} onCopyMessage={onCopyMessage} onForkMessage={onForkMessage} onRespondInteraction={onRespondInteraction} />;
+    return <EventRow key={record.event.id} item={presentCanonicalEvent(record.event)} tool={record.event.type === "tool.call" ? tools.get(record.event.id) : undefined} queue={queue.get(record.event.id)} interruption={interruptions.get(record.event.id)} interaction={interactions.get(record.event.id)} attribution={attributions.get(record.event.id)} resolveBlobUrl={resolveBlobUrl} loadFullToolOutput={loadFullToolOutput} renderTool={renderTool} renderMessage={renderMessage} renderEntry={renderEntry} searchQuery={searchQuery} onCopyMessage={onCopyMessage} onForkMessage={onForkMessage} onRespondInteraction={onRespondInteraction} />;
   })}</>;
 }

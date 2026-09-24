@@ -2,6 +2,16 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-License-Identifier: Apache-2.0
 
+/**
+ * The browser's `HTMLElement` when the consuming program includes DOM types.
+ * Daemon and terminal programs compile without DOM globals.
+ */
+export type WebElement = typeof globalThis extends {
+  readonly HTMLElement: { readonly prototype: infer Element };
+}
+  ? Element
+  : never;
+
 export interface WebExtension {
   readonly manifest: { readonly id: string; readonly name: string; readonly apiVersion: 1 };
   // biome-ignore lint/suspicious/noConfusingVoidType: Activation may return no disposer, including from a synchronous function.
@@ -13,6 +23,25 @@ export interface WebExtensionApi {
   readonly sessionId: string;
   readonly ui: {
     notify(message: string): void;
+    select(title: string, choices: readonly string[]): Promise<string | undefined>;
+    confirm(title: string, message: string): Promise<boolean>;
+    input(title: string, initial?: string): Promise<string | undefined>;
+    editor(title: string, initial?: string): Promise<string | undefined>;
+    /** The browser extension owns its DOM and must release listeners on abort. */
+    custom<T>(
+      title: string,
+      render: (
+        root: WebElement,
+        done: (value: T | undefined) => void,
+        signal: AbortSignal,
+        // biome-ignore lint/suspicious/noConfusingVoidType: UI callbacks may return nothing or a disposer.
+      ) => void | ExtensionDisposer,
+    ): Promise<T | undefined>;
+    readonly theme: {
+      readonly name: "light" | "dark";
+      color(role: "text" | "muted" | "accent" | "panel" | "line"): string;
+    };
+    setTheme(name: "light" | "dark" | "system"): void;
   };
   registerCommand(command: {
     readonly name: string;
@@ -20,7 +49,37 @@ export interface WebExtensionApi {
     run(argument: string, signal: AbortSignal): void | Promise<void>;
   }): ExtensionDisposer;
   registerStatus(id: string, label: string): ExtensionDisposer;
-  registerWidget(id: string, text: string): ExtensionDisposer;
+  registerShortcut(shortcut: {
+    /** Example: Ctrl+Shift+P. Browser and Axl reserved shortcuts cannot be overridden. */
+    readonly key: string;
+    readonly description: string;
+    run(signal: AbortSignal): void | Promise<void>;
+  }): ExtensionDisposer;
+  registerWidget(
+    id: string,
+    // biome-ignore lint/suspicious/noConfusingVoidType: Mount callbacks may return nothing or a disposer.
+    widget: string | { mount(root: WebElement, signal: AbortSignal): void | ExtensionDisposer },
+  ): ExtensionDisposer;
+  registerToolRenderer(
+    /** The model-visible tool name recorded in canonical `tool.call` events. */
+    name: string,
+    render: (tool: unknown) => string | undefined,
+  ): ExtensionDisposer;
+  registerMessageRenderer(
+    source: string,
+    render: (event: unknown) => string | undefined,
+  ): ExtensionDisposer;
+  registerEntryRenderer(
+    channel: string,
+    render: (event: unknown) => string | undefined,
+  ): ExtensionDisposer;
+  onEvent(
+    handler: (event: {
+      readonly type: "session.event" | "working.start" | "working.end";
+      readonly event?: unknown;
+      readonly signal: AbortSignal;
+    }) => void | Promise<void>,
+  ): ExtensionDisposer;
   registerMarkdownTransformer(
     transform: (text: string, role: "user" | "assistant") => string,
   ): ExtensionDisposer;
