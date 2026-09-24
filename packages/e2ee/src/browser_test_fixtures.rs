@@ -246,14 +246,11 @@ pub fn run_openmls_lifecycle(now_ms: u64) -> Result<BrowserLifecycleEvidence, Er
         "commit target epoch mismatch",
     )?;
 
-    let mut epoch_ready_plaintext = Vec::with_capacity(18 + 2 + 16 + 32 + 48 + 8 + 48);
-    epoch_ready_plaintext.extend_from_slice(b"Axl epoch ready v1");
-    epoch_ready_plaintext.extend_from_slice(&crate::PROFILE_REVISION.to_be_bytes());
-    epoch_ready_plaintext.extend_from_slice(&context.crypto_session_id);
-    epoch_ready_plaintext.extend_from_slice(&context.group_id);
-    epoch_ready_plaintext.extend_from_slice(&commit_metadata.commit_id);
-    epoch_ready_plaintext.extend_from_slice(&commit_metadata.target_epoch.to_be_bytes());
-    epoch_ready_plaintext.extend_from_slice(&commit_metadata.epoch_authenticator);
+    let epoch_ready_plaintext = crate::epoch_ready_payload(
+        context.crypto_session_id,
+        context.group_id,
+        &commit_metadata,
+    );
     let epoch_ready = device.prepare_epoch_ready(id(0x44), 0, &epoch_ready_plaintext)?;
     let epoch_ready_bytes = epoch_ready.ciphertext().len();
     let epoch_ready_ciphertext = epoch_ready.ciphertext().to_vec();
@@ -932,6 +929,148 @@ impl TestBrowserLineage {
             exact_result,
             credential: &self.credential,
             signer,
+            token: 0,
         })
     }
+}
+
+/// Test-only in-WASM pairing daemon. It is the peer of a browser device endpoint under test and
+/// produces or consumes the exact bytes the device's barrier releases. It has no persistence and
+/// never enters the production artifact.
+pub struct TestPeerDaemon {
+    daemon: Daemon,
+    context: PairContext,
+}
+
+impl TestPeerDaemon {
+    pub fn new(context: PairContext, now_ms: u64) -> Result<Self, Error> {
+        let identity = Identity::daemon(context.account_id, context.installation_id);
+        let daemon =
+            Daemon::create_with_clock(identity, context.clone(), Arc::new(FixedClock(now_ms)))?;
+        Ok(Self { daemon, context })
+    }
+
+    pub fn context(&self) -> &PairContext {
+        &self.context
+    }
+
+    pub fn epoch(&self) -> Result<u64, Error> {
+        self.daemon.epoch()
+    }
+
+    pub fn epoch_authenticator(&self) -> Result<Vec<u8>, Error> {
+        self.daemon.epoch_authenticator()
+    }
+
+    /// Consume the device KeyPackage the device's register barrier released; returns the Welcome.
+    pub fn consume_key_package(&mut self, key_package: &[u8]) -> Result<Vec<u8>, Error> {
+        let identity = Identity::device(
+            self.context.account_id,
+            self.context.installation_id,
+            self.context.device_id,
+        )?;
+        let welcome = self.daemon.consume_key_package(crate::PhoneKeyPackage {
+            bytes: key_package.to_vec().into_boxed_slice(),
+            identity,
+        })?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(welcome.bytes().to_vec())
+    }
+
+    pub fn receive_activation(
+        &mut self,
+        ciphertext: &[u8],
+        id: [u8; 16],
+    ) -> Result<Vec<u8>, Error> {
+        let plaintext = self.daemon.receive_pair_activation(ciphertext, id)?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(plaintext.plaintext().to_vec())
+    }
+
+    pub fn prepare_delivery(
+        &mut self,
+        id: [u8; 16],
+        generation: u64,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let envelope = self.daemon.prepare_application(id, generation, plaintext)?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(envelope.ciphertext().to_vec())
+    }
+
+    pub fn receive_application(
+        &mut self,
+        ciphertext: &[u8],
+        id: [u8; 16],
+        generation: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let plaintext = self
+            .daemon
+            .receive_application(ciphertext, id, generation)?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(plaintext.plaintext().to_vec())
+    }
+
+    pub fn receive_update_proposal(
+        &mut self,
+        ciphertext: &[u8],
+        id: [u8; 16],
+        generation: u64,
+    ) -> Result<(), Error> {
+        self.daemon
+            .receive_update_proposal(ciphertext, id, generation)?;
+        committed_daemon(&mut self.daemon)
+    }
+
+    /// Returns the commit ciphertext and its metadata.
+    pub fn prepare_commit(
+        &mut self,
+        id: [u8; 16],
+        generation: u64,
+    ) -> Result<(Vec<u8>, crate::CommitMetadata), Error> {
+        let envelope = self.daemon.prepare_commit(id, generation)?;
+        let metadata = envelope
+            .commit_metadata()
+            .ok_or(Error::Crypto("commit metadata missing"))?
+            .clone();
+        committed_daemon(&mut self.daemon)?;
+        Ok((envelope.ciphertext().to_vec(), metadata))
+    }
+
+    pub fn receive_epoch_ready(
+        &mut self,
+        ciphertext: &[u8],
+        id: [u8; 16],
+        generation: u64,
+    ) -> Result<Vec<u8>, Error> {
+        let plaintext = self
+            .daemon
+            .receive_epoch_ready(ciphertext, id, generation)?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(plaintext.plaintext().to_vec())
+    }
+
+    pub fn prepare_resync_control(
+        &mut self,
+        id: [u8; 16],
+        generation: u64,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let envelope = self
+            .daemon
+            .prepare_resync_control(id, generation, plaintext)?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(envelope.ciphertext().to_vec())
+    }
+
+    pub fn prepare_removal(&mut self, id: [u8; 16], generation: u64) -> Result<Vec<u8>, Error> {
+        let envelope = self.daemon.prepare_removal(id, generation)?;
+        committed_daemon(&mut self.daemon)?;
+        Ok(envelope.ciphertext().to_vec())
+    }
+}
+
+/// UUIDv7-shaped identifier for browser endpoint tests.
+pub fn test_uuid_v7_id(seed: u8) -> [u8; 16] {
+    test_uuid_v7(seed)
 }

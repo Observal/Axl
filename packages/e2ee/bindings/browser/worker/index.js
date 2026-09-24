@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-import { ProductionBrowserStore } from "./storage.js";
+import { BrowserDeviceEndpoint } from "./endpoint.js";
 import initializeWasm, {
   get_binding_info_json as bindingInfoJson,
   inspect_pairing_claim as inspectClaim,
@@ -9,10 +9,12 @@ import initializeWasm, {
   secure_random_check as secureRandomCheck,
 } from "../wasm/axl_e2ee_browser.js";
 
-// The store is constructed only by the still-disabled production endpoint path. It accepts only a
-// Rust-owned lineage, pinned replica trust, and Rust-finalized transitions, so page code never
-// receives storage, key, or verifier authority.
-void ProductionBrowserStore;
+// Build-pinned production replica trust is a later production gate. Until it exists, no production
+// endpoint can be created or opened, and the endpoint module below is unreachable from the page.
+// It accepts only Rust-owned replica trust and Rust-finalized transitions, so page code never
+// receives storage, key, transition, or verifier authority.
+const PRODUCTION_REPLICA_TRUST = undefined;
+void BrowserDeviceEndpoint;
 
 const BYTE_OPERATIONS = Object.freeze({
   inspect_invitation: 2048,
@@ -128,7 +130,10 @@ self.addEventListener("message", async ({ data }) => {
       value = JSON.parse(inspectInvitation(bytes));
     } else if (validated.operation === "inspect_claim") value = JSON.parse(inspectClaim(bytes));
     else if (ENDPOINT_OPERATIONS.has(validated.operation)) {
-      throw new Error("AXL_E2EE:rollback_anchor_unavailable");
+      if (PRODUCTION_REPLICA_TRUST === undefined) {
+        throw new Error("AXL_E2EE:rollback_anchor_unavailable");
+      }
+      throw new Error("AXL_E2EE:internal_error");
     }
     self.postMessage({ id, ok: true, value });
   } catch (cause) {

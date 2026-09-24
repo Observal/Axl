@@ -70,9 +70,11 @@ cpSync(
   mode === "production" ? join(packageRoot, "worker/index.js") : join(packageRoot, "test/worker.js"),
   join(staging, "worker/index.js"),
 );
-// The production store is byte-identical in both artifacts. The test worker drives it against the
-// fixture WASM so its transitions and trust come from the same module instance.
-cpSync(join(packageRoot, "worker/storage.js"), join(staging, "worker/storage.js"));
+// The production endpoint driver and store are byte-identical in both artifacts. The test worker
+// drives them against the fixture WASM so transitions and trust come from the same module instance.
+for (const name of ["worker/storage.js", "worker/endpoint.js"]) {
+  cpSync(join(packageRoot, name), join(staging, name));
+}
 if (mode === "test") {
   cpSync(join(packageRoot, "test/browser-storage.js"), join(staging, "worker/browser-storage.js"));
   cpSync(join(packageRoot, "test/barrier-scenario.js"), join(staging, "worker/barrier-scenario.js"));
@@ -116,6 +118,7 @@ const artifactFiles = [
   { kind: "wasm", path: `wasm/${wasmName}_bg.wasm` },
   { kind: "worker", path: "worker/index.js" },
   { kind: "worker-storage", path: "worker/storage.js" },
+  { kind: "worker-endpoint", path: "worker/endpoint.js" },
 ];
 const artifacts = artifactFiles.map((entry) => ({
   ...entry,
