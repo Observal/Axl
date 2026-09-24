@@ -14,6 +14,7 @@ export * from "./mcp-configuration.ts";
 export * from "./model-request.ts";
 export * from "./model-stream.ts";
 export * from "./provider-management.ts";
+export * from "./remote-endpoint-status.ts";
 export * from "./remote-pairing.ts";
 export * from "./remote-transport.ts";
 export * from "./user-question.ts";

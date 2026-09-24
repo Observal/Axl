@@ -8,12 +8,16 @@ import {
   type DeviceId,
   encodeRemoteDaemonMessage,
   encodeRemoteE2eeEnvelope,
+  isRemoteEndpointQuarantineReason,
   type OperationId,
   parseAuthenticatedRemoteRequest,
   parseDeviceId,
   parseRemoteE2eeEnvelope,
   type RemoteDaemonMessage,
   type RemoteE2eeEnvelope,
+  type RemoteEndpointQuarantineReason,
+  type RemoteEndpointWitnessState,
+  type RemoteEndpointWitnessStatus,
   type RequestId,
   type RouteId,
   type ServerMessage,
@@ -28,10 +32,14 @@ import type { RemoteDeviceAuthorityStore } from "./remote-authority.ts";
 import {
   DaemonWitnessBarrier,
   type DaemonWitnessEndpointOperations,
+  DaemonWitnessError,
   type DaemonWitnessOutcome,
+  type DaemonWitnessRecoveryPolicy,
   type DaemonWitnessResult,
   type DaemonWitnessTransport,
   releasedField,
+  witnessRecoveryDelay,
+  witnessRecoveryPolicy,
 } from "./remote-witness.ts";
 
 /** Released `outbox` result: the exact committed ciphertext and its envelope metadata. */
@@ -130,6 +138,12 @@ export interface RemoteEncryptedSender {
   send(destinationRouteId: RouteId, opaqueEnvelope: Uint8Array): Promise<void> | void;
 }
 
+/** Injectable timer source so recovery scheduling is deterministic under test. */
+export interface WitnessRecoveryTimers {
+  setTimeout(run: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
 export interface WindowsRemoteE2eeBridgeOptions {
   readonly daemon: AxlDaemon;
   readonly deviceId: DeviceId;
@@ -137,8 +151,23 @@ export interface WindowsRemoteE2eeBridgeOptions {
   readonly endpoint: NativeDaemonE2eeEndpoint;
   /** Daemon-owned authenticated witness transport for the endpoint's signed requests. */
   readonly witness: DaemonWitnessTransport;
+  /** Backoff between witness recovery retries; defaults to 1 s doubling to a 30 s cap. */
+  readonly recovery?: Partial<DaemonWitnessRecoveryPolicy>;
+  readonly random?: () => number;
+  readonly timers?: WitnessRecoveryTimers;
+  readonly now?: () => number;
   readonly sender: RemoteEncryptedSender;
   readonly onError?: (error: Error) => void;
+}
+
+const WITNESS_CODE_PATTERN = /^witness_/u;
+
+function witnessCode(cause: unknown): string | undefined {
+  const code = (cause as { readonly code?: unknown } | undefined)?.code;
+  return typeof code === "string" &&
+    (WITNESS_CODE_PATTERN.test(code) || code === "endpoint_revoked")
+    ? code
+    : undefined;
 }
 
 function idBytes(value: string): Uint8Array {
@@ -189,18 +218,43 @@ function safeRemoteError(cause: unknown, requestId: RequestId): RemoteDaemonMess
  * authorizes a request. Cryptographic authentication precedes daemon authorization. All endpoint
  * calls and outbound encryption are serialized; the serialization orders work, the barrier
  * authorizes it.
+ *
+ * The bridge owns the endpoint's witness lifecycle. Ordinary work runs only while the recorded
+ * state is `ready`; before `start()` and throughout `recovering` it is refused with
+ * `witness_unavailable` without touching the endpoint. Recovery is an internal path: `start()` and
+ * the backoff timer reconcile the endpoint, and the first successful reconciliation records
+ * `ready`. `quarantined` and `revoked` are terminal; the bridge never retries them. Every transition
+ * is one durable audit record in the authority store, written before the state takes effect;
+ * retries record nothing. A failed status write faults the bridge closed: no state changes, no
+ * work or recovery runs, and every call reports the persistence failure.
  */
 export class WindowsRemoteE2eeBridge {
   private readonly options: WindowsRemoteE2eeBridgeOptions;
   private readonly barrier: DaemonWitnessBarrier<NativeDaemonE2eeEndpoint>;
   private readonly attachment: AuthenticatedRemoteAttachment;
+  private readonly policy: DaemonWitnessRecoveryPolicy;
+  private readonly timers: WitnessRecoveryTimers;
+  private readonly random: () => number;
+  private readonly now: () => number;
+  private readonly stateListeners = new Set<(status: RemoteEndpointWitnessStatus) => void>();
   private tail: Promise<void> = Promise.resolve();
   private currentRoute: RouteId | undefined;
   private closed = false;
+  private witness: RemoteEndpointWitnessStatus | undefined;
+  private fault: Error | undefined;
+  private retryTimer: unknown;
+  private retryAttempt = 0;
 
   constructor(options: WindowsRemoteE2eeBridgeOptions) {
     this.options = options;
     this.barrier = new DaemonWitnessBarrier(options.endpoint, options.witness);
+    this.policy = witnessRecoveryPolicy(options.recovery);
+    this.timers = options.timers ?? {
+      setTimeout: (run, delayMs) => setTimeout(run, delayMs),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    };
+    this.random = options.random ?? Math.random;
+    this.now = options.now ?? Date.now;
     this.attachment = options.daemon.attachAuthenticatedRemoteDevice({
       deviceId: options.deviceId,
       authority: options.authority,
@@ -208,11 +262,147 @@ export class WindowsRemoteE2eeBridge {
     });
   }
 
+  /** Last recorded witness lifecycle, or undefined before the first barrier outcome. */
+  get witnessStatus(): RemoteEndpointWitnessStatus | undefined {
+    return this.witness;
+  }
+
+  onWitnessState(listener: (status: RemoteEndpointWitnessStatus) => void): () => void {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+
+  /**
+   * Reconcile the endpoint with a fresh quorum read before admitting work. Resolves with the
+   * resulting state; `recovering` means retries are scheduled and work is refused meanwhile.
+   */
+  async start(): Promise<RemoteEndpointWitnessState> {
+    try {
+      await this.run(() => this.barrier.recover(), "recovery");
+    } catch (cause) {
+      if (witnessCode(cause) === undefined) throw cause;
+    }
+    const state = this.witness?.state;
+    if (state === undefined) throw new Error("Witness recovery finished without a state");
+    return state;
+  }
+
   receive(delivery: RemoteEncryptedDelivery): Promise<void> {
     const copied = new Uint8Array(delivery.opaqueEnvelope);
-    const operation = this.tail.then(() => this.receiveOne(delivery.sourceRouteId, copied));
-    this.tail = operation.catch(() => undefined);
+    return this.run(() => this.receiveOne(delivery.sourceRouteId, copied), "work");
+  }
+
+  /** Serialize one unit of endpoint work behind the tail and inside the lifecycle gate. */
+  private run<T>(work: () => Promise<T>, kind: "work" | "recovery"): Promise<T> {
+    const operation = this.tail.then(() => this.guarded(work, kind));
+    this.tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
     return operation;
+  }
+
+  private async guarded<T>(work: () => Promise<T>, kind: "work" | "recovery"): Promise<T> {
+    if (this.fault !== undefined) throw this.fault;
+    const state = this.witness?.state;
+    if (state === "quarantined") {
+      throw new DaemonWitnessError(
+        "witness_quarantined",
+        "The endpoint is quarantined",
+        this.witness?.reason,
+      );
+    }
+    if (state === "revoked") {
+      throw new DaemonWitnessError("endpoint_revoked", "The endpoint is revoked");
+    }
+    if (kind === "work" && state !== "ready") {
+      throw new DaemonWitnessError(
+        "witness_unavailable",
+        state === undefined
+          ? "Endpoint witness lifecycle has not been established"
+          : "Endpoint witness recovery is in progress",
+      );
+    }
+    try {
+      const result = await work();
+      this.retryAttempt = 0;
+      await this.transition("ready");
+      return result;
+    } catch (cause) {
+      await this.classify(cause);
+      throw cause;
+    }
+  }
+
+  private async classify(cause: unknown): Promise<void> {
+    const code = witnessCode(cause);
+    if (code === undefined) return;
+    if (code === "endpoint_revoked") {
+      await this.transition("revoked");
+      return;
+    }
+    if (code === "witness_quarantined") {
+      const reason = (cause as { readonly reason?: unknown }).reason;
+      if (!isRemoteEndpointQuarantineReason(reason)) {
+        throw new Error("Native endpoint reported an unknown quarantine class");
+      }
+      await this.transition("quarantined", reason);
+      return;
+    }
+    await this.transition("recovering");
+    this.scheduleRecovery();
+  }
+
+  private scheduleRecovery(): void {
+    if (this.closed || this.retryTimer !== undefined) return;
+    const delay = witnessRecoveryDelay(this.policy, this.retryAttempt, this.random);
+    this.retryTimer = this.timers.setTimeout(() => {
+      this.retryTimer = undefined;
+      this.retryAttempt += 1;
+      this.run(() => this.barrier.recover(), "recovery").catch((cause: unknown) => {
+        if (witnessCode(cause) === undefined && cause !== this.fault) {
+          this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+        }
+      });
+    }, delay);
+  }
+
+  /**
+   * Record one lifecycle transition durably, then let it take effect. The durable record is the
+   * report every client and every restarted daemon reads, so a failed write must not leave this
+   * process believing a state nobody else can see: the bridge faults closed instead.
+   */
+  private async transition(
+    state: RemoteEndpointWitnessState,
+    reason?: RemoteEndpointQuarantineReason,
+  ): Promise<void> {
+    if (this.witness?.state === state && this.witness.reason === reason) return;
+    const status: RemoteEndpointWitnessStatus = {
+      deviceId: this.options.deviceId,
+      state,
+      ...(reason === undefined ? {} : { reason }),
+      changedAt: this.now(),
+    };
+    try {
+      await this.options.authority.recordEndpointWitnessState(
+        this.options.deviceId,
+        state,
+        reason,
+        status.changedAt,
+      );
+    } catch (cause) {
+      const fault = new Error(
+        `Remote endpoint witness state ${state} could not be recorded; the bridge is blocked`,
+        { cause },
+      );
+      this.fault = fault;
+      this.cancelRecovery();
+      this.options.onError?.(fault);
+      throw fault;
+    }
+    this.witness = status;
+    if (state !== "recovering") this.cancelRecovery();
+    for (const listener of this.stateListeners) listener(status);
   }
 
   async drain(): Promise<void> {
@@ -226,6 +416,7 @@ export class WindowsRemoteE2eeBridge {
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.cancelRecovery();
     this.attachment.close();
     await this.drain();
     this.options.endpoint.close();
@@ -235,9 +426,16 @@ export class WindowsRemoteE2eeBridge {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.cancelRecovery();
     this.attachment.close();
     this.options.endpoint.close();
     this.currentRoute = undefined;
+  }
+
+  private cancelRecovery(): void {
+    if (this.retryTimer === undefined) return;
+    this.timers.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
   }
 
   private async receiveOne(sourceRouteId: RouteId, bytes: Uint8Array): Promise<void> {
@@ -477,10 +675,10 @@ export class WindowsRemoteE2eeBridge {
   private enqueueDaemonMessage(message: ServerMessage): void {
     const route = this.currentRoute;
     if (route === undefined || this.closed) return;
-    const operation = this.tail.then(() =>
-      this.sendMessage(route, { version: 1, type: "daemon_delivery", message }),
-    );
-    this.tail = operation.catch((cause: unknown) => {
+    this.run(
+      () => this.sendMessage(route, { version: 1, type: "daemon_delivery", message }),
+      "work",
+    ).catch((cause: unknown) => {
       this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
     });
   }

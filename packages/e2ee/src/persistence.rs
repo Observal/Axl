@@ -534,6 +534,10 @@ struct WitnessRuntime {
     /// Fresh signed read requests awaiting their certificates, newest last. Bounded so a caller
     /// that never presents certificates cannot grow memory; each is matched by request hash.
     pending_reads: std::collections::VecDeque<([u8; 48], WitnessRequest)>,
+    /// Whether a fresh unanimous head or a verified certificate has confirmed the rebuilt
+    /// snapshot in this process. False after every open: a restored image, including every
+    /// retained exact result of any age, is a cache until the quorum confirms it.
+    head_validated: bool,
 }
 
 const MAX_PENDING_READS: usize = 8;
@@ -646,6 +650,8 @@ impl NativeTransactionalProvider {
             witness: Mutex::new(WitnessRuntime {
                 state,
                 pending_reads: std::collections::VecDeque::new(),
+                // A brand-new lineage has no retained result that a stale snapshot could leak.
+                head_validated: true,
             }),
             faults,
             clock,
@@ -703,6 +709,7 @@ impl NativeTransactionalProvider {
             witness: Mutex::new(WitnessRuntime {
                 state: EndpointWitnessState::new(),
                 pending_reads: std::collections::VecDeque::new(),
+                head_validated: false,
             }),
             faults,
             clock,
@@ -953,6 +960,7 @@ impl NativeTransactionalProvider {
         }
         runtime.state = state;
         runtime.pending_reads.clear();
+        runtime.head_validated = false;
         Ok(())
     }
 
@@ -1717,7 +1725,8 @@ impl NativeTransactionalProvider {
                     WitnessOperationDisposition::Completed => {
                         self.faults.check(FaultPoint::DuringDuplicateOperation)?;
                         let runtime = self.witness_lock()?;
-                        let confirmed_live = !runtime.state.has_pending()
+                        let confirmed_live = runtime.head_validated
+                            && !runtime.state.has_pending()
                             && runtime.state.head().counter
                                 == row.confirmed_head.counter.saturating_add(1);
                         drop(runtime);
@@ -1740,11 +1749,13 @@ impl NativeTransactionalProvider {
                 self.quarantine_locally()?;
                 return Err(PersistenceError::WitnessOperationConflict);
             }
-            if self.witness_lock()?.state.has_pending() {
+            let runtime = self.witness_lock()?;
+            if !runtime.head_validated || runtime.state.has_pending() {
                 // A restored snapshot is not validated until a fresh head confirms the cached
                 // completion; no older exact result leaves the crate before that.
                 return Err(PersistenceError::FreshWitnessRequired);
             }
+            drop(runtime);
             return self
                 .released_result(operation_id, index.operation_kind)
                 .map(Lookup::Released);
@@ -2026,6 +2037,9 @@ impl NativeTransactionalProvider {
             lineage_was_registered || pending_register,
             quorum,
         );
+        if outcome == EndpointReconciliation::Ready {
+            runtime.head_validated = true;
+        }
         if let Some(terminal) = runtime.state.terminal() {
             self.persist_terminal_marker(terminal)?;
         }
@@ -2122,6 +2136,8 @@ impl NativeTransactionalProvider {
             .state
             .release_and_advance()
             .map_err(map_witness_error)?;
+        // The verified certificate confirmed the head this process rebuilt from.
+        runtime.head_validated = true;
         drop(runtime);
         let lifecycle = {
             let database = self.database_lock()?;

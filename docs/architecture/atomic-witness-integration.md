@@ -1,4 +1,5 @@
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Atomic witness integration
@@ -474,9 +475,35 @@ serialized promise tail orders work; the barrier authorizes it. A receive contin
 the native binding before the daemon parses or authorizes the plaintext; a withheld certificate
 leaves the request unanswered and unacknowledged.
 
-The daemon's authenticated HTTP witness transport, retry scheduling, and reporting of a blocked or
-quarantined endpoint are the next commit. Until then the daemon transport is injected, and local
-integration uses the in-process test quorum.
+`HostedDaemonWitnessTransport` is the daemon's own HTTPS transport (the daemon does not import the
+SDK): byte-identical requests, bounded sizes, a timeout, and gateway codes mapped to bounded public
+codes. Hosts inject it; local integration injects the in-process test quorum.
+
+The bridge owns the endpoint's witness lifecycle: `recovering`, `ready`, `quarantined`, `revoked`.
+Ordinary work runs only while the recorded state is `ready`; before `start()` and throughout
+`recovering` it is refused with `witness_unavailable` without touching the endpoint. Recovery is an
+internal path: `start()` reconciles from a fresh quorum read, and after a `witness_unavailable`
+outcome (from the quorum, the transport, or the native binding) the bridge retries `recover()` with
+exponential backoff, 1 s doubling to a 30 s cap with bounded jitter, until a reconciliation
+succeeds and records `ready`. Availability failures never give up. `quarantined` (with its native
+reason) and `revoked` are terminal: no timer, every later call is refused, and only a fresh pairing
+creates a new endpoint. Closing the bridge cancels the timer.
+
+Every transition, and nothing per retry, is one durable audit record in the remote authority store
+(`endpoint_recovering`, `endpoint_ready`, `endpoint_quarantined` with `quarantineReason`,
+`endpoint_revoked`) and updates the device's `witness` record; see the "Remote endpoint witness
+status" decision in `decisions.md` for why this is authority state rather than a canonical session
+event. The record is written before the state takes effect. If the write fails, including when the
+store's 4,096-entry audit capacity is exhausted, the bridge faults closed: the state does not
+change, no work or recovery runs, and every call reports the persistence failure. The daemon
+reports the last transition per device in `daemon.info.remoteEndpoints` and sends
+`remote_endpoints_changed` to every initialized attachment so a client learns a blocked endpoint
+without relying on a bridge `onError` callback. `onError` still reports individual non-witness
+failures.
+
+Both HTTP transports read gateway responses through a streaming bound: certificate bodies stop at
+`WITNESS_CERTIFICATE_MAX_BYTES`, error bodies at 4 KiB, and a declared oversized content length is
+rejected before any read.
 
 ## Current RFC-to-code gaps
 
@@ -505,7 +532,8 @@ integration uses the in-process test quorum.
   mutation coverage"; the native-only lifecycle rows listed there remain deferred.
 - Resolved: the SDK `WitnessedEndpoint` and the daemon `DaemonWitnessBarrier` run every adapter
   mutation through fresh read, reconciliation, mutation, and continuation; adapters read released
-  results only. The daemon's HTTP witness transport and retry scheduling remain to be added.
+  results only. The daemon owns its HTTPS witness transport, recovery scheduling, and lifecycle
+  reporting through `daemon.info` and `remote_endpoints_changed`.
 - `pendingOutbox`, `recoverWelcome`, and duplicate mutation paths can expose locally committed exact
   results without proving that their witness barrier completed.
 - Current acknowledgements advance generation, rollback counter, encrypted state, operation history,

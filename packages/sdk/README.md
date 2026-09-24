@@ -1,5 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # `@axl/sdk`
@@ -42,7 +43,7 @@ The SDK does not own:
 - provider-specific authentication
 - terminal, browser, desktop, or mobile presentation
 
-Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages. The remote delivery API consumes immutable prepared envelopes. `RemoteDeviceE2ee` and `NativeEndpointOutbox` consume one shared `WitnessedEndpoint`, which runs every endpoint mutation through the witness barrier (fresh read, reconciliation, mutation, continuation) before any ciphertext, plaintext, or acknowledgement is visible. `HostedWitnessClient` is the transport behind it: it submits byte-identical signed requests and returns the bounded certificate to the endpoint that verifies it. Neither API owns cryptographic state or decides acceptance. Production construction remains disabled until the Windows and hosted-deployment gates pass.
+Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages. The remote delivery API consumes immutable prepared envelopes. `AxlClient.daemonInfo()` returns the witness lifecycle of every remote device endpoint the daemon serves, and `onRemoteEndpointsChanged` signals when to re-read it. `RemoteDeviceE2ee` and `NativeEndpointOutbox` consume one shared `WitnessedEndpoint`, which runs every endpoint mutation through the witness barrier (fresh read, reconciliation, mutation, continuation) before any ciphertext, plaintext, or acknowledgement is visible. `HostedWitnessClient` is the transport behind it: it submits byte-identical signed requests and returns the bounded certificate to the endpoint that verifies it. Neither API owns cryptographic state or decides acceptance. Production construction remains disabled until the Windows and hosted-deployment gates pass.
 
 ## Public entry points
 
