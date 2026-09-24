@@ -216,6 +216,7 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
     },
   });
   context.after(() => bridge.close());
+  assert.equal(await bridge.start(), "ready");
   await bridge.receive({
     sourceRouteId: parseRouteId("11111111-1111-4111-8111-111111111111"),
     opaqueEnvelope: encodeRemoteE2eeEnvelope({
@@ -242,6 +243,8 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
     [
       "read",
       "reconcile",
+      "read",
+      "reconcile",
       "mutate",
       "continue",
       "read",
@@ -253,7 +256,7 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
       "mutate",
       "continue",
     ],
-    "receive, response, and acknowledgement each completed their own barrier in order",
+    "start reconciled once; receive, response, and acknowledgement each completed their own barrier in order",
   );
 });
 
@@ -311,6 +314,7 @@ test("the Windows E2EE bridge releases no plaintext or ciphertext when the witne
     onError: (error) => errors.push(error),
   });
   context.after(() => bridge.close());
+  assert.equal(await bridge.start(), "ready");
   await assert.rejects(
     bridge.receive({
       sourceRouteId: parseRouteId("11111111-1111-4111-8111-111111111111"),
@@ -324,8 +328,12 @@ test("the Windows E2EE bridge releases no plaintext or ciphertext when the witne
     }),
     (cause) => cause instanceof DaemonWitnessError && cause.code === "witness_unavailable",
   );
-  assert.deepEqual(calls, ["read", "reconcile", "mutate"], "no continuation, no plaintext");
-  assert.equal(responses, 2);
+  assert.deepEqual(
+    calls,
+    ["read", "reconcile", "read", "reconcile", "mutate"],
+    "no continuation, no plaintext",
+  );
+  assert.equal(responses, 3);
   assert.deepEqual(sent, [], "the daemon never authorized or answered the request");
   assert.equal(errors.length, 1);
 });
@@ -425,6 +433,7 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
     },
   });
   context.after(() => bridge.close());
+  assert.equal(await bridge.start(), "ready");
   const sourceRouteId = parseRouteId("55555555-5555-4555-8555-555555555555");
   await bridge.receive({
     sourceRouteId,
@@ -715,6 +724,7 @@ test("internal dispatcher enforces scope, method allowlist, identity, and active
   assert.deepEqual(info.result, {
     securityMode: "sandboxed",
     sandboxProvider: "fixture",
+    remoteEndpoints: [],
   });
   assert.deepEqual(deliveries, []);
 

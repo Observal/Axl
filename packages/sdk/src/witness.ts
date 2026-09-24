@@ -70,8 +70,72 @@ export interface WitnessFetchResponse {
   readonly ok: boolean;
   readonly status: number;
   readonly headers: { get(name: string): string | null };
-  arrayBuffer(): Promise<ArrayBuffer>;
-  json(): Promise<unknown>;
+  /** Streamed so the transport can stop reading at its size bound. */
+  readonly body: ReadableStream<Uint8Array> | null;
+}
+
+/** Longest gateway error body the transport decodes for a bounded public code. */
+const WITNESS_ERROR_BODY_MAX_BYTES = 4_096;
+
+/**
+ * Read a response body while enforcing the size bound, so an oversized gateway response is never
+ * fully allocated. Returns undefined once the bound is exceeded; the remainder is cancelled.
+ */
+async function readBounded(
+  response: {
+    readonly headers: { get(name: string): string | null };
+    readonly body: ReadableStream<Uint8Array> | null;
+  },
+  maximumBytes: number,
+): Promise<Uint8Array | undefined> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null) {
+    const length = Number(declared);
+    if (!Number.isSafeInteger(length) || length < 0 || length > maximumBytes) return undefined;
+  }
+  if (response.body === null) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) return undefined;
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel();
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
+function gatewayErrorCode<Code extends string>(
+  bytes: Uint8Array | undefined,
+  known: ReadonlySet<Code>,
+  fallback: Code,
+): Code {
+  if (bytes === undefined) return fallback;
+  try {
+    const body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as {
+      readonly error?: { readonly code?: unknown };
+    };
+    const code = body.error?.code;
+    return typeof code === "string" && known.has(code as Code) ? (code as Code) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export type WitnessFetch = (
@@ -178,18 +242,12 @@ export class HostedWitnessClient implements WitnessCertificateTransport {
         signal: controller.signal,
       });
       if (!response.ok) {
-        let code: HostedWitnessErrorCode = "witness_unavailable";
-        try {
-          const body = (await response.json()) as { readonly error?: { readonly code?: unknown } };
-          if (
-            typeof body.error?.code === "string" &&
-            witnessCodes.has(body.error.code as HostedWitnessErrorCode)
-          ) {
-            code = body.error.code as HostedWitnessErrorCode;
-          }
-        } catch {
-          // The bounded public code remains witness_unavailable.
-        }
+        // An oversized or malformed error body keeps the bounded public code.
+        const code = gatewayErrorCode(
+          await readBounded(response, WITNESS_ERROR_BODY_MAX_BYTES),
+          witnessCodes,
+          "witness_unavailable" as HostedWitnessErrorCode,
+        );
         throw new HostedWitnessError(
           code,
           `Witness gateway rejected the request with HTTP ${response.status}`,
@@ -201,14 +259,14 @@ export class HostedWitnessClient implements WitnessCertificateTransport {
           "Witness response content type is invalid",
         );
       }
-      const body = await response.arrayBuffer();
-      if (body.byteLength === 0 || body.byteLength > WITNESS_CERTIFICATE_MAX_BYTES) {
+      const body = await readBounded(response, WITNESS_CERTIFICATE_MAX_BYTES);
+      if (body === undefined || body.byteLength === 0) {
         throw new HostedWitnessError(
           "witness_receipt_invalid",
           "Witness certificate is outside bounds",
         );
       }
-      return parseWitnessHttpResponseBody(new Uint8Array(body));
+      return parseWitnessHttpResponseBody(body);
     } catch (cause) {
       if (cause instanceof HostedWitnessError) throw cause;
       if (controller.signal.aborted) {

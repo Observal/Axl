@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import { constants, type Stats } from "node:fs";
@@ -7,12 +8,17 @@ import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import {
+  isRemoteEndpointQuarantineReason,
+  isRemoteEndpointWitnessState,
   parseDeviceId,
   parseInstallationId,
   parseRemoteDeviceScopes,
   type DeviceId,
   type InstallationId,
   type RemoteDeviceScope,
+  type RemoteEndpointQuarantineReason,
+  type RemoteEndpointWitnessState,
+  type RemoteEndpointWitnessStatus,
 } from "@axl/protocol";
 
 const AUTHORITY_FORMAT_VERSION = 2 as const;
@@ -27,11 +33,19 @@ interface GrantState {
   readonly revokedAt?: number;
 }
 
+/** Last witness lifecycle transition the daemon recorded for a device endpoint. */
+interface WitnessRecordState {
+  readonly state: RemoteEndpointWitnessState;
+  readonly reason?: RemoteEndpointQuarantineReason;
+  readonly changedAt: number;
+}
+
 interface DeviceAuthorityRecord {
   readonly deviceId: DeviceId;
   readonly createdAt: number;
   readonly local: GrantState;
   readonly hosted?: GrantState;
+  readonly witness?: WitnessRecordState;
 }
 
 export type RemoteAuthorityAuditCode =
@@ -40,7 +54,19 @@ export type RemoteAuthorityAuditCode =
   | "hosted_grant_narrowed"
   | "local_device_revoked"
   | "hosted_device_revoked"
-  | "authorization_denied";
+  | "authorization_denied"
+  | "endpoint_recovering"
+  | "endpoint_ready"
+  | "endpoint_quarantined"
+  | "endpoint_revoked";
+
+const WITNESS_AUDIT_CODES: Readonly<Record<RemoteEndpointWitnessState, RemoteAuthorityAuditCode>> =
+  Object.freeze({
+    recovering: "endpoint_recovering",
+    ready: "endpoint_ready",
+    quarantined: "endpoint_quarantined",
+    revoked: "endpoint_revoked",
+  });
 
 type RemoteAuthorityAuditDraft = Omit<RemoteAuthorityAuditEvent, "sequence">;
 
@@ -53,6 +79,8 @@ export interface RemoteAuthorityAuditEvent {
   readonly hostedGeneration?: number;
   readonly scope?: RemoteDeviceScope;
   readonly reason?: RemoteAuthorityErrorCode;
+  /** Present exactly on `endpoint_quarantined`. */
+  readonly quarantineReason?: RemoteEndpointQuarantineReason;
 }
 
 interface PersistedAuthorityState {
@@ -72,6 +100,8 @@ export interface RemoteDeviceAuthoritySnapshot {
   readonly effectiveScopes: readonly RemoteDeviceScope[];
   readonly locallyRevoked: boolean;
   readonly hostedRevoked: boolean;
+  /** Absent until the daemon records the endpoint's first witness transition. */
+  readonly witness?: WitnessRecordState;
 }
 
 export interface RemoteAuthorizationContext {
@@ -176,6 +206,26 @@ function parseGrant(value: unknown, path: string): GrantState {
   };
 }
 
+function parseWitnessState(value: unknown, path: string): WitnessRecordState {
+  const witness = object(value, path);
+  exact(witness, path, ["state", "changedAt"], ["reason"]);
+  if (!isRemoteEndpointWitnessState(witness.state)) throw new Error(`${path}.state is invalid`);
+  if (witness.state === "quarantined") {
+    if (!isRemoteEndpointQuarantineReason(witness.reason)) {
+      throw new Error(`${path}.reason must name a quarantine class`);
+    }
+  } else if (witness.reason !== undefined) {
+    throw new Error(`${path}.reason is only allowed when quarantined`);
+  }
+  return {
+    state: witness.state,
+    ...(witness.state === "quarantined"
+      ? { reason: witness.reason as RemoteEndpointQuarantineReason }
+      : {}),
+    changedAt: nonNegativeInteger(witness.changedAt, `${path}.changedAt`),
+  };
+}
+
 function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEvent {
   const path = `remote authority.audit[${index}]`;
   const event = object(value, path);
@@ -183,7 +233,7 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
     event,
     path,
     ["sequence", "occurredAt", "code", "actorDeviceId"],
-    ["localGeneration", "hostedGeneration", "scope", "reason"],
+    ["localGeneration", "hostedGeneration", "scope", "reason", "quarantineReason"],
   );
   const codes: readonly RemoteAuthorityAuditCode[] = [
     "device_registered",
@@ -192,6 +242,10 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
     "local_device_revoked",
     "hosted_device_revoked",
     "authorization_denied",
+    "endpoint_recovering",
+    "endpoint_ready",
+    "endpoint_quarantined",
+    "endpoint_revoked",
   ];
   if (typeof event.code !== "string" || !codes.includes(event.code as RemoteAuthorityAuditCode)) {
     throw new Error(`${path}.code is invalid`);
@@ -207,6 +261,13 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
       !REMOTE_AUTHORITY_ERROR_CODES.includes(reason as RemoteAuthorityErrorCode))
   ) {
     throw new Error(`${path}.reason is invalid`);
+  }
+  if (event.code === "endpoint_quarantined") {
+    if (!isRemoteEndpointQuarantineReason(event.quarantineReason)) {
+      throw new Error(`${path}.quarantineReason must name a quarantine class`);
+    }
+  } else if (event.quarantineReason !== undefined) {
+    throw new Error(`${path}.quarantineReason is only allowed on endpoint_quarantined`);
   }
   return {
     sequence: positiveInteger(event.sequence, `${path}.sequence`),
@@ -225,6 +286,9 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
         }),
     ...(scopes === undefined ? {} : { scope: scopes }),
     ...(reason === undefined ? {} : { reason: reason as RemoteAuthorityErrorCode }),
+    ...(event.quarantineReason === undefined
+      ? {}
+      : { quarantineReason: event.quarantineReason as RemoteEndpointQuarantineReason }),
   };
 }
 
@@ -247,7 +311,7 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
   const devices = state.devices.map((value, index): DeviceAuthorityRecord => {
     const path = `remote authority.devices[${index}]`;
     const device = object(value, path);
-    exact(device, path, ["deviceId", "createdAt", "local"], ["hosted"]);
+    exact(device, path, ["deviceId", "createdAt", "local"], ["hosted", "witness"]);
     const deviceId = parseDeviceId(device.deviceId, `${path}.deviceId`);
     if (seen.has(deviceId)) throw new Error(`${path}.deviceId is duplicated`);
     seen.add(deviceId);
@@ -258,6 +322,9 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
       ...(device.hosted === undefined
         ? {}
         : { hosted: parseGrant(device.hosted, `${path}.hosted`) }),
+      ...(device.witness === undefined
+        ? {}
+        : { witness: parseWitnessState(device.witness, `${path}.witness`) }),
     };
   });
   const audit = state.audit.map(parseAuditEvent);
@@ -359,6 +426,7 @@ export class RemoteDeviceAuthorityStore {
   private devices: Map<DeviceId, DeviceAuthorityRecord>;
   private audit: RemoteAuthorityAuditEvent[];
   private readonly revocationListeners = new Set<(deviceId: DeviceId) => void>();
+  private readonly witnessListeners = new Set<(deviceId: DeviceId) => void>();
   private tail: Promise<void> = Promise.resolve();
 
   private constructor(path: string, state: PersistedAuthorityState) {
@@ -415,7 +483,86 @@ export class RemoteDeviceAuthorityStore {
       effectiveScopes: effectiveScopes(record),
       locallyRevoked: record.local.revokedAt !== undefined,
       hostedRevoked: record.hosted?.revokedAt !== undefined,
+      ...(record.witness === undefined ? {} : { witness: { ...record.witness } }),
     };
+  }
+
+  /** Witness lifecycle of every device whose endpoint has reported a transition. */
+  endpointWitnessStatuses(): readonly RemoteEndpointWitnessStatus[] {
+    const statuses: RemoteEndpointWitnessStatus[] = [];
+    for (const record of this.devices.values()) {
+      if (record.witness === undefined) continue;
+      statuses.push({ deviceId: record.deviceId, ...record.witness });
+    }
+    return statuses.sort((left, right) => left.deviceId.localeCompare(right.deviceId));
+  }
+
+  /**
+   * Record one endpoint witness transition. A transition into the state the record already holds
+   * (with the same reason) changes nothing and appends no audit event, so retries while
+   * recovering never grow the audit. Every real transition is one durable audit event.
+   */
+  recordEndpointWitnessState(
+    deviceId: DeviceId,
+    state: RemoteEndpointWitnessState,
+    reason?: RemoteEndpointQuarantineReason,
+    now = Date.now(),
+  ): Promise<RemoteEndpointWitnessStatus> {
+    const occurredAt = nonNegativeInteger(now, "now");
+    if (state === "quarantined") {
+      if (reason === undefined) throw new TypeError("A quarantine transition requires a reason");
+    } else if (reason !== undefined) {
+      throw new TypeError("Only a quarantine transition carries a reason");
+    }
+    const current = this.devices.get(deviceId);
+    if (current === undefined) {
+      return Promise.reject(new RemoteAuthorityError("unknown_device", "Device is not registered"));
+    }
+    if (current.witness?.state === state && current.witness.reason === reason) {
+      return Promise.resolve({ deviceId, ...current.witness });
+    }
+    let changed = false;
+    return this.mutate(
+      (devices) => {
+        const existing = devices.get(deviceId);
+        if (existing === undefined) {
+          throw new RemoteAuthorityError("unknown_device", "Device is not registered");
+        }
+        if (existing.witness?.state === state && existing.witness.reason === reason) {
+          return devices;
+        }
+        changed = true;
+        devices.set(deviceId, {
+          ...existing,
+          witness: {
+            state,
+            ...(reason === undefined ? {} : { reason }),
+            changedAt: occurredAt,
+          },
+        });
+        return devices;
+      },
+      () =>
+        changed
+          ? {
+              occurredAt,
+              code: WITNESS_AUDIT_CODES[state],
+              actorDeviceId: deviceId,
+              ...(reason === undefined ? {} : { quarantineReason: reason }),
+            }
+          : undefined,
+    ).then(() => {
+      if (changed) for (const listener of this.witnessListeners) listener(deviceId);
+      const witness = this.devices.get(deviceId)?.witness;
+      if (witness === undefined)
+        throw new Error("Remote authority mutation lost its witness state");
+      return { deviceId, ...witness };
+    });
+  }
+
+  onEndpointWitnessChanged(listener: (deviceId: DeviceId) => void): () => void {
+    this.witnessListeners.add(listener);
+    return () => this.witnessListeners.delete(listener);
   }
 
   registerLocalDevice(

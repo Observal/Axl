@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -125,6 +126,7 @@ test("language-neutral fixtures validate every non-success server message shape"
     "event",
     "hello",
     "presence",
+    "remote_endpoints_changed",
     "sessions_changed",
   ]);
   for (const message of messages) {

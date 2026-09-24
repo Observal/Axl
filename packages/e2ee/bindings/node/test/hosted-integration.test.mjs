@@ -21,6 +21,7 @@ import {
   parseRemoteE2eeEnvelope,
   parseRemoteRequestId,
   parseRouteId,
+  parseWitnessRequest,
 } from "@axl/protocol";
 import {
   HostedPairingClient,
@@ -309,6 +310,7 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
     destinationCryptoSessionId: cryptoSessionId,
   });
   try {
+    assert.equal(await bridge.start(), "ready");
     const requestId = parseRemoteRequestId("19191919-1919-7919-9919-191919191919");
     const outbound = await client.prepareEphemeral(
       { deviceId, requestId, method: "daemon.info", params: {} },
@@ -362,12 +364,164 @@ test("real OpenMLS endpoints cross the daemon authority bridge", async () => {
     assert.equal(confirmed.controlOnly, true);
     assert.equal(await pair.device.pairStatus(), "active");
     // Every adapter mutation went to the quorum twice: one fresh read and one committed advance.
-    assert.ok(witnessCalls.daemon >= 2 * 6, `daemon barrier calls: ${witnessCalls.daemon}`);
+    // The daemon bridge's start() adds one fresh read.
+    assert.ok(witnessCalls.daemon >= 1 + 2 * 6, `daemon barrier calls: ${witnessCalls.daemon}`);
     assert.ok(witnessCalls.device >= 2 * 7, `device barrier calls: ${witnessCalls.device}`);
-    assert.equal(witnessCalls.daemon % 2, 0);
+    assert.equal((witnessCalls.daemon - 1) % 2, 0);
     assert.equal(witnessCalls.device % 2, 0);
   } finally {
     bridge.close();
+    pair.device.close();
+    await daemon.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the daemon bridge recovers an accepted-but-lost barrier after restart and answers exactly once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-real-e2ee-recovery-"));
+  const pair = await activatedPair(root);
+  const installationId = parseInstallationId("25252525-2525-7525-9525-252525252525");
+  const deviceId = parseDeviceId("27272727-2727-7727-9727-272727272727");
+  const daemonDeviceId = parseDeviceId("28282828-2828-7828-9828-282828282828");
+  const sessionHex = pair.session.toString("hex");
+  const cryptoSessionId = parseCryptoSessionId(
+    `${sessionHex.slice(0, 8)}-${sessionHex.slice(8, 12)}-${sessionHex.slice(12, 16)}-${sessionHex.slice(16, 20)}-${sessionHex.slice(20)}`,
+  );
+  const authority = await RemoteDeviceAuthorityStore.open(join(root, "daemon-data"), installationId);
+  await authority.registerLocalDevice(deviceId, ["observe"]);
+  await authority.applyHostedGrant(deviceId, 1, ["observe"]);
+  const daemon = new AxlDaemon({
+    socketPath: join(root, "daemon.sock"),
+    dataDirectory: join(root, "daemon-data"),
+    securityMode: "sandboxed",
+    sandboxProvider: "fixture",
+    remoteAuthority: authority,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry(), system: "test" }),
+  });
+  await daemon.start();
+  const route = parseRouteId("30303030-3030-7030-a030-303030303030");
+  const waiters = [];
+  const sender = {
+    send(_route, envelope) {
+      const waiter = waiters.shift();
+      if (!waiter) throw new Error("Unexpected encrypted daemon delivery");
+      waiter(envelope.slice());
+    },
+  };
+  const scheduled = [];
+  const timers = {
+    setTimeout: (run, delayMs) => scheduled.push({ run, delayMs }) && scheduled.length,
+    clearTimeout: (handle) => scheduled.splice(handle - 1, 1),
+  };
+  // The quorum accepts the committed advance, but the certificate is lost before the daemon
+  // endpoint sees it: the endpoint holds an accepted pending operation and no result.
+  let loseNextAdvance = false;
+  let quorumAdvances = 0;
+  const lossyWitness = {
+    async respond(request) {
+      const kind = parseWitnessRequest(request).kind;
+      const certificate = pair.witness.respond(request);
+      if (kind === "advance") quorumAdvances += 1;
+      if (kind === "advance" && loseNextAdvance) {
+        loseNextAdvance = false;
+        certificate.fill(0);
+        const error = new Error("certificate lost in transit");
+        error.code = "witness_unavailable";
+        throw error;
+      }
+      return certificate;
+    },
+  };
+  const witnessedDevice = new WitnessedEndpoint(pair.device, {
+    respond: async (request) => pair.witness.respond(request),
+  });
+  const client = new RemoteDeviceE2ee({
+    endpoint: witnessedDevice,
+    localDeviceId: deviceId,
+    daemonDeviceId,
+    destinationCryptoSessionId: cryptoSessionId,
+  });
+  let firstBridge;
+  let secondBridge;
+  try {
+    firstBridge = new WindowsRemoteE2eeBridge({
+      daemon,
+      deviceId,
+      authority,
+      endpoint: pair.daemon,
+      witness: lossyWitness,
+      timers,
+      random: () => 0.5,
+      sender,
+    });
+    assert.equal(await firstBridge.start(), "ready");
+
+    const requestId = parseRemoteRequestId("29292929-2929-7929-9929-292929292929");
+    const outbound = await client.prepareEphemeral(
+      { deviceId, requestId, method: "daemon.info", params: {} },
+      1,
+    );
+    loseNextAdvance = true;
+    await assert.rejects(firstBridge.receive({ sourceRouteId: route, opaqueEnvelope: outbound }), {
+      code: "witness_unavailable",
+    });
+    assert.equal(quorumAdvances, 1, "the quorum accepted the receive before the loss");
+    assert.equal(firstBridge.witnessStatus.state, "recovering");
+    assert.deepEqual(waiters, [], "no response was framed for an unreleased plaintext");
+    assert.equal(scheduled.length, 1, "one recovery retry is scheduled");
+    assert.equal(scheduled[0].delayMs, 1_000);
+    assert.equal((await pair.daemon.pendingWitness()).kind, "advance");
+    // Work is refused while recovery is pending, without touching the endpoint.
+    await assert.rejects(firstBridge.receive({ sourceRouteId: route, opaqueEnvelope: outbound }), {
+      code: "witness_unavailable",
+    });
+
+    // Daemon process crash: the endpoint closes with its pending operation on disk.
+    firstBridge.close();
+    assert.equal(scheduled.length, 0, "closing cancelled the retry timer");
+    assert.equal(await pair.daemon.reopen(), "opened");
+
+    // Restart: the new bridge completes the accepted operation before admitting work.
+    secondBridge = new WindowsRemoteE2eeBridge({
+      daemon,
+      deviceId,
+      authority,
+      endpoint: pair.daemon,
+      witness: lossyWitness,
+      timers,
+      random: () => 0.5,
+      sender,
+    });
+    assert.equal(await secondBridge.start(), "ready");
+    assert.equal(await pair.daemon.pendingWitness(), null, "recovery completed the pending advance");
+    assert.equal(quorumAdvances, 2, "exact resend of the same advance");
+
+    // The device retries the byte-identical request and receives exactly one answer.
+    const responsePromise = nextDelivery(waiters);
+    await secondBridge.receive({ sourceRouteId: route, opaqueEnvelope: outbound });
+    const opened = await client.open(await responsePromise);
+    const response = client.decode(opened.plaintext);
+    assert.equal(response.type, "daemon_result");
+    assert.equal(response.requestId, requestId);
+    assert.deepEqual(response.result.remoteEndpoints.map((status) => status.state), ["ready"]);
+    await opened.acknowledge?.();
+    assert.deepEqual(waiters, [], "exactly one response");
+
+    assert.deepEqual(
+      authority
+        .auditEntries()
+        .filter((event) => event.code.startsWith("endpoint_"))
+        .map((event) => event.code),
+      ["endpoint_ready", "endpoint_recovering", "endpoint_ready"],
+      "one durable transition per lifecycle change, none per retry",
+    );
+    assert.deepEqual(
+      authority.endpointWitnessStatuses().map((status) => [status.deviceId, status.state]),
+      [[deviceId, "ready"]],
+    );
+  } finally {
+    secondBridge?.close();
+    firstBridge?.close();
     pair.device.close();
     await daemon.stop();
     rmSync(root, { recursive: true, force: true });
