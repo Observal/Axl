@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash, randomUUID } from "node:crypto";
@@ -24,69 +25,100 @@ import type {
   AxlDaemon,
 } from "./daemon.ts";
 import type { RemoteDeviceAuthorityStore } from "./remote-authority.ts";
+import {
+  DaemonWitnessBarrier,
+  type DaemonWitnessEndpointOperations,
+  type DaemonWitnessOutcome,
+  type DaemonWitnessResult,
+  type DaemonWitnessTransport,
+  releasedField,
+} from "./remote-witness.ts";
 
-interface NativeCiphertext {
+/** Released `outbox` result: the exact committed ciphertext and its envelope metadata. */
+export interface NativeCiphertext {
   readonly operationId: Uint8Array;
   readonly logicalMessageId: Uint8Array;
   readonly messageClass: string;
   readonly ciphertext: Uint8Array;
 }
 
-interface NativePlaintext {
+/** Released `plaintext` result of a completed receive. */
+export interface NativePlaintext {
   readonly plaintext: Uint8Array;
 }
 
-interface NativeEpochReadyAcceptance {
+/** Released `epoch_ready` result of an accepted epoch-ready message. */
+export interface NativeEpochReadyAcceptance {
   readonly cryptoSessionId: Uint8Array;
   readonly commitId: Uint8Array;
 }
 
-/** Narrow structural subset of the private Node binding used by the daemon. */
-export interface NativeDaemonE2eeEndpoint {
+/**
+ * Narrow structural subset of the private Node binding used by the daemon. Every mutation returns
+ * a witness outcome; the bridge reads results only after the barrier completes.
+ */
+export interface NativeDaemonE2eeEndpoint extends DaemonWitnessEndpointOperations {
   prepareApplication(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     plaintext: Uint8Array,
-  ): Promise<NativeCiphertext>;
+  ): Promise<DaemonWitnessOutcome>;
   receiveApplication(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativePlaintext>;
+  ): Promise<DaemonWitnessOutcome>;
   receiveReplacementProposal?(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<"accepted">;
+  ): Promise<DaemonWitnessOutcome>;
   createUpdateCommit?(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativeCiphertext>;
+  ): Promise<DaemonWitnessOutcome>;
   acceptEpochReady?(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
-  ): Promise<NativeEpochReadyAcceptance>;
+  ): Promise<DaemonWitnessOutcome>;
   prepareEpochReadyConfirmation?(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     acceptance: NativeEpochReadyAcceptance,
-  ): Promise<NativeCiphertext>;
+  ): Promise<DaemonWitnessOutcome>;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<NativeCiphertext>;
+  ): Promise<DaemonWitnessOutcome>;
   acknowledgeReceive(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<"acknowledged">;
+  ): Promise<DaemonWitnessOutcome>;
   close(): void;
+}
+
+function outbox(result: DaemonWitnessResult): NativeCiphertext {
+  const value = releasedField<NativeCiphertext>(result, "outbox", "outbox");
+  if (
+    !(value.operationId instanceof Uint8Array) ||
+    !(value.logicalMessageId instanceof Uint8Array) ||
+    typeof value.messageClass !== "string" ||
+    !(value.ciphertext instanceof Uint8Array)
+  ) {
+    throw new Error("Native endpoint released an invalid outbox record");
+  }
+  return value;
+}
+
+function accepted(result: DaemonWitnessResult): void {
+  releasedField(result, "accepted", "accepted");
 }
 
 export interface RemoteEncryptedDelivery {
@@ -103,6 +135,8 @@ export interface WindowsRemoteE2eeBridgeOptions {
   readonly deviceId: DeviceId;
   readonly authority: RemoteDeviceAuthorityStore;
   readonly endpoint: NativeDaemonE2eeEndpoint;
+  /** Daemon-owned authenticated witness transport for the endpoint's signed requests. */
+  readonly witness: DaemonWitnessTransport;
   readonly sender: RemoteEncryptedSender;
   readonly onError?: (error: Error) => void;
 }
@@ -150,11 +184,15 @@ function safeRemoteError(cause: unknown, requestId: RequestId): RemoteDaemonMess
 }
 
 /**
- * Bridges opaque relay delivery to one native daemon E2EE endpoint. Cryptographic authentication
- * precedes daemon authorization. All endpoint calls and outbound encryption are serialized.
+ * Bridges opaque relay delivery to one native daemon E2EE endpoint. Every endpoint mutation
+ * completes its witness barrier before the bridge frames ciphertext, parses plaintext, or
+ * authorizes a request. Cryptographic authentication precedes daemon authorization. All endpoint
+ * calls and outbound encryption are serialized; the serialization orders work, the barrier
+ * authorizes it.
  */
 export class WindowsRemoteE2eeBridge {
   private readonly options: WindowsRemoteE2eeBridgeOptions;
+  private readonly barrier: DaemonWitnessBarrier<NativeDaemonE2eeEndpoint>;
   private readonly attachment: AuthenticatedRemoteAttachment;
   private tail: Promise<void> = Promise.resolve();
   private currentRoute: RouteId | undefined;
@@ -162,6 +200,7 @@ export class WindowsRemoteE2eeBridge {
 
   constructor(options: WindowsRemoteE2eeBridgeOptions) {
     this.options = options;
+    this.barrier = new DaemonWitnessBarrier(options.endpoint, options.witness);
     this.attachment = options.daemon.attachAuthenticatedRemoteDevice({
       deviceId: options.deviceId,
       authority: options.authority,
@@ -227,12 +266,23 @@ export class WindowsRemoteE2eeBridge {
       if (envelope.messageClass !== "application_request") {
         throw new Error("Remote E2EE envelope has an invalid device-to-daemon class");
       }
-      const opened = await this.options.endpoint.receiveApplication(
-        incomingOperation,
-        envelope.ciphertext,
-        idBytes(envelope.logicalMessageId),
-        BigInt(envelope.hostedGrantGeneration),
+      const logical = idBytes(envelope.logicalMessageId);
+      const target = incomingOperation;
+      const opened = releasedField<NativePlaintext>(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.receiveApplication(
+            target,
+            envelope.ciphertext,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+          ),
+        ),
+        "plaintext",
+        "plaintext",
       );
+      if (!(opened.plaintext instanceof Uint8Array)) {
+        throw new Error("Native endpoint released invalid plaintext");
+      }
       const request = parseAuthenticatedRemoteRequest(
         JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(opened.plaintext)),
       );
@@ -251,7 +301,11 @@ export class WindowsRemoteE2eeBridge {
       }
       await this.sendResult(sourceRouteId, response);
       const acknowledgement = derivedId("axl-e2ee-receive-ack-v1", envelope.operationId);
-      await this.options.endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation);
+      accepted(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.acknowledgeReceive(acknowledgement.bytes, target),
+        ),
+      );
     } catch (cause) {
       if (requestId !== undefined) {
         await this.sendMessage(sourceRouteId, safeRemoteError(cause, requestId));
@@ -270,19 +324,20 @@ export class WindowsRemoteE2eeBridge {
     envelope: RemoteE2eeEnvelope,
     incomingOperation: Uint8Array,
   ): Promise<void> {
-    const receive = this.options.endpoint.receiveReplacementProposal;
-    const createCommit = this.options.endpoint.createUpdateCommit;
-    if (receive === undefined || createCommit === undefined) {
-      throw new Error("Native endpoint does not support MLS updates");
-    }
     const logical = idBytes(envelope.logicalMessageId);
     try {
-      await receive.call(
-        this.options.endpoint,
-        incomingOperation,
-        envelope.ciphertext,
-        logical,
-        BigInt(envelope.hostedGrantGeneration),
+      accepted(
+        await this.barrier.mutate((endpoint) => {
+          if (endpoint.receiveReplacementProposal === undefined) {
+            throw new Error("Native endpoint does not support MLS updates");
+          }
+          return endpoint.receiveReplacementProposal(
+            incomingOperation,
+            envelope.ciphertext,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+          );
+        }),
       );
       const commitOperation = derivedId(
         "axl-e2ee-daemon-commit-operation-v1",
@@ -293,11 +348,17 @@ export class WindowsRemoteE2eeBridge {
         bytes: idBytes(envelope.operationId),
       };
       try {
-        const commit = await createCommit.call(
-          this.options.endpoint,
-          commitOperation.bytes,
-          commitLogical.bytes,
-          BigInt(envelope.hostedGrantGeneration),
+        const commit = outbox(
+          await this.barrier.mutate((endpoint) => {
+            if (endpoint.createUpdateCommit === undefined) {
+              throw new Error("Native endpoint does not support MLS updates");
+            }
+            return endpoint.createUpdateCommit(
+              commitOperation.bytes,
+              commitLogical.bytes,
+              BigInt(envelope.hostedGrantGeneration),
+            );
+          }),
         );
         await this.sendPrepared(routeId, commit, envelope.hostedGrantGeneration, "commit");
       } finally {
@@ -309,7 +370,11 @@ export class WindowsRemoteE2eeBridge {
         envelope.operationId,
       );
       try {
-        await this.options.endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation);
+        accepted(
+          await this.barrier.mutate((endpoint) =>
+            endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation),
+          ),
+        );
       } finally {
         acknowledgement.bytes.fill(0);
       }
@@ -322,20 +387,28 @@ export class WindowsRemoteE2eeBridge {
     envelope: RemoteE2eeEnvelope,
     incomingOperation: Uint8Array,
   ): Promise<void> {
-    const accept = this.options.endpoint.acceptEpochReady;
-    if (accept === undefined) throw new Error("Native endpoint does not support epoch readiness");
     const logical = idBytes(envelope.logicalMessageId);
     try {
-      const acceptance = await accept.call(
-        this.options.endpoint,
-        incomingOperation,
-        logical,
-        BigInt(envelope.hostedGrantGeneration),
-        envelope.ciphertext,
+      const acceptance = releasedField<NativeEpochReadyAcceptance>(
+        await this.barrier.mutate((endpoint) => {
+          if (endpoint.acceptEpochReady === undefined) {
+            throw new Error("Native endpoint does not support epoch readiness");
+          }
+          return endpoint.acceptEpochReady(
+            incomingOperation,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+            envelope.ciphertext,
+          );
+        }),
+        "epoch_ready",
+        "epochReady",
       );
-      const prepareConfirmation = this.options.endpoint.prepareEpochReadyConfirmation;
-      if (prepareConfirmation === undefined) {
-        throw new Error("Native endpoint does not support epoch-ready confirmation");
+      if (
+        !(acceptance.cryptoSessionId instanceof Uint8Array) ||
+        !(acceptance.commitId instanceof Uint8Array)
+      ) {
+        throw new Error("Native endpoint released an invalid epoch-ready acceptance");
       }
       const confirmationOperation = derivedId(
         "axl-e2ee-epoch-ready-confirmation-operation-v1",
@@ -346,12 +419,18 @@ export class WindowsRemoteE2eeBridge {
         bytes: idBytes(envelope.operationId),
       };
       try {
-        const confirmation = await prepareConfirmation.call(
-          this.options.endpoint,
-          confirmationOperation.bytes,
-          confirmationLogical.bytes,
-          BigInt(envelope.hostedGrantGeneration),
-          acceptance,
+        const confirmation = outbox(
+          await this.barrier.mutate((endpoint) => {
+            if (endpoint.prepareEpochReadyConfirmation === undefined) {
+              throw new Error("Native endpoint does not support epoch-ready confirmation");
+            }
+            return endpoint.prepareEpochReadyConfirmation(
+              confirmationOperation.bytes,
+              confirmationLogical.bytes,
+              BigInt(envelope.hostedGrantGeneration),
+              acceptance,
+            );
+          }),
         );
         const route = this.currentRoute;
         if (route === undefined) throw new Error("Remote route is unavailable");
@@ -371,7 +450,11 @@ export class WindowsRemoteE2eeBridge {
       );
       const commitOperation = idBytes(envelope.logicalMessageId);
       try {
-        await this.options.endpoint.acknowledgeOutbox(commitAcknowledgement.bytes, commitOperation);
+        outbox(
+          await this.barrier.mutate((endpoint) =>
+            endpoint.acknowledgeOutbox(commitAcknowledgement.bytes, commitOperation),
+          ),
+        );
       } finally {
         commitAcknowledgement.bytes.fill(0);
         commitOperation.fill(0);
@@ -407,23 +490,23 @@ export class WindowsRemoteE2eeBridge {
     if (authority?.hostedGeneration === undefined || authority.effectiveScopes.length === 0) {
       throw new Error("Remote authority is unavailable");
     }
+    const hostedGeneration = authority.hostedGeneration;
     const requestIdentity = "requestId" in message ? message.requestId : randomUUID();
     const operation = derivedId(`axl-e2ee-daemon-${message.type}-operation-v1`, requestIdentity);
     const logical = derivedId(`axl-e2ee-daemon-${message.type}-logical-v1`, requestIdentity);
     const plaintext = encodeRemoteDaemonMessage(message);
     try {
-      const prepared = await this.options.endpoint.prepareApplication(
-        operation.bytes,
-        logical.bytes,
-        BigInt(authority.hostedGeneration),
-        plaintext,
+      const prepared = outbox(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.prepareApplication(
+            operation.bytes,
+            logical.bytes,
+            BigInt(hostedGeneration),
+            plaintext,
+          ),
+        ),
       );
-      await this.sendPrepared(
-        routeId,
-        prepared,
-        authority.hostedGeneration,
-        "application_delivery",
-      );
+      await this.sendPrepared(routeId, prepared, hostedGeneration, "application_delivery");
     } finally {
       plaintext.fill(0);
       operation.bytes.fill(0);

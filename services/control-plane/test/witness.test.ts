@@ -1152,31 +1152,13 @@ test("local three-replica gateway completes the SDK witness continuation", async
   context.after(() => server.close());
   const address = server.address();
   assert(address !== null && typeof address !== "string");
-  const operationId = parseWitnessRequest(request).operationId;
-  const exactResult = new TextEncoder().encode("locally witnessed result");
-  let continuationCalls = 0;
   const client = new HostedWitnessClient({
     controlPlaneOrigin: `http://127.0.0.1:${address.port}`,
     allowInsecureLoopbackForTests: true,
     authenticationHeaders: async () => ({ authorization: "Bearer local-witness" }),
   });
-  const result = await client.complete({
-    operationId,
-    witnessRequest: request,
-    requestHash: createHash("sha384").update(request).digest(),
-    status: "pending_quorum",
-    async continueWitness(receivedOperationId, certificate) {
-      continuationCalls += 1;
-      assert.deepEqual(receivedOperationId, operationId);
-      assert.equal(
-        parseAndVerifyWitnessCertificate(request, certificate, service.trust),
-        "registered",
-      );
-      return exactResult.slice();
-    },
-  });
-  assert.deepEqual(result, exactResult);
-  assert.equal(continuationCalls, 1);
+  const certificate = await client.respond(request);
+  assert.equal(parseAndVerifyWitnessCertificate(request, certificate, service.trust), "registered");
   assert.deepEqual(
     service.signers.map((signer) => signer.calls),
     [1, 1, 1],

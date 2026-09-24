@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -18,62 +19,88 @@ import {
 } from "@axl/protocol";
 
 import type { AuthenticatedRemotePayload, RemotePayloadOpener } from "./remote-relay.ts";
+import {
+  releasedField,
+  type WitnessEndpointOperations,
+  type WitnessMutationOutcome,
+  type WitnessTypedResult,
+  type WitnessedEndpoint,
+} from "./witness.ts";
 
-interface NativeCiphertext {
+/** Released `outbox` result: the exact committed ciphertext and its envelope metadata. */
+export interface NativeCiphertext {
   readonly operationId: Uint8Array;
   readonly logicalMessageId: Uint8Array;
   readonly messageClass: string;
   readonly ciphertext: Uint8Array;
 }
 
-interface NativePlaintext {
+/** Released `plaintext` result of a completed receive. */
+export interface NativePlaintext {
   readonly plaintext: Uint8Array;
 }
 
-/** Narrow structural subset implemented by the browser and native device bindings. */
-export interface NativeDeviceE2eeEndpoint {
+/** Released `commit` result of an applied received commit. */
+export interface NativeCommitMetadata {
+  readonly commitId: Uint8Array;
+  readonly targetEpoch: bigint;
+  readonly epochAuthenticator: Uint8Array;
+}
+
+/**
+ * Narrow structural subset implemented by the native device binding. A browser page-facing
+ * endpoint must present the same outcome shape once it is enabled. Every mutation returns a
+ * witness outcome; the adapter reads results only after the barrier completes.
+ */
+export interface NativeDeviceE2eeEndpoint extends WitnessEndpointOperations {
   prepareApplication(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     plaintext: Uint8Array,
-  ): Promise<NativeCiphertext>;
+  ): Promise<WitnessMutationOutcome>;
   receiveApplication(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativePlaintext>;
+  ): Promise<WitnessMutationOutcome>;
   prepareReplacement?(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-  ): Promise<NativeCiphertext>;
+  ): Promise<WitnessMutationOutcome>;
   applyReceivedUpdateCommit?(
     operationId: Uint8Array,
     ciphertext: Uint8Array,
     commitLogicalId: Uint8Array,
     hostedGrantGeneration: bigint,
-    epochReadyLogicalId: Uint8Array,
-  ): Promise<NativeCiphertext>;
+  ): Promise<WitnessMutationOutcome>;
+  prepareEpochReady?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    commit: NativeCommitMetadata,
+  ): Promise<WitnessMutationOutcome>;
   acceptEpochReadyConfirmation?(
     operationId: Uint8Array,
     logicalId: Uint8Array,
     hostedGrantGeneration: bigint,
     ciphertext: Uint8Array,
-  ): Promise<"active">;
+  ): Promise<WitnessMutationOutcome>;
   acknowledgeOutbox(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<NativeCiphertext>;
+  ): Promise<WitnessMutationOutcome>;
   acknowledgeReceive(
     operationId: Uint8Array,
     targetOperationId: Uint8Array,
-  ): Promise<"acknowledged">;
+  ): Promise<WitnessMutationOutcome>;
 }
 
 export interface RemoteDeviceE2eeOptions {
-  readonly endpoint: NativeDeviceE2eeEndpoint;
+  /** The device endpoint behind its witness barrier, shared with the native outbox projection. */
+  readonly endpoint: WitnessedEndpoint<NativeDeviceE2eeEndpoint>;
   readonly localDeviceId: DeviceId;
   readonly daemonDeviceId: DeviceId;
   readonly destinationCryptoSessionId: CryptoSessionId;
@@ -117,6 +144,19 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 function generation(value: number): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError("Hosted grant generation must be a positive safe integer");
+  }
+  return value;
+}
+
+function outbox(result: WitnessTypedResult): NativeCiphertext {
+  const value = releasedField<NativeCiphertext>(result, "outbox", "outbox");
+  if (
+    !(value.operationId instanceof Uint8Array) ||
+    !(value.logicalMessageId instanceof Uint8Array) ||
+    typeof value.messageClass !== "string" ||
+    !(value.ciphertext instanceof Uint8Array)
+  ) {
+    throw new TypeError("Native endpoint released an invalid outbox record");
   }
   return value;
 }
@@ -176,11 +216,10 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     const plaintext = requestBytes(validated);
     const operation = uuidBytes(validated.idempotencyKey);
     try {
-      const prepared = await this.options.endpoint.prepareApplication(
-        operation,
-        logicalId,
-        BigInt(grant),
-        plaintext,
+      const prepared = outbox(
+        await this.options.endpoint.mutate((endpoint) =>
+          endpoint.prepareApplication(operation, logicalId, BigInt(grant), plaintext),
+        ),
       );
       return {
         requestId: validated.requestId,
@@ -218,11 +257,10 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     const logicalId = derivedId(validated.requestId, 0x42);
     const plaintext = requestBytes(validated);
     try {
-      const prepared = await this.options.endpoint.prepareApplication(
-        operation,
-        logicalId,
-        BigInt(grant),
-        plaintext,
+      const prepared = outbox(
+        await this.options.endpoint.mutate((endpoint) =>
+          endpoint.prepareApplication(operation, logicalId, BigInt(grant), plaintext),
+        ),
       );
       return framed(prepared, operation, logicalId, grant);
     } finally {
@@ -237,13 +275,18 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     logicalMessageId: OperationId,
     hostedGrantGeneration: number,
   ): Promise<Uint8Array> {
-    const prepare = this.options.endpoint.prepareReplacement;
-    if (prepare === undefined) throw new TypeError("Native endpoint does not support MLS updates");
     const grant = generation(hostedGrantGeneration);
     const operation = uuidBytes(operationId);
     const logical = uuidBytes(logicalMessageId);
     try {
-      const prepared = await prepare.call(this.options.endpoint, operation, logical, BigInt(grant));
+      const prepared = outbox(
+        await this.options.endpoint.mutate((endpoint) => {
+          if (endpoint.prepareReplacement === undefined) {
+            throw new TypeError("Native endpoint does not support MLS updates");
+          }
+          return endpoint.prepareReplacement(operation, logical, BigInt(grant));
+        }),
+      );
       return framed(prepared, operation, logical, grant, "update_proposal");
     } finally {
       operation.fill(0);
@@ -251,38 +294,66 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     }
   }
 
+  /**
+   * Apply a daemon commit and create its epoch-ready message as two witnessed operations. The
+   * epoch-ready operation ID is derived from the apply operation ID so a retried delivery replays
+   * both exact results instead of creating a second transition.
+   */
   async applyUpdateCommit(
     opaqueEnvelope: Uint8Array,
     operationId: OperationId,
     epochReadyLogicalMessageId: OperationId,
   ): Promise<Uint8Array> {
-    const apply = this.options.endpoint.applyReceivedUpdateCommit;
-    if (apply === undefined) throw new TypeError("Native endpoint does not support MLS updates");
     const envelope = parseRemoteE2eeEnvelope(opaqueEnvelope);
     if (envelope.messageClass !== "commit") {
       throw new TypeError("Remote E2EE envelope is not an MLS commit");
     }
     const operation = uuidBytes(operationId);
+    const readyOperation = derivedId(operationId, 0x4a);
     const commitLogical = uuidBytes(envelope.logicalMessageId);
     const readyLogical = uuidBytes(epochReadyLogicalMessageId);
+    const grant = BigInt(envelope.hostedGrantGeneration);
     try {
-      const prepared = await apply.call(
-        this.options.endpoint,
-        operation,
-        envelope.ciphertext,
-        commitLogical,
-        BigInt(envelope.hostedGrantGeneration),
-        readyLogical,
+      const commit = releasedField<NativeCommitMetadata>(
+        await this.options.endpoint.mutate((endpoint) => {
+          if (endpoint.applyReceivedUpdateCommit === undefined) {
+            throw new TypeError("Native endpoint does not support MLS updates");
+          }
+          return endpoint.applyReceivedUpdateCommit(
+            operation,
+            envelope.ciphertext,
+            commitLogical,
+            grant,
+          );
+        }),
+        "commit",
+        "commit",
+      );
+      if (
+        !(commit.commitId instanceof Uint8Array) ||
+        typeof commit.targetEpoch !== "bigint" ||
+        !(commit.epochAuthenticator instanceof Uint8Array)
+      ) {
+        throw new TypeError("Native endpoint released invalid commit metadata");
+      }
+      const prepared = outbox(
+        await this.options.endpoint.mutate((endpoint) => {
+          if (endpoint.prepareEpochReady === undefined) {
+            throw new TypeError("Native endpoint does not support MLS updates");
+          }
+          return endpoint.prepareEpochReady(readyOperation, readyLogical, grant, commit);
+        }),
       );
       return framed(
         prepared,
-        operation,
+        readyOperation,
         readyLogical,
         envelope.hostedGrantGeneration,
         "epoch_ready",
       );
     } finally {
       operation.fill(0);
+      readyOperation.fill(0);
       commitLogical.fill(0);
       readyLogical.fill(0);
     }
@@ -291,22 +362,33 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
   async open(opaqueEnvelope: Uint8Array): Promise<AuthenticatedRemotePayload> {
     const envelope: RemoteE2eeEnvelope = parseRemoteE2eeEnvelope(opaqueEnvelope);
     if (envelope.messageClass === "resync_control") {
-      const accept = this.options.endpoint.acceptEpochReadyConfirmation;
-      if (accept === undefined) {
-        throw new TypeError("Native endpoint does not support epoch-ready confirmation");
-      }
       const operation = derivedId(envelope.operationId, 0x47);
       const logical = uuidBytes(envelope.logicalMessageId);
       const acknowledgement = derivedId(envelope.logicalMessageId, 0x48);
       try {
-        await accept.call(
-          this.options.endpoint,
-          operation,
-          logical,
-          BigInt(envelope.hostedGrantGeneration),
-          envelope.ciphertext,
+        const lifecycle = releasedField<string>(
+          await this.options.endpoint.mutate((endpoint) => {
+            if (endpoint.acceptEpochReadyConfirmation === undefined) {
+              throw new TypeError("Native endpoint does not support epoch-ready confirmation");
+            }
+            return endpoint.acceptEpochReadyConfirmation(
+              operation,
+              logical,
+              BigInt(envelope.hostedGrantGeneration),
+              envelope.ciphertext,
+            );
+          }),
+          "pair_state",
+          "status",
         );
-        await this.options.endpoint.acknowledgeOutbox(acknowledgement, logical);
+        if (lifecycle !== "active") {
+          throw new TypeError("Epoch-ready confirmation did not activate the pair");
+        }
+        outbox(
+          await this.options.endpoint.mutate((endpoint) =>
+            endpoint.acknowledgeOutbox(acknowledgement, logical),
+          ),
+        );
         return {
           authenticatedPeerId: this.options.daemonDeviceId,
           plaintext: new Uint8Array(),
@@ -325,7 +407,11 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
       const proposalAcknowledgement = derivedId(envelope.logicalMessageId, 0x46);
       try {
         await this.applyUpdateCommit(opaqueEnvelope, uuidText(operation), uuidText(readyLogical));
-        await this.options.endpoint.acknowledgeOutbox(proposalAcknowledgement, proposalOperation);
+        outbox(
+          await this.options.endpoint.mutate((endpoint) =>
+            endpoint.acknowledgeOutbox(proposalAcknowledgement, proposalOperation),
+          ),
+        );
         return {
           authenticatedPeerId: this.options.daemonDeviceId,
           plaintext: new Uint8Array(),
@@ -344,12 +430,21 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
     const operation = uuidBytes(envelope.operationId);
     const logical = uuidBytes(envelope.logicalMessageId);
     try {
-      const opened = await this.options.endpoint.receiveApplication(
-        operation,
-        envelope.ciphertext,
-        logical,
-        BigInt(envelope.hostedGrantGeneration),
+      const opened = releasedField<NativePlaintext>(
+        await this.options.endpoint.mutate((endpoint) =>
+          endpoint.receiveApplication(
+            operation,
+            envelope.ciphertext,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+          ),
+        ),
+        "plaintext",
+        "plaintext",
       );
+      if (!(opened.plaintext instanceof Uint8Array)) {
+        throw new TypeError("Native endpoint released invalid plaintext");
+      }
       let acknowledged = false;
       return {
         authenticatedPeerId: this.options.daemonDeviceId,
@@ -358,7 +453,13 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
           if (acknowledged) return;
           const acknowledgement = derivedId(envelope.operationId, 0x43);
           try {
-            await this.options.endpoint.acknowledgeReceive(acknowledgement, operation);
+            releasedField(
+              await this.options.endpoint.mutate((endpoint) =>
+                endpoint.acknowledgeReceive(acknowledgement, operation),
+              ),
+              "accepted",
+              "accepted",
+            );
             acknowledged = true;
           } finally {
             acknowledgement.fill(0);

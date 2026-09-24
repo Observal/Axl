@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -28,6 +29,64 @@ import { AxlDaemon } from "../src/daemon.ts";
 import { RemoteAuthorityError, RemoteDeviceAuthorityStore } from "../src/remote-authority.ts";
 import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
 import { remoteRpcMethods, requiredRemoteScope } from "../src/remote-rpc.ts";
+import {
+  DaemonWitnessError,
+  type DaemonWitnessOutcome,
+  type DaemonWitnessResult,
+} from "../src/remote-witness.ts";
+
+const witnessCertificate = Uint8Array.of(0xc3);
+
+/**
+ * Scripted witness state for the fake daemon endpoints: every mutation commits as pending and
+ * releases its exact result only from `continueWitness` with the transport's certificate.
+ */
+function witnessOperations(calls: string[]) {
+  let pending: { operationId: Uint8Array; result: DaemonWitnessResult } | undefined;
+  const commit = (operationId: Uint8Array, result: DaemonWitnessResult): DaemonWitnessOutcome => {
+    calls.push("mutate");
+    pending = { operationId: operationId.slice(), result };
+    return {
+      tag: "pending",
+      pending: {
+        operationId: operationId.slice(),
+        request: Uint8Array.of(0x7e, ...operationId),
+        requestHash: new Uint8Array(48),
+        kind: "advance",
+      },
+    };
+  };
+  const operations = {
+    async witnessReadRequest() {
+      calls.push("read");
+      return Uint8Array.of(0x7d);
+    },
+    async reconcileWitness(certificate: Uint8Array) {
+      assert.deepEqual(certificate, witnessCertificate);
+      calls.push("reconcile");
+      return { tag: "ready" } as const;
+    },
+    async pendingWitness() {
+      return null;
+    },
+    async continueWitness(operationId: Uint8Array, certificate: Uint8Array) {
+      assert.deepEqual(certificate, witnessCertificate);
+      assert.ok(pending, "continuation without a pending operation");
+      assert.deepEqual(operationId, pending.operationId);
+      calls.push("continue");
+      const result = pending.result;
+      pending = undefined;
+      return result;
+    },
+  };
+  return { operations, commit };
+}
+
+const witness = {
+  async respond() {
+    return witnessCertificate.slice();
+  },
+};
 
 const installationId = parseInstallationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 const deviceId = parseDeviceId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
@@ -102,7 +161,10 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
   );
   const received: Uint8Array[] = [];
   const prepared: Uint8Array[] = [];
+  const calls: string[] = [];
+  const scripted = witnessOperations(calls);
   const endpoint: NativeDaemonE2eeEndpoint = {
+    ...scripted.operations,
     async receiveApplication(receivedOperation, ciphertext, logicalId, generation) {
       assert.deepEqual(
         receivedOperation,
@@ -114,23 +176,29 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
       );
       assert.equal(generation, 1n);
       received.push(ciphertext.slice());
-      return { plaintext: plaintext.slice() };
+      return scripted.commit(receivedOperation, {
+        tag: "plaintext",
+        plaintext: { plaintext: plaintext.slice() },
+      });
     },
-    async prepareApplication(_operation, _logical, generation, value) {
+    async prepareApplication(operation, logical, generation, value) {
       assert.equal(generation, 1n);
       prepared.push(value.slice());
-      return {
-        operationId: _operation,
-        logicalMessageId: _logical,
-        messageClass: "application_delivery",
-        ciphertext: value.slice(),
-      };
+      return scripted.commit(operation, {
+        tag: "outbox",
+        outbox: {
+          operationId: operation,
+          logicalMessageId: logical,
+          messageClass: "application_delivery",
+          ciphertext: value.slice(),
+        },
+      });
     },
     async acknowledgeOutbox() {
       throw new Error("not used");
     },
-    async acknowledgeReceive() {
-      return "acknowledged";
+    async acknowledgeReceive(operation) {
+      return scripted.commit(operation, { tag: "accepted", accepted: { acknowledged: true } });
     },
     close() {},
   };
@@ -140,6 +208,7 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
     deviceId,
     authority,
     endpoint,
+    witness,
     sender: {
       send(_route, envelope) {
         sent.push(envelope.slice());
@@ -168,6 +237,97 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
     assert.equal(response.method, "daemon.info");
   }
   assert.equal(prepared.length, 1);
+  assert.deepEqual(
+    calls,
+    [
+      "read",
+      "reconcile",
+      "mutate",
+      "continue",
+      "read",
+      "reconcile",
+      "mutate",
+      "continue",
+      "read",
+      "reconcile",
+      "mutate",
+      "continue",
+    ],
+    "receive, response, and acknowledgement each completed their own barrier in order",
+  );
+});
+
+test("the Windows E2EE bridge releases no plaintext or ciphertext when the witness withholds a certificate", async (context) => {
+  const { daemon, dataDirectory } = await startDaemon(context);
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.registerLocalDevice(deviceId, ["observe"]);
+  await authority.applyHostedGrant(deviceId, 1, ["observe"]);
+  const calls: string[] = [];
+  const scripted = witnessOperations(calls);
+  const requestId = parseRemoteRequestId("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  const plaintext = new TextEncoder().encode(
+    JSON.stringify({ deviceId, requestId, method: "daemon.info", params: {} }),
+  );
+  const endpoint: NativeDaemonE2eeEndpoint = {
+    ...scripted.operations,
+    async receiveApplication(operation) {
+      return scripted.commit(operation, {
+        tag: "plaintext",
+        plaintext: { plaintext: plaintext.slice() },
+      });
+    },
+    async prepareApplication() {
+      throw new Error("not reached");
+    },
+    async acknowledgeOutbox() {
+      throw new Error("not used");
+    },
+    async acknowledgeReceive() {
+      throw new Error("not reached");
+    },
+    close() {},
+  };
+  const sent: Uint8Array[] = [];
+  const errors: Error[] = [];
+  let responses = 0;
+  const bridge = new WindowsRemoteE2eeBridge({
+    daemon,
+    deviceId,
+    authority,
+    endpoint,
+    witness: {
+      async respond(request) {
+        responses += 1;
+        // The fresh read succeeds; the committed advance never receives its certificate.
+        if (request[0] === 0x7d) return witnessCertificate.slice();
+        throw new DaemonWitnessError("witness_unavailable", "witness offline");
+      },
+    },
+    sender: {
+      send(_route, envelope) {
+        sent.push(envelope.slice());
+      },
+    },
+    onError: (error) => errors.push(error),
+  });
+  context.after(() => bridge.close());
+  await assert.rejects(
+    bridge.receive({
+      sourceRouteId: parseRouteId("11111111-1111-4111-8111-111111111111"),
+      opaqueEnvelope: encodeRemoteE2eeEnvelope({
+        operationId: parseOperationId("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"),
+        logicalMessageId: parseOperationId("ffffffff-ffff-4fff-8fff-ffffffffffff"),
+        messageClass: "application_request",
+        hostedGrantGeneration: 1,
+        ciphertext: Uint8Array.of(1, 2, 3),
+      }),
+    }),
+    (cause) => cause instanceof DaemonWitnessError && cause.code === "witness_unavailable",
+  );
+  assert.deepEqual(calls, ["read", "reconcile", "mutate"], "no continuation, no plaintext");
+  assert.equal(responses, 2);
+  assert.deepEqual(sent, [], "the daemon never authorized or answered the request");
+  assert.equal(errors.length, 1);
 });
 
 test("the Windows E2EE bridge prioritizes update commits and epoch readiness", async (context) => {
@@ -182,55 +342,72 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
   const accepted: string[] = [];
   const acknowledgements: Uint8Array[] = [];
   const outboxAcknowledgements: Uint8Array[] = [];
+  const calls: string[] = [];
+  const scripted = witnessOperations(calls);
   const endpoint: NativeDaemonE2eeEndpoint = {
+    ...scripted.operations,
     async prepareApplication() {
       throw new Error("not used");
     },
     async receiveApplication() {
       throw new Error("not used");
     },
-    async receiveReplacementProposal(_operation, ciphertext, _logical, generation) {
+    async receiveReplacementProposal(operation, ciphertext, _logical, generation) {
       assert.deepEqual(ciphertext, Uint8Array.of(7));
       assert.equal(generation, 3n);
       accepted.push("proposal");
-      return "accepted";
+      return scripted.commit(operation, { tag: "accepted", accepted: { acknowledged: false } });
     },
     async createUpdateCommit(operationId, logicalMessageId, generation) {
       assert.equal(generation, 3n);
       accepted.push("commit");
-      return {
-        operationId,
-        logicalMessageId,
-        messageClass: "commit",
-        ciphertext: Uint8Array.of(8),
-      };
+      return scripted.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId,
+          logicalMessageId,
+          messageClass: "commit",
+          ciphertext: Uint8Array.of(8),
+        },
+      });
     },
-    async acceptEpochReady() {
+    async acceptEpochReady(operation) {
       accepted.push("epoch_ready");
-      return { cryptoSessionId: new Uint8Array(16), commitId: new Uint8Array(48) };
+      return scripted.commit(operation, {
+        tag: "epoch_ready",
+        epochReady: { cryptoSessionId: new Uint8Array(16), commitId: new Uint8Array(48) },
+      });
     },
-    async prepareEpochReadyConfirmation(operationId, logicalMessageId, generation) {
+    async prepareEpochReadyConfirmation(operationId, logicalMessageId, generation, acceptance) {
       assert.equal(generation, 3n);
+      assert.equal(acceptance.commitId.byteLength, 48);
       accepted.push("confirmation");
-      return {
-        operationId,
-        logicalMessageId,
-        messageClass: "resync_control",
-        ciphertext: Uint8Array.of(10),
-      };
+      return scripted.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId,
+          logicalMessageId,
+          messageClass: "resync_control",
+          ciphertext: Uint8Array.of(10),
+        },
+      });
     },
-    async acknowledgeOutbox(_operationId, targetOperationId) {
+    async acknowledgeOutbox(operationId, targetOperationId) {
       outboxAcknowledgements.push(targetOperationId.slice());
-      return {
-        operationId: targetOperationId,
-        logicalMessageId: targetOperationId,
-        messageClass: "commit",
-        ciphertext: new Uint8Array(),
-      };
+      return scripted.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId: targetOperationId,
+          logicalMessageId: targetOperationId,
+          messageClass: "commit",
+          retryState: "acknowledged",
+          ciphertext: new Uint8Array(),
+        },
+      });
     },
     async acknowledgeReceive(operationId) {
       acknowledgements.push(operationId.slice());
-      return "acknowledged";
+      return scripted.commit(operationId, { tag: "accepted", accepted: { acknowledged: true } });
     },
     close() {},
   };
@@ -240,6 +417,7 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
     deviceId,
     authority,
     endpoint,
+    witness,
     sender: {
       send(_route, envelope) {
         sent.push(envelope.slice());
@@ -278,6 +456,11 @@ test("the Windows E2EE bridge prioritizes update commits and epoch readiness", a
   ]);
   assert.equal(sent.length, 2);
   assert.equal(parseRemoteE2eeEnvelope(sent[1] ?? new Uint8Array()).messageClass, "resync_control");
+  assert.equal(
+    calls.filter((call) => call === "continue").length,
+    6,
+    "proposal, commit, proposal ack, epoch-ready, confirmation, and commit ack each completed",
+  );
 });
 
 test("intersects local and hosted grants without allowing hosted widening", async () => {

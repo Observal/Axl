@@ -447,21 +447,36 @@ production replica trust does not exist yet.
 
 ### SDK and daemon
 
-`HostedWitnessClient` remains the sole shared HTTP transport helper. Extend it to support fresh read
-reconciliation and pending-operation completion while keeping request bytes opaque. It must preserve
-byte identity, bounds, HTTPS policy, timeout behavior, and certificate zeroing. It must not decide
-whether a result is accepted.
+`HostedWitnessClient` is the sole shared HTTP transport helper. Its one operation, `respond`, submits
+exact signed request bytes, fresh reads and committed advances alike, and returns the bounded
+certificate. It preserves byte identity, bounds, HTTPS policy, timeout behavior, and request zeroing.
+It does not decide whether a result is accepted; it implements `WitnessCertificateTransport`, the
+shape every barrier consumes.
 
-`RemoteDeviceE2ee` and `WindowsRemoteE2eeBridge` must await the witness completion before framing or
-sending ciphertext, parsing plaintext, invoking daemon authorization, producing `daemon_accepted`,
-or calling any state-changing acknowledgement. They must recover a pending operation before
-accepting later work. Each acknowledgement is completed through its own barrier. The existing
-serialized promise tail remains useful transport ordering but is not endpoint mutation authority.
+`WitnessedEndpoint` in the SDK wraps one native endpoint and one transport. `mutate(run)` performs
+the complete barrier: fresh read, reconciliation until `ready` (completing a `resend_pending` or
+`recover_accepted` operation first), exactly one endpoint mutation, and the continuation that
+releases the exact typed result. `read(run)` orders a read-only call with the barriers. All calls on
+one `WitnessedEndpoint` are serialized, and `RemoteDeviceE2ee` and `NativeEndpointOutbox` share the
+same instance so acknowledgements never interleave with sends. `revoked`, `quarantined`, and
+`witness_unavailable` reconciliations throw `WitnessBarrierError` before any mutation runs; the
+certificate is zeroed after the endpoint consumes it.
 
-The daemon owns authenticated witness transport, retry scheduling, and surfacing a blocked or
-quarantined endpoint. It never receives candidate plaintext. A receive continuation completes in the
-native binding before the daemon parses or authorizes the plaintext. The SDK follows the same rule
-before decoding or projecting a delivery.
+`RemoteDeviceE2ee` frames ciphertext, decodes plaintext, and acknowledges only from released
+results, and verifies the released tag and shape. Received commit application and epoch-ready
+creation are two barriers; the epoch-ready operation ID is derived from the apply operation ID so a
+retried delivery replays both exact results.
+
+`WindowsRemoteE2eeBridge` takes an injected `witness: DaemonWitnessTransport` and runs
+`DaemonWitnessBarrier` from `packages/daemon/src/remote-witness.ts` around every endpoint mutation:
+receive, response, `daemon_accepted`, commit, confirmation, and each acknowledgement. The bridge's
+serialized promise tail orders work; the barrier authorizes it. A receive continuation completes in
+the native binding before the daemon parses or authorizes the plaintext; a withheld certificate
+leaves the request unanswered and unacknowledged.
+
+The daemon's authenticated HTTP witness transport, retry scheduling, and reporting of a blocked or
+quarantined endpoint are the next commit. Until then the daemon transport is injected, and local
+integration uses the in-process test quorum.
 
 ## Current RFC-to-code gaps
 
@@ -488,10 +503,9 @@ before decoding or projecting a delivery.
   absent before Rust releases the exact result, and certificates are verified in WASM against
   Rust-owned replica trust. The browser device endpoint runs the mutations listed under "Browser
   mutation coverage"; the native-only lifecycle rows listed there remain deferred.
-- Node's `NativePendingWitness` is constructed only by `testWitnessPending`; its key activation and
-  erasure flags are test-selected, and it is not connected to durable endpoints.
-- SDK and daemon endpoint interfaces expect direct ciphertext or plaintext. They do not model
-  reconciliation, pending witness recovery, or continuation.
+- Resolved: the SDK `WitnessedEndpoint` and the daemon `DaemonWitnessBarrier` run every adapter
+  mutation through fresh read, reconciliation, mutation, and continuation; adapters read released
+  results only. The daemon's HTTP witness transport and retry scheduling remain to be added.
 - `pendingOutbox`, `recoverWelcome`, and duplicate mutation paths can expose locally committed exact
   results without proving that their witness barrier completed.
 - Current acknowledgements advance generation, rollback counter, encrypted state, operation history,

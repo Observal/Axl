@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -14,6 +15,7 @@ import {
 } from "@axl/protocol";
 
 import { type NativeDurableOutboxRecord, NativeEndpointOutbox } from "../src/remote-outbox.ts";
+import { WitnessedEndpoint } from "../src/witness.ts";
 
 function bytes(value: string): Uint8Array {
   return Uint8Array.from(Buffer.from(value.replaceAll("-", ""), "hex"));
@@ -42,19 +44,56 @@ function nativeRecord(): NativeDurableOutboxRecord {
 test("native endpoint outbox recovers exact committed bytes and acknowledges in native storage", async () => {
   let records: readonly NativeDurableOutboxRecord[] = [nativeRecord()];
   const acknowledgements: Uint8Array[][] = [];
+  const witnessCalls: string[] = [];
+  let pendingAcknowledgement: NativeDurableOutboxRecord | undefined;
   const adapter = new NativeEndpointOutbox(
-    {
-      async pendingOutbox() {
-        return records;
+    new WitnessedEndpoint(
+      {
+        async witnessReadRequest() {
+          witnessCalls.push("read");
+          return Uint8Array.of(1);
+        },
+        async reconcileWitness() {
+          witnessCalls.push("reconcile");
+          return { tag: "ready" as const };
+        },
+        async pendingWitness() {
+          return null;
+        },
+        async continueWitness(operationId) {
+          witnessCalls.push("continue");
+          assert.ok(pendingAcknowledgement);
+          assert.deepEqual(operationId, Uint8Array.of(0xa0));
+          const released = pendingAcknowledgement;
+          pendingAcknowledgement = undefined;
+          records = [];
+          return { tag: "outbox", outbox: released };
+        },
+        async pendingOutbox() {
+          return records;
+        },
+        async acknowledgeOutbox(acknowledgement, target) {
+          acknowledgements.push([acknowledgement.slice(), target.slice()]);
+          const record = records[0];
+          assert.ok(record);
+          pendingAcknowledgement = { ...record, retryState: "acknowledged" };
+          return {
+            tag: "pending",
+            pending: {
+              operationId: Uint8Array.of(0xa0),
+              request: Uint8Array.of(2),
+              requestHash: new Uint8Array(48),
+              kind: "advance",
+            },
+          };
+        },
       },
-      async acknowledgeOutbox(acknowledgement, target) {
-        acknowledgements.push([acknowledgement.slice(), target.slice()]);
-        const record = records[0];
-        assert.ok(record);
-        records = [];
-        return { ...record, retryState: "acknowledged" };
+      {
+        async respond() {
+          return Uint8Array.of(0xcc);
+        },
       },
-    },
+    ),
     { create: () => attemptId },
     {
       resolve: async (destination) =>
@@ -82,6 +121,11 @@ test("native endpoint outbox recovers exact committed bytes and acknowledges in 
   await adapter.markDaemonAccepted(requestId);
   assert.equal(acknowledgements.length, 1);
   assert.deepEqual(acknowledgements[0]?.[1], bytes(operationId));
+  assert.deepEqual(
+    witnessCalls,
+    ["read", "reconcile", "continue"],
+    "the acknowledgement completed its own witness barrier",
+  );
   await adapter.removeAccepted(requestId);
   assert.deepEqual(await adapter.list(), []);
 });

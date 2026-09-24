@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -29,6 +30,7 @@ import {
   RemoteDeviceE2ee,
   RemoteHostedDelivery,
   RemoteRelayConnection,
+  WitnessedEndpoint,
 } from "@axl/sdk";
 import {
   InMemoryRelayTicketStore,
@@ -37,7 +39,7 @@ import {
 } from "@axl/control-plane";
 
 import * as fixture from "./fixture-loader.mjs";
-import { complete, witnessed, witnessedFacade } from "./witness-driver.mjs";
+import { complete, witnessed } from "./witness-driver.mjs";
 
 const unwrap = (field) => (result) => {
   const value = result[field];
@@ -112,10 +114,7 @@ async function activatedPair(root) {
     ),
   );
   await witnessed(deviceEndpoint, witness, () => deviceEndpoint.acknowledgeActivation(operation(11), acceptance));
-  return {
-    daemonEndpoint: witnessedFacade(daemonEndpoint, witness),
-    deviceEndpoint: witnessedFacade(deviceEndpoint, witness),
-  };
+  return { daemonEndpoint, deviceEndpoint, witness };
 }
 
 function replyPort() {
@@ -315,6 +314,7 @@ test(
       deviceId,
       authority,
       endpoint: pair.daemonEndpoint,
+      witness: { respond: async (request) => pair.witness.respond(request) },
       sender: {
         send(route, envelope) {
           daemonConnection.send(route, daemonAttempts.create(), envelope);
@@ -327,14 +327,17 @@ test(
         .receive({ sourceRouteId: delivery.sourceRouteId, opaqueEnvelope: delivery.opaquePayload })
         .catch((error) => errors.push(error));
     });
+    const witnessedDevice = new WitnessedEndpoint(pair.deviceEndpoint, {
+      respond: async (request) => pair.witness.respond(request),
+    });
     const deviceCrypto = new RemoteDeviceE2ee({
-      endpoint: pair.deviceEndpoint,
+      endpoint: witnessedDevice,
       localDeviceId: deviceId,
       daemonDeviceId: daemonId,
       destinationCryptoSessionId: cryptoSessionId,
     });
     const nativeOutbox = new NativeEndpointOutbox(
-      pair.deviceEndpoint,
+      witnessedDevice,
       deviceAttempts,
       deviceConnection,
     );

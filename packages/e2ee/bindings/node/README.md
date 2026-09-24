@@ -29,9 +29,10 @@ envelope-key store under an explicitly selected non-built-in account by setting
 `AXL_RUN_WINDOWS_DPAPI_TESTS=1`; ordinary hosted CI accounts continue to use test storage rather
 than silently weakening the DPAPI identity policy.
 
-The SDK and daemon adapters do not yet drive the barrier themselves. Until that integration lands,
-`test/witness-driver.mjs` runs the complete barrier against the test witness and adapts released
-results to the shape those adapters still expect. It is test scaffolding, not part of the artifact.
+The SDK `WitnessedEndpoint` and the daemon `DaemonWitnessBarrier` drive the barrier in production
+code; the hosted integration tests hand them the in-process test quorum as their transport.
+`test/witness-driver.mjs` drives the same endpoint API directly for the binding lifecycle tests. It
+is test scaffolding, not part of the artifact.
 
 Every accepted JavaScript byte input is length-checked and copied before native asynchronous work
 is scheduled. Returned byte arrays are new Node-owned values containing the exact committed Rust

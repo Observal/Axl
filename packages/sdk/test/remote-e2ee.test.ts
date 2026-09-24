@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -16,6 +17,11 @@ import {
 } from "@axl/protocol";
 
 import { type NativeDeviceE2eeEndpoint, RemoteDeviceE2ee } from "../src/remote-e2ee.ts";
+import {
+  WitnessedEndpoint,
+  type WitnessMutationOutcome,
+  type WitnessTypedResult,
+} from "../src/witness.ts";
 
 const localDeviceId = parseDeviceId("11111111-1111-4111-8111-111111111111");
 const daemonDeviceId = parseDeviceId("22222222-2222-4222-8222-222222222222");
@@ -27,41 +33,107 @@ function uuidBytesForTest(value: string): Uint8Array {
   return Uint8Array.from(Buffer.from(value.replaceAll("-", ""), "hex"));
 }
 
+const certificate = Uint8Array.of(0xc3);
+
+/**
+ * Scripted witness state shared by the fake endpoints: every mutation commits as pending and
+ * releases its exact result only from `continueWitness` with the transport's certificate.
+ */
+function witnessOperations(calls: string[]) {
+  let pending: { operationId: Uint8Array; result: WitnessTypedResult } | undefined;
+  const commit = (operationId: Uint8Array, result: WitnessTypedResult): WitnessMutationOutcome => {
+    calls.push("mutate");
+    pending = { operationId: operationId.slice(), result };
+    return {
+      tag: "pending",
+      pending: {
+        operationId: operationId.slice(),
+        request: Uint8Array.of(0x7e, ...operationId),
+        requestHash: new Uint8Array(48),
+        kind: "advance",
+      },
+    };
+  };
+  const operations = {
+    async witnessReadRequest() {
+      calls.push("read");
+      return Uint8Array.of(0x7d);
+    },
+    async reconcileWitness(received: Uint8Array) {
+      assert.deepEqual(received, certificate);
+      calls.push("reconcile");
+      return { tag: "ready" } as const;
+    },
+    async pendingWitness() {
+      return null;
+    },
+    async continueWitness(operationId: Uint8Array, received: Uint8Array) {
+      assert.deepEqual(received, certificate);
+      assert.ok(pending, "continuation without a pending operation");
+      assert.deepEqual(operationId, pending.operationId);
+      calls.push("continue");
+      const result = pending.result;
+      pending = undefined;
+      return result;
+    },
+  };
+  return { operations, commit };
+}
+
+function witnessed<E extends NativeDeviceE2eeEndpoint>(endpoint: E, requests: Uint8Array[] = []) {
+  return new WitnessedEndpoint(endpoint, {
+    async respond(request) {
+      requests.push(request.slice());
+      return certificate.slice();
+    },
+  });
+}
+
 function fixtureEndpoint() {
   const prepared: Uint8Array[] = [];
   const received: Uint8Array[] = [];
   const acknowledgements: Uint8Array[] = [];
+  const calls: string[] = [];
+  const witness = witnessOperations(calls);
   const endpoint: NativeDeviceE2eeEndpoint = {
+    ...witness.operations,
     async prepareApplication(operationId, logicalId, generation, plaintext) {
       assert.equal(generation, 7n);
       prepared.push(plaintext.slice());
-      return {
-        operationId,
-        logicalMessageId: logicalId,
-        messageClass: "application_request",
-        ciphertext: plaintext.slice(),
-      };
+      return witness.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId,
+          logicalMessageId: logicalId,
+          messageClass: "application_request",
+          ciphertext: plaintext.slice(),
+        },
+      });
     },
-    async receiveApplication(_operationId, ciphertext, _logicalId, generation) {
+    async receiveApplication(operationId, ciphertext, _logicalId, generation) {
       assert.equal(generation, 7n);
       received.push(ciphertext.slice());
-      return { plaintext: ciphertext.slice() };
+      return witness.commit(operationId, {
+        tag: "plaintext",
+        plaintext: { plaintext: ciphertext.slice() },
+      });
     },
     async acknowledgeOutbox() {
       throw new Error("not used");
     },
     async acknowledgeReceive(operationId) {
       acknowledgements.push(operationId.slice());
-      return "acknowledged";
+      return witness.commit(operationId, { tag: "accepted", accepted: { acknowledged: true } });
     },
   };
-  return { endpoint, prepared, received, acknowledgements };
+  return { endpoint, prepared, received, acknowledgements, calls };
 }
 
 test("prepares immutable native ciphertext for durable relay delivery", async () => {
   const fixture = fixtureEndpoint();
+  const requests: Uint8Array[] = [];
   const adapter = new RemoteDeviceE2ee({
-    endpoint: fixture.endpoint,
+    endpoint: witnessed(fixture.endpoint, requests),
     localDeviceId,
     daemonDeviceId,
     destinationCryptoSessionId: cryptoSessionId,
@@ -86,6 +158,16 @@ test("prepares immutable native ciphertext for durable relay delivery", async ()
   assert.equal(envelope.hostedGrantGeneration, 7);
   assert.equal(envelope.messageClass, "application_request");
   assert.deepEqual(envelope.ciphertext, fixture.prepared[0]);
+  assert.deepEqual(
+    fixture.calls,
+    ["read", "reconcile", "mutate", "continue"],
+    "the ciphertext is framed only after the witness continuation released it",
+  );
+  assert.deepEqual(
+    requests.map((request) => request[0]),
+    [0x7d, 0x7e],
+    "the transport received the exact fresh read and pending request bytes",
+  );
 });
 
 test("prepares update proposals and applies daemon commits before epoch readiness", async () => {
@@ -97,7 +179,15 @@ test("prepares update proposals and applies daemon commits before epoch readines
   const readyLogical = parseOperationId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
   let confirmed = false;
   const acknowledgedOutbox: Uint8Array[] = [];
+  const calls: string[] = [];
+  const witness = witnessOperations(calls);
+  const commitMetadata = {
+    commitId: new Uint8Array(48).fill(0xc0),
+    targetEpoch: 2n,
+    epochAuthenticator: new Uint8Array(48).fill(0xea),
+  };
   const endpoint: NativeDeviceE2eeEndpoint = {
+    ...witness.operations,
     async prepareApplication() {
       throw new Error("not used");
     },
@@ -106,51 +196,61 @@ test("prepares update proposals and applies daemon commits before epoch readines
     },
     async prepareReplacement(operationId, logicalMessageId, generation) {
       assert.equal(generation, 7n);
-      return {
-        operationId,
-        logicalMessageId,
-        messageClass: "update_proposal",
-        ciphertext: Uint8Array.of(7),
-      };
+      return witness.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId,
+          logicalMessageId,
+          messageClass: "update_proposal",
+          ciphertext: Uint8Array.of(7),
+        },
+      });
     },
-    async applyReceivedUpdateCommit(
-      operationId,
-      ciphertext,
-      logicalMessageId,
-      generation,
-      readyLogicalMessageId,
-    ) {
+    async applyReceivedUpdateCommit(operationId, ciphertext, logicalMessageId, generation) {
       assert.deepEqual(ciphertext, Uint8Array.of(8));
       assert.deepEqual(logicalMessageId, uuidBytesForTest(commitLogical));
       assert.equal(generation, 7n);
-      return {
-        operationId,
-        logicalMessageId: readyLogicalMessageId,
-        messageClass: "epoch_ready",
-        ciphertext: Uint8Array.of(9),
-      };
+      return witness.commit(operationId, { tag: "commit", commit: commitMetadata });
     },
-    async acceptEpochReadyConfirmation(_operation, _logical, generation, ciphertext) {
+    async prepareEpochReady(operationId, logicalMessageId, generation, commit) {
+      assert.equal(generation, 7n);
+      assert.deepEqual(commit, commitMetadata);
+      assert.deepEqual(logicalMessageId, uuidBytesForTest(readyLogical));
+      return witness.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId,
+          logicalMessageId,
+          messageClass: "epoch_ready",
+          ciphertext: Uint8Array.of(9),
+        },
+      });
+    },
+    async acceptEpochReadyConfirmation(operationId, _logical, generation, ciphertext) {
       assert.equal(generation, 7n);
       assert.deepEqual(ciphertext, Uint8Array.of(10));
       confirmed = true;
-      return "active";
+      return witness.commit(operationId, { tag: "pair_state", status: "active" });
     },
-    async acknowledgeOutbox(_operationId, targetOperationId) {
+    async acknowledgeOutbox(operationId, targetOperationId) {
       acknowledgedOutbox.push(targetOperationId.slice());
-      return {
-        operationId: targetOperationId,
-        logicalMessageId: targetOperationId,
-        messageClass: "epoch_ready",
-        ciphertext: new Uint8Array(),
-      };
+      return witness.commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId: targetOperationId,
+          logicalMessageId: targetOperationId,
+          messageClass: "epoch_ready",
+          retryState: "acknowledged",
+          ciphertext: new Uint8Array(),
+        },
+      });
     },
     async acknowledgeReceive() {
-      return "acknowledged";
+      throw new Error("not used");
     },
   };
   const adapter = new RemoteDeviceE2ee({
-    endpoint,
+    endpoint: witnessed(endpoint),
     localDeviceId,
     daemonDeviceId,
     destinationCryptoSessionId: cryptoSessionId,
@@ -172,6 +272,13 @@ test("prepares update proposals and applies daemon commits before epoch readines
   );
   assert.equal(ready.messageClass, "epoch_ready");
   assert.deepEqual(ready.ciphertext, Uint8Array.of(9));
+  assert.equal(ready.logicalMessageId, readyLogical);
+  assert.notEqual(ready.operationId, readyOperation, "epoch-ready is its own operation");
+  assert.equal(
+    calls.filter((call) => call === "continue").length,
+    3,
+    "proposal, commit application, and epoch-ready each completed their own barrier",
+  );
   const confirmation = encodeRemoteE2eeEnvelope({
     operationId: parseOperationId("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
     logicalMessageId: parseOperationId("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
@@ -183,12 +290,13 @@ test("prepares update proposals and applies daemon commits before epoch readines
   assert.equal(control.controlOnly, true);
   assert.equal(confirmed, true);
   assert.deepEqual(acknowledgedOutbox, [uuidBytesForTest("dddddddd-dddd-4ddd-8ddd-dddddddddddd")]);
+  assert.equal(calls.filter((call) => call === "continue").length, 5);
 });
 
 test("opens daemon delivery and acknowledges only after SDK acceptance", async () => {
   const fixture = fixtureEndpoint();
   const adapter = new RemoteDeviceE2ee({
-    endpoint: fixture.endpoint,
+    endpoint: witnessed(fixture.endpoint),
     localDeviceId,
     daemonDeviceId,
     destinationCryptoSessionId: cryptoSessionId,
@@ -217,8 +325,33 @@ test("opens daemon delivery and acknowledges only after SDK acceptance", async (
     result: { ok: true },
   });
   assert.equal(fixture.acknowledgements.length, 0);
+  assert.deepEqual(fixture.calls, ["read", "reconcile", "mutate", "continue"]);
   await opened.acknowledge?.();
   await opened.acknowledge?.();
   assert.equal(fixture.acknowledgements.length, 1);
   assert.equal(fixture.received.length, 1);
+  assert.equal(fixture.calls.filter((call) => call === "continue").length, 2);
+});
+
+test("a witness that withholds the certificate withholds the ciphertext and plaintext", async () => {
+  const fixture = fixtureEndpoint();
+  const adapter = new RemoteDeviceE2ee({
+    endpoint: new WitnessedEndpoint(fixture.endpoint, {
+      async respond() {
+        throw new Error("witness offline");
+      },
+    }),
+    localDeviceId,
+    daemonDeviceId,
+    destinationCryptoSessionId: cryptoSessionId,
+  });
+  await assert.rejects(
+    adapter.prepareEphemeral(
+      { deviceId: localDeviceId, requestId, method: "daemon.info", params: {} },
+      7,
+    ),
+    { message: "witness offline" },
+  );
+  assert.deepEqual(fixture.calls, ["read"], "no mutation runs without a fresh head");
+  assert.equal(fixture.prepared.length, 0);
 });
