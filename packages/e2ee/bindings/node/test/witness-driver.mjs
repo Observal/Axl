@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
-// Test-side witness barrier driver.
+// Test-side witness barrier driver for the binding tests.
 //
-// Production transports live in the SDK and daemon (later integration commits). These helpers
-// exercise the endpoint-owned witness API exactly as that transport must: fresh read, reconcile,
-// mutate, send the exact pending request, continue with the unanimous certificate. Nothing here
-// inspects or alters request or certificate bytes.
+// The SDK `WitnessedEndpoint` and the daemon `DaemonWitnessBarrier` are the production sequencers.
+// These helpers drive the endpoint-owned witness API the same way against the in-process test
+// witness: fresh read, reconcile, mutate, send the exact pending request, continue with the
+// unanimous certificate. Nothing here inspects or alters request or certificate bytes.
 
 import { AxlE2eeError } from "./fixture-loader.mjs";
 
@@ -60,17 +60,10 @@ function requireField(result, field) {
   return value;
 }
 
-function derivedOperationId(operationId, salt) {
-  const derived = Buffer.from(operationId);
-  derived[0] ^= salt;
-  return derived;
-}
-
 /**
- * Adapt a witnessed endpoint to the direct-result shape the SDK and daemon adapters still expect
- * before their own witness integration. Every call runs the complete barrier against the given
- * in-process witness and returns only released exact results. Calls are serialized so that two
- * SDK operations never interleave their read, mutate, and continue steps on one endpoint.
+ * Terse released-result view of one endpoint for the binding lifecycle test. Every call runs the
+ * complete barrier and returns only the released typed field. Calls are serialized so that two
+ * barriers never interleave on one endpoint. Test scaffolding; not part of the artifact.
  */
 export function witnessedFacade(endpoint, witness) {
   let tail = Promise.resolve();
@@ -82,54 +75,25 @@ export function witnessedFacade(endpoint, witness) {
     );
     return run;
   };
-  const run = (mutate) => serialized(() => witnessed(endpoint, witness, mutate));
-  const facade = {
-    prepareApplication: (...args) =>
-      run(() => endpoint.prepareApplication(...args)).then((r) => requireField(r, "outbox")),
-    receiveApplication: (...args) =>
-      run(() => endpoint.receiveApplication(...args)).then((r) => requireField(r, "plaintext")),
-    prepareReplacement: (...args) =>
-      run(() => endpoint.prepareReplacement(...args)).then((r) => requireField(r, "outbox")),
+  const released = (field, mutate) =>
+    serialized(() => witnessed(endpoint, witness, mutate)).then((r) => requireField(r, field));
+  return {
+    prepareApplication: (...args) => released("outbox", () => endpoint.prepareApplication(...args)),
+    receiveApplication: (...args) => released("plaintext", () => endpoint.receiveApplication(...args)),
+    prepareReplacement: (...args) => released("outbox", () => endpoint.prepareReplacement(...args)),
     receiveReplacementProposal: (...args) =>
-      run(() => endpoint.receiveReplacementProposal(...args)).then(() => "accepted"),
-    createUpdateCommit: (...args) =>
-      run(() => endpoint.createUpdateCommit(...args)).then((r) => requireField(r, "outbox")),
-    acceptEpochReady: (...args) =>
-      run(() => endpoint.acceptEpochReady(...args)).then((r) => requireField(r, "epochReady")),
+      released("accepted", () => endpoint.receiveReplacementProposal(...args)).then(() => "accepted"),
+    createUpdateCommit: (...args) => released("outbox", () => endpoint.createUpdateCommit(...args)),
+    acceptEpochReady: (...args) => released("epochReady", () => endpoint.acceptEpochReady(...args)),
     prepareEpochReadyConfirmation: (...args) =>
-      run(() => endpoint.prepareEpochReadyConfirmation(...args)).then((r) => requireField(r, "outbox")),
-    async applyReceivedUpdateCommit(operationId, ciphertext, commitLogicalId, generation, readyLogicalId) {
-      const applied = await run(() =>
-        endpoint.applyReceivedUpdateCommit(operationId, ciphertext, commitLogicalId, generation),
-      );
-      const commit = requireField(applied, "commit");
-      const ready = await run(() =>
-        endpoint.prepareEpochReady(derivedOperationId(operationId, 0x5a), readyLogicalId, generation, commit),
-      );
-      const record = requireField(ready, "outbox");
-      // The pre-integration SDK frames the epoch-ready envelope under the apply operation ID.
-      // The durable record keeps its own operation ID; only this returned view is renamed.
-      return Object.freeze({
-        operationId: Buffer.from(operationId),
-        cryptoSessionId: record.cryptoSessionId,
-        logicalMessageId: record.logicalMessageId,
-        messageClass: record.messageClass,
-        epoch: record.epoch,
-        hostedGrantGeneration: record.hostedGrantGeneration,
-        profileRevision: record.profileRevision,
-        retryState: record.retryState,
-        ciphertext: record.ciphertext,
-      });
-    },
+      released("outbox", () => endpoint.prepareEpochReadyConfirmation(...args)),
     acceptEpochReadyConfirmation: (...args) =>
-      run(() => endpoint.acceptEpochReadyConfirmation(...args)).then((r) => requireField(r, "status")),
-    acknowledgeOutbox: (...args) =>
-      run(() => endpoint.acknowledgeOutbox(...args)).then((r) => requireField(r, "outbox")),
+      released("status", () => endpoint.acceptEpochReadyConfirmation(...args)),
+    acknowledgeOutbox: (...args) => released("outbox", () => endpoint.acknowledgeOutbox(...args)),
     acknowledgeReceive: (...args) =>
-      run(() => endpoint.acknowledgeReceive(...args)).then(() => "acknowledged"),
+      released("accepted", () => endpoint.acknowledgeReceive(...args)).then(() => "acknowledged"),
     pendingOutbox: () => serialized(() => endpoint.pendingOutbox()),
     pairStatus: () => serialized(() => endpoint.pairStatus()),
     close: () => endpoint.close(),
   };
-  return facade;
 }
