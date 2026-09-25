@@ -30,7 +30,29 @@ defmodule AxlRelay.WebSocketRelayTest do
            max_frame_bytes: 65_535,
            max_queued_bytes: 524_288,
            heartbeat_interval_ms: 10,
-           idle_timeout_ms: 30
+           idle_timeout_ms: 30,
+           max_frames_per_window: 100,
+           rate_window_ms: 10_000
+         }
+       }}
+    end
+
+    def consume_ticket(%{"ticket" => "rate-limited"}, _relay_instance_id, options) do
+      {:ok,
+       %{
+         installation_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+         device_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+         source_route_id: Keyword.fetch!(options, :device),
+         role: :device,
+         grant_generation: 1,
+         lease_expires_at: System.system_time(:millisecond) + 60_000,
+         limits: %{
+           max_frame_bytes: 65_535,
+           max_queued_bytes: 524_288,
+           heartbeat_interval_ms: 20_000,
+           idle_timeout_ms: 60_000,
+           max_frames_per_window: 2,
+           rate_window_ms: 10_000
          }
        }}
     end
@@ -56,7 +78,9 @@ defmodule AxlRelay.WebSocketRelayTest do
            max_frame_bytes: 65_535,
            max_queued_bytes: 524_288,
            heartbeat_interval_ms: 20_000,
-           idle_timeout_ms: 60_000
+           idle_timeout_ms: 60_000,
+           max_frames_per_window: 100,
+           rate_window_ms: 10_000
          }
        }}
     end
@@ -161,6 +185,44 @@ defmodule AxlRelay.WebSocketRelayTest do
 
     assert {:stop, :normal, {1008, "idle_timeout"}, _state} =
              Connection.handle_info(:heartbeat, active)
+  end
+
+  test "enforces the frame budget carried in the admission limits" do
+    registry =
+      start_supervised!(Supervisor.child_spec({RouteRegistry, name: nil}, id: make_ref()))
+
+    {:ok, state} =
+      Connection.init(
+        control_plane: FakeControlPlane,
+        control_plane_options: [device: @device_route],
+        relay_instance_id: "relay-test",
+        registry: registry
+      )
+
+    admission =
+      :json.encode(%{
+        "version" => 1,
+        "ticket" => "rate-limited",
+        "connectionNonce" => "fixture-nonce",
+        "possessionProof" => "AAECA/8="
+      })
+      |> IO.iodata_to_binary()
+
+    assert {:ok, active} = Connection.handle_in({admission, opcode: :binary}, state)
+
+    assert {:ok, send_frame} =
+             Frame.encode(%{
+               kind: :send,
+               attempt_id: @attempt,
+               route_id: @daemon_route,
+               payload: <<1>>
+             })
+
+    assert {:push, _frames, first} = Connection.handle_in({send_frame, opcode: :binary}, active)
+    assert {:push, _frames, second} = Connection.handle_in({send_frame, opcode: :binary}, first)
+
+    assert {:stop, :normal, {1008, "rate_limited"}, _state} =
+             Connection.handle_in({send_frame, opcode: :binary}, second)
   end
 
   test "fails admission closed when the control plane is unavailable", %{

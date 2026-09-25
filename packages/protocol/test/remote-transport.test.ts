@@ -8,9 +8,16 @@ import test from "node:test";
 import {
   decodeBase64,
   decodeRemoteDaemonMessage,
+  DEFAULT_DAEMON_RELAY_LIMITS,
   DEFAULT_RELAY_LIMITS,
   encodeBase64,
   encodeRemoteDaemonMessage,
+  encodeRemoteDaemonMessageFrames,
+  MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES,
+  MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES,
+  parseEnvelopeId,
+  parseRelayLimits,
+  RemoteDaemonMessageAssembler,
   encodeRemoteE2eeEnvelope,
   encodeInternalConsumeRelayTicketRequest,
   encodeRelayBinaryFrame,
@@ -232,6 +239,163 @@ test("validates daemon acceptance only inside the authenticated payload", () => 
     (error) =>
       error instanceof ProtocolValidationError &&
       error.path === "remoteDaemonMessage.idempotencyKey",
+  );
+});
+
+function largeResult(bytes: number) {
+  return {
+    version: REMOTE_TRANSPORT_VERSION,
+    type: "daemon_result" as const,
+    requestId: parseRemoteRequestId("11111111-1111-4111-8111-111111111111"),
+    method: "session.history",
+    result: { text: "x".repeat(bytes) },
+  };
+}
+
+function fragmentIds() {
+  let counter = 0;
+  return () => `33333333-3333-4333-8333-${(++counter).toString().padStart(12, "0")}`;
+}
+
+test("fits one envelope per message and fragments larger messages within the plaintext cap", () => {
+  const small = largeResult(100);
+  const [single, ...none] = encodeRemoteDaemonMessageFrames(small, fragmentIds());
+  assert.deepEqual(none, []);
+  assert.deepEqual(decodeRemoteDaemonMessage(single ?? new Uint8Array()), small);
+
+  const large = largeResult(150_000);
+  const frames = encodeRemoteDaemonMessageFrames(large, fragmentIds());
+  assert.equal(frames.length, 4);
+  for (const frame of frames) {
+    assert.ok(frame.byteLength <= MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES);
+  }
+  assert.throws(() => encodeRemoteDaemonMessage(large), /no more than 60000 bytes/u);
+  assert.throws(
+    () =>
+      decodeRemoteDaemonMessage(
+        new Uint8Array(MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES + 1).fill(32),
+      ),
+    /1 through 60000 bytes/u,
+  );
+  assert.throws(
+    () =>
+      encodeRemoteDaemonMessageFrames(
+        largeResult(MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES),
+        fragmentIds(),
+      ),
+    /no more than 4194304 bytes/u,
+  );
+
+  // Out of order and duplicated delivery reassembles the exact message once.
+  const assembler = new RemoteDaemonMessageAssembler();
+  const fragments = frames.map((frame) => decodeRemoteDaemonMessage(frame));
+  const order = [3, 0, 0, 2, 1];
+  const results = order.map((index) => {
+    const fragment = fragments[index];
+    assert.ok(fragment?.type === "daemon_fragment");
+    return assembler.accept(fragment);
+  });
+  assert.deepEqual(results.slice(0, 4), [undefined, undefined, undefined, undefined]);
+  assert.deepEqual(results[4], large);
+  assert.equal(assembler.pendingMessages, 0);
+});
+
+test("rejects conflicting, stale, and nested fragments", () => {
+  const frames = encodeRemoteDaemonMessageFrames(largeResult(100_000), fragmentIds()).map((frame) =>
+    decodeRemoteDaemonMessage(frame),
+  );
+  const [first, second] = frames;
+  assert.ok(first?.type === "daemon_fragment" && second?.type === "daemon_fragment");
+
+  const conflicting = new RemoteDaemonMessageAssembler();
+  conflicting.accept(first);
+  assert.throws(() => conflicting.accept({ ...first, data: second.data }), /conflicts/u);
+  assert.equal(conflicting.pendingMessages, 0, "a conflict discards the message");
+
+  let now = 0;
+  const expiring = new RemoteDaemonMessageAssembler({ lifetimeMs: 1_000, now: () => now });
+  expiring.accept(first);
+  now = 1_000;
+  expiring.accept({
+    ...second,
+    fragmentId: parseEnvelopeId("44444444-4444-4444-8444-444444444444"),
+  });
+  assert.equal(expiring.pendingMessages, 1, "the incomplete message expired");
+
+  const bounded = new RemoteDaemonMessageAssembler({ maxPending: 1 });
+  bounded.accept(first);
+  bounded.accept({
+    ...second,
+    fragmentId: parseEnvelopeId("44444444-4444-4444-8444-444444444444"),
+  });
+  assert.equal(bounded.pendingMessages, 1, "the oldest incomplete message was evicted");
+
+  // A fragment never carries another fragment, in either direction.
+  assert.throws(
+    () => encodeRemoteDaemonMessageFrames(first, fragmentIds()),
+    /must not be a fragment/u,
+  );
+  const inner = new TextEncoder().encode(
+    JSON.stringify({ ...first, data: encodeBase64(Uint8Array.of(1)) }),
+  );
+  const nested = new RemoteDaemonMessageAssembler();
+  const parts = [inner.subarray(0, 10), inner.subarray(10)].map((part, index) => ({
+    version: REMOTE_TRANSPORT_VERSION,
+    type: "daemon_fragment" as const,
+    fragmentId: parseEnvelopeId("55555555-5555-4555-8555-555555555555"),
+    index,
+    count: 2,
+    data: encodeBase64(part),
+  }));
+  assert.equal(nested.accept(parts[0] ?? first), undefined);
+  assert.throws(() => nested.accept(parts[1] ?? first), /must not reassemble into a fragment/u);
+});
+
+test("validates delivery batches and grant rejections", () => {
+  const delivery = { kind: "sessions_changed", generation: 1 } as const;
+  const batch = {
+    version: REMOTE_TRANSPORT_VERSION,
+    type: "daemon_deliveries" as const,
+    messages: [delivery, { ...delivery, generation: 2 }],
+  };
+  assert.deepEqual(decodeRemoteDaemonMessage(encodeRemoteDaemonMessage(batch)), batch);
+  assert.throws(
+    () => encodeRemoteDaemonMessage({ ...batch, messages: [] }),
+    /1 through 512 messages/u,
+  );
+  const rejection = {
+    version: REMOTE_TRANSPORT_VERSION,
+    type: "daemon_rejected" as const,
+    operationId: parseOperationId("66666666-6666-4666-8666-666666666666"),
+    code: "stale_grant_generation" as const,
+    hostedGrantGeneration: 3,
+  };
+  assert.deepEqual(decodeRemoteDaemonMessage(encodeRemoteDaemonMessage(rejection)), rejection);
+  assert.throws(
+    () =>
+      encodeRemoteDaemonMessage({
+        ...rejection,
+        code: "unauthorized" as unknown as "stale_grant_generation",
+      }),
+    (error) =>
+      error instanceof ProtocolValidationError && error.path === "remoteDaemonMessage.code",
+  );
+});
+
+test("carries the relay frame budget in the limits, with a larger daemon budget", () => {
+  assert.ok(
+    DEFAULT_DAEMON_RELAY_LIMITS.maxFramesPerWindow > DEFAULT_RELAY_LIMITS.maxFramesPerWindow,
+  );
+  assert.deepEqual(parseRelayLimits(DEFAULT_DAEMON_RELAY_LIMITS), DEFAULT_DAEMON_RELAY_LIMITS);
+  const { maxFramesPerWindow: _omitted, ...missing } = DEFAULT_RELAY_LIMITS;
+  assert.throws(
+    () => parseRelayLimits(missing),
+    (error) =>
+      error instanceof ProtocolValidationError && error.path === "limits.maxFramesPerWindow",
+  );
+  assert.throws(
+    () => parseRelayLimits({ ...DEFAULT_RELAY_LIMITS, rateWindowMs: 10 }),
+    (error) => error instanceof ProtocolValidationError && error.path === "limits.rateWindowMs",
   );
 });
 

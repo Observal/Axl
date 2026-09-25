@@ -161,6 +161,7 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
   );
   const received: Uint8Array[] = [];
   const prepared: Uint8Array[] = [];
+  const releasedOutbox: Uint8Array[] = [];
   const calls: string[] = [];
   const scripted = witnessOperations(calls);
   const endpoint: NativeDaemonE2eeEndpoint = {
@@ -194,8 +195,17 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
         },
       });
     },
-    async acknowledgeOutbox() {
-      throw new Error("not used");
+    async acknowledgeOutbox(operation, target) {
+      releasedOutbox.push(target.slice());
+      return scripted.commit(operation, {
+        tag: "outbox",
+        outbox: {
+          operationId: target.slice(),
+          logicalMessageId: target.slice(),
+          messageClass: "application_delivery",
+          ciphertext: Uint8Array.of(0),
+        },
+      });
     },
     async acknowledgeReceive(operation) {
       return scripted.commit(operation, { tag: "accepted", accepted: { acknowledged: true } });
@@ -239,6 +249,11 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
   }
   assert.equal(prepared.length, 1);
   assert.deepEqual(
+    releasedOutbox,
+    [Uint8Array.from(Buffer.from(responseEnvelope.operationId.replaceAll("-", ""), "hex"))],
+    "the sent response leaves the native outbox",
+  );
+  assert.deepEqual(
     calls,
     [
       "read",
@@ -255,8 +270,12 @@ test("the Windows E2EE bridge authenticates before daemon authorization and seal
       "reconcile",
       "mutate",
       "continue",
+      "read",
+      "reconcile",
+      "mutate",
+      "continue",
     ],
-    "start reconciled once; receive, response, and acknowledgement each completed their own barrier in order",
+    "start reconciled once; receive, response, outbox release, and receive acknowledgement each completed their own barrier in order",
   );
 });
 

@@ -9,8 +9,6 @@ defmodule AxlRelay.Connection do
   alias AxlRelay.{Admission, Frame, RouteRegistry}
 
   @admission_timeout_ms 5_000
-  @rate_window_ms 10_000
-  @max_frames_per_window 100
 
   @impl true
   def init(options) do
@@ -171,15 +169,16 @@ defmodule AxlRelay.Connection do
     now = System.monotonic_time(:millisecond)
 
     current =
-      if now - state.rate_window_started >= @rate_window_ms do
+      if now - state.rate_window_started >= state.limits.rate_window_ms do
         %{state | rate_window_started: now, rate_frames: 0, rate_bytes: 0}
       else
         state
       end
 
-    max_bytes = current.limits.max_frame_bytes * @max_frames_per_window
+    max_frames = current.limits.max_frames_per_window
+    max_bytes = current.limits.max_frame_bytes * max_frames
 
-    if current.rate_frames + 1 > @max_frames_per_window or current.rate_bytes + bytes > max_bytes do
+    if current.rate_frames + 1 > max_frames or current.rate_bytes + bytes > max_bytes do
       {:error, :rate_limited}
     else
       {:ok,

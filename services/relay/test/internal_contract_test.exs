@@ -23,6 +23,8 @@ defmodule AxlRelay.InternalContractTest do
     assert parsed.grant_generation == result["grantGeneration"]
     assert parsed.limits.max_frame_bytes == 65_535
     assert parsed.limits.max_queued_bytes == 524_288
+    assert parsed.limits.max_frames_per_window == 100
+    assert parsed.limits.rate_window_ms == 10_000
   end
 
   test "accepts the role-filtered discovery fixture" do

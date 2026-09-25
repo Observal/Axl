@@ -8,12 +8,16 @@ import {
   DEFAULT_RELAY_LIMITS,
   encodeRelayBinaryFrame,
   encodeRemoteDaemonMessage,
+  encodeRemoteDaemonMessageFrames,
+  encodeRemoteE2eeEnvelope,
   type OpaqueOutboxRecord,
   parseCryptoSessionId,
   parseDeviceId,
   parseIdempotencyKey,
   parseInstallationId,
+  parseOperationId,
   parseRelayBinaryFrame,
+  type RemoteDaemonMessage,
   parseRemoteRequestId,
   parseRouteId,
   parseTransportAttemptId,
@@ -29,6 +33,7 @@ import {
 import {
   HttpRelayTicketProvider,
   type RelayAdmissionCredential,
+  type RemoteDeliveryUpdate,
   RemoteHostedDelivery,
   RemoteRelayConnection,
   type RemoteRelayConnectionState,
@@ -677,4 +682,191 @@ test("reconnect resolves a new route and retries byte-identical prepared ciphert
   assert.equal(acknowledged, 2);
   assert.equal(updates.filter((state) => state === "daemon_accepted").length, 1);
   delivery.close();
+});
+
+function attemptId(index: number) {
+  return parseTransportAttemptId(`88888888-8888-4888-8888-${index.toString().padStart(12, "0")}`);
+}
+
+test("paces sends inside the relay frame budget instead of tripping the relay limit", async () => {
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory, {
+    ...credential(),
+    limits: {
+      ...DEFAULT_RELAY_LIMITS,
+      maxFramesPerWindow: 10,
+      rateWindowMs: 1_000,
+      maxQueuedBytes: 200,
+    },
+  });
+  const admission = socket.sent.length;
+  const payloads = () =>
+    socket.sent.slice(admission).map((frame) => {
+      const parsed = parseRelayBinaryFrame(frame);
+      assert.ok("opaquePayload" in parsed);
+      return parsed.opaquePayload[0];
+    });
+
+  for (let index = 0; index < 14; index += 1) {
+    connection.send(firstDaemonRoute, attemptId(index), Uint8Array.of(index));
+  }
+  assert.deepEqual(payloads(), [0, 1, 2, 3, 4, 5, 6, 7, 8], "90% of the budget is sent at once");
+  assert.equal(connection.pacedFrames, 5);
+  assert.throws(
+    () => connection.send(firstDaemonRoute, attemptId(14), Uint8Array.of(14)),
+    (error) => error instanceof RemoteRelayError && error.code === "rate_limited",
+    "a backlog beyond the relay queue bound fails loudly",
+  );
+
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  assert.deepEqual(payloads(), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], "in order");
+  assert.equal(connection.pacedFrames, 0);
+
+  for (let index = 20; index < 26; index += 1) {
+    connection.send(firstDaemonRoute, attemptId(index), Uint8Array.of(index));
+  }
+  assert.ok(connection.pacedFrames > 0);
+  connection.close();
+  assert.equal(connection.pacedFrames, 0, "a closed connection drops its paced frames");
+});
+
+async function deliveryHarness() {
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory);
+  const store = new MemoryOutboxStore();
+  let attempt = 0;
+  const attemptIds = {
+    create() {
+      attempt += 1;
+      return attemptId(100 + attempt);
+    },
+  };
+  let acknowledged = 0;
+  const delivery = new RemoteHostedDelivery({
+    connection,
+    outbox: new OpaqueOutbox(store, attemptIds, connection),
+    expectedDaemonId: daemonId,
+    attemptIds,
+    opener: {
+      async open(opaqueEnvelope) {
+        return {
+          authenticatedPeerId: daemonId,
+          plaintext: opaqueEnvelope,
+          acknowledge: async () => {
+            acknowledged += 1;
+          },
+        };
+      },
+    },
+  });
+  const messages: RemoteDaemonMessage[] = [];
+  const updates: RemoteDeliveryUpdate[] = [];
+  const errors: Error[] = [];
+  delivery.onMessage((message) => messages.push(message));
+  delivery.onDeliveryState((update) => updates.push(update));
+  delivery.onError((error) => errors.push(error));
+  await delivery.start();
+  let sequence = 0;
+  const deliver = async (plaintext: Uint8Array) => {
+    sequence += 1;
+    socket.message(
+      encodeRelayBinaryFrame({
+        transportVersion: REMOTE_TRANSPORT_VERSION,
+        attemptId: attemptId(500 + sequence),
+        sourceRouteId: firstDaemonRoute,
+        opaquePayload: plaintext,
+      }),
+    );
+    await nextTurn();
+    await delivery.drain();
+  };
+  return {
+    delivery,
+    store,
+    messages,
+    updates,
+    errors,
+    deliver,
+    acknowledged: () => acknowledged,
+  };
+}
+
+test("unpacks delivery batches and reassembles fragmented daemon messages", async () => {
+  const harness = await deliveryHarness();
+  await harness.deliver(
+    encodeRemoteDaemonMessage({
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_deliveries",
+      messages: [
+        { kind: "sessions_changed", generation: 1 },
+        { kind: "sessions_changed", generation: 2 },
+      ],
+    }),
+  );
+  assert.deepEqual(
+    harness.messages.map((message) =>
+      message.type === "daemon_delivery" && message.message.kind === "sessions_changed"
+        ? message.message.generation
+        : message.type,
+    ),
+    [1, 2],
+  );
+
+  const result = {
+    version: REMOTE_TRANSPORT_VERSION,
+    type: "daemon_result" as const,
+    requestId,
+    method: "session.history",
+    result: { text: "y".repeat(120_000) },
+  };
+  const frames = encodeRemoteDaemonMessageFrames(
+    result,
+    () => "99999999-9999-4999-8999-999999999999",
+  );
+  assert.equal(frames.length, 3);
+  for (const index of [2, 0, 1]) await harness.deliver(frames[index] ?? new Uint8Array());
+  assert.deepEqual(harness.messages.at(-1), result);
+  assert.equal(harness.messages.length, 3, "fragments are not surfaced individually");
+  assert.equal(harness.acknowledged(), 4, "every received envelope is acknowledged");
+  assert.deepEqual(harness.errors, []);
+  harness.delivery.close();
+});
+
+test("fails a queued request explicitly when the daemon rejects its grant generation", async () => {
+  const harness = await deliveryHarness();
+  const operationId = parseOperationId("abababab-abab-4bab-8bab-abababababab");
+  await harness.delivery.enqueuePrepared({
+    requestId,
+    idempotencyKey,
+    destinationCryptoSessionId: cryptoSessionId,
+    opaqueEnvelope: encodeRemoteE2eeEnvelope({
+      operationId,
+      logicalMessageId: parseOperationId("cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd"),
+      messageClass: "application_request",
+      hostedGrantGeneration: 1,
+      ciphertext: Uint8Array.of(1, 2, 3),
+    }),
+    createdAt: 1_900_000_000_000,
+    state: "queued_local",
+  });
+  assert.equal(harness.store.records.size, 1);
+
+  await harness.deliver(
+    encodeRemoteDaemonMessage({
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_rejected",
+      operationId,
+      code: "stale_grant_generation",
+      hostedGrantGeneration: 2,
+    }),
+  );
+  assert.equal(harness.store.records.size, 0, "the request will never run, so it leaves");
+  assert.deepEqual(harness.updates.at(-1), {
+    requestId,
+    state: "failed",
+    daemonRejection: "stale_grant_generation",
+  });
+  assert.equal(harness.messages.at(-1)?.type, "daemon_rejected");
+  assert.deepEqual(harness.errors, []);
+  harness.delivery.close();
 });

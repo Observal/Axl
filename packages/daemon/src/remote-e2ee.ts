@@ -7,9 +7,11 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   type AuthenticatedRemoteRequest,
   type DeviceId,
-  encodeRemoteDaemonMessage,
+  encodeRemoteDaemonMessageFrames,
   encodeRemoteE2eeEnvelope,
   isRemoteEndpointQuarantineReason,
+  MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES,
+  MAX_REMOTE_DELIVERY_BATCH,
   type OperationId,
   parseAuthenticatedRemoteRequest,
   parseDeviceId,
@@ -155,6 +157,15 @@ export interface WindowsRemoteE2eeBridgeOptions {
   readonly now?: () => number;
   readonly sender: RemoteEncryptedSender;
   readonly onError?: (error: Error) => void;
+  /** Longest a live delivery waits to be batched with the next; defaults to 50 ms. */
+  readonly deliveryFlushMs?: number;
+}
+
+/** A relay route as announced by the relay's authenticated route view. */
+export interface RemoteRelayRoute {
+  readonly routeId: RouteId;
+  readonly role: "daemon" | "device";
+  readonly deviceId?: DeviceId;
 }
 
 const WITNESS_CODE_PATTERN = /^witness_/u;
@@ -215,6 +226,16 @@ function encodePrepared(
 
 /** Bounds the replies retained for byte-exact replays of authenticated requests. */
 const MAX_REPLAY_ENTRIES = 64;
+/** Bounds the stale envelopes remembered so each is rejected once. */
+const MAX_REJECTED_OPERATIONS = 256;
+const DEFAULT_DELIVERY_FLUSH_MS = 50;
+/** Batch payload budget, leaving room for the batch framing inside one envelope. */
+const DELIVERY_BATCH_BYTES = MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES - 1_024;
+
+interface PreparedDaemonMessage {
+  readonly envelope: Uint8Array;
+  readonly operationId: OperationId;
+}
 
 /** Replies already produced for one authenticated request envelope, in send order. */
 interface ReplayEntry {
@@ -269,6 +290,12 @@ export class WindowsRemoteE2eeBridge {
   private tail: Promise<void> = Promise.resolve();
   private readonly inFlight = new Set<Promise<void>>();
   private readonly replies = new Map<string, ReplayEntry>();
+  private readonly rejected = new Set<OperationId>();
+  private readonly deliveryFlushMs: number;
+  private pendingDeliveries: ServerMessage[] = [];
+  private pendingDeliveryBytes = 0;
+  private deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+  private deliveryBatchesInFlight = 0;
   private currentRoute: RouteId | undefined;
   private closed = false;
   private witness: RemoteEndpointWitnessStatus | undefined;
@@ -286,6 +313,10 @@ export class WindowsRemoteE2eeBridge {
     };
     this.random = options.random ?? Math.random;
     this.now = options.now ?? Date.now;
+    this.deliveryFlushMs = options.deliveryFlushMs ?? DEFAULT_DELIVERY_FLUSH_MS;
+    if (!Number.isSafeInteger(this.deliveryFlushMs) || this.deliveryFlushMs < 0) {
+      throw new TypeError("deliveryFlushMs must be a non-negative integer");
+    }
     this.attachment = options.daemon.attachAuthenticatedRemoteDevice({
       deviceId: options.deviceId,
       authority: options.authority,
@@ -450,6 +481,7 @@ export class WindowsRemoteE2eeBridge {
   /** Wait until no endpoint work is queued and no dispatched request is still settling. */
   async drain(): Promise<void> {
     while (true) {
+      this.flushDeliveries();
       const current = this.tail;
       const dispatched = [...this.inFlight];
       await Promise.allSettled([current, ...dispatched]);
@@ -472,10 +504,27 @@ export class WindowsRemoteE2eeBridge {
     if (this.closed) return;
     this.closed = true;
     this.cancelRecovery();
+    if (this.deliveryTimer !== undefined) clearTimeout(this.deliveryTimer);
+    this.deliveryTimer = undefined;
+    this.pendingDeliveries = [];
+    this.pendingDeliveryBytes = 0;
     this.attachment.close();
     this.options.endpoint.close();
     this.currentRoute = undefined;
     this.replies.clear();
+  }
+
+  /**
+   * Follow the relay's route for this device. The relay learns it from ticket admission, so a
+   * device that reconnected keeps receiving deliveries before it sends anything. Losing the route
+   * keeps the last one; sends to it fail at the relay until the device returns.
+   */
+  observeRelayRoutes(routes: readonly RemoteRelayRoute[]): void {
+    if (this.closed) return;
+    const route = routes.find(
+      (candidate) => candidate.role === "device" && candidate.deviceId === this.options.deviceId,
+    );
+    if (route !== undefined) this.currentRoute = route.routeId;
   }
 
   private cancelRecovery(): void {
@@ -500,11 +549,15 @@ export class WindowsRemoteE2eeBridge {
     try {
       const envelope = parseRemoteE2eeEnvelope(bytes);
       const authority = this.options.authority.snapshot(this.options.deviceId);
-      if (
-        authority?.hostedGeneration !== envelope.hostedGrantGeneration ||
-        authority.effectiveScopes.length === 0
-      ) {
-        throw new Error("Remote hosted grant generation is stale or unavailable");
+      if (authority?.hostedGeneration === undefined || authority.effectiveScopes.length === 0) {
+        throw new Error("Remote hosted grant is unavailable");
+      }
+      if (envelope.hostedGrantGeneration < authority.hostedGeneration) {
+        await this.rejectStale(sourceRouteId, envelope.operationId, authority.hostedGeneration);
+        throw new Error("Remote hosted grant generation is stale");
+      }
+      if (envelope.hostedGrantGeneration !== authority.hostedGeneration) {
+        throw new Error("Remote hosted grant generation is ahead of the daemon");
       }
       const replay = this.replies.get(key);
       if (replay !== undefined) {
@@ -574,6 +627,8 @@ export class WindowsRemoteE2eeBridge {
     const { request, replay } = opened;
     const replies: Promise<void>[] = [];
     const reply = (message: RemoteDaemonMessage): Promise<void> => {
+      // Deliveries produced before this reply are sealed ahead of it.
+      this.flushDeliveries();
       const sent = this.run(() => this.sendReply(replay, message), "work");
       sent.catch(() => undefined);
       replies.push(sent);
@@ -633,9 +688,39 @@ export class WindowsRemoteE2eeBridge {
     if (this.closed) throw new Error("Remote E2EE bridge is closed");
     const route = this.currentRoute;
     if (route === undefined) throw new Error("Remote route is unavailable");
-    const envelope = await this.prepareMessage(message);
-    replay.envelopes.push(envelope);
-    await this.options.sender.send(route, envelope.slice());
+    const prepared = await this.prepareMessage(message);
+    // Cache every sealed part before sending any, so a replay can always re-send the whole reply.
+    for (const { envelope } of prepared) replay.envelopes.push(envelope);
+    for (const { envelope, operationId } of prepared) {
+      await this.options.sender.send(route, envelope.slice());
+      await this.releaseOutbox(operationId);
+    }
+  }
+
+  /**
+   * Tell the device, once per envelope, that it was sealed under a superseded hosted grant. The
+   * envelope is never decrypted or executed, so the device must fail the request rather than
+   * retry the same ciphertext forever. The reply is sealed under the current grant and goes to
+   * the frame's source without moving the reply route, since the frame is unauthenticated.
+   */
+  private async rejectStale(
+    sourceRouteId: RouteId,
+    operationId: OperationId,
+    hostedGrantGeneration: number,
+  ): Promise<void> {
+    if (this.rejected.has(operationId)) return;
+    if (this.rejected.size >= MAX_REJECTED_OPERATIONS) {
+      const oldest = this.rejected.values().next().value;
+      if (oldest !== undefined) this.rejected.delete(oldest);
+    }
+    this.rejected.add(operationId);
+    await this.sendMessage(sourceRouteId, {
+      version: 1,
+      type: "daemon_rejected",
+      operationId,
+      code: "stale_grant_generation",
+      hostedGrantGeneration,
+    });
   }
 
   /** Re-send the replies already produced for a byte-exact replay, and follow the device's route. */
@@ -822,48 +907,133 @@ export class WindowsRemoteE2eeBridge {
     }
   }
 
+  /**
+   * Coalesce live deliveries into `daemon_deliveries` batches. A batch waits at most the flush
+   * window, and keeps growing while earlier batches still wait for the endpoint, so a slow witness
+   * or relay budget produces fewer, larger envelopes instead of an unbounded queue of small ones.
+   */
   private enqueueDaemonMessage(message: ServerMessage): void {
     if (this.currentRoute === undefined || this.closed) return;
+    const bytes = Buffer.byteLength(JSON.stringify(message)) + 1;
+    if (
+      this.pendingDeliveries.length > 0 &&
+      (this.pendingDeliveryBytes + bytes > DELIVERY_BATCH_BYTES ||
+        this.pendingDeliveries.length >= MAX_REMOTE_DELIVERY_BATCH)
+    ) {
+      this.flushDeliveries();
+    }
+    this.pendingDeliveries.push(message);
+    this.pendingDeliveryBytes += bytes;
+    // A delivery too large for a batch is sent alone and fragmented.
+    if (this.pendingDeliveryBytes >= DELIVERY_BATCH_BYTES) this.flushDeliveries();
+    else this.armDeliveryTimer();
+  }
+
+  private armDeliveryTimer(): void {
+    if (this.deliveryTimer !== undefined || this.closed) return;
+    this.deliveryTimer = setTimeout(() => {
+      this.deliveryTimer = undefined;
+      if (this.deliveryBatchesInFlight > 0) this.armDeliveryTimer();
+      else this.flushDeliveries();
+    }, this.deliveryFlushMs);
+  }
+
+  /** Queue every pending delivery now, ahead of anything queued after this call. */
+  private flushDeliveries(): void {
+    if (this.deliveryTimer !== undefined) clearTimeout(this.deliveryTimer);
+    this.deliveryTimer = undefined;
+    if (this.pendingDeliveries.length === 0) return;
+    const batch = this.pendingDeliveries;
+    this.pendingDeliveries = [];
+    this.pendingDeliveryBytes = 0;
+    const [first] = batch;
+    const message: RemoteDaemonMessage =
+      batch.length === 1 && first !== undefined
+        ? { version: 1, type: "daemon_delivery", message: first }
+        : { version: 1, type: "daemon_deliveries", messages: batch };
+    this.deliveryBatchesInFlight += 1;
     this.run(async () => {
       // Resolve the route at send time so a device that reconnected keeps receiving.
       const route = this.currentRoute;
       if (route === undefined || this.closed) return;
-      await this.sendMessage(route, { version: 1, type: "daemon_delivery", message });
-    }, "work").catch((cause: unknown) => {
-      this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
-    });
+      await this.sendMessage(route, message);
+    }, "work")
+      .catch((cause: unknown) => {
+        this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+      })
+      .finally(() => {
+        this.deliveryBatchesInFlight -= 1;
+      });
   }
 
   private async sendMessage(routeId: RouteId, message: RemoteDaemonMessage): Promise<void> {
-    await this.options.sender.send(routeId, await this.prepareMessage(message));
+    for (const prepared of await this.prepareMessage(message)) {
+      await this.options.sender.send(routeId, prepared.envelope);
+      await this.releaseOutbox(prepared.operationId);
+    }
   }
 
-  private async prepareMessage(message: RemoteDaemonMessage): Promise<Uint8Array> {
+  /**
+   * Seal one daemon message as one or more envelopes. A message larger than one envelope is split
+   * into `daemon_fragment` messages, each sealed under its own derived operation.
+   */
+  private async prepareMessage(message: RemoteDaemonMessage): Promise<PreparedDaemonMessage[]> {
     const authority = this.options.authority.snapshot(this.options.deviceId);
     if (authority?.hostedGeneration === undefined || authority.effectiveScopes.length === 0) {
       throw new Error("Remote authority is unavailable");
     }
     const hostedGeneration = authority.hostedGeneration;
     const requestIdentity = "requestId" in message ? message.requestId : randomUUID();
-    const operation = derivedId(`axl-e2ee-daemon-${message.type}-operation-v1`, requestIdentity);
-    const logical = derivedId(`axl-e2ee-daemon-${message.type}-logical-v1`, requestIdentity);
-    const plaintext = encodeRemoteDaemonMessage(message);
+    const frames = encodeRemoteDaemonMessageFrames(message, randomUUID);
+    const prepared: PreparedDaemonMessage[] = [];
     try {
-      const prepared = outbox(
+      for (const [index, plaintext] of frames.entries()) {
+        const identity = frames.length === 1 ? requestIdentity : `${requestIdentity}:${index}`;
+        const operation = derivedId(`axl-e2ee-daemon-${message.type}-operation-v1`, identity);
+        const logical = derivedId(`axl-e2ee-daemon-${message.type}-logical-v1`, identity);
+        try {
+          const sealed = outbox(
+            await this.barrier.mutate((endpoint) =>
+              endpoint.prepareApplication(
+                operation.bytes,
+                logical.bytes,
+                BigInt(hostedGeneration),
+                plaintext,
+              ),
+            ),
+          );
+          prepared.push({
+            envelope: encodePrepared(sealed, hostedGeneration, "application_delivery"),
+            operationId: uuidText(sealed.operationId),
+          });
+        } finally {
+          operation.bytes.fill(0);
+          logical.bytes.fill(0);
+        }
+      }
+      return prepared;
+    } finally {
+      for (const plaintext of frames) plaintext.fill(0);
+    }
+  }
+
+  /**
+   * Drop a sent envelope from the native outbox. The bridge never resends from that outbox:
+   * replies are replayed from memory and deliveries resume from cursors, so a retained record
+   * would only grow the endpoint's durable state.
+   */
+  private async releaseOutbox(operationId: OperationId): Promise<void> {
+    const target = idBytes(operationId);
+    const acknowledgement = derivedId("axl-e2ee-daemon-outbox-ack-v1", operationId);
+    try {
+      outbox(
         await this.barrier.mutate((endpoint) =>
-          endpoint.prepareApplication(
-            operation.bytes,
-            logical.bytes,
-            BigInt(hostedGeneration),
-            plaintext,
-          ),
+          endpoint.acknowledgeOutbox(acknowledgement.bytes, target),
         ),
       );
-      return encodePrepared(prepared, hostedGeneration, "application_delivery");
     } finally {
-      plaintext.fill(0);
-      operation.bytes.fill(0);
-      logical.bytes.fill(0);
+      target.fill(0);
+      acknowledgement.bytes.fill(0);
     }
   }
 

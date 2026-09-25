@@ -52,7 +52,7 @@ Production service authentication is distinct from user authentication and ticke
 
 The current code therefore injects authentication on both sides and provides no production credential implementation. Selecting mTLS, SPIFFE, or a cloud IAM mechanism waits for the deployment decision. Tests use obvious fixture credentials only.
 
-If the control plane is unavailable, new admissions fail. Existing connections continue only through their consumed-ticket lease.
+If the control plane is unavailable, new admissions fail. Existing connections continue only through their connection lease.
 
 ## WebSocket admission
 
@@ -107,7 +107,7 @@ Receipt and failure frames instead contain one byte at offset 22. Receipt values
 
 These assignments must not be reordered. A new failure receives a new number or requires a transport-version change.
 
-A complete WebSocket message, including this framing, is at most 65,535 bytes. Therefore the largest opaque payload is 65,497 bytes. The relay rejects oversized messages through the WebSocket parser ceiling and checks negotiated limits again before parsing or enqueueing.
+A complete WebSocket message, including this framing, is at most 65,535 bytes. Therefore the largest opaque payload is 65,497 bytes. The relay rejects oversized messages through the WebSocket parser ceiling and checks negotiated limits again before parsing or enqueueing. Application messages larger than one encrypted frame are split by the daemon before encryption, as described in [Remote hosted path](remote-hosted-path.md); the relay never sees message boundaries above the frame.
 
 `attemptId` is transport-local. Retrying exact opaque bytes uses a new attempt ID while retaining the encrypted request and daemon idempotency identifiers inside the opaque payload. The relay does not define or inspect that payload.
 
@@ -125,7 +125,15 @@ The first relay slice uses pinned Bandit, Plug, and WebSock Adapter production d
 
 ## Heartbeats and half-open connections
 
-The relay sends a ping every 20 seconds and records inbound activity with a monotonic clock. A valid binary frame, ping, or pong updates liveness. Outbound pings do not. A connection closes with `idle_timeout` after 60 seconds without valid inbound activity. Ticket lease expiry is an independent hard deadline and is never extended by heartbeat traffic.
+The relay sends a ping every 20 seconds and records inbound activity with a monotonic clock. A valid binary frame, ping, or pong updates liveness. Outbound pings do not. A connection closes with `idle_timeout` after 60 seconds without valid inbound activity. The connection lease is an independent hard deadline and is never extended by heartbeat traffic.
+
+## Connection lease and frame budget
+
+A ticket and the connection it admits have separate lifetimes. The ticket is valid for 60 seconds and can be consumed once. Consumption starts a connection lease of 30 minutes, returned as `leaseExpiresAt`. The control plane refuses a lease shorter than the ticket lifetime or longer than 24 hours. When the lease ends the relay closes the connection and the client reconnects with a fresh ticket, which rechecks admission and grant generation. Tying the lease to the ticket expiry dropped every connection after 60 seconds, so it cost a reconnect per minute without adding a check the daemon does not already make on every request.
+
+The relay limits inbound frames per connection over a fixed window. The budget is part of the admission limits (`maxFramesPerWindow` and `rateWindowMs`), so the control plane can size it per role without a relay change. The defaults are 100 frames per 10 seconds for a device and 1,000 for the daemon, which fans out session activity to every subscribed device. The relay accepts budgets from 1 to 10,000 frames over windows of 1 to 60 seconds. A connection that exceeds its budget closes with `rate_limited`.
+
+The SDK connection paces its own sends to 90% of the negotiated budget over a sliding window. Frames beyond it wait in a bounded in-memory queue, charged against `maxQueuedBytes`, and drain as the window slides. A send that would overflow that queue fails with `rate_limited` locally instead of costing the connection. Closing or losing the connection discards the paced frames; durable requests remain in the outbox and resend after reconnection.
 
 ## Slow consumers
 
