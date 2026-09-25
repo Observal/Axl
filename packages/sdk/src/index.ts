@@ -16,6 +16,7 @@ export * from "./projector.ts";
 export * from "./remote-e2ee.ts";
 export * from "./remote-outbox.ts";
 export * from "./remote-pairing.ts";
+export * from "./remote-pairing-link.ts";
 export * from "./remote-relay.ts";
 export * from "./subscription.ts";
 export * from "./witness.ts";

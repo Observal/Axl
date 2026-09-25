@@ -675,6 +675,7 @@ export const WIRE_CAPABILITIES = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  "remote.pairing.start",
 ] as const satisfies readonly CapabilityId[];
 
 export interface ClientIdentity {
@@ -748,6 +749,15 @@ export interface QueueRestoreResult {
   readonly operationId?: OperationId;
 }
 
+/** A started remote pairing: the one-time link a device opens to pair with this daemon. */
+export interface RemotePairingStartResult {
+  /** HTTPS link whose fragment carries the invitation; valid until `expiresAt`. */
+  readonly link: string;
+  readonly cryptoSessionId: string;
+  readonly deviceId: string;
+  readonly expiresAt: number;
+}
+
 export interface RpcMethodMap {
   readonly "daemon.info": {
     readonly params: Record<string, never>;
@@ -788,6 +798,10 @@ export interface RpcMethodMap {
   readonly "provider.auth.logout": {
     readonly params: ProviderLogoutParams;
     readonly result: ProviderLogoutResult;
+  };
+  readonly "remote.pairing.start": {
+    readonly params: Record<string, never>;
+    readonly result: RemotePairingStartResult;
   };
   readonly "session.create": {
     readonly params: { readonly cwd: string } & SessionConfiguration;
@@ -1140,6 +1154,7 @@ export const RPC_ERROR_CODES = [
   "provider_disabled",
   "model_not_found",
   "model_unavailable",
+  "remote_unavailable",
   "authentication_required",
   "authentication_failed",
   "authentication_unavailable",
@@ -1599,7 +1614,11 @@ export function parseWireRequest(value: unknown): WireRequest {
       },
     };
   }
-  if (method === "daemon.info" || method === "connection.ping") {
+  if (
+    method === "daemon.info" ||
+    method === "connection.ping" ||
+    method === "remote.pairing.start"
+  ) {
     exact(params, "request.params", []);
     return { ...base, method, params: {} };
   }
@@ -2565,6 +2584,22 @@ export function parseRpcResult<Method extends RpcMethod>(
     parsed = parseProviderAuthenticationStatusResult(value);
   } else if (method === "provider.auth.login" || method === "provider.auth.logout") {
     parsed = parseProviderAuthenticationStatus(value, path);
+  } else if (method === "remote.pairing.start") {
+    const result = object(value, path);
+    exact(result, path, ["link", "cryptoSessionId", "deviceId", "expiresAt"]);
+    const link = boundedString(result.link, `${path}.link`, 8_192);
+    if (!link.startsWith("https://")) {
+      throw new ProtocolValidationError(`${path}.link`, "must be an HTTPS link");
+    }
+    if (!Number.isSafeInteger(result.expiresAt) || (result.expiresAt as number) < 0) {
+      throw new ProtocolValidationError(`${path}.expiresAt`, "must be a timestamp");
+    }
+    parsed = {
+      link,
+      cryptoSessionId: boundedString(result.cryptoSessionId, `${path}.cryptoSessionId`, 36),
+      deviceId: boundedString(result.deviceId, `${path}.deviceId`, 36),
+      expiresAt: result.expiresAt,
+    };
   } else if (method === "session.create" || method === "session.resume") {
     parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
@@ -2956,6 +2991,7 @@ export const RPC_METHODS = [
   "provider.auth.status",
   "provider.auth.login",
   "provider.auth.logout",
+  "remote.pairing.start",
   "session.create",
   "session.resume",
   "session.list",
@@ -3076,6 +3112,7 @@ export const RPC_METHOD_ERROR_CODES = {
     "authentication_unavailable",
     "authentication_failed",
   ],
+  "remote.pairing.start": ["remote_unavailable"],
   "session.create": [
     "invalid_cwd",
     ...MUTATION_ERRORS,

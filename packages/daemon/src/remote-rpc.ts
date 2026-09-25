@@ -14,6 +14,8 @@ const REMOTE_RPC_SCOPES = Object.freeze({
   "session.workspace.read": "observe",
   "session.workspace.status": "observe",
   "session.workspace.diff": "observe",
+  // Reopening a closed session starts its runtime, so it needs steer like the requests that follow.
+  "session.resume": "steer",
   "session.send": "steer",
   "session.steer": "steer",
   "session.followUp": "steer",

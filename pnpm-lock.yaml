@@ -197,7 +197,6 @@ importers:
       '@axl/sandbox':
         specifier: workspace:*
         version: link:../sandbox
-    devDependencies:
       '@axl/sdk':
         specifier: workspace:*
         version: link:../sdk

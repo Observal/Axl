@@ -199,6 +199,7 @@ const params = {
   "provider.auth.status": { providerId: "provider-1" },
   "provider.auth.login": { providerId: "provider-1", method: "oauth" },
   "provider.auth.logout": { providerId: "provider-1" },
+  "remote.pairing.start": {},
   "session.create": {
     cwd: "/workspace",
     providerId: "provider-1",
@@ -376,6 +377,12 @@ const results = {
     source: "OAuth",
   },
   "provider.auth.logout": { providerId: "provider-1", phase: "logged_out" },
+  "remote.pairing.start": {
+    link: "https://axl.example/remote/#v=1",
+    cryptoSessionId: "01900000-0000-7000-8000-000000000001",
+    deviceId: "01900000-0000-7000-8000-000000000002",
+    expiresAt: 1_900_000_000_000,
+  },
   "session.create": opened,
   "session.resume": opened,
   "session.list": {
