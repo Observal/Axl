@@ -74,6 +74,9 @@ export const testWitness = () => {
     get responses() {
       return witness.responses;
     },
+    get trustConfig() {
+      return witness.trustConfig;
+    },
   };
   witnessHandles.set(facade, witness);
   return facade;
@@ -82,6 +85,11 @@ export const testDaemonEndpoint = (root, account, installation, session, witness
   wrap(daemonFactory(root, account, installation, session, targetsWitness(witness)));
 export const testDeviceEndpoint = (root, account, installation, session, device, witness) =>
   wrap(deviceFactory(root, account, installation, session, device, targetsWitness(witness)));
+/** Test storage certified by the replicas named in a canonical trust configuration. */
+export const configuredDaemonEndpoint = (root, account, installation, session, trust) =>
+  wrap(native.configuredDaemonEndpoint(root, account, installation, session, trust));
+export const configuredDeviceEndpoint = (root, account, installation, session, device, trust) =>
+  wrap(native.configuredDeviceEndpoint(root, account, installation, session, device, trust));
 export const testPanic = (endpoint) => Promise.resolve(native.testPanic(targets.get(endpoint))).catch((cause) => { throw mapError(cause); });
 export const nativeExports = Object.freeze(Object.keys(native).sort());
 

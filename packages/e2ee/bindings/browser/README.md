@@ -32,9 +32,30 @@ observes the obsolete key absent, and only then releases the exact result from R
 loss, worker loss, or ambiguous completion destroys the transient endpoint (`recovery_required`) and
 recovery reopens from committed data. Version 1 and unknown newer databases fail closed with
 `unsupported_schema`. No WASM class has a JavaScript constructor, and the page protocol never
-receives the endpoint, the store, a key, a transition, or a plaintext buffer. The native-only pairing
-lifecycle (claims, reservations, acknowledgements, outbox, reset) has no browser implementation yet;
-see "Browser mutation coverage" in [`../../BROWSER_STORAGE.md`](../../BROWSER_STORAGE.md).
+receives the endpoint, the store, a key, a transition, or a plaintext buffer.
+
+The worker runs the complete witness barrier itself (`worker/barrier.js`): fresh read, reconcile,
+mutate, and continue, against the fixed same-origin gateway path `/v1/e2ee/witness` with the account
+credential the page passes once through `authorizeWitness()`. The page receives only the exact
+released result of each operation, never a request, certificate, or credential. The device side of
+native pairing is available to the page: `pairingClaim()` signs a `PairingClaimV1` over the KeyPackage
+the registration created, `joinPublished()` joins the daemon's published Welcome, and
+`preparePairActivation()` sends the activation the native daemon's `acceptActivation` verifies. The
+daemon-side lifecycle (reservations, acknowledgements, outbox, reset) stays native-only; see "Browser
+mutation coverage" in [`../../BROWSER_STORAGE.md`](../../BROWSER_STORAGE.md).
+
+### Deployment-test artifact
+
+`node scripts/build.mjs deployment-test` (with `AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE`) builds
+`dist/deployment-test` for the AWS deployment-test stack. It is the production artifact with the
+production loader, worker, barrier, driver, and storage byte-identical, plus exactly two changes:
+`worker/trust.js` loads `trust/replica-trust.bin`, whose size and SHA-256 are pinned in the build's
+`integrity.json`, and the WASM exports `deployment_test_replica_trust` to decode it. The trust is
+never read from a link, a query string, or the page. `check-abi.mjs` verifies both properties and
+that production still names no trust. `pnpm test:deployment` pairs a real browser with a native
+daemon through this artifact and the same-origin witness path, then exchanges application messages
+both ways and reopens the endpoint. It is not a production artifact: production endpoint creation
+still fails with `rollback_anchor_unavailable`.
 
 The separate test artifact drives the byte-identical driver and store from inside the dedicated
 test worker with an in-WASM peer daemon and an in-WASM deterministic three-replica witness. Its

@@ -27,6 +27,7 @@
     "check:abi": "node scripts/check-abi.mjs",
     "check:types": "tsc --noEmit --strict --target ES2022 --module NodeNext --moduleResolution NodeNext test/types.test.ts",
     "test": "node scripts/test.mjs",
+    "test:deployment": "node scripts/test-deployment.mjs",
     "test:safari": "node scripts/safari-webdriver.mjs",
     "pack:local": "node scripts/package.mjs"
   },

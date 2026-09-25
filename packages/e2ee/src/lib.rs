@@ -1442,7 +1442,6 @@ impl Phone {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn join_published_welcome(
         &mut self,
         bytes: &[u8],

@@ -243,10 +243,17 @@ separate operation, 21 epoch-ready confirmation receive, and 24 received removal
 The native-only pairing lifecycle has no browser implementation. Its state machines live in redb
 tables, and redb does not run on `wasm32-unknown-unknown`; bringing them to the browser needs a
 separate decision between a storage abstraction over an in-memory WASM backend and an independent
-browser implementation. Deferred rows: device pre-join creation from an invitation, claim
-publication, and pre-join and Welcome expiry (kinds 2, 30, 31; the browser creates its KeyPackage
-directly and receives the Welcome out of band); published-Welcome join with claim hash and expiry
-(the browser join carries only the Welcome bytes and group ID); activation acknowledgement, typed
+browser implementation. The browser still pairs with a native daemon without it: `pairing_claim`
+signs a deterministic `PairingClaimV1` over the retained kind 32 KeyPackage for a matching
+invitation (a read, not a mutation, refused once a transaction is pending or the image has joined);
+`join_published` runs kind 8 over the daemon's published Welcome with the daemon identity as the
+expected inviter; and `prepare_pair_activation` runs kind 9 over the exact native activation payload
+(`pair_activation_payload` over the session, joined group ID, and SHA-384 of the claim), so the
+native `accept_activation` verifies it unchanged. Deferred rows: device pre-join creation from an
+invitation, claim publication, and pre-join and Welcome expiry (kinds 2, 30, 31; the browser creates
+its KeyPackage at registration and does not persist the claim or its expiry); the native claim-hash
+and Welcome-expiry checks on join (the browser join verifies the Welcome, inviter, and session but
+not the reservation expiry); activation acknowledgement, typed
 epoch-ready acknowledgement, epoch-ready receive, and epoch-ready confirmation send (kinds 11, 22,
 19, 20); local revocation, reset, outbox acknowledgement, and receive acknowledgement (kinds 25 to
 28) and the outbox and accepted-message records they operate on (the browser retains released bytes

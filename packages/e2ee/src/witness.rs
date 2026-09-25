@@ -33,6 +33,10 @@ pub const WITNESS_RECEIPT_MAX_BYTES: usize = 1024;
 pub const WITNESS_CERTIFICATE_MAX_BYTES: usize = 3 * 1024;
 pub const WITNESS_REPLICA_COUNT: usize = 3;
 pub const WITNESS_MAX_KEYS_PER_REPLICA: usize = 4;
+pub const REPLICA_TRUST_CONFIG_VERSION: u16 = 1;
+/// Version, count, and three replicas each with the maximum number of 48-byte keys.
+pub const REPLICA_TRUST_CONFIG_MAX_BYTES: usize =
+    3 + WITNESS_REPLICA_COUNT * (16 + 1 + WITNESS_MAX_KEYS_PER_REPLICA * 48);
 pub const WITNESS_CREDENTIAL_MAX_BYTES: usize = 512;
 
 const REQUEST_SIGNATURE_DOMAIN: &[u8] = b"Axl rollback witness request v1";
@@ -800,6 +804,57 @@ impl ReplicaTrustSet {
 
     pub fn replicas(&self) -> &[ReplicaTrust; WITNESS_REPLICA_COUNT] {
         &self.replicas
+    }
+
+    /// Decode the canonical trust configuration produced by [`Self::encode_config`]. It is how a
+    /// deployment names its replica keys to an endpoint that was not built with them; it carries
+    /// only public verification keys.
+    pub fn decode_config(bytes: &[u8]) -> Result<Self, WitnessError> {
+        if bytes.is_empty() || bytes.len() > REPLICA_TRUST_CONFIG_MAX_BYTES {
+            return Err(WitnessError::BoundExceeded);
+        }
+        let mut cursor = Cursor::new(bytes);
+        if cursor.u16()? != REPLICA_TRUST_CONFIG_VERSION
+            || cursor.u8()? as usize != WITNESS_REPLICA_COUNT
+        {
+            return Err(WitnessError::InvalidTrustSet);
+        }
+        let mut replicas = Vec::with_capacity(WITNESS_REPLICA_COUNT);
+        for _ in 0..WITNESS_REPLICA_COUNT {
+            let replica_id = cursor.array()?;
+            let count = cursor.u8()? as usize;
+            if count == 0 || count > WITNESS_MAX_KEYS_PER_REPLICA {
+                return Err(WitnessError::InvalidTrustSet);
+            }
+            let mut keys = Vec::with_capacity(count);
+            for _ in 0..count {
+                keys.push(ReplicaKey::new(cursor.array()?, cursor.array()?)?);
+            }
+            replicas.push(ReplicaTrust::new(replica_id, keys)?);
+        }
+        cursor.finish()?;
+        let value = Self::new(replicas)?;
+        if value.encode_config()? != bytes {
+            return Err(WitnessError::NonCanonical);
+        }
+        Ok(value)
+    }
+
+    /// Canonical trust configuration: version, replica count, then each replica in ID order with
+    /// its keys in key-ID order.
+    pub fn encode_config(&self) -> Result<Vec<u8>, WitnessError> {
+        let mut out = Vec::with_capacity(REPLICA_TRUST_CONFIG_MAX_BYTES);
+        out.extend_from_slice(&REPLICA_TRUST_CONFIG_VERSION.to_be_bytes());
+        out.push(WITNESS_REPLICA_COUNT as u8);
+        for replica in &self.replicas {
+            out.extend_from_slice(&replica.replica_id);
+            out.push(u8::try_from(replica.keys.len()).map_err(|_| WitnessError::InvalidTrustSet)?);
+            for key in &replica.keys {
+                out.extend_from_slice(&key.key_id);
+                out.extend_from_slice(&key.verification_key);
+            }
+        }
+        Ok(out)
     }
 
     fn replica(&self, replica_id: Id) -> Option<&ReplicaTrust> {
@@ -2801,6 +2856,70 @@ mod tests {
         assert_eq!(
             ReplicaTrust::new(id(88), too_many),
             Err(WitnessError::InvalidTrustSet)
+        );
+    }
+
+    #[test]
+    fn trust_config_round_trips_canonically_and_rejects_every_malformed_form() {
+        let fixture = fixture(2);
+        let encoded = fixture.trust.encode_config().unwrap();
+        assert_eq!(encoded.len(), 3 + 3 * (16 + 1 + 48));
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&encoded).unwrap(),
+            fixture.trust
+        );
+
+        // Replicas out of ID order decode to the same set but are not canonical.
+        let mut swapped = encoded[..3].to_vec();
+        swapped.extend_from_slice(&encoded[3 + 65..3 + 130]);
+        swapped.extend_from_slice(&encoded[3..3 + 65]);
+        swapped.extend_from_slice(&encoded[3 + 130..]);
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&swapped),
+            Err(WitnessError::NonCanonical)
+        );
+
+        let mut version = encoded.clone();
+        version[1] = 2;
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&version),
+            Err(WitnessError::InvalidTrustSet)
+        );
+        let mut count = encoded.clone();
+        count[2] = 2;
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&count),
+            Err(WitnessError::InvalidTrustSet)
+        );
+        let mut no_keys = encoded.clone();
+        no_keys[3 + 16] = 0;
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&no_keys),
+            Err(WitnessError::InvalidTrustSet)
+        );
+        let mut duplicate_replica = encoded.clone();
+        duplicate_replica.copy_within(3..3 + 16, 3 + 65);
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&duplicate_replica),
+            Err(WitnessError::InvalidTrustSet)
+        );
+        let mut zero_key = encoded.clone();
+        zero_key[3 + 17 + 16..3 + 17 + 48].fill(0);
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&zero_key),
+            Err(WitnessError::InvalidTrustSet)
+        );
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(ReplicaTrustSet::decode_config(&trailing).is_err());
+        assert!(ReplicaTrustSet::decode_config(&encoded[..encoded.len() - 1]).is_err());
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&[]),
+            Err(WitnessError::BoundExceeded)
+        );
+        assert_eq!(
+            ReplicaTrustSet::decode_config(&vec![0; REPLICA_TRUST_CONFIG_MAX_BYTES + 1]),
+            Err(WitnessError::BoundExceeded)
         );
     }
 

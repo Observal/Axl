@@ -133,6 +133,65 @@ async function activatedPair(seed = 20) {
   return { root, daemon, device, witness, session };
 }
 
+test("configured trust certifies only through the named replicas", async () => {
+  const root = mkdtempSync(join(tmpdir(), "axl-e2ee-node-"));
+  try {
+    const account = Buffer.alloc(16, 60);
+    const installation = uuid(61);
+    const session = uuid(62);
+    const witness = fixture.testWitness();
+    const other = fixture.testWitness();
+    const config = witness.trustConfig;
+    assert.equal(config.byteLength, 3 + 3 * (16 + 1 + 48));
+
+    const daemon = fixture.configuredDaemonEndpoint(
+      join(root, "daemon"),
+      account,
+      installation,
+      session,
+      config,
+    );
+    const issued = await complete(daemon, witness, await daemon.issue(operation(1)));
+    assert.equal(issued.publication.tag, "issued");
+    const device = fixture.configuredDeviceEndpoint(
+      join(root, "device"),
+      account,
+      installation,
+      session,
+      uuid(63),
+      config,
+    );
+    const prejoin = await complete(
+      device,
+      witness,
+      await device.prepare(issued.publication.bytes, operation(2)),
+    );
+    assert.equal(prejoin.publication.tag, "prepared");
+
+    // Receipts from replicas the configuration does not name never complete an operation.
+    const foreign = fixture.configuredDaemonEndpoint(
+      join(root, "foreign"),
+      account,
+      installation,
+      uuid(64),
+      other.trustConfig,
+    );
+    const pending = await foreign.issue(operation(1));
+    await assert.rejects(foreign.continueWitness(pending.operationId, witness.respond(pending.request)), {
+      code: "witness_receipt_invalid",
+    });
+
+    for (const malformed of [Buffer.alloc(0), Buffer.concat([config, Buffer.alloc(1)]), config.subarray(1)]) {
+      assert.throws(
+        () => fixture.configuredDaemonEndpoint(join(root, "bad"), account, installation, session, malformed),
+        /invalid_argument|bound_exceeded/u,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("production artifact reports its ABI and fails closed", async () => {
   assert.deepEqual(production.getBindingInfo(), {
     abiVersion: 2,
