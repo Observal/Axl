@@ -9,7 +9,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build --base ./ --manifest && node scripts/write-metadata.ts",
     "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/sdk build && pnpm --filter @axl/ui build && node --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build:remote": "vite build --config vite.remote.config.ts"
   },
   "dependencies": {
     "@axl/sdk": "workspace:*",
