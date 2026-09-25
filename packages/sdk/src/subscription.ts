@@ -63,6 +63,9 @@ class ResumableSessionSubscription implements SessionSubscription {
   private cursorStoreFailed = false;
   private generation = 0;
   private delivery: Promise<void> = Promise.resolve();
+  private newestQueued:
+    | { readonly generation: number; readonly subscriptionId: string; readonly sequence: number }
+    | undefined;
   private recovery: Promise<void> | undefined;
   private removeEvent: () => void = () => undefined;
   private removeActivity: () => void = () => undefined;
@@ -330,6 +333,11 @@ class ResumableSessionSubscription implements SessionSubscription {
   }
 
   private enqueueEvent(delivery: WireEvent, generation: number): void {
+    this.newestQueued = {
+      generation,
+      subscriptionId: delivery.subscriptionId,
+      sequence: delivery.sequence,
+    };
     this.delivery = this.delivery
       .then(() => this.applyEvent(delivery, generation))
       .catch((error: unknown) => {
@@ -350,6 +358,17 @@ class ResumableSessionSubscription implements SessionSubscription {
     }
     await this.reduceEvent(delivery.event);
     this.sequence = delivery.sequence;
+    // Acknowledgements are cumulative, so a burst acknowledges only its newest cursor.
+    // Per-event acknowledgements can exceed transport rate limits during reload replay.
+    const newest = this.newestQueued;
+    if (
+      newest !== undefined &&
+      newest.generation === generation &&
+      newest.subscriptionId === delivery.subscriptionId &&
+      newest.sequence > delivery.sequence
+    ) {
+      return;
+    }
     await this.persist(delivery.cursor, generation, this.client, delivery.subscriptionId);
   }
 

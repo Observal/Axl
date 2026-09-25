@@ -206,6 +206,41 @@ test("reduces every frozen page before acknowledging and persists live cursors",
   assert.equal(subscription.projector.state.activity, undefined);
 });
 
+test("acknowledges only the newest cursor of a delivered event burst", async () => {
+  const fixture = new FixtureClient();
+  const subscription = await subscribeSession(fixture as unknown as AxlClient, sessionId, {});
+  const before = fixture.requests.length;
+  let parentId = second.id;
+  for (let index = 1; index <= 30; index += 1) {
+    const event = parseEvent({
+      version: EVENT_FORMAT_VERSION,
+      id: `00000000-0000-4000-8000-${String(100 + index).padStart(12, "0")}`,
+      sessionId,
+      parentId,
+      timestamp: 2 + index,
+      type: "user.message",
+      payload: { content: [{ type: "text", text: `burst ${index}` }] },
+    }) as CanonicalEvent;
+    parentId = event.id;
+    fixture.eventListener?.({
+      kind: "event",
+      subscriptionId: "subscription-1",
+      sessionId,
+      sequence: index,
+      cursor: `live-${index}`,
+      event,
+    });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  const acknowledgements = fixture.requests
+    .slice(before)
+    .filter((request) => request.method === "session.ack")
+    .map((request) => (request.params as { readonly cursor: string }).cursor);
+  assert.equal(subscription.projector.state.records.length, 32);
+  assert.deepEqual(acknowledgements, ["live-30"]);
+  await subscription.close();
+});
+
 test("replaces a snapshot when its boundary cursor expires before acknowledgement", async () => {
   const fixture = new ExpiringAckClient();
   const resyncErrors: Error[] = [];
