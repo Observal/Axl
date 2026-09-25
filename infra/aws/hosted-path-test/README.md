@@ -56,13 +56,17 @@ Give a local daemon the stack's remote configuration. Build the deployment-test 
 this stack's witness trust first (`AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE`), then:
 
 ```bash
-AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/remote-config.sh ~/.axl-remote.json   /path/to/axl/packages/e2ee/bindings/node/dist/deployment-test/loader/index.js
+AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/remote-config.sh ~/.axl-remote.json \n  /path/to/axl/packages/e2ee/bindings/node/dist/deployment-test/loader/index.js
 ```
 
 Start the daemon with `AXL_REMOTE_DEPLOYMENT_TEST=~/.axl-remote.json`, run `/remote` in the
-terminal, and open the printed link on the phone. The link carries the stack's shared test
+terminal, and scan the QR code with the phone camera (or open the printed link on the phone). The
+code needs a terminal at least 93 columns wide. The link carries the stack's shared test
 credentials in its fragment, which browsers never send to a server; treat it as a secret. The
 witness keeps its state in memory, so a control-plane restart requires pairing again.
+
+A paired phone can list, open, and follow sessions, send and queue prompts, and stop a running
+turn. A daemon started with `--unsafe` lets the phone watch sessions but not change them.
 
 Destroy compute and networking resources when testing ends:
 
