@@ -308,7 +308,22 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
+  // Deployment-test remote access only; production has no remote host yet.
+  const remoteConfig = process.env.AXL_REMOTE_DEPLOYMENT_TEST;
+  const remote =
+    remoteConfig === undefined || remoteConfig === ""
+      ? undefined
+      : await import("./remote-deployment-test.ts").then(async (module) =>
+          module.DeploymentTestRemoteHost.open(
+            await module.loadDeploymentTestRemoteConfig(remoteConfig),
+            stateDirectory,
+            (message) =>
+              process.stderr.write(`${message}
+`),
+          ),
+        );
   const daemon = new AxlDaemon({
+    ...(remote === undefined ? {} : { remoteAuthority: remote.authority, remotePairing: remote }),
     ...(options.buildVersion === undefined ? {} : { buildVersion: options.buildVersion }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),
     ...(options.forceTerminate === undefined ? {} : { forceTerminate: options.forceTerminate }),
@@ -469,5 +484,6 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     },
   });
   await daemon.start();
+  await remote?.attach(daemon);
   return daemon;
 }

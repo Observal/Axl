@@ -266,6 +266,13 @@ export class AxlClient {
     return this.request("daemon.info", {}, options);
   }
 
+  /** Start pairing a remote device; resolves with the one-time pairing link. Local clients only. */
+  startRemotePairing(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.pairing.start">> {
+    return this.request("remote.pairing.start", {}, options);
+  }
+
   listCommands(
     params: RpcParams<"command.list"> = {},
     options: Omit<RequestOptions, "idempotencyKey"> = {},
