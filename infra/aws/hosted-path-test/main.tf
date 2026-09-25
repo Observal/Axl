@@ -9,6 +9,10 @@ data "aws_secretsmanager_secret" "runtime" {
   name = var.secret_name
 }
 
+data "aws_secretsmanager_secret" "witness_keys" {
+  name = var.witness_secret_name
+}
+
 data "aws_ec2_managed_prefix_list" "cloudfront" {
   name = "com.amazonaws.global.cloudfront.origin-facing"
 }
@@ -321,9 +325,12 @@ resource "aws_iam_role_policy" "runtime_secret" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Effect   = "Allow"
-      Action   = ["secretsmanager:GetSecretValue"]
-      Resource = data.aws_secretsmanager_secret.runtime.arn
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      Resource = [
+        data.aws_secretsmanager_secret.runtime.arn,
+        data.aws_secretsmanager_secret.witness_keys.arn
+      ]
     }]
   })
 }
@@ -383,7 +390,8 @@ resource "aws_ecs_task_definition" "control_plane" {
       { name = "AXL_TEST_DEVICE_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:deviceId::" },
       { name = "AXL_TEST_PUBLIC_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:publicToken::" },
       { name = "AXL_TEST_RELAY_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayToken::" },
-      { name = "AXL_TEST_POSSESSION_PROOF", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:possessionProof::" }
+      { name = "AXL_TEST_POSSESSION_PROOF", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:possessionProof::" },
+      { name = "AXL_TEST_WITNESS_KEYS", valueFrom = data.aws_secretsmanager_secret.witness_keys.arn }
     ]
     logConfiguration = {
       logDriver = "awslogs"
