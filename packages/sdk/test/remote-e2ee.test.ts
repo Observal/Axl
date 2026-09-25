@@ -333,6 +333,45 @@ test("opens daemon delivery and acknowledges only after SDK acceptance", async (
   assert.equal(fixture.calls.filter((call) => call === "continue").length, 2);
 });
 
+test("a failed delivery acknowledgement retries against the original receive operation", async () => {
+  const fixture = fixtureEndpoint();
+  const targets: Uint8Array[] = [];
+  const acknowledgeReceive = fixture.endpoint.acknowledgeReceive.bind(fixture.endpoint);
+  fixture.endpoint.acknowledgeReceive = async (operationId, targetOperationId) => {
+    targets.push(new Uint8Array(targetOperationId));
+    if (targets.length === 1) throw new Error("transient acknowledgement failure");
+    return acknowledgeReceive(operationId, targetOperationId);
+  };
+  const adapter = new RemoteDeviceE2ee({
+    endpoint: witnessed(fixture.endpoint),
+    localDeviceId,
+    daemonDeviceId,
+    destinationCryptoSessionId: cryptoSessionId,
+  });
+  const opened = await adapter.open(
+    encodeRemoteE2eeEnvelope({
+      operationId: parseOperationId(idempotencyKey),
+      logicalMessageId: parseOperationId(requestId),
+      messageClass: "application_delivery",
+      hostedGrantGeneration: 7,
+      ciphertext: encodeRemoteDaemonMessage({
+        version: 1,
+        type: "daemon_result",
+        requestId,
+        method: "daemon.info",
+        result: { ok: true },
+      }),
+    }),
+  );
+  await assert.rejects(opened.acknowledge?.() ?? Promise.resolve(), {
+    message: "transient acknowledgement failure",
+  });
+  await opened.acknowledge?.();
+  const expected = uuidBytesForTest(idempotencyKey);
+  assert.deepEqual(targets, [expected, expected]);
+  assert.equal(fixture.acknowledgements.length, 1);
+});
+
 test("a witness that withholds the certificate withholds the ciphertext and plaintext", async () => {
   const fixture = fixtureEndpoint();
   const adapter = new RemoteDeviceE2ee({
