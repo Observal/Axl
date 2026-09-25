@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   buildReleasePackage,
   publicManifest,
+  RELEASE_EXTERNALS,
   validateReleaseVersion,
 } from "./build-release-package.ts";
 
@@ -32,6 +33,17 @@ test("creates a public CLI manifest without workspace dependencies", () => {
   });
   assert.deepEqual(manifest.dependencies, { yaml: "2.8.3" });
   assert.equal("private" in manifest, false);
+});
+
+test("every bundler external is a declared release runtime dependency", () => {
+  const dependencies = Object.keys(
+    JSON.parse(readFileSync("distribution/npm/package.json", "utf8")).dependencies,
+  );
+  for (const external of RELEASE_EXTERNALS) {
+    assert.ok(dependencies.includes(external.replace(/\/\*$/u, "")), external);
+  }
+  // The sandbox launcher must install with its platform binary instead of being bundled.
+  assert.ok(RELEASE_EXTERNALS.includes("@deepseek-ai/node-addon-landlock-run"));
 });
 
 test("accepts only supported release versions", () => {

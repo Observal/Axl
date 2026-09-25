@@ -34,6 +34,7 @@
     "access": "public"
   },
   "dependencies": {
+    "@deepseek-ai/node-addon-landlock-run": "0.1.1",
     "@modelcontextprotocol/sdk": "1.30.0",
     "highlight.js": "11.12.0",
     "yaml": "2.8.3"

@@ -23,6 +23,17 @@ const TEMPLATE = join(ROOT, "distribution", "npm", "package.json");
 const STAGE = join(ROOT, ".release", "npm");
 const ARTIFACTS = join(ROOT, ".release", "artifacts");
 
+/**
+ * Runtime packages left out of the bundle. Each must be a declared release dependency.
+ * The Landlock addon resolves its per-platform launcher package at runtime.
+ */
+export const RELEASE_EXTERNALS = [
+  "@deepseek-ai/node-addon-landlock-run",
+  "@modelcontextprotocol/sdk",
+  "@modelcontextprotocol/sdk/*",
+  "yaml",
+] as const;
+
 export interface ReleasePackageManifest {
   readonly name: "@observal/axl";
   readonly version: string;
@@ -121,7 +132,7 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
     banner: {
       js: 'import { createRequire as __axlCreateRequire } from "node:module";\nconst require = __axlCreateRequire(import.meta.url);',
     },
-    external: ["@modelcontextprotocol/sdk", "@modelcontextprotocol/sdk/*", "yaml"],
+    external: [...RELEASE_EXTERNALS],
     define: {
       "process.env.AXL_BUILD_VERSION": JSON.stringify(manifest.version),
       "process.env.AXL_WEB_ASSET_PATH": JSON.stringify("web"),
