@@ -41,8 +41,31 @@ function nativeRecord(): NativeDurableOutboxRecord {
   };
 }
 
-test("native endpoint outbox recovers exact committed bytes and acknowledges in native storage", async () => {
-  let records: readonly NativeDurableOutboxRecord[] = [nativeRecord()];
+/** The Node binding returns `Buffer` fields, whose `slice()` shares memory with the source. */
+function bufferRecord(): NativeDurableOutboxRecord {
+  const record = nativeRecord();
+  return {
+    ...record,
+    operationId: Buffer.from(record.operationId),
+    cryptoSessionId: Buffer.from(record.cryptoSessionId),
+    logicalMessageId: Buffer.from(record.logicalMessageId),
+    ciphertext: Buffer.from(record.ciphertext),
+  };
+}
+
+test("native endpoint outbox recovers exact committed bytes and acknowledges in native storage", () =>
+  exerciseOutbox(nativeRecord));
+
+test("native endpoint outbox derives identities without mutating Buffer-backed records", () =>
+  exerciseOutbox(bufferRecord));
+
+async function exerciseOutbox(makeRecord: () => NativeDurableOutboxRecord): Promise<void> {
+  const source = makeRecord();
+  const original = {
+    operationId: bytes(operationId),
+    logical: new Uint8Array(source.logicalMessageId),
+  };
+  let records: readonly NativeDurableOutboxRecord[] = [source];
   const acknowledgements: Uint8Array[][] = [];
   const witnessCalls: string[] = [];
   let pendingAcknowledgement: NativeDurableOutboxRecord | undefined;
@@ -118,9 +141,16 @@ test("native endpoint outbox recovers exact committed bytes and acknowledges in 
   await adapter.resetSendingAfterDisconnect();
   assert.equal((await adapter.list())[0]?.state, "queued_local");
 
+  assert.deepEqual(new Uint8Array(source.operationId), original.operationId);
+  assert.deepEqual(new Uint8Array(source.logicalMessageId), original.logical);
   await adapter.markDaemonAccepted(requestId);
   assert.equal(acknowledgements.length, 1);
-  assert.deepEqual(acknowledgements[0]?.[1], bytes(operationId));
+  assert.deepEqual(new Uint8Array(acknowledgements[0]?.[1] ?? []), original.operationId);
+  assert.notDeepEqual(
+    new Uint8Array(acknowledgements[0]?.[0] ?? []),
+    original.operationId,
+    "the acknowledgement identity is derived, not the target",
+  );
   assert.deepEqual(
     witnessCalls,
     ["read", "reconcile", "continue"],
@@ -128,4 +158,4 @@ test("native endpoint outbox recovers exact committed bytes and acknowledges in 
   );
   await adapter.removeAccepted(requestId);
   assert.deepEqual(await adapter.list(), []);
-});
+}

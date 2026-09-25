@@ -461,10 +461,11 @@ export class RemoteDeviceE2ee implements RemotePayloadOpener {
               "accepted",
             );
             acknowledged = true;
-          } finally {
-            acknowledgement.fill(0);
+            // Keep the target identity until the acknowledgement succeeds so a retry names it.
             operation.fill(0);
             logical.fill(0);
+          } finally {
+            acknowledgement.fill(0);
           }
         },
       };
