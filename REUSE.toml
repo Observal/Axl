@@ -204,3 +204,9 @@ SPDX-License-Identifier = "Apache-2.0"
 path = ["packages/*/dist/**", "packages/extensions/*/dist/**"]
 SPDX-FileCopyrightText = "2026 Hari Srinivasan"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Appended verbatim to the production loader, so it carries no header of its own.
+[[annotations]]
+path = ["packages/e2ee/bindings/node/loader/deployment-test-exports.js"]
+SPDX-FileCopyrightText = "2026 Lokesh"
+SPDX-License-Identifier = "Apache-2.0"
