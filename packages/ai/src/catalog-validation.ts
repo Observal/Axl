@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-License-Identifier: Apache-2.0
 
-import { supportedThinkingLevels } from "@axl/protocol";
+import { supportedThinkingLevels, THINKING_LEVELS as THINKING_LEVEL_LIST } from "@axl/protocol";
 import type {
   EndpointPolicy,
   ModelCachePolicy,
@@ -16,7 +16,7 @@ const PROVIDER_IDENTIFIER = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const SETTING_IDENTIFIER = /^[A-Za-z][A-Za-z0-9]*$/;
 const SECRET_NAME = /(?:authorization|api[-_]?key|credential|password|secret|token)/i;
 const FORBIDDEN_HEADER = /^(?:authorization|cookie|proxy-authorization|set-cookie|x-api-key)$/i;
-const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+const THINKING_LEVELS = new Set(THINKING_LEVEL_LIST);
 const API_DIALECTS = new Set([
   "openai-chat",
   "openai-responses",

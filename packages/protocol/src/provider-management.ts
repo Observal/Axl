@@ -3,6 +3,7 @@
 
 import { type JsonObject, ProtocolValidationError } from "./event-envelope.ts";
 import type { ThinkingLevel } from "./events.ts";
+import { THINKING_LEVELS } from "./model-stream.ts";
 
 export type ProviderAuthMethod = "environment" | "file" | "oauth" | "ambient" | "keyless";
 export type ProviderLoginMethod = "api_key" | "oauth";
@@ -188,16 +189,6 @@ const AUTH_PHASES: readonly ProviderAuthenticationPhase[] = [
   "reauthentication_required",
   "logged_out",
 ];
-const THINKING_LEVELS: readonly ThinkingLevel[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
-
 function object(value: unknown, path: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ProtocolValidationError(path, "must be an object");
