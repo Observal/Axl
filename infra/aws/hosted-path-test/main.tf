@@ -239,6 +239,27 @@ resource "aws_cloudfront_distribution" "main" {
     }
   }
 
+  origin {
+    domain_name              = aws_s3_bucket.remote_page.bucket_regional_domain_name
+    origin_id                = "remote-page"
+    origin_access_control_id = aws_cloudfront_origin_access_control.remote_page.id
+  }
+
+  ordered_cache_behavior {
+    path_pattern               = "/remote*"
+    target_origin_id           = "remote-page"
+    viewer_protocol_policy     = "redirect-to-https"
+    allowed_methods            = ["GET", "HEAD"]
+    cached_methods             = ["GET", "HEAD"]
+    cache_policy_id            = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.remote_page.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.remote_page_index.arn
+    }
+  }
+
   default_cache_behavior {
     target_origin_id         = "hosted-path-alb"
     viewer_protocol_policy   = "redirect-to-https"

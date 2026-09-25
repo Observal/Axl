@@ -41,6 +41,29 @@ Run the HTTPS and WebSocket opaque-delivery smoke test again:
 AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/smoke-test.sh
 ```
 
+## Phone remote access
+
+The distribution also serves a deployment-test phone page under `/remote/` from a private S3
+bucket, with a strict Content-Security-Policy. The page and the browser binding's worker reach the
+control plane, witness, and relay on the same origin. Publish the page from an Axl checkout that
+carries it (the browser binding build needs the Rust and wasm-bindgen toolchain):
+
+```bash
+AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/remote-page.sh /path/to/axl
+```
+
+Give a local daemon the stack's remote configuration. Build the deployment-test Node binding with
+this stack's witness trust first (`AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE`), then:
+
+```bash
+AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/remote-config.sh ~/.axl-remote.json   /path/to/axl/packages/e2ee/bindings/node/dist/deployment-test/loader/index.js
+```
+
+Start the daemon with `AXL_REMOTE_DEPLOYMENT_TEST=~/.axl-remote.json`, run `/remote` in the
+terminal, and open the printed link on the phone. The link carries the stack's shared test
+credentials in its fragment, which browsers never send to a server; treat it as a secret. The
+witness keeps its state in memory, so a control-plane restart requires pairing again.
+
 Destroy compute and networking resources when testing ends:
 
 ```bash
