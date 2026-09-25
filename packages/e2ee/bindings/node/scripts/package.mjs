@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from "node:child_process";
@@ -7,6 +8,12 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import {
+  FORBIDDEN_PRODUCTION_STRINGS,
+  assertNoFixtureBytes,
+  testOnlyIdentifiers,
+} from "../../../scripts/artifact-policy.mjs";
 
 function assertEqual(actual, expected, message) {
   if (actual !== expected) throw new Error(message);
@@ -53,25 +60,15 @@ for (const path of sourcePaths) {
 assertEqual(manifest.nativeSourceSha256, sourceHash.digest("hex"), "native source digest drift");
 const nativeBytes = readFileSync(join(staging, manifest.artifacts[0].path));
 for (const forbidden of [
-  "testDaemonEndpoint",
-  "testDeviceEndpoint",
-  "testWitnessPending",
-  "testWindowsDaemonEndpoint",
-  "testWindowsDeviceEndpoint",
-  "testPanic",
-  "TestWitness",
+  ...testOnlyIdentifiers(),
+  ...FORBIDDEN_PRODUCTION_STRINGS,
   "test_witness",
   "test_pending_witness_operation",
-  "sign_for_test",
-  "from_receipts_for_test",
-  "TestKeys",
-  "TestAnchor",
-  "FakeKeychain",
-  "with_keychain",
-  "AXL_RUN_MACOS_KEYCHAIN_TESTS",
 ]) {
   if (nativeBytes.includes(Buffer.from(forbidden))) throw new Error(`production binary contains test symbol ${forbidden}`);
 }
+assertNoFixtureBytes(nativeBytes, "production native binary");
+if (typeof manifest.cargoLockSha256 !== "string") throw new Error("integrity manifest lacks lock provenance");
 const entries = readdirSync(staging, { recursive: true }).map(String);
 if (entries.some((entry) => /test|fixture/i.test(entry))) throw new Error("production package contains test material");
 const module = await import(`${pathToFileURL(join(staging, "loader/index.js")).href}?verify=${Date.now()}`);
@@ -97,7 +94,12 @@ const result = JSON.parse(
   }),
 );
 const files = result[0].files.map((entry) => entry.path);
-if (files.some((entry) => /test|fixture/i.test(entry)) || files.filter((entry) => entry.endsWith(".node")).length !== 1) throw new Error("production tarball contents are unsafe");
+if (files.some((entry) => /test|fixture|\.env|\.pem|\.key$/i.test(entry)) || files.filter((entry) => entry.endsWith(".node")).length !== 1) throw new Error("production tarball contents are unsafe");
+if (files.some((entry) => /binding\.gyp|Cargo\.toml|build\.rs|\.rs$|\.c$|\.cc$|\.h$/i.test(entry))) throw new Error("production tarball would compile natively on install");
+const stagedPackage = JSON.parse(readFileSync(join(staging, "package.json"), "utf8"));
+if (stagedPackage.scripts !== undefined || stagedPackage.dependencies !== undefined || stagedPackage.optionalDependencies !== undefined) {
+  throw new Error("production package must install without scripts or dependencies");
+}
 const tarball = join(staging, result[0].filename);
 const installRoot = mkdtempSync(join(tmpdir(), "axl-e2ee-node-package-"));
 try {

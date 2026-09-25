@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from "node:child_process";
@@ -73,6 +74,7 @@ const manifest = {
   sourceBaseCommit,
   sourceTreeState: sourceStatus === "" ? "clean" : "dirty",
   nativeSourceSha256: sourceHash.digest("hex"),
+  cargoLockSha256: createHash("sha256").update(readFileSync(join(e2eeRoot, "Cargo.lock"))).digest("hex"),
   artifactKind: mode,
   artifacts: [{ target, path: `native/${artifactName}`, sha256 }],
 };

@@ -611,6 +611,22 @@ Positive checks must prove exact artifact hashes, source and lock provenance, on
 replica trust, production/test artifact separation, immutable byte results, `bigint` for every
 `u64`, and no local native compilation during install.
 
+Implemented in `packages/e2ee/scripts/artifact-policy.mjs` and the two bindings' `check:abi` and
+`pack:local` scripts: test-only identifiers are derived from the feature-gated Rust sources rather
+than hand-listed and must appear in the test artifact (positive control) and never in production
+bytes; high-entropy windows of every versioned fixture are rejected from production binaries and
+WASM; integrity manifests carry exactly the allowed keys plus `cargoLockSha256`, full-SHA source
+commits, and per-artifact hashes; production JavaScript contains no `eval`, `Function`,
+`importScripts`, `process.env`, `process.argv`, or console diagnostics (generated glue may emit only
+its two static wasm-bindgen initialization warnings); Node production constructors reject with
+`secure_store_unavailable` or `rollback_anchor_unavailable`; no public Node member or page-visible
+browser member names a Rust-only capability; the worker-internal WASM class surface is pinned per
+class; the browser store hands out no transaction or database handle; every worker `fetch` uses a
+static same-origin URL; the Node tarball has no install scripts, dependencies, or compilable
+sources; and every declared `u64` field is `bigint`. `scripts/check-fault-coverage.mjs` sweeps the
+crash and recovery matrix above so a fault point, restart state, browser fault, or browser
+operation kind without a test fails CI.
+
 ## Resolved sequencing and confirmation cache
 
 The authoritative RFC fixes activation order. Durable local commit precedes successor-key
