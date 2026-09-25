@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Axl Remote</title>
+  </head>
+  <body>
+    <main id="remote" class="remote">
+      <header class="remote-header">
+        <h1>Axl Remote</h1>
+        <p id="status" class="remote-status" role="status" aria-live="polite">Starting</p>
+      </header>
+      <section id="pairing" class="remote-panel" hidden>
+        <ol id="steps" class="remote-steps"></ol>
+        <p id="pairing-hint" class="remote-hint"></p>
+      </section>
+      <section id="sessions" class="remote-panel" hidden>
+        <div class="remote-row">
+          <h2>Sessions</h2>
+          <button id="refresh" type="button" class="remote-button quiet">Refresh</button>
+        </div>
+        <ul id="session-list" class="remote-list"></ul>
+      </section>
+      <section id="thread" class="remote-thread" hidden>
+        <div class="remote-row">
+          <button id="back" type="button" class="remote-button quiet">Sessions</button>
+          <h2 id="thread-title" class="remote-title"></h2>
+        </div>
+        <ol id="records" class="remote-records"></ol>
+        <p id="activity" class="remote-activity" hidden></p>
+        <form id="composer" class="remote-composer">
+          <textarea id="prompt" rows="2" placeholder="Message the agent" aria-label="Message"></textarea>
+          <div class="remote-actions">
+            <button id="stop" type="button" class="remote-button quiet" hidden>Stop</button>
+            <button id="send" type="submit" class="remote-button">Send</button>
+          </div>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/src/remote/main.ts"></script>
+  </body>
+</html>

@@ -102,7 +102,8 @@ export class HttpRelayTicketProvider implements RelayTicketProvider {
     this.origin = validatedControlPlaneOrigin(options);
     const fetcher = options.fetch ?? (globalThis as { fetch?: RemoteFetch }).fetch;
     if (fetcher === undefined) throw new TypeError("A fetch implementation is required");
-    this.request = fetcher;
+    // Browsers reject a global fetch invoked as a method of another object.
+    this.request = (url, init) => fetcher(url, init);
   }
 
   async acquire(): Promise<RelayAdmissionCredential> {

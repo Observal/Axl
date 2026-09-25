@@ -215,7 +215,8 @@ export class HostedWitnessClient implements WitnessCertificateTransport {
     this.origin = origin(options);
     const request = options.fetch ?? (globalThis as { fetch?: WitnessFetch }).fetch;
     if (request === undefined) throw new TypeError("A fetch implementation is required");
-    this.request = request;
+    // Browsers reject a global fetch invoked as a method of another object.
+    this.request = (url, init) => request(url, init);
     this.timeoutMs = options.timeoutMs ?? 10_000;
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0 || this.timeoutMs > 60_000) {
       throw new TypeError("Witness timeout must be from 1 through 60000 milliseconds");
