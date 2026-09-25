@@ -1,5 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Axl endpoint E2EE core
@@ -75,7 +76,19 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo audit --deny warnings
 cargo deny check
+node scripts/check-fault-coverage.mjs
 ```
+
+`scripts/check-fault-coverage.mjs` sweeps the crash and recovery matrix: every native `FaultPoint`,
+every reconciliation and quarantine outcome, every browser test-worker fault, and every browser
+operation kind must be exercised by a test. `scripts/artifact-policy.mjs` is the shared production
+isolation policy consumed by both bindings' `check:abi` and `pack:local` scripts. It derives the
+test-only identifiers from the feature-gated Rust sources, so a new test constructor, fixture,
+fault control, or deterministic signer is rejected from production artifacts automatically, and it
+pins the allowed integrity-manifest keys, forbids fixture bytes and diagnostics hooks in production
+bytes, and names the capabilities (signing, counters, commitments, nonces, key selection,
+activation, erasure, finalization, raw decryption, generic certificate verification) that never
+become public members.
 
 The private Node-API binding lives in [`bindings/node`](bindings/node). Its native boundary owns a
 typed pending-witness continuation that exposes only the operation ID, exact request bytes, request
