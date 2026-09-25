@@ -27,6 +27,14 @@ const TEST_ONLY_MODULES = [
 const MIXED_MODULES = ["src/lib.rs", "bindings/node/src/lib.rs", "bindings/browser/src/lib.rs"];
 
 const TEST_GATE = /#\[cfg\((?:any\()?(?:test|feature = "(?:test-fixtures|test-witness|browser-test-fixtures|node-test-fixtures)")/u;
+/**
+ * Deployment-test items are neither production nor test code: they ship only in deployment-test
+ * artifacts, whose checks forbid test identifiers separately. They must not count as production
+ * declarations, or a name such as `deployment_test_daemon_endpoint` would hide the test-only
+ * `test_daemon_endpoint` it contains.
+ */
+const DEPLOYMENT_GATE = /#\[cfg\(feature = "deployment-test"\)\]/u;
+const DEPLOYMENT_TEST_MODULES = ["bindings/node/src/deployment_store.rs"];
 const ITEM = /^\s*pub(?:\(crate\))? (?:async )?(?:fn|struct|enum|trait) ([A-Za-z_][A-Za-z0-9_]*)/u;
 
 function camel(name) {
@@ -57,7 +65,9 @@ function productionModules() {
   walk("src");
   walk("bindings/node/src");
   walk("bindings/browser/src");
-  return modules.filter((module) => !TEST_ONLY_MODULES.includes(module));
+  return modules.filter(
+    (module) => !TEST_ONLY_MODULES.includes(module) && !DEPLOYMENT_TEST_MODULES.includes(module),
+  );
 }
 
 /** Identifiers declared by production (ungated) Rust items. */
@@ -67,7 +77,7 @@ function productionDeclaredIdentifiers() {
     const lines = readFileSync(join(e2eeRoot, module), "utf8").split("\n");
     let gated = 0;
     for (const line of lines) {
-      if (TEST_GATE.test(line)) {
+      if (TEST_GATE.test(line) || DEPLOYMENT_GATE.test(line)) {
         gated = 12;
         continue;
       }

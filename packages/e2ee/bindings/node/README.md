@@ -43,3 +43,18 @@ attestation, or independent trust anchor. Its source fields identify the Git bas
 whether the `packages/e2ee` tree was dirty at build time, and hash the exact tracked and untracked,
 non-ignored files in that tree. A dirty artifact therefore does not claim that its base commit
 contains the binding source.
+
+## Deployment-test artifact
+
+`node scripts/build.mjs deployment-test` (with `AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE`, for example
+from `infra/aws/hosted-path-test/witness-trust.sh`) builds `dist/deployment-test` for a daemon that
+pairs through the hosted deployment-test stack. It adds exactly one export to the production
+binding, `deploymentTestDaemonEndpoint(root, accountId, installationId, cryptoSessionId)`, whose
+endpoint verifies certificates against the replica trust pinned at build time. Its loader is the
+production loader plus that one appended export.
+
+It is not a production artifact. Its envelope keys rest unwrapped in one owner-only file under
+`root/keys`, because the hosts it targets (for example WSL) have no supported platform store.
+`check-abi.mjs` verifies that production contains none of it and that the deployment-test binary
+carries no test identifiers. Without a trust file the Cargo feature still builds for unit tests and
+lint, and every endpoint then fails closed with `rollback_anchor_unavailable`.
