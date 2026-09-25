@@ -936,7 +936,13 @@ export class RemoteHostedDelivery {
       const record = (await this.options.outbox.list()).find(
         (candidate) => candidate.requestId === message.requestId,
       );
-      if (record === undefined || record.idempotencyKey !== message.idempotencyKey) {
+      if (record === undefined) {
+        // The daemon re-sends its replies when the device replays a request; the first
+        // acceptance already removed this record, so the duplicate only needs acknowledging.
+        await opened.acknowledge?.();
+        return;
+      }
+      if (record.idempotencyKey !== message.idempotencyKey) {
         throw new RemoteRelayError(
           "bad_relay_message",
           "Daemon acceptance does not match the prepared request",

@@ -99,8 +99,18 @@ export interface AuthenticatedRemoteRequestResult {
   readonly result: unknown;
 }
 
+export interface AuthenticatedRemoteRequestObserver {
+  /** Called once the command journal durably accepted a mutating request, before its effect settles. */
+  accepted?(): void;
+  /** Called with the validated result before any subscription activation events are sent. */
+  completed?(result: AuthenticatedRemoteRequestResult): void;
+}
+
 export interface AuthenticatedRemoteAttachment {
-  request(value: unknown): Promise<AuthenticatedRemoteRequestResult>;
+  request(
+    value: unknown,
+    observer?: AuthenticatedRemoteRequestObserver,
+  ): Promise<AuthenticatedRemoteRequestResult>;
   close(): void;
 }
 
@@ -108,6 +118,7 @@ interface RemoteExecutionAuthority {
   readonly store: RemoteDeviceAuthorityStore;
   readonly deviceId: DeviceId;
   readonly scope: RemoteDeviceScope;
+  readonly onAccepted?: () => void;
 }
 
 const MAX_PENDING_REQUESTS = 64;
@@ -424,24 +435,46 @@ export class AxlDaemon {
       },
     };
     this.remoteConnectionStates.add(state);
-    const close = (): void => {
+    // An ordinary close keeps the acknowledged cursor so the device can resume; losing authority
+    // drops every cursor so nothing can resume from it.
+    const releaseSubscriptions = (preserveAcknowledged: boolean): void => {
+      for (const subscription of state.subscriptions.values()) {
+        this.releaseSubscriptionCursors(subscription, preserveAcknowledged);
+        subscription.unsubscribe();
+      }
+      state.subscriptions.clear();
+    };
+    // Subscriptions deliver without a per-event authority check, so they must end when observe is lost.
+    const enforceObserveGrant = (): void => {
+      if (state.subscriptions.size === 0) return;
+      try {
+        options.authority.authorize(options.deviceId, "observe");
+      } catch (cause) {
+        if (!(cause instanceof RemoteAuthorityError)) throw cause;
+        releaseSubscriptions(false);
+      }
+    };
+    const close = (revoked = false): void => {
       if (closed) return;
       closed = true;
       for (const controller of state.cancellableRequests.values()) controller.abort();
-      for (const subscription of state.subscriptions.values()) subscription.unsubscribe();
       state.cancellableRequests.clear();
-      state.subscriptions.clear();
+      releaseSubscriptions(!revoked);
       this.remoteConnectionStates.delete(state);
       this.remoteAttachmentClosers.delete(close);
       removeRevocationListener();
+      removeGrantListener();
     };
     const removeRevocationListener = options.authority.onDeviceRevoked((deviceId) => {
-      if (deviceId === options.deviceId) close();
+      if (deviceId === options.deviceId) close(true);
+    });
+    const removeGrantListener = options.authority.onDeviceGrantChanged((deviceId) => {
+      if (deviceId === options.deviceId && !closed) enforceObserveGrant();
     });
     this.remoteAttachmentClosers.add(close);
 
     return {
-      request: (value) => {
+      request: (value, observer) => {
         const operation = (async (): Promise<AuthenticatedRemoteRequestResult> => {
           if (closed)
             throw new RemoteAuthorityError("device_revoked", "Remote attachment is closed");
@@ -489,14 +522,21 @@ export class AxlDaemon {
               store: options.authority,
               deviceId: options.deviceId,
               scope,
+              ...(observer?.accepted === undefined
+                ? {}
+                : { onAccepted: () => observer.accepted?.() }),
             });
             const validated = parseRpcResult(wireRequest.method, result);
-            this.activateReadySubscriptions(state, state.send);
-            return {
+            const completed: AuthenticatedRemoteRequestResult = {
               requestId: remoteRequest.requestId,
               method: wireRequest.method,
               result: validated,
             };
+            observer?.completed?.(completed);
+            // A grant narrowed while this request ran must not leave a new subscription live.
+            enforceObserveGrant();
+            this.activateReadySubscriptions(state, state.send);
+            return completed;
           } finally {
             this.admitted.delete(admissionId);
             state.pendingRequests -= 1;
@@ -510,7 +550,7 @@ export class AxlDaemon {
         void tracked.finally(() => this.pending.delete(tracked));
         return operation;
       },
-      close,
+      close: () => close(),
     };
   }
 
@@ -1169,6 +1209,7 @@ export class AxlDaemon {
           remoteAuthority.deviceId,
           remoteAuthority.scope,
           () => journal.start(journalInput, effect),
+          remoteAuthority.onAccepted,
         );
       }
       return await journal.execute(journalInput, effect);

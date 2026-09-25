@@ -5,6 +5,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
+  type AuthenticatedRemoteRequest,
   type DeviceId,
   encodeRemoteDaemonMessage,
   encodeRemoteE2eeEnvelope,
@@ -23,11 +24,7 @@ import {
   type ServerMessage,
 } from "@axl/protocol";
 
-import type {
-  AuthenticatedRemoteAttachment,
-  AuthenticatedRemoteRequestResult,
-  AxlDaemon,
-} from "./daemon.ts";
+import type { AuthenticatedRemoteAttachment, AxlDaemon } from "./daemon.ts";
 import type { RemoteDeviceAuthorityStore } from "./remote-authority.ts";
 import {
   DaemonWitnessBarrier,
@@ -199,6 +196,38 @@ function derivedId(
   };
 }
 
+function encodePrepared(
+  prepared: NativeCiphertext,
+  hostedGrantGeneration: number,
+  expectedClass: RemoteE2eeEnvelope["messageClass"],
+): Uint8Array {
+  if (prepared.messageClass !== expectedClass) {
+    throw new Error("Native endpoint returned the wrong message class");
+  }
+  return encodeRemoteE2eeEnvelope({
+    operationId: uuidText(prepared.operationId),
+    logicalMessageId: uuidText(prepared.logicalMessageId),
+    messageClass: expectedClass,
+    hostedGrantGeneration,
+    ciphertext: prepared.ciphertext,
+  });
+}
+
+/** Bounds the replies retained for byte-exact replays of authenticated requests. */
+const MAX_REPLAY_ENTRIES = 64;
+
+/** Replies already produced for one authenticated request envelope, in send order. */
+interface ReplayEntry {
+  readonly envelopes: Uint8Array[];
+  settled: boolean;
+}
+
+interface OpenedApplication {
+  readonly request: AuthenticatedRemoteRequest;
+  readonly operationId: OperationId;
+  readonly replay: ReplayEntry;
+}
+
 function safeRemoteError(cause: unknown, requestId: RequestId): RemoteDaemonMessage {
   const candidate = cause as { readonly code?: unknown; readonly retryable?: unknown };
   const code = typeof candidate?.code === "string" ? candidate.code : "internal_error";
@@ -238,6 +267,8 @@ export class WindowsRemoteE2eeBridge {
   private readonly now: () => number;
   private readonly stateListeners = new Set<(status: RemoteEndpointWitnessStatus) => void>();
   private tail: Promise<void> = Promise.resolve();
+  private readonly inFlight = new Set<Promise<void>>();
+  private readonly replies = new Map<string, ReplayEntry>();
   private currentRoute: RouteId | undefined;
   private closed = false;
   private witness: RemoteEndpointWitnessStatus | undefined;
@@ -287,9 +318,20 @@ export class WindowsRemoteE2eeBridge {
     return state;
   }
 
-  receive(delivery: RemoteEncryptedDelivery): Promise<void> {
+  /**
+   * Authenticate one inbound envelope under the endpoint serialization, then execute an
+   * application request outside it so later envelopes (an interrupt, a replay) are not blocked
+   * behind a running turn. The returned promise settles once the request's replies are sent and
+   * its receive is acknowledged; callers must not serialize deliveries on it.
+   */
+  async receive(delivery: RemoteEncryptedDelivery): Promise<void> {
     const copied = new Uint8Array(delivery.opaqueEnvelope);
-    return this.run(() => this.receiveOne(delivery.sourceRouteId, copied), "work");
+    const key = createHash("sha256").update(copied).digest("hex");
+    const opened = await this.run(
+      () => this.receiveOne(delivery.sourceRouteId, copied, key),
+      "work",
+    );
+    if (opened !== undefined) await this.dispatch(opened);
   }
 
   /** Serialize one unit of endpoint work behind the tail and inside the lifecycle gate. */
@@ -405,11 +447,13 @@ export class WindowsRemoteE2eeBridge {
     for (const listener of this.stateListeners) listener(status);
   }
 
+  /** Wait until no endpoint work is queued and no dispatched request is still settling. */
   async drain(): Promise<void> {
     while (true) {
       const current = this.tail;
-      await current;
-      if (current === this.tail) return;
+      const dispatched = [...this.inFlight];
+      await Promise.allSettled([current, ...dispatched]);
+      if (current === this.tail && this.inFlight.size === 0) return;
     }
   }
 
@@ -421,6 +465,7 @@ export class WindowsRemoteE2eeBridge {
     await this.drain();
     this.options.endpoint.close();
     this.currentRoute = undefined;
+    this.replies.clear();
   }
 
   close(): void {
@@ -430,6 +475,7 @@ export class WindowsRemoteE2eeBridge {
     this.attachment.close();
     this.options.endpoint.close();
     this.currentRoute = undefined;
+    this.replies.clear();
   }
 
   private cancelRecovery(): void {
@@ -438,7 +484,16 @@ export class WindowsRemoteE2eeBridge {
     this.retryTimer = undefined;
   }
 
-  private async receiveOne(sourceRouteId: RouteId, bytes: Uint8Array): Promise<void> {
+  /**
+   * Authenticate one envelope. Control classes complete here; an application request is returned
+   * for dispatch outside the serialization. The reply route moves only after the endpoint
+   * authenticated the envelope, or when it is a byte-exact replay of one it already authenticated.
+   */
+  private async receiveOne(
+    sourceRouteId: RouteId,
+    bytes: Uint8Array,
+    key: string,
+  ): Promise<OpenedApplication | undefined> {
     if (this.closed) throw new Error("Remote E2EE bridge is closed");
     let requestId: RequestId | undefined;
     let incomingOperation: Uint8Array | undefined;
@@ -451,15 +506,19 @@ export class WindowsRemoteE2eeBridge {
       ) {
         throw new Error("Remote hosted grant generation is stale or unavailable");
       }
-      this.currentRoute = sourceRouteId;
+      const replay = this.replies.get(key);
+      if (replay !== undefined) {
+        await this.replay(sourceRouteId, replay);
+        return undefined;
+      }
       incomingOperation = idBytes(envelope.operationId);
       if (envelope.messageClass === "update_proposal") {
         await this.receiveUpdateProposal(sourceRouteId, envelope, incomingOperation);
-        return;
+        return undefined;
       }
       if (envelope.messageClass === "epoch_ready") {
-        await this.receiveEpochReady(envelope, incomingOperation);
-        return;
+        await this.receiveEpochReady(sourceRouteId, envelope, incomingOperation);
+        return undefined;
       }
       if (envelope.messageClass !== "application_request") {
         throw new Error("Remote E2EE envelope has an invalid device-to-daemon class");
@@ -488,22 +547,10 @@ export class WindowsRemoteE2eeBridge {
       if (parseDeviceId(request.deviceId) !== this.options.deviceId) {
         throw new Error("Authenticated request device does not match the endpoint");
       }
-      const response = await this.attachment.request(request);
-      if (request.idempotencyKey !== undefined) {
-        await this.sendMessage(sourceRouteId, {
-          version: 1,
-          type: "daemon_accepted",
-          requestId: request.requestId,
-          idempotencyKey: request.idempotencyKey,
-        });
-      }
-      await this.sendResult(sourceRouteId, response);
-      const acknowledgement = derivedId("axl-e2ee-receive-ack-v1", envelope.operationId);
-      accepted(
-        await this.barrier.mutate((endpoint) =>
-          endpoint.acknowledgeReceive(acknowledgement.bytes, target),
-        ),
-      );
+      this.currentRoute = sourceRouteId;
+      const entry: ReplayEntry = { envelopes: [], settled: false };
+      this.remember(key, entry);
+      return { request, operationId: envelope.operationId, replay: entry };
     } catch (cause) {
       if (requestId !== undefined) {
         await this.sendMessage(sourceRouteId, safeRemoteError(cause, requestId));
@@ -514,6 +561,118 @@ export class WindowsRemoteE2eeBridge {
     } finally {
       bytes.fill(0);
       incomingOperation?.fill(0);
+    }
+  }
+
+  /**
+   * Execute one authenticated request. `daemon_accepted` is sent when the command journal accepts
+   * the request, and `daemon_result` is queued before any subscription activation events, so the
+   * device observes acceptance, result, then deliveries. The receive is acknowledged only after
+   * every reply reached the relay.
+   */
+  private async dispatch(opened: OpenedApplication): Promise<void> {
+    const { request, replay } = opened;
+    const replies: Promise<void>[] = [];
+    const reply = (message: RemoteDaemonMessage): Promise<void> => {
+      const sent = this.run(() => this.sendReply(replay, message), "work");
+      sent.catch(() => undefined);
+      replies.push(sent);
+      return sent;
+    };
+    let acceptanceSent = false;
+    const accept = (): void => {
+      if (acceptanceSent || request.idempotencyKey === undefined) return;
+      acceptanceSent = true;
+      void reply({
+        version: 1,
+        type: "daemon_accepted",
+        requestId: request.requestId,
+        idempotencyKey: request.idempotencyKey,
+      });
+    };
+    let resultQueued = false;
+    const operation = (async () => {
+      try {
+        await this.attachment.request(request, {
+          accepted: accept,
+          completed: (response) => {
+            accept();
+            resultQueued = true;
+            void reply({
+              version: 1,
+              type: "daemon_result",
+              requestId: response.requestId,
+              method: response.method,
+              result: response.result,
+            });
+          },
+        });
+      } catch (cause) {
+        if (resultQueued) {
+          // The device already holds the result; a later failure is the daemon's to report.
+          this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+        } else {
+          void reply(safeRemoteError(cause, request.requestId));
+          await Promise.allSettled(replies);
+          throw cause;
+        }
+      }
+      await Promise.all(replies);
+      await this.run(() => this.acknowledgeReceive(opened.operationId), "work");
+    })();
+    this.inFlight.add(operation);
+    try {
+      await operation;
+    } finally {
+      replay.settled = true;
+      this.inFlight.delete(operation);
+    }
+  }
+
+  private async sendReply(replay: ReplayEntry, message: RemoteDaemonMessage): Promise<void> {
+    if (this.closed) throw new Error("Remote E2EE bridge is closed");
+    const route = this.currentRoute;
+    if (route === undefined) throw new Error("Remote route is unavailable");
+    const envelope = await this.prepareMessage(message);
+    replay.envelopes.push(envelope);
+    await this.options.sender.send(route, envelope.slice());
+  }
+
+  /** Re-send the replies already produced for a byte-exact replay, and follow the device's route. */
+  private async replay(routeId: RouteId, replay: ReplayEntry): Promise<void> {
+    this.currentRoute = routeId;
+    for (const envelope of replay.envelopes) {
+      await this.options.sender.send(routeId, envelope.slice());
+    }
+  }
+
+  private remember(key: string, entry: ReplayEntry): void {
+    if (this.replies.size >= MAX_REPLAY_ENTRIES) {
+      let evicted: string | undefined;
+      for (const [candidate, value] of this.replies) {
+        evicted ??= candidate;
+        if (value.settled) {
+          evicted = candidate;
+          break;
+        }
+      }
+      if (evicted !== undefined) this.replies.delete(evicted);
+    }
+    this.replies.set(key, entry);
+  }
+
+  private async acknowledgeReceive(operationId: OperationId): Promise<void> {
+    const target = idBytes(operationId);
+    const acknowledgement = derivedId("axl-e2ee-receive-ack-v1", operationId);
+    try {
+      accepted(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.acknowledgeReceive(acknowledgement.bytes, target),
+        ),
+      );
+    } finally {
+      target.fill(0);
+      acknowledgement.bytes.fill(0);
     }
   }
 
@@ -537,6 +696,7 @@ export class WindowsRemoteE2eeBridge {
           );
         }),
       );
+      this.currentRoute = routeId;
       const commitOperation = derivedId(
         "axl-e2ee-daemon-commit-operation-v1",
         envelope.operationId,
@@ -582,6 +742,7 @@ export class WindowsRemoteE2eeBridge {
   }
 
   private async receiveEpochReady(
+    routeId: RouteId,
     envelope: RemoteE2eeEnvelope,
     incomingOperation: Uint8Array,
   ): Promise<void> {
@@ -608,6 +769,7 @@ export class WindowsRemoteE2eeBridge {
       ) {
         throw new Error("Native endpoint released an invalid epoch-ready acceptance");
       }
+      this.currentRoute = routeId;
       const confirmationOperation = derivedId(
         "axl-e2ee-epoch-ready-confirmation-operation-v1",
         envelope.operationId,
@@ -630,10 +792,8 @@ export class WindowsRemoteE2eeBridge {
             );
           }),
         );
-        const route = this.currentRoute;
-        if (route === undefined) throw new Error("Remote route is unavailable");
         await this.sendPrepared(
-          route,
+          routeId,
           confirmation,
           envelope.hostedGrantGeneration,
           "resync_control",
@@ -662,28 +822,23 @@ export class WindowsRemoteE2eeBridge {
     }
   }
 
-  private sendResult(routeId: RouteId, response: AuthenticatedRemoteRequestResult): Promise<void> {
-    return this.sendMessage(routeId, {
-      version: 1,
-      type: "daemon_result",
-      requestId: response.requestId,
-      method: response.method,
-      result: response.result,
-    });
-  }
-
   private enqueueDaemonMessage(message: ServerMessage): void {
-    const route = this.currentRoute;
-    if (route === undefined || this.closed) return;
-    this.run(
-      () => this.sendMessage(route, { version: 1, type: "daemon_delivery", message }),
-      "work",
-    ).catch((cause: unknown) => {
+    if (this.currentRoute === undefined || this.closed) return;
+    this.run(async () => {
+      // Resolve the route at send time so a device that reconnected keeps receiving.
+      const route = this.currentRoute;
+      if (route === undefined || this.closed) return;
+      await this.sendMessage(route, { version: 1, type: "daemon_delivery", message });
+    }, "work").catch((cause: unknown) => {
       this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
     });
   }
 
   private async sendMessage(routeId: RouteId, message: RemoteDaemonMessage): Promise<void> {
+    await this.options.sender.send(routeId, await this.prepareMessage(message));
+  }
+
+  private async prepareMessage(message: RemoteDaemonMessage): Promise<Uint8Array> {
     const authority = this.options.authority.snapshot(this.options.deviceId);
     if (authority?.hostedGeneration === undefined || authority.effectiveScopes.length === 0) {
       throw new Error("Remote authority is unavailable");
@@ -704,7 +859,7 @@ export class WindowsRemoteE2eeBridge {
           ),
         ),
       );
-      await this.sendPrepared(routeId, prepared, hostedGeneration, "application_delivery");
+      return encodePrepared(prepared, hostedGeneration, "application_delivery");
     } finally {
       plaintext.fill(0);
       operation.bytes.fill(0);
@@ -718,18 +873,9 @@ export class WindowsRemoteE2eeBridge {
     hostedGrantGeneration: number,
     expectedClass: RemoteE2eeEnvelope["messageClass"],
   ): Promise<void> {
-    if (prepared.messageClass !== expectedClass) {
-      throw new Error("Native endpoint returned the wrong message class");
-    }
     await this.options.sender.send(
       routeId,
-      encodeRemoteE2eeEnvelope({
-        operationId: uuidText(prepared.operationId),
-        logicalMessageId: uuidText(prepared.logicalMessageId),
-        messageClass: expectedClass,
-        hostedGrantGeneration,
-        ciphertext: prepared.ciphertext,
-      }),
+      encodePrepared(prepared, hostedGrantGeneration, expectedClass),
     );
   }
 }

@@ -522,7 +522,7 @@ test("a failed status write faults the bridge closed instead of admitting work",
   assert.equal(errors.length, 1, "the fault is reported once");
 });
 
-test("audit capacity exhaustion fails the transition closed at the store and the bridge", async (context) => {
+test("a full audit log evicts the oldest denial so transitions and revocation still record", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "axl-witness-capacity-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const dataDirectory = join(root, "data");
@@ -555,18 +555,91 @@ test("audit capacity exhaustion fails the transition closed at the store and the
   const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
   assert.equal(authority.auditEntries().length, capacity - 1);
 
-  // The last free slot records one transition; the next transition has nowhere to go.
+  // The last free slot records one transition; later records evict the oldest denials, never
+  // the registration or the lifecycle history, and sequences keep increasing across the gap.
   await authority.recordEndpointWitnessState(deviceId, "recovering", undefined, 1);
-  await authority.recordEndpointWitnessState(deviceId, "recovering", undefined, 2);
-  await assert.rejects(
-    authority.recordEndpointWitnessState(deviceId, "ready", undefined, 3),
-    /audit capacity/u,
-  );
+  await authority.recordEndpointWitnessState(deviceId, "ready", undefined, 2);
+  let entries = authority.auditEntries();
+  assert.equal(entries.length, capacity);
+  assert.equal(entries[0]?.code, "device_registered");
+  assert.equal(entries[1]?.sequence, 3, "the oldest denial (sequence 2) was evicted");
+  assert.equal(entries.at(-1)?.sequence, capacity + 1);
   assert.deepEqual(authority.endpointWitnessStatuses(), [
-    { deviceId, state: "recovering", changedAt: 1 },
+    { deviceId, state: "ready", changedAt: 2 },
   ]);
+
+  // A full log never makes a device unrevocable.
+  const revoked = await authority.revokeLocalDevice(deviceId, 3);
+  assert.equal(revoked.locallyRevoked, true);
+  entries = authority.auditEntries();
+  assert.equal(entries.length, capacity);
+  assert.equal(entries.at(-1)?.code, "local_device_revoked");
+  assert.equal(entries.at(-1)?.sequence, capacity + 2);
+
   const reopened = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  assert.deepEqual(reopened.auditEntries(), entries);
   assert.deepEqual(reopened.endpointWitnessStatuses(), authority.endpointWitnessStatuses());
+  assert.throws(() => reopened.authorize(deviceId, "observe"), /revoked/u);
+});
+
+test("an audit log with no denials to evict drops its oldest record", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-witness-capacity-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const dataDirectory = join(root, "data");
+  await mkdir(dataDirectory, { recursive: true });
+  const capacity = 4_096;
+  const audit = Array.from({ length: capacity }, (_, index) => ({
+    sequence: index + 1,
+    occurredAt: index,
+    code:
+      index === 0
+        ? "device_registered"
+        : index % 2 === 0
+          ? "endpoint_ready"
+          : "endpoint_recovering",
+    actorDeviceId: deviceId,
+    ...(index === 0 ? { localGeneration: 1 } : {}),
+  }));
+  await writeFile(
+    join(dataDirectory, "remote-authority.json"),
+    `${JSON.stringify({
+      version: 2,
+      installationId,
+      devices: [
+        {
+          deviceId,
+          createdAt: 0,
+          local: { generation: 1, scopes: ["observe"] },
+          hosted: { generation: 1, scopes: ["observe"] },
+        },
+      ],
+      audit,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.revokeLocalDevice(deviceId, capacity);
+  const entries = authority.auditEntries();
+  assert.equal(entries.length, capacity);
+  assert.equal(entries[0]?.sequence, 2, "the oldest record was evicted");
+  assert.equal(entries.at(-1)?.code, "local_device_revoked");
+  assert.equal(entries.at(-1)?.sequence, capacity + 1);
+});
+
+test("a failed witness transition write faults the bridge closed", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-witness-capacity-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const dataDirectory = join(root, "data");
+  await mkdir(dataDirectory, { recursive: true });
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.registerLocalDevice(deviceId, ["observe"]);
+  await authority.applyHostedGrant(deviceId, 1, ["observe"]);
+  await authority.recordEndpointWitnessState(deviceId, "recovering", undefined, 1);
+  const record = authority.recordEndpointWitnessState.bind(authority);
+  authority.recordEndpointWitnessState = async (...args) => {
+    if (args[1] === "ready") throw new Error("disk full");
+    return record(...args);
+  };
 
   const daemon = new AxlDaemon({
     socketPath: join(root, "daemon.sock"),
