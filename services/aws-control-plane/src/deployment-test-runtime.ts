@@ -22,6 +22,10 @@ import {
 import { type ConsumeRelayTicketRequest, parseDeviceId, parseInstallationId } from "@axl/protocol";
 
 import { DynamoPairingRendezvousStore, DynamoRelayTicketStore } from "./aws.ts";
+import {
+  createDeploymentTestWitness,
+  parseDeploymentTestWitnessKeys,
+} from "./witness-deployment-test.ts";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -88,9 +92,24 @@ const tickets = new RelayTicketService({
   },
 });
 
+// Optional: without witness keys the witness path stays unrouted and E2EE endpoints fail closed.
+const witnessKeys = process.env.AXL_TEST_WITNESS_KEYS;
+const witness =
+  witnessKeys === undefined || witnessKeys.length === 0
+    ? undefined
+    : await createDeploymentTestWitness({
+        keys: parseDeploymentTestWitnessKeys(witnessKeys),
+        accountId,
+        audit(event) {
+          process.stdout.write(`${JSON.stringify({ witnessAudit: event })}
+`);
+        },
+      });
+
 const handler = createControlPlaneHandler({
   tickets,
   pairing,
+  ...(witness === undefined ? {} : { witness }),
   publicAuthentication: {
     async authenticate(request): Promise<AccountPrincipal | undefined> {
       return secretEqual(request.headers.authorization, `Bearer ${publicToken}`)
@@ -111,7 +130,9 @@ const server = createServer((request, response) => {
       "cache-control": "no-store",
       "content-type": "application/json; charset=utf-8",
     });
-    response.end('{"status":"ok","mode":"deployment-test"}');
+    response.end(
+      JSON.stringify({ status: "ok", mode: "deployment-test", witness: witness !== undefined }),
+    );
     return;
   }
   handler(request, response);

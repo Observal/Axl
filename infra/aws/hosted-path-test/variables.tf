@@ -27,3 +27,9 @@ variable "secret_name" {
   type        = string
   default     = "axl/hosted-path/deployment-test"
 }
+
+variable "witness_secret_name" {
+  description = "Existing Secrets Manager secret holding the three deployment-test witness signing keys."
+  type        = string
+  default     = "axl/hosted-path/witness-keys"
+}
