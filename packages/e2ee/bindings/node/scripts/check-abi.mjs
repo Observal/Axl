@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -153,6 +153,16 @@ for (const forbidden of [...derived, ...FORBIDDEN_PRODUCTION_STRINGS]) {
 for (const forbidden of FORBIDDEN_PRODUCTION_JS) {
   assert(!loaderText.includes(forbidden), `production loader contains ${forbidden}`);
 }
+// The deployment-test daemon constructor, its file key store, and its pinned trust are absent.
+for (const forbidden of [
+  "deploymentTestDaemonEndpoint",
+  "deployment_test",
+  "deployment-test-keys",
+  "axl-deployment-test-keys",
+]) {
+  assert(!nativeBytes.includes(Buffer.from(forbidden)), `production binary contains ${forbidden}`);
+  assert(!loaderText.includes(forbidden), `production loader contains ${forbidden}`);
+}
 assertNoFixtureBytes(nativeBytes, "production native binary");
 assert(!readdirSync(productionRoot, { recursive: true }).map(String).some((entry) => /test|fixture|\.env|\.pem|\.key$|\.git/iu.test(entry)), "production package carries test or secret material");
 const packaged = JSON.parse(readFileSync(join(productionRoot, "package.json"), "utf8"));
@@ -164,3 +174,34 @@ assert(Object.keys(testNative).includes("testDaemonEndpoint"));
 assert(Object.keys(testNative).includes("TestWitness"));
 assert(!Object.keys(native).some((name) => /^test/iu.test(name)));
 console.log("Node ABI, declarations, discriminants, bigint fields, readonly fields, isolation, and provenance match.");
+
+// A deployment-test artifact, when built, is the production binding plus one daemon constructor.
+const deploymentRoot = join(root, "dist/deployment-test");
+if (existsSync(join(deploymentRoot, "integrity.json"))) {
+  const deploymentManifest = JSON.parse(readFileSync(join(deploymentRoot, "integrity.json"), "utf8"));
+  assert.equal(deploymentManifest.artifactKind, "deployment-test");
+  const [deploymentArtifact] = deploymentManifest.artifacts;
+  const deploymentBytes = readFileSync(join(deploymentRoot, deploymentArtifact.path));
+  assert.equal(
+    createHash("sha256").update(deploymentBytes).digest("hex"),
+    deploymentArtifact.sha256,
+    "deployment-test native integrity drift",
+  );
+  assert.equal(
+    readFileSync(join(deploymentRoot, "loader/index.js"), "utf8"),
+    `${loaderText}${readFileSync(join(root, "loader/deployment-test-exports.js"), "utf8")}`,
+    "the deployment-test loader must be the production loader plus its one appended export",
+  );
+  assert(deploymentBytes.includes(Buffer.from("deploymentTestDaemonEndpoint")));
+  // The constructor's own name contains `test_daemon_endpoint`; blank it before scanning.
+  const scanned = Buffer.from(deploymentBytes);
+  for (const own of ["deployment_test_daemon_endpoint", "deploymentTestDaemonEndpoint"]) {
+    for (let at = scanned.indexOf(own); at >= 0; at = scanned.indexOf(own, at + own.length)) {
+      scanned.fill(0, at, at + own.length);
+    }
+  }
+  for (const forbidden of derived) {
+    assert(!scanned.includes(Buffer.from(forbidden)), `deployment-test binary contains ${forbidden}`);
+  }
+  assertNoFixtureBytes(deploymentBytes, "deployment-test native binary");
+}
