@@ -68,7 +68,15 @@ The authority store now atomically persists a bounded audit sequence with its au
 - local and hosted revocation
 - failed authorization by stable reason code
 
-Audit records may contain installation/device identifiers, generations, scope names, timestamps, and reason codes. They must not contain credentials, relay tickets, possession proofs, ciphertext, key material, plaintext request bodies, prompts, or sensitive parameters. Audit entries and authority mutations share one durable replacement. Denied authorization is persisted before the failure is returned. The store fails closed when its bounded audit capacity is exhausted.
+Audit records may contain installation/device identifiers, generations, scope names, timestamps, and reason codes. They must not contain credentials, relay tickets, possession proofs, ciphertext, key material, plaintext request bodies, prompts, or sensitive parameters. Audit entries and authority mutations share one durable replacement. Denied authorization is persisted before the failure is returned. When the bounded audit sequence is full, a new record evicts the oldest `authorization_denied` record, or the oldest record when no denial remains. Sequence numbers keep increasing across evictions, so a gap shows that history was dropped. A full log never blocks revocation, grant changes, or witness transitions, and a remote caller cannot flush lifecycle history by provoking denials.
+
+## Bridge dispatch
+
+The Windows E2EE bridge serializes every native endpoint call, but it executes an authenticated application request outside that serialization. A long turn therefore does not hold back a later envelope such as an interrupt. The bridge sends `daemon_accepted` as soon as the command journal durably accepts a mutating request. It queues `daemon_result` before any deliveries activated by that result, and acknowledges the native receive only after every reply reached the relay.
+
+The reply route moves only after the endpoint authenticates an envelope. A forged frame from another route cannot redirect replies. The bridge keeps the sealed replies of its most recent 64 authenticated request envelopes. A byte-exact replay of one of them, such as a device retrying after a lost acceptance, re-sends those replies on the replay's route without executing the request again. This cache lives in memory; after a daemon restart, recovery depends on the native endpoint and the command journal.
+
+A remote attachment ends its event subscriptions when the device loses `observe`, and closes when the device is revoked. Subscriptions deliver without a per-event authority check, so a narrowed grant must not leave one running.
 
 ## Remaining gates
 

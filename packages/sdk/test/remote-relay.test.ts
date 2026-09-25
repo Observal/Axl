@@ -580,6 +580,7 @@ test("reconnect resolves a new route and retries byte-identical prepared ciphert
   const states: RemoteRelayConnectionState[] = [];
   connection.onState((state) => states.push(state));
   const updates: string[] = [];
+  let acknowledged = 0;
   const delivery = new RemoteHostedDelivery({
     connection,
     outbox,
@@ -587,10 +588,18 @@ test("reconnect resolves a new route and retries byte-identical prepared ciphert
     attemptIds,
     opener: {
       async open(opaqueEnvelope) {
-        return { authenticatedPeerId: daemonId, plaintext: opaqueEnvelope };
+        return {
+          authenticatedPeerId: daemonId,
+          plaintext: opaqueEnvelope,
+          acknowledge: async () => {
+            acknowledged += 1;
+          },
+        };
       },
     },
   });
+  const errors: Error[] = [];
+  delivery.onError((error) => errors.push(error));
   delivery.onDeliveryState((update) => updates.push(update.state));
   await delivery.start();
 
@@ -638,19 +647,18 @@ test("reconnect resolves a new route and retries byte-identical prepared ciphert
       status: "forwarded",
     }),
   );
-  secondSocket.message(
-    encodeRelayBinaryFrame({
-      transportVersion: REMOTE_TRANSPORT_VERSION,
-      attemptId: parseTransportAttemptId("99999999-9999-4999-8999-999999999999"),
-      sourceRouteId: secondDaemonRoute,
-      opaquePayload: encodeRemoteDaemonMessage({
-        version: REMOTE_TRANSPORT_VERSION,
-        type: "daemon_accepted",
-        requestId,
-        idempotencyKey,
-      }),
+  const acceptance = encodeRelayBinaryFrame({
+    transportVersion: REMOTE_TRANSPORT_VERSION,
+    attemptId: parseTransportAttemptId("99999999-9999-4999-8999-999999999999"),
+    sourceRouteId: secondDaemonRoute,
+    opaquePayload: encodeRemoteDaemonMessage({
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_accepted",
+      requestId,
+      idempotencyKey,
     }),
-  );
+  });
+  secondSocket.message(acceptance);
   await nextTurn();
   await nextTurn();
 
@@ -659,5 +667,14 @@ test("reconnect resolves a new route and retries byte-identical prepared ciphert
   assert.ok(updates.includes("relay_forwarded"));
   assert.ok(updates.includes("daemon_accepted"));
   assert.deepEqual(await outbox.list(), []);
+  assert.equal(acknowledged, 1);
+
+  // The daemon re-sends its replies when a request is replayed; a duplicate acceptance for a
+  // record already removed is acknowledged, not reported as a bad message.
+  secondSocket.message(acceptance);
+  await delivery.drain();
+  assert.deepEqual(errors, []);
+  assert.equal(acknowledged, 2);
+  assert.equal(updates.filter((state) => state === "daemon_accepted").length, 1);
   delivery.close();
 });

@@ -328,8 +328,12 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
     };
   });
   const audit = state.audit.map(parseAuditEvent);
+  // Sequences strictly increase. Gaps are allowed because a full audit evicts old records.
   for (const [index, event] of audit.entries()) {
-    if (event.sequence !== index + 1) throw new Error("remote authority.audit sequence is invalid");
+    const previous = audit[index - 1];
+    if (previous !== undefined && event.sequence <= previous.sequence) {
+      throw new Error("remote authority.audit sequence is invalid");
+    }
   }
   return {
     version: AUTHORITY_FORMAT_VERSION,
@@ -337,6 +341,27 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
     devices,
     audit,
   };
+}
+
+/**
+ * Append one audit event within the bounded capacity. A full audit evicts its oldest denied
+ * authorization first, then its oldest record, so an attempt flood can never block a revocation,
+ * grant change, or witness transition. Sequences keep increasing, so an eviction leaves a gap.
+ */
+function appendAudit(
+  audit: readonly RemoteAuthorityAuditEvent[],
+  event: RemoteAuthorityAuditDraft,
+): RemoteAuthorityAuditEvent[] {
+  const sequence = (audit.at(-1)?.sequence ?? 0) + 1;
+  if (!Number.isSafeInteger(sequence))
+    throw new Error("Remote authority audit sequence overflowed");
+  const next = [...audit];
+  if (next.length >= MAX_AUTHORITY_AUDIT_EVENTS) {
+    const denial = next.findIndex((entry) => entry.code === "authorization_denied");
+    next.splice(denial < 0 ? 0 : denial, 1);
+  }
+  next.push({ ...event, sequence });
+  return next;
 }
 
 function canonicalScopes(scopes: readonly RemoteDeviceScope[]): readonly RemoteDeviceScope[] {
@@ -426,6 +451,7 @@ export class RemoteDeviceAuthorityStore {
   private devices: Map<DeviceId, DeviceAuthorityRecord>;
   private audit: RemoteAuthorityAuditEvent[];
   private readonly revocationListeners = new Set<(deviceId: DeviceId) => void>();
+  private readonly grantListeners = new Set<(deviceId: DeviceId) => void>();
   private readonly witnessListeners = new Set<(deviceId: DeviceId) => void>();
   private tail: Promise<void> = Promise.resolve();
 
@@ -655,12 +681,22 @@ export class RemoteDeviceAuthorityStore {
               localGeneration: record.local.generation,
             };
       },
-    ).then(() => this.requiredSnapshot(deviceId));
+    ).then(() => {
+      const snapshot = this.requiredSnapshot(deviceId);
+      this.publishGrantChange(deviceId);
+      return snapshot;
+    });
   }
 
   onDeviceRevoked(listener: (deviceId: DeviceId) => void): () => void {
     this.revocationListeners.add(listener);
     return () => this.revocationListeners.delete(listener);
+  }
+
+  /** Notified after any durable change to a device's local or hosted grant, including revocation. */
+  onDeviceGrantChanged(listener: (deviceId: DeviceId) => void): () => void {
+    this.grantListeners.add(listener);
+    return () => this.grantListeners.delete(listener);
   }
 
   applyHostedGrant(
@@ -733,6 +769,7 @@ export class RemoteDeviceAuthorityStore {
     ).then(() => {
       const snapshot = this.requiredSnapshot(deviceId);
       if (snapshot.hostedRevoked) this.publishRevocation(deviceId);
+      this.publishGrantChange(deviceId);
       return snapshot;
     });
   }
@@ -771,6 +808,7 @@ export class RemoteDeviceAuthorityStore {
     ).then(() => {
       const snapshot = this.requiredSnapshot(deviceId);
       this.publishRevocation(deviceId);
+      this.publishGrantChange(deviceId);
       return snapshot;
     });
   }
@@ -825,6 +863,7 @@ export class RemoteDeviceAuthorityStore {
     deviceId: DeviceId,
     requiredScope: RemoteDeviceScope,
     start: (context: RemoteAuthorizationContext) => StartedAuthorizedOperation<Result>,
+    onAccepted?: () => void,
   ): Promise<Result> {
     const admitted = this.serialize(async () => {
       let context: RemoteAuthorizationContext;
@@ -847,11 +886,18 @@ export class RemoteDeviceAuthorityStore {
       await operation.acceptance;
       return { completion: operation.completion };
     });
-    return admitted.then(({ completion }) => completion);
+    return admitted.then(({ completion }) => {
+      onAccepted?.();
+      return completion;
+    });
   }
 
   private publishRevocation(deviceId: DeviceId): void {
     for (const listener of this.revocationListeners) listener(deviceId);
+  }
+
+  private publishGrantChange(deviceId: DeviceId): void {
+    for (const listener of this.grantListeners) listener(deviceId);
   }
 
   private requiredSnapshot(deviceId: DeviceId): RemoteDeviceAuthoritySnapshot {
@@ -861,10 +907,7 @@ export class RemoteDeviceAuthorityStore {
   }
 
   private async appendAuditLocked(event: RemoteAuthorityAuditDraft): Promise<void> {
-    if (this.audit.length >= MAX_AUTHORITY_AUDIT_EVENTS) {
-      throw new Error("Remote authority audit capacity has been reached");
-    }
-    const audit = [...this.audit, { ...event, sequence: this.audit.length + 1 }];
+    const audit = appendAudit(this.audit, event);
     await writeAtomic(this.path, {
       version: AUTHORITY_FORMAT_VERSION,
       installationId: this.installationId,
@@ -890,13 +933,7 @@ export class RemoteDeviceAuthorityStore {
       const candidate = new Map(before);
       const next = operation(candidate);
       const event = auditEvent?.(before, next);
-      if (event !== undefined && this.audit.length >= MAX_AUTHORITY_AUDIT_EVENTS) {
-        throw new Error("Remote authority audit capacity has been reached");
-      }
-      const audit =
-        event === undefined
-          ? this.audit
-          : [...this.audit, { ...event, sequence: this.audit.length + 1 }];
+      const audit = event === undefined ? this.audit : appendAudit(this.audit, event);
       const state: PersistedAuthorityState = {
         version: AUTHORITY_FORMAT_VERSION,
         installationId: this.installationId,
