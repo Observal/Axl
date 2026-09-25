@@ -1,0 +1,279 @@
+/* SPDX-FileCopyrightText: 2026 Lokesh */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+:root {
+  --canvas: #f7f7f8;
+  --panel: #ffffff;
+  --raised: #efeff2;
+  --border: #d5d5db;
+  --text: #202126;
+  --muted: #62636b;
+  --accent: #6d70c9;
+  --accent-text: #ffffff;
+  --danger: #c2413b;
+  --success: #2f8f5e;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #111113;
+    --panel: #19191c;
+    --raised: #202023;
+    --border: #303036;
+    --text: #f4f4f5;
+    --muted: #a1a1aa;
+    --accent: #6d70c9;
+    --accent-text: #ffffff;
+    --danger: #f2877f;
+    --success: #43b77b;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--canvas);
+  color: var(--text);
+  font: 400 15px/1.55 "SF Pro Text", "Segoe UI Variable", "Helvetica Neue", ui-sans-serif,
+    system-ui, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+.remote {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: max(12px, env(safe-area-inset-top)) 16px max(12px, env(safe-area-inset-bottom));
+}
+
+.remote-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+h1,
+h2 {
+  margin: 0;
+  letter-spacing: -0.02em;
+}
+
+h1 {
+  font-size: 18px;
+  font-weight: 650;
+}
+
+h2 {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.remote-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.remote-status.error {
+  color: var(--danger);
+}
+
+.remote-panel,
+.remote-thread {
+  padding-top: 14px;
+}
+
+.remote-thread {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.remote-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.remote-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.remote-steps {
+  margin: 0;
+  padding-left: 22px;
+  color: var(--muted);
+}
+
+.remote-steps li {
+  padding: 4px 0;
+}
+
+.remote-steps li.done {
+  color: var(--success);
+}
+
+.remote-steps li.active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.remote-hint {
+  color: var(--muted);
+}
+
+.remote-list,
+.remote-records {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.remote-session {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.remote-session-title {
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-session-detail {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-records {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.record {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.record.user {
+  margin-left: 15%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--raised);
+}
+
+.record.tool {
+  color: var(--muted);
+  font: 12px/1.5 "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, monospace;
+}
+
+.record.error {
+  color: var(--danger);
+}
+
+.remote-activity {
+  margin: 0 0 10px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.remote-composer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+  background: var(--canvas);
+}
+
+.remote-composer textarea {
+  width: 100%;
+  min-height: 48px;
+  max-height: 40dvh;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  resize: vertical;
+}
+
+.remote-composer textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.remote-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.remote-button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.remote-button.quiet {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+}
+
+.remote-button:focus-visible,
+.remote-session:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

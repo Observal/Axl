@@ -13,6 +13,7 @@ export * from "./models.ts";
 export * from "./new-session.ts";
 export * from "./presentation.ts";
 export * from "./projector.ts";
+export * from "./remote-browser-device.ts";
 export * from "./remote-e2ee.ts";
 export * from "./remote-outbox.ts";
 export * from "./remote-pairing.ts";
