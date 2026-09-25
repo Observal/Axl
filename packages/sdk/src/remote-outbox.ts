@@ -252,10 +252,18 @@ function uuidText(bytes: Uint8Array): string {
   return `${encoded.slice(0, 8)}-${encoded.slice(8, 12)}-${encoded.slice(12, 16)}-${encoded.slice(16, 20)}-${encoded.slice(20)}`;
 }
 
+/**
+ * Copy native bytes before deriving identities from them. Node bindings return `Buffer`, whose
+ * `slice()` is a view of the same memory, so XOR-deriving on a slice would corrupt the source.
+ */
+function copyBytes(value: Uint8Array): Uint8Array {
+  return new Uint8Array(value);
+}
+
 function requestIdFor(record: NativeDurableOutboxRecord): RequestId {
-  const bytes = record.logicalMessageId.slice();
+  const bytes = copyBytes(record.logicalMessageId);
   if (record.messageClass === "application_request") {
-    const ephemeral = bytes.slice();
+    const ephemeral = copyBytes(bytes);
     ephemeral[0] = (ephemeral[0] ?? 0) ^ 0x42;
     if (sameBytes(ephemeral, record.operationId)) return parseRemoteRequestId(uuidText(ephemeral));
     bytes[0] = (bytes[0] ?? 0) ^ 0x41;
@@ -338,7 +346,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
 
   async markDaemonAccepted(requestId: RequestId): Promise<void> {
     const record = await this.#required(requestId);
-    const acknowledgement = record.operationId.slice();
+    const acknowledgement = copyBytes(record.operationId);
     acknowledgement[0] = (acknowledgement[0] ?? 0) ^ 0x44;
     await this.#acknowledge(acknowledgement, record.operationId);
     this.#sending.delete(requestId);
@@ -350,7 +358,7 @@ export class NativeEndpointOutbox implements RemoteOutbox {
       (candidate) => requestIdFor(candidate) === requestId,
     );
     if (record === undefined) return;
-    const acknowledgement = record.operationId.slice();
+    const acknowledgement = copyBytes(record.operationId);
     acknowledgement[0] = (acknowledgement[0] ?? 0) ^ 0x49;
     await this.#acknowledge(acknowledgement, record.operationId);
     this.#sending.delete(requestId);
