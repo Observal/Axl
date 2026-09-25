@@ -80,6 +80,22 @@ print(json.dumps({
 PY
 fi
 
+witness_secret_name="axl/hosted-path/witness-keys"
+if ! aws secretsmanager describe-secret   --profile "$profile" --region "$region" --secret-id "$witness_secret_name" >/dev/null 2>&1; then
+  node --input-type=module <<'NODE' | aws secretsmanager create-secret     --profile "$profile"     --region "$region"     --name "$witness_secret_name"     --description "Axl hosted-path deployment-test witness signing keys"     --secret-string file:///dev/stdin >/dev/null
+import { generateKeyPairSync, randomBytes } from "node:crypto";
+
+const replicas = [0, 1, 2].map(() => ({
+  replicaId: randomBytes(16).toString("hex"),
+  keyId: randomBytes(16).toString("hex"),
+  privateKey: generateKeyPairSync("ed25519")
+    .privateKey.export({ format: "der", type: "pkcs8" })
+    .toString("base64"),
+}));
+process.stdout.write(JSON.stringify({ replicas }));
+NODE
+fi
+
 export AWS_PROFILE="$profile"
 export AWS_REGION="$region"
 image_tag="$(git -C "$root" rev-parse --short=12 HEAD)"

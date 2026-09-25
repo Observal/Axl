@@ -20,7 +20,10 @@ for _attempt in $(seq 1 60); do
   fi
   sleep 5
 done
-curl --fail --silent --show-error "$origin/healthz" >/dev/null
+curl --fail --silent --show-error "$origin/healthz" | grep -q '"witness":true' || {
+  echo "The control plane is not serving the rollback witness." >&2
+  exit 1
+}
 
 AXL_TEST_ORIGIN="$origin" AXL_TEST_SECRET_JSON="$secret_json" node --input-type=module <<'NODE'
 import { createHash, randomUUID } from "node:crypto";

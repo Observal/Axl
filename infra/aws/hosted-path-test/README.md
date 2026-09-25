@@ -17,6 +17,18 @@ services, immutable ECR repositories, CloudWatch logs, and least-privilege ECS r
 secrets are generated outside Terraform and stored in AWS Secrets Manager. Terraform state is
 versioned and encrypted in a dedicated private S3 bucket.
 
+The control plane also serves the rollback witness at `/v1/e2ee/witness` with three in-process
+replicas. Their Ed25519 signing keys live in the `axl/hosted-path/witness-keys` secret, which
+`deploy.sh` generates once. Replica state is process memory: a control-plane restart or redeploy
+starts every replica empty, so endpoints registered before it fail closed and must pair again. The
+first endpoint to register after a start must make one fresh witness read before a second endpoint
+can register; that read moves the replicas from bootstrap to ready. Write the public replica trust
+for deployment-test client builds with:
+
+```bash
+AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/witness-trust.sh /tmp/axl-replica-trust.bin
+```
+
 Deploy from a clean tracked checkout:
 
 ```bash
