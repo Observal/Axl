@@ -20,6 +20,7 @@ import {
   parseRemoteRequestId,
   parseRouteId,
   parseSessionId,
+  RemoteDaemonMessageAssembler,
   type RemoteDaemonMessage,
   type RouteId,
   type ServerMessage,
@@ -48,6 +49,8 @@ const FORGED = 0xff;
 function transparentEndpoint() {
   const received: string[] = [];
   const acknowledged: string[] = [];
+  const prepared: string[] = [];
+  const released: string[] = [];
   const endpoint: NativeDaemonE2eeEndpoint = {
     async witnessReadRequest() {
       return Uint8Array.of(0x7d);
@@ -70,6 +73,7 @@ function transparentEndpoint() {
       };
     },
     async prepareApplication(operation, logical, _generation, plaintext) {
+      prepared.push(Buffer.from(operation).toString("hex"));
       return {
         tag: "released",
         result: {
@@ -83,8 +87,20 @@ function transparentEndpoint() {
         },
       };
     },
-    async acknowledgeOutbox() {
-      throw new Error("not used");
+    async acknowledgeOutbox(_operation, target) {
+      released.push(Buffer.from(target).toString("hex"));
+      return {
+        tag: "released",
+        result: {
+          tag: "outbox",
+          outbox: {
+            operationId: target.slice(),
+            logicalMessageId: target.slice(),
+            messageClass: "application_delivery",
+            ciphertext: Uint8Array.of(0),
+          },
+        },
+      };
     },
     async acknowledgeReceive(_operation, target) {
       acknowledged.push(Buffer.from(target).toString("hex"));
@@ -92,7 +108,7 @@ function transparentEndpoint() {
     },
     close() {},
   };
-  return { endpoint, received, acknowledged };
+  return { endpoint, received, acknowledged, prepared, released };
 }
 
 type Handler = (
@@ -102,11 +118,15 @@ type Handler = (
 ) => Promise<AuthenticatedRemoteRequestResult>;
 
 /** Stands in for the daemon so each test scripts acceptance, completion, and activation. */
-function scriptedDaemon(handler: Handler): AxlDaemon {
+function scriptedDaemon(
+  handler: Handler,
+  attached: { send?: (message: ServerMessage) => void } = {},
+): AxlDaemon {
   return {
     attachAuthenticatedRemoteDevice(
       options: AuthenticatedRemoteAttachmentOptions,
     ): AuthenticatedRemoteAttachment {
+      attached.send = options.send;
       return {
         request: (value, observer) =>
           handler(value as AuthenticatedRemoteRequest, observer, options.send),
@@ -132,7 +152,11 @@ async function waitFor(description: string, predicate: () => boolean): Promise<v
   }
 }
 
-async function harness(context: TestContext, handler: Handler) {
+async function harness(
+  context: TestContext,
+  handler: Handler,
+  options: { readonly deliveryFlushMs?: number } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "axl-bridge-dispatch-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const authority = await RemoteDeviceAuthorityStore.open(join(root, "data"), installationId);
@@ -141,9 +165,11 @@ async function harness(context: TestContext, handler: Handler) {
   const fake = transparentEndpoint();
   const sent: { route: RouteId; bytes: Uint8Array; message: RemoteDaemonMessage }[] = [];
   const errors: Error[] = [];
+  const attached: { send?: (message: ServerMessage) => void } = {};
   const bridge = new WindowsRemoteE2eeBridge({
+    ...options,
     onError: (error) => errors.push(error),
-    daemon: scriptedDaemon(handler),
+    daemon: scriptedDaemon(handler, attached),
     deviceId,
     authority,
     endpoint: fake.endpoint,
@@ -161,11 +187,19 @@ async function harness(context: TestContext, handler: Handler) {
   });
   context.after(() => bridge.close());
   assert.equal(await bridge.start(), "ready");
-  return { bridge, sent, errors, ...fake };
+  const emit = (message: ServerMessage): void => {
+    assert.ok(attached.send);
+    attached.send(message);
+  };
+  return { bridge, sent, errors, authority, emit, ...fake };
 }
 
 let sequence = 0;
-function requestEnvelope(request: AuthenticatedRemoteRequest, forged = false): Uint8Array {
+function requestEnvelope(
+  request: AuthenticatedRemoteRequest,
+  forged = false,
+  hostedGrantGeneration = 1,
+): Uint8Array {
   sequence += 1;
   const suffix = sequence.toString(16).padStart(12, "0");
   const plaintext = new TextEncoder().encode(JSON.stringify(request));
@@ -173,9 +207,13 @@ function requestEnvelope(request: AuthenticatedRemoteRequest, forged = false): U
     operationId: parseOperationId(`eeeeeeee-eeee-4eee-8eee-${suffix}`),
     logicalMessageId: parseOperationId(`ffffffff-ffff-4fff-8fff-${suffix}`),
     messageClass: "application_request",
-    hostedGrantGeneration: 1,
+    hostedGrantGeneration,
     ciphertext: forged ? Uint8Array.of(FORGED, ...plaintext) : plaintext,
   });
+}
+
+function changed(generation: number): ServerMessage {
+  return { kind: "sessions_changed", generation };
 }
 
 function sendRequest(id: string): AuthenticatedRemoteRequest {
@@ -331,6 +369,135 @@ test("an unauthenticated frame never moves the reply route", async (context) => 
     "the result and later deliveries still go to the authenticated route",
   );
   assert.equal(errors.length, 1, "the forged frame is reported, not answered");
+});
+
+test("live deliveries are batched and never overtake the result they follow", async (context) => {
+  const { bridge, sent, emit, prepared, released, errors } = await harness(
+    context,
+    async (request, observer, send) => {
+      for (const generation of [1, 2, 3]) send(changed(generation));
+      const completed = result(request);
+      observer?.completed?.(completed);
+      for (const generation of [4, 5]) send(changed(generation));
+      return completed;
+    },
+    // A long window proves the reply and drain flush the batch, not the timer.
+    { deliveryFlushMs: 60_000 },
+  );
+  await bridge.receive({
+    sourceRouteId: firstRoute,
+    opaqueEnvelope: requestEnvelope(infoRequest("a0000000")),
+  });
+  emit(changed(6));
+  await bridge.drain();
+  assert.deepEqual(
+    sent.map(({ message }) =>
+      message.type === "daemon_deliveries"
+        ? message.messages.map((delivery) =>
+            delivery.kind === "sessions_changed" ? delivery.generation : delivery.kind,
+          )
+        : message.type,
+    ),
+    [[1, 2, 3], "daemon_result", [4, 5, 6]],
+  );
+  assert.deepEqual(released, prepared, "every sent envelope left the native outbox");
+  assert.deepEqual(errors, []);
+});
+
+test("a large result is fragmented, released, and replayed whole", async (context) => {
+  const text = "z".repeat(150_000);
+  const { bridge, sent, prepared, released } = await harness(context, async (request, observer) => {
+    const completed = { ...result(request), result: { text } };
+    observer?.completed?.(completed);
+    return completed;
+  });
+  const envelope = requestEnvelope(infoRequest("b0000000"));
+  await bridge.receive({ sourceRouteId: firstRoute, opaqueEnvelope: envelope });
+  assert.equal(sent.length, 4);
+  const assembler = new RemoteDaemonMessageAssembler();
+  let whole: RemoteDaemonMessage | undefined;
+  for (const { message, route } of sent) {
+    assert.equal(route, firstRoute);
+    assert.equal(message.type, "daemon_fragment");
+    if (message.type === "daemon_fragment") whole = assembler.accept(message) ?? whole;
+  }
+  assert.ok(whole?.type === "daemon_result");
+  assert.deepEqual(whole.result, { text });
+  assert.deepEqual(released, prepared);
+  assert.equal(new Set(prepared).size, 4, "each fragment is sealed under its own operation");
+
+  await bridge.receive({ sourceRouteId: secondRoute, opaqueEnvelope: envelope });
+  assert.equal(sent.length, 8);
+  assert.deepEqual(
+    sent.slice(4).map(({ bytes }) => bytes),
+    sent.slice(0, 4).map(({ bytes }) => bytes),
+    "a replay re-sends every fragment",
+  );
+});
+
+test("a superseded grant generation is rejected once without moving the reply route", async (context) => {
+  const { bridge, sent, authority, emit, received } = await harness(context, async (request) =>
+    result(request),
+  );
+  await bridge.receive({
+    sourceRouteId: firstRoute,
+    opaqueEnvelope: requestEnvelope(infoRequest("c0000000")),
+  });
+  await authority.applyHostedGrant(deviceId, 2, ["observe", "steer"]);
+  sent.length = 0;
+
+  const stale = requestEnvelope(infoRequest("c0000001"), false, 1);
+  await assert.rejects(
+    bridge.receive({ sourceRouteId: secondRoute, opaqueEnvelope: stale }),
+    /stale/u,
+  );
+  await assert.rejects(
+    bridge.receive({ sourceRouteId: secondRoute, opaqueEnvelope: stale }),
+    /stale/u,
+  );
+  assert.equal(received.length, 1, "the stale envelope was never decrypted");
+  assert.deepEqual(
+    sent.map(({ route, message }) => [route, message]),
+    [
+      [
+        secondRoute,
+        {
+          version: 1,
+          type: "daemon_rejected",
+          operationId: parseRemoteE2eeEnvelope(stale).operationId,
+          code: "stale_grant_generation",
+          hostedGrantGeneration: 2,
+        },
+      ],
+    ],
+    "rejected once, sealed under the current grant, to the frame's source",
+  );
+  emit(changed(1));
+  await bridge.drain();
+  assert.equal(sent.at(-1)?.route, firstRoute, "the unauthenticated frame did not move the route");
+});
+
+test("deliveries follow the relay's route for the device after it reconnects", async (context) => {
+  const { bridge, sent, emit } = await harness(context, async (request) => result(request));
+  await bridge.receive({
+    sourceRouteId: firstRoute,
+    opaqueEnvelope: requestEnvelope(infoRequest("d0000000")),
+  });
+  bridge.observeRelayRoutes([
+    {
+      routeId: parseRouteId("33333333-3333-4333-8333-333333333333"),
+      role: "device",
+      deviceId: parseDeviceId("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+    },
+    { routeId: secondRoute, role: "device", deviceId },
+  ]);
+  emit(changed(1));
+  await bridge.drain();
+  assert.equal(sent.at(-1)?.route, secondRoute);
+  bridge.observeRelayRoutes([]);
+  emit(changed(2));
+  await bridge.drain();
+  assert.equal(sent.at(-1)?.route, secondRoute, "a vanished route keeps the last known one");
 });
 
 function replyPort(): ModelPort {

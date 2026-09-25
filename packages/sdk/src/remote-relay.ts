@@ -15,9 +15,12 @@ import {
   parseIssueRelayTicketResult,
   parseRelayBinaryFrame,
   parseRelayDiscoveryMessage,
+  parseRemoteE2eeEnvelope,
+  RemoteDaemonMessageAssembler,
   REMOTE_TRANSPORT_VERSION,
   type RelayDelivery,
   type RelayFailure,
+  type RelayLimits,
   type RelayPeerRoute,
   type RelayReceipt,
   type RemoteDaemonMessage,
@@ -31,6 +34,8 @@ import type { RemoteOutbox, TransportAttemptIdFactory } from "./remote-outbox.ts
 
 const MAX_ADMISSION_BYTES = 4_096;
 const DEFAULT_ROUTE_WAIT_MS = 10_000;
+/** Share of the relay's frame budget a client uses, leaving room for timing skew. */
+const RATE_BUDGET_SHARE = 0.9;
 
 export interface RelayAdmissionCredential extends IssueRelayTicketResult {
   readonly connectionNonce: string;
@@ -217,7 +222,8 @@ export type RemoteRelayErrorCode =
   | "daemon_offline"
   | "wrong_destination"
   | "bad_relay_message"
-  | "frame_too_large";
+  | "frame_too_large"
+  | "rate_limited";
 
 export class RemoteRelayError extends Error {
   readonly code: RemoteRelayErrorCode;
@@ -336,6 +342,13 @@ export class RemoteRelayConnection {
   private starting: Promise<void> | undefined;
   private reconnecting: Promise<void> | undefined;
   private activeMaxFrameBytes: number | undefined;
+  private activeLimits: RelayLimits | undefined;
+  /** Send times inside the current rate window, oldest first. */
+  private sentAt: number[] = [];
+  /** Frames held back so the connection stays inside its relay frame budget. */
+  private paced: Uint8Array[] = [];
+  private pacedBytes = 0;
+  private pacer: ReturnType<typeof setTimeout> | undefined;
   private currentState: RemoteRelayConnectionState = "disconnected";
 
   constructor(options: RemoteRelayConnectionOptions) {
@@ -383,6 +396,8 @@ export class RemoteRelayConnection {
     this.socket?.close(1000, "client_closed");
     this.socket = undefined;
     this.activeMaxFrameBytes = undefined;
+    this.activeLimits = undefined;
+    this.clearPaced();
     this.clearRoutes();
     this.rejectRouteWaiters(
       new RemoteRelayError("connection_closed", "Relay connection is closed"),
@@ -466,7 +481,73 @@ export class RemoteRelayConnection {
         "Relay frame exceeds the negotiated frame limit",
       );
     }
-    socket.send(frame);
+    // The relay closes a connection that exceeds its frame budget, so frames beyond it wait
+    // here in order instead. A backlog past the relay's own queue bound fails loudly.
+    if (this.paced.length === 0 && this.takeBudget()) {
+      socket.send(frame);
+      return;
+    }
+    const limit = this.activeLimits?.maxQueuedBytes ?? 0;
+    if (this.pacedBytes + frame.byteLength > limit) {
+      throw new RemoteRelayError(
+        "rate_limited",
+        "Relay send backlog exceeds the connection's frame budget",
+      );
+    }
+    this.paced.push(frame);
+    this.pacedBytes += frame.byteLength;
+    this.schedulePacer();
+  }
+
+  /** Frames waiting for the relay frame budget. */
+  get pacedFrames(): number {
+    return this.paced.length;
+  }
+
+  private takeBudget(now = Date.now()): boolean {
+    const limits = this.activeLimits;
+    if (limits === undefined) return false;
+    const windowStart = now - limits.rateWindowMs;
+    while ((this.sentAt[0] ?? now) <= windowStart) this.sentAt.shift();
+    const budget = Math.max(1, Math.floor(limits.maxFramesPerWindow * RATE_BUDGET_SHARE));
+    if (this.sentAt.length >= budget) return false;
+    this.sentAt.push(now);
+    return true;
+  }
+
+  private schedulePacer(): void {
+    const limits = this.activeLimits;
+    if (this.pacer !== undefined || limits === undefined) return;
+    const oldest = this.sentAt[0] ?? Date.now();
+    const delay = Math.max(1, oldest + limits.rateWindowMs - Date.now() + 1);
+    this.pacer = setTimeout(() => {
+      this.pacer = undefined;
+      this.drainPaced();
+    }, delay);
+  }
+
+  private drainPaced(): void {
+    const socket = this.socket;
+    if (this.currentState !== "connected" || socket === undefined || socket.readyState !== 1) {
+      this.clearPaced();
+      return;
+    }
+    while (this.paced.length > 0 && this.takeBudget()) {
+      const frame = this.paced.shift();
+      if (frame === undefined) break;
+      this.pacedBytes -= frame.byteLength;
+      socket.send(frame);
+    }
+    if (this.paced.length > 0) this.schedulePacer();
+  }
+
+  /** Paced frames belong to one admitted connection; its successor starts with a fresh budget. */
+  private clearPaced(): void {
+    if (this.pacer !== undefined) clearTimeout(this.pacer);
+    this.pacer = undefined;
+    this.paced = [];
+    this.pacedBytes = 0;
+    this.sentAt = [];
   }
 
   private async connectWithRetry(
@@ -579,6 +660,8 @@ export class RemoteRelayConnection {
       throw new RemoteRelayError("connection_closed", "Relay connection became stale");
     }
     this.activeMaxFrameBytes = credential.limits.maxFrameBytes;
+    this.activeLimits = credential.limits;
+    this.clearPaced();
     this.setState("connected");
   }
 
@@ -621,6 +704,8 @@ export class RemoteRelayConnection {
     this.generation += 1;
     this.socket = undefined;
     this.activeMaxFrameBytes = undefined;
+    this.activeLimits = undefined;
+    this.clearPaced();
     socket?.close(1000, "connection_attempt_failed");
     this.clearRoutes();
   }
@@ -679,6 +764,8 @@ export class RemoteRelayConnection {
     const wasConnected = this.currentState === "connected";
     this.socket = undefined;
     this.activeMaxFrameBytes = undefined;
+    this.activeLimits = undefined;
+    this.clearPaced();
     this.clearRoutes();
     this.rejectRouteWaiters(error);
     if (!wasConnected || this.stopped || this.reconnecting !== undefined) return;
@@ -729,6 +816,8 @@ export interface RemoteDeliveryUpdate {
   readonly state: RemoteDeliveryState;
   readonly attemptId?: RelayReceipt["attemptId"];
   readonly relayFailure?: RelayFailure["code"];
+  /** The daemon refused the envelope without executing it; the request will never run. */
+  readonly daemonRejection?: Extract<RemoteDaemonMessage, { type: "daemon_rejected" }>["code"];
 }
 
 export interface RemoteHostedDeliveryOptions {
@@ -746,6 +835,7 @@ export class RemoteHostedDelivery {
   private readonly deliveryListeners = new Set<(update: RemoteDeliveryUpdate) => void>();
   private readonly messageListeners = new Set<(message: RemoteDaemonMessage) => void>();
   private readonly errorListeners = new Set<(error: Error) => void>();
+  private readonly fragments = new RemoteDaemonMessageAssembler();
   private flushTail: Promise<void> = Promise.resolve();
   private inboundTail: Promise<void> = Promise.resolve();
   private started = false;
@@ -931,17 +1021,40 @@ export class RemoteHostedDelivery {
       await this.flush();
       return;
     }
-    const message = decodeRemoteDaemonMessage(opened.plaintext);
+    const decoded = decodeRemoteDaemonMessage(opened.plaintext);
+    if (decoded.type === "daemon_fragment") {
+      const whole = this.fragments.accept(decoded);
+      await opened.acknowledge?.();
+      if (whole !== undefined) await this.handleMessage(whole);
+      return;
+    }
+    await this.handleMessage(decoded);
+    await opened.acknowledge?.();
+  }
+
+  private async handleMessage(message: RemoteDaemonMessage): Promise<void> {
+    if (message.type === "daemon_deliveries") {
+      for (const delivered of message.messages) {
+        await this.handleMessage({
+          version: message.version,
+          type: "daemon_delivery",
+          message: delivered,
+        });
+      }
+      return;
+    }
+    if (message.type === "daemon_rejected") {
+      await this.handleRejection(message);
+      for (const listener of this.messageListeners) listener(message);
+      return;
+    }
     if (message.type === "daemon_accepted") {
       const record = (await this.options.outbox.list()).find(
         (candidate) => candidate.requestId === message.requestId,
       );
-      if (record === undefined) {
-        // The daemon re-sends its replies when the device replays a request; the first
-        // acceptance already removed this record, so the duplicate only needs acknowledging.
-        await opened.acknowledge?.();
-        return;
-      }
+      // The daemon re-sends its replies when the device replays a request; the first
+      // acceptance already removed this record, so the duplicate only needs acknowledging.
+      if (record === undefined) return;
       if (record.idempotencyKey !== message.idempotencyKey) {
         throw new RemoteRelayError(
           "bad_relay_message",
@@ -959,7 +1072,31 @@ export class RemoteHostedDelivery {
       this.publish({ requestId: message.requestId, state: "failed" });
     }
     for (const listener of this.messageListeners) listener(message);
-    await opened.acknowledge?.();
+  }
+
+  /**
+   * Fail the queued request the daemon refused. The daemon never decrypted it, so the request
+   * leaves the outbox without running; retrying the same ciphertext could never succeed.
+   */
+  private async handleRejection(
+    message: Extract<RemoteDaemonMessage, { type: "daemon_rejected" }>,
+  ): Promise<void> {
+    for (const record of await this.options.outbox.list()) {
+      let operationId: string;
+      try {
+        operationId = parseRemoteE2eeEnvelope(record.opaqueEnvelope).operationId;
+      } catch {
+        continue;
+      }
+      if (operationId !== message.operationId) continue;
+      await this.options.outbox.markCompleted(record.requestId);
+      this.publish({
+        requestId: record.requestId,
+        state: "failed",
+        daemonRejection: message.code,
+      });
+      return;
+    }
   }
 
   private publish(update: RemoteDeliveryUpdate): void {

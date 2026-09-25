@@ -78,6 +78,16 @@ The reply route moves only after the endpoint authenticates an envelope. A forge
 
 A remote attachment ends its event subscriptions when the device loses `observe`, and closes when the device is revoked. Subscriptions deliver without a per-event authority check, so a narrowed grant must not leave one running.
 
+## Daemon delivery shape
+
+Every sealed envelope costs a native endpoint transaction, a witness round, and one relay frame. The bridge therefore shapes what it sends:
+
+- **Batching.** Live deliveries wait up to 50 ms and leave as one `daemon_deliveries` message of at most 512 entries that fits one envelope. While an earlier batch still waits for the endpoint or the relay, the next batch keeps growing instead of queuing another small envelope. A reply flushes pending deliveries first, so a result never overtakes the events that preceded it.
+- **Fragmentation.** The native core seals at most 60,000 bytes of plaintext per envelope. A larger message, such as a long assistant reply or a snapshot page, is split before sealing into `daemon_fragment` messages carrying base64 slices of the encoded message. Each fragment is sealed under its own operation derived from the message identity and fragment index. Messages above 4 MiB are refused. The SDK reassembles at most four messages at once, drops a set that is not complete within 60 seconds, rejects fragments that conflict with ones already held, and never accepts a fragment inside a fragment.
+- **Outbox release.** The bridge never resends from the native outbox: replies are replayed from memory and deliveries resume from cursors. After each envelope reaches the relay, the bridge acknowledges its native outbox record so the endpoint's durable state does not grow with traffic.
+- **Superseded grants.** An application envelope sealed under an older hosted grant generation is never opened or executed. The bridge answers it once per operation with `daemon_rejected` (`stale_grant_generation`), sealed under the current generation and sent to the frame's source route without moving the reply route. The SDK removes the matching record from the outbox and reports the request as failed, instead of retrying ciphertext that can never be accepted. The bridge remembers the last 256 rejected operations; each rejection is still bounded by the sender's relay frame budget. An envelope from a generation ahead of the daemon's is refused without a reply.
+- **Route following.** The daemon follows the relay's route view for the paired device. A device that reconnects receives deliveries on its new route before it sends anything. When the device route disappears, the bridge keeps the last one and sends fail at the relay until the device returns.
+
 ## Remaining gates
 
 Before production remote control:

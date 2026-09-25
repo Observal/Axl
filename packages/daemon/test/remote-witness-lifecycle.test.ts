@@ -165,8 +165,16 @@ function scriptedEndpoint(reconciliations: DaemonWitnessReconciliation[], calls:
         },
       });
     },
-    async acknowledgeOutbox() {
-      throw new Error("not used");
+    async acknowledgeOutbox(operationId, targetOperationId) {
+      return commit(operationId, {
+        tag: "outbox",
+        outbox: {
+          operationId: targetOperationId.slice(),
+          logicalMessageId: targetOperationId.slice(),
+          messageClass: "application_delivery",
+          ciphertext: Uint8Array.of(0),
+        },
+      });
     },
     async acknowledgeReceive(operationId) {
       return commit(operationId, { tag: "accepted", accepted: { acknowledged: true } });
@@ -285,7 +293,8 @@ test("an unavailable witness gates new work, retries with backoff, and returns t
     { tag: "witness_unavailable" },
     { tag: "witness_unavailable" },
     { tag: "ready" },
-    // receive, response, and acknowledgement each reconcile once
+    // receive, response, outbox release, and acknowledgement each reconcile once
+    { tag: "ready" },
     { tag: "ready" },
     { tag: "ready" },
     { tag: "ready" },
@@ -358,7 +367,7 @@ test("an unavailable witness gates new work, retries with backoff, and returns t
 
   // Work is admitted again and completes its barrier.
   await bridge.receive(delivery());
-  assert.equal(calls.filter((call) => call === "continue").length, 3);
+  assert.equal(calls.filter((call) => call === "continue").length, 4);
   assert.deepEqual(reconciliations, [], "every scripted reconciliation was consumed");
   assert.deepEqual(errors, []);
 

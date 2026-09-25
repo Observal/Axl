@@ -8,11 +8,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  DEFAULT_DAEMON_RELAY_LIMITS,
   DEFAULT_RELAY_LIMITS,
   encodeInternalConsumeRelayTicketRequest,
   INTERNAL_RELAY_API_VERSION,
   parseInstallationId,
   parseRelayRevocationNotification,
+  RELAY_CONNECTION_LEASE_MS,
 } from "@axl/protocol";
 
 import {
@@ -209,9 +211,48 @@ test("serves authenticated public issuance and internal consumption without URL 
     sourceRouteId: "cccccccc-cccc-4ccc-8ccc-000000000001",
     role: "device",
     grantGeneration: 1,
-    leaseExpiresAt: 1_900_000_060_000,
+    leaseExpiresAt: 1_900_000_000_000 + RELAY_CONNECTION_LEASE_MS,
     limits: DEFAULT_RELAY_LIMITS,
   });
+});
+
+test("leases the connection from consumption and budgets frames by role", async () => {
+  let now = 1_900_000_000_000;
+  const service = createTicketService({ now: () => now });
+  const daemon = await service.issue(
+    { accountId: "account-fixture" },
+    { installationId, role: "daemon" },
+  );
+  assert.deepEqual(daemon.limits, DEFAULT_DAEMON_RELAY_LIMITS);
+  const device = await createTicketService({ now: () => now }).issue(
+    { accountId: "account-fixture" },
+    { installationId, deviceId, role: "device" },
+  );
+  assert.deepEqual(device.limits, DEFAULT_RELAY_LIMITS);
+  assert.ok(daemon.limits.maxFramesPerWindow > device.limits.maxFramesPerWindow);
+
+  // The ticket bounds only admission: a ticket consumed late still gets a full lease.
+  now += 59_000;
+  const consumed = await service.consume({
+    ticket: daemon.ticket,
+    relayInstanceId: "relay-fixture-1",
+    connectionNonce: "fixture-nonce",
+    possessionProof: Uint8Array.of(0, 1, 2, 3, 255),
+  });
+  assert.equal(consumed.leaseExpiresAt, now + RELAY_CONNECTION_LEASE_MS);
+  assert.ok(consumed.leaseExpiresAt > daemon.expiresAt);
+
+  assert.throws(
+    () =>
+      new RelayTicketService({
+        store: new InMemoryRelayTicketStore(),
+        authorizer: { currentGeneration: async () => 1 },
+        proofVerifier: { verify: async () => true },
+        relayUrl: "wss://relay.invalid/v1/connect",
+        connectionLeaseMs: 1_000,
+      }),
+    /Connection lease/u,
+  );
 });
 
 test("validates the authenticated relay revocation boundary", async () => {
