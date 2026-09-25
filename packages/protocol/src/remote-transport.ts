@@ -44,14 +44,34 @@ export const MAX_RELAY_QUEUED_BYTES = 512 * 1024;
 export const RELAY_HEARTBEAT_INTERVAL_MS = 20_000;
 export const RELAY_IDLE_TIMEOUT_MS = 60_000;
 export const RELAY_TICKET_LIFETIME_MS = 60_000;
+/** Hard deadline of an admitted connection, independent of the ticket's admission window. */
+export const RELAY_CONNECTION_LEASE_MS = 30 * 60_000;
+export const RELAY_RATE_WINDOW_MS = 10_000;
+export const RELAY_DEVICE_FRAMES_PER_WINDOW = 100;
+/** One daemon connection carries every paired device's replies and live deliveries. */
+export const RELAY_DAEMON_FRAMES_PER_WINDOW = 1_000;
+export const MAX_RELAY_FRAMES_PER_WINDOW = 10_000;
 export const MAX_RELAY_OPAQUE_PAYLOAD_BYTES = MAX_RELAY_FRAME_BYTES - routedFrameHeaderBytes;
 export const MAX_E2EE_CIPHERTEXT_BYTES = MAX_RELAY_OPAQUE_PAYLOAD_BYTES - e2eeEnvelopeHeaderBytes;
+/** Largest application plaintext the E2EE core seals into one envelope. */
+export const MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES = 60_000;
+/** Largest daemon message a device reassembles from `daemon_fragment` messages. */
+export const MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES = 4 * 1024 * 1024;
+/** Raw bytes per fragment; their base64 form and framing stay under the plaintext cap. */
+export const REMOTE_FRAGMENT_DATA_BYTES = 44_000;
+export const MAX_REMOTE_FRAGMENTS = Math.ceil(
+  MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES / REMOTE_FRAGMENT_DATA_BYTES,
+);
+export const MAX_REMOTE_DELIVERY_BATCH = 512;
 
 export interface RelayLimits {
   readonly maxFrameBytes: number;
   readonly maxQueuedBytes: number;
   readonly heartbeatIntervalMs: number;
   readonly idleTimeoutMs: number;
+  /** Inbound frames the relay admits per rate window before closing with `rate_limited`. */
+  readonly maxFramesPerWindow: number;
+  readonly rateWindowMs: number;
 }
 
 export const DEFAULT_RELAY_LIMITS: RelayLimits = Object.freeze({
@@ -59,7 +79,18 @@ export const DEFAULT_RELAY_LIMITS: RelayLimits = Object.freeze({
   maxQueuedBytes: MAX_RELAY_QUEUED_BYTES,
   heartbeatIntervalMs: RELAY_HEARTBEAT_INTERVAL_MS,
   idleTimeoutMs: RELAY_IDLE_TIMEOUT_MS,
+  maxFramesPerWindow: RELAY_DEVICE_FRAMES_PER_WINDOW,
+  rateWindowMs: RELAY_RATE_WINDOW_MS,
 });
+
+export const DEFAULT_DAEMON_RELAY_LIMITS: RelayLimits = Object.freeze({
+  ...DEFAULT_RELAY_LIMITS,
+  maxFramesPerWindow: RELAY_DAEMON_FRAMES_PER_WINDOW,
+});
+
+export function defaultRelayLimits(role: "daemon" | "device"): RelayLimits {
+  return role === "daemon" ? DEFAULT_DAEMON_RELAY_LIMITS : DEFAULT_RELAY_LIMITS;
+}
 
 export interface IssueRelayTicketRequest {
   readonly installationId: InstallationId;
@@ -205,6 +236,33 @@ export type RemoteDaemonMessage =
       readonly version: typeof REMOTE_TRANSPORT_VERSION;
       readonly type: "daemon_delivery";
       readonly message: ServerMessage;
+    }
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      /** Consecutive deliveries sealed together; the device handles them in order. */
+      readonly type: "daemon_deliveries";
+      readonly messages: readonly ServerMessage[];
+    }
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      /** One part of a daemon message too large for a single envelope. */
+      readonly type: "daemon_fragment";
+      readonly fragmentId: EnvelopeId;
+      readonly index: number;
+      readonly count: number;
+      /** Canonical base64 of this part of the encoded message. */
+      readonly data: string;
+    }
+  | {
+      readonly version: typeof REMOTE_TRANSPORT_VERSION;
+      /**
+       * The daemon refused an envelope it could not authenticate under the current hosted grant.
+       * It was never decrypted or executed; the device must fail the request explicitly.
+       */
+      readonly type: "daemon_rejected";
+      readonly operationId: OperationId;
+      readonly code: "stale_grant_generation";
+      readonly hostedGrantGeneration: number;
     };
 
 export interface RelayPeerRoute {
@@ -346,6 +404,8 @@ export function parseRelayLimits(value: unknown, path = "limits"): RelayLimits {
     "maxQueuedBytes",
     "heartbeatIntervalMs",
     "idleTimeoutMs",
+    "maxFramesPerWindow",
+    "rateWindowMs",
   ]);
   return {
     maxFrameBytes: integer(
@@ -367,6 +427,13 @@ export function parseRelayLimits(value: unknown, path = "limits"): RelayLimits {
       300_000,
     ),
     idleTimeoutMs: integer(candidate.idleTimeoutMs, `${path}.idleTimeoutMs`, 1, 600_000),
+    maxFramesPerWindow: integer(
+      candidate.maxFramesPerWindow,
+      `${path}.maxFramesPerWindow`,
+      1,
+      MAX_RELAY_FRAMES_PER_WINDOW,
+    ),
+    rateWindowMs: integer(candidate.rateWindowMs, `${path}.rateWindowMs`, 1_000, 60_000),
   };
 }
 
@@ -814,25 +881,136 @@ export function parseRemoteDaemonMessage(value: unknown): RemoteDaemonMessage {
       message: parseServerMessage(candidate.message),
     };
   }
+  if (candidate.type === "daemon_deliveries") {
+    exact(candidate, "remoteDaemonMessage", ["version", "type", "messages"]);
+    const messages = candidate.messages;
+    if (
+      !Array.isArray(messages) ||
+      messages.length === 0 ||
+      messages.length > MAX_REMOTE_DELIVERY_BATCH
+    ) {
+      fail(
+        "remoteDaemonMessage.messages",
+        `must contain 1 through ${MAX_REMOTE_DELIVERY_BATCH} messages`,
+      );
+    }
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_deliveries",
+      messages: messages.map((message) => parseServerMessage(message)),
+    };
+  }
+  if (candidate.type === "daemon_fragment") {
+    exact(candidate, "remoteDaemonMessage", [
+      "version",
+      "type",
+      "fragmentId",
+      "index",
+      "count",
+      "data",
+    ]);
+    const count = integer(candidate.count, "remoteDaemonMessage.count", 2, MAX_REMOTE_FRAGMENTS);
+    const index = integer(candidate.index, "remoteDaemonMessage.index", 0, count - 1);
+    decodeBase64(candidate.data, "remoteDaemonMessage.data", REMOTE_FRAGMENT_DATA_BYTES);
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_fragment",
+      fragmentId: parseEnvelopeId(candidate.fragmentId, "remoteDaemonMessage.fragmentId"),
+      index,
+      count,
+      data: candidate.data as string,
+    };
+  }
+  if (candidate.type === "daemon_rejected") {
+    exact(candidate, "remoteDaemonMessage", [
+      "version",
+      "type",
+      "operationId",
+      "code",
+      "hostedGrantGeneration",
+    ]);
+    if (candidate.code !== "stale_grant_generation") {
+      fail("remoteDaemonMessage.code", "is invalid");
+    }
+    return {
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_rejected",
+      operationId: parseOperationId(candidate.operationId, "remoteDaemonMessage.operationId"),
+      code: candidate.code,
+      hostedGrantGeneration: integer(
+        candidate.hostedGrantGeneration,
+        "remoteDaemonMessage.hostedGrantGeneration",
+        1,
+        Number.MAX_SAFE_INTEGER,
+      ),
+    };
+  }
   return fail("remoteDaemonMessage.type", "is invalid");
 }
 
+/** Encode one daemon message that fits one envelope. Larger messages use `encodeRemoteDaemonMessageFrames`. */
 export function encodeRemoteDaemonMessage(message: RemoteDaemonMessage): Uint8Array {
-  const validated = parseRemoteDaemonMessage(message);
-  const encoded = new TextEncoder().encode(JSON.stringify(validated));
-  if (encoded.byteLength > MAX_RELAY_OPAQUE_PAYLOAD_BYTES) {
+  const encoded = encodeValidated(parseRemoteDaemonMessage(message));
+  if (encoded.byteLength > MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES) {
     fail(
       "remoteDaemonMessage",
-      `must encode to no more than ${MAX_RELAY_OPAQUE_PAYLOAD_BYTES} bytes`,
+      `must encode to no more than ${MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES} bytes`,
     );
   }
   return encoded;
 }
 
+function encodeValidated(message: RemoteDaemonMessage): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(message));
+}
+
+/**
+ * Encode a daemon message as one or more envelope plaintexts. A message larger than one envelope
+ * is split into ordered `daemon_fragment` messages that share `fragmentId`.
+ */
+export function encodeRemoteDaemonMessageFrames(
+  message: RemoteDaemonMessage,
+  fragmentId: () => string,
+): Uint8Array[] {
+  const validated = parseRemoteDaemonMessage(message);
+  if (validated.type === "daemon_fragment") {
+    fail("remoteDaemonMessage.type", "must not be a fragment");
+  }
+  const encoded = encodeValidated(validated);
+  if (encoded.byteLength <= MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES) return [encoded];
+  if (encoded.byteLength > MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES) {
+    fail(
+      "remoteDaemonMessage",
+      `must encode to no more than ${MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES} bytes`,
+    );
+  }
+  const id = parseEnvelopeId(fragmentId(), "fragmentId");
+  const count = Math.ceil(encoded.byteLength / REMOTE_FRAGMENT_DATA_BYTES);
+  return Array.from({ length: count }, (_, index) =>
+    encodeRemoteDaemonMessage({
+      version: REMOTE_TRANSPORT_VERSION,
+      type: "daemon_fragment",
+      fragmentId: id,
+      index,
+      count,
+      data: encodeBase64(
+        encoded.subarray(
+          index * REMOTE_FRAGMENT_DATA_BYTES,
+          (index + 1) * REMOTE_FRAGMENT_DATA_BYTES,
+        ),
+      ),
+    }),
+  );
+}
+
 export function decodeRemoteDaemonMessage(value: Uint8Array): RemoteDaemonMessage {
+  return decodeBounded(value, MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES);
+}
+
+function decodeBounded(value: Uint8Array, maximumBytes: number): RemoteDaemonMessage {
   if (!(value instanceof Uint8Array)) fail("remoteDaemonMessage", "must be bytes");
-  if (value.byteLength === 0 || value.byteLength > MAX_RELAY_OPAQUE_PAYLOAD_BYTES) {
-    fail("remoteDaemonMessage", `must contain 1 through ${MAX_RELAY_OPAQUE_PAYLOAD_BYTES} bytes`);
+  if (value.byteLength === 0 || value.byteLength > maximumBytes) {
+    fail("remoteDaemonMessage", `must contain 1 through ${maximumBytes} bytes`);
   }
   try {
     return parseRemoteDaemonMessage(
@@ -842,6 +1020,133 @@ export function decodeRemoteDaemonMessage(value: Uint8Array): RemoteDaemonMessag
     if (error instanceof ProtocolValidationError) throw error;
     fail("remoteDaemonMessage", "must be valid UTF-8 JSON");
   }
+}
+
+export interface RemoteDaemonMessageAssemblerOptions {
+  /** Incomplete messages held at once; a new one beyond this evicts the oldest. */
+  readonly maxPending?: number;
+  /** Buffered fragment bytes across all incomplete messages. */
+  readonly maxBufferedBytes?: number;
+  /** An incomplete message older than this is discarded. */
+  readonly lifetimeMs?: number;
+  readonly now?: () => number;
+}
+
+interface PendingFragments {
+  readonly count: number;
+  readonly startedAt: number;
+  readonly parts: (Uint8Array | undefined)[];
+  received: number;
+  bytes: number;
+}
+
+/**
+ * Bounded device-side reassembly of `daemon_fragment` messages. Fragments may arrive in any order
+ * and more than once; an identical duplicate is ignored and a conflicting one discards the message.
+ * Lost fragments leave an incomplete message that expires. Reassembly only restores framing; the
+ * reassembled message is validated like any other and may not itself be a fragment.
+ */
+export class RemoteDaemonMessageAssembler {
+  private readonly maxPending: number;
+  private readonly maxBufferedBytes: number;
+  private readonly lifetimeMs: number;
+  private readonly now: () => number;
+  private readonly pending = new Map<EnvelopeId, PendingFragments>();
+  private bufferedBytes = 0;
+
+  constructor(options: RemoteDaemonMessageAssemblerOptions = {}) {
+    this.maxPending = options.maxPending ?? 4;
+    this.maxBufferedBytes = options.maxBufferedBytes ?? 2 * MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES;
+    this.lifetimeMs = options.lifetimeMs ?? 60_000;
+    this.now = options.now ?? Date.now;
+  }
+
+  get pendingMessages(): number {
+    return this.pending.size;
+  }
+
+  /** Buffer one fragment. Returns the reassembled message once every fragment has arrived. */
+  accept(
+    fragment: Extract<RemoteDaemonMessage, { type: "daemon_fragment" }>,
+  ): RemoteDaemonMessage | undefined {
+    const now = this.now();
+    this.expire(now);
+    const data = decodeBase64(
+      fragment.data,
+      "remoteDaemonMessage.data",
+      REMOTE_FRAGMENT_DATA_BYTES,
+    );
+    let entry = this.pending.get(fragment.fragmentId);
+    if (entry === undefined) {
+      while (this.pending.size >= this.maxPending) this.evictOldest();
+      entry = { count: fragment.count, startedAt: now, parts: [], received: 0, bytes: 0 };
+      this.pending.set(fragment.fragmentId, entry);
+    }
+    if (entry.count !== fragment.count) {
+      this.discard(fragment.fragmentId);
+      fail("remoteDaemonMessage.count", "conflicts with an earlier fragment");
+    }
+    const existing = entry.parts[fragment.index];
+    if (existing !== undefined) {
+      if (sameBytes(existing, data)) return undefined;
+      this.discard(fragment.fragmentId);
+      fail("remoteDaemonMessage.data", "conflicts with an earlier fragment");
+    }
+    if (entry.bytes + data.byteLength > MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES) {
+      this.discard(fragment.fragmentId);
+      fail("remoteDaemonMessage", "reassembles beyond the message limit");
+    }
+    while (this.bufferedBytes + data.byteLength > this.maxBufferedBytes && this.pending.size > 1) {
+      this.evictOldest(fragment.fragmentId);
+    }
+    entry.parts[fragment.index] = data;
+    entry.received += 1;
+    entry.bytes += data.byteLength;
+    this.bufferedBytes += data.byteLength;
+    if (entry.received < entry.count) return undefined;
+    this.discard(fragment.fragmentId);
+    const whole = new Uint8Array(entry.bytes);
+    let offset = 0;
+    for (const part of entry.parts) {
+      if (part === undefined) fail("remoteDaemonMessage", "is missing a fragment");
+      whole.set(part, offset);
+      offset += part.byteLength;
+    }
+    const message = decodeBounded(whole, MAX_REMOTE_REASSEMBLED_MESSAGE_BYTES);
+    if (message.type === "daemon_fragment") {
+      fail("remoteDaemonMessage.type", "must not reassemble into a fragment");
+    }
+    return message;
+  }
+
+  private expire(now: number): void {
+    for (const [id, entry] of this.pending) {
+      if (now - entry.startedAt >= this.lifetimeMs) this.discard(id);
+    }
+  }
+
+  private evictOldest(keep?: EnvelopeId): void {
+    for (const id of this.pending.keys()) {
+      if (id === keep) continue;
+      this.discard(id);
+      return;
+    }
+  }
+
+  private discard(id: EnvelopeId): void {
+    const entry = this.pending.get(id);
+    if (entry === undefined) return;
+    this.pending.delete(id);
+    this.bufferedBytes -= entry.bytes;
+  }
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) return false;
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
 }
 
 export function parseRelayRevocationResult(value: unknown): RelayRevocationResult {

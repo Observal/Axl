@@ -4,11 +4,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
-  DEFAULT_RELAY_LIMITS,
+  defaultRelayLimits,
   parseIssueRelayTicketRequest,
   parseIssueRelayTicketResult,
   parseRelayLimits,
   parseRouteId,
+  RELAY_CONNECTION_LEASE_MS,
   RELAY_TICKET_LIFETIME_MS,
   type ConsumeRelayTicketRequest,
   type ConsumeRelayTicketResult,
@@ -118,11 +119,17 @@ export interface RelayTicketServiceOptions {
   readonly proofVerifier: RelayTicketProofVerifier;
   readonly relayUrl: string;
   readonly clock?: Clock;
+  /** Overrides the per-role defaults for both roles. */
   readonly limits?: RelayLimits;
+  /** Window in which an issued ticket must be consumed. */
   readonly ticketLifetimeMs?: number;
+  /** Hard deadline of the admitted connection, measured from consumption. */
+  readonly connectionLeaseMs?: number;
   readonly randomToken?: () => string;
   readonly randomId?: () => string;
 }
+
+const MAX_CONNECTION_LEASE_MS = 24 * 60 * 60_000;
 
 function digestTicket(ticket: string): string {
   return createHash("sha256").update(ticket, "utf8").digest("hex");
@@ -131,16 +138,18 @@ function digestTicket(ticket: string): string {
 export class RelayTicketService {
   private readonly options: RelayTicketServiceOptions;
   private readonly clock: Clock;
-  private readonly limits: RelayLimits;
+  private readonly limits: RelayLimits | undefined;
   private readonly ticketLifetimeMs: number;
+  private readonly connectionLeaseMs: number;
   private readonly randomToken: () => string;
   private readonly randomId: () => string;
 
   constructor(options: RelayTicketServiceOptions) {
     this.options = options;
     this.clock = options.clock ?? { now: () => Date.now() };
-    this.limits = parseRelayLimits(options.limits ?? DEFAULT_RELAY_LIMITS);
+    this.limits = options.limits === undefined ? undefined : parseRelayLimits(options.limits);
     this.ticketLifetimeMs = options.ticketLifetimeMs ?? RELAY_TICKET_LIFETIME_MS;
+    this.connectionLeaseMs = options.connectionLeaseMs ?? RELAY_CONNECTION_LEASE_MS;
     this.randomToken = options.randomToken ?? (() => randomBytes(32).toString("base64url"));
     this.randomId = options.randomId ?? randomUUID;
     if (
@@ -149,6 +158,15 @@ export class RelayTicketService {
       this.ticketLifetimeMs > RELAY_TICKET_LIFETIME_MS
     ) {
       throw new TypeError(`Ticket lifetime must be from 1 through ${RELAY_TICKET_LIFETIME_MS} ms`);
+    }
+    if (
+      !Number.isSafeInteger(this.connectionLeaseMs) ||
+      this.connectionLeaseMs < this.ticketLifetimeMs ||
+      this.connectionLeaseMs > MAX_CONNECTION_LEASE_MS
+    ) {
+      throw new TypeError(
+        `Connection lease must be from the ticket lifetime through ${MAX_CONNECTION_LEASE_MS} ms`,
+      );
     }
   }
 
@@ -171,7 +189,7 @@ export class RelayTicketService {
       sourceRouteId: parseRouteId(this.randomId(), "sourceRouteId"),
       issuedAt: now,
       expiresAt: now + this.ticketLifetimeMs,
-      limits: this.limits,
+      limits: this.limits ?? defaultRelayLimits(request.role),
     };
     await this.options.store.insert(record);
     return parseIssueRelayTicketResult({
@@ -199,10 +217,11 @@ export class RelayTicketService {
     if (currentGeneration === undefined || currentGeneration !== candidate.grantGeneration) {
       throw new RelayTicketError("ticket_revoked", "Relay ticket grant is no longer current", 401);
     }
+    const consumedAt = this.clock.now();
     const consumed = await this.options.store.consume(
       ticketDigest,
       request.relayInstanceId,
-      this.clock.now(),
+      consumedAt,
     );
     return {
       installationId: consumed.installationId,
@@ -210,7 +229,8 @@ export class RelayTicketService {
       sourceRouteId: consumed.sourceRouteId,
       role: consumed.role,
       grantGeneration: consumed.grantGeneration,
-      leaseExpiresAt: consumed.expiresAt,
+      // The ticket only bounds admission; the connection gets its own lease from consumption.
+      leaseExpiresAt: consumedAt + this.connectionLeaseMs,
       limits: consumed.limits,
     };
   }

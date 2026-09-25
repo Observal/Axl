@@ -20,7 +20,9 @@
         "maxFrameBytes": 65535,
         "maxQueuedBytes": 524288,
         "heartbeatIntervalMs": 20000,
-        "idleTimeoutMs": 60000
+        "idleTimeoutMs": 60000,
+        "maxFramesPerWindow": 100,
+        "rateWindowMs": 10000
       }
     }
   },

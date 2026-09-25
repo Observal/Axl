@@ -137,7 +137,9 @@ defmodule AxlRelay.HttpControlPlaneClient do
         "maxFrameBytes",
         "maxQueuedBytes",
         "heartbeatIntervalMs",
-        "idleTimeoutMs"
+        "idleTimeoutMs",
+        "maxFramesPerWindow",
+        "rateWindowMs"
       ])
 
     with ^keys <- MapSet.new(Map.keys(limits)),
@@ -145,13 +147,17 @@ defmodule AxlRelay.HttpControlPlaneClient do
          queued when is_integer(queued) and queued in 1..524_288 <- limits["maxQueuedBytes"],
          heartbeat when is_integer(heartbeat) and heartbeat in 1..300_000 <-
            limits["heartbeatIntervalMs"],
-         idle when is_integer(idle) and idle in 1..600_000 <- limits["idleTimeoutMs"] do
+         idle when is_integer(idle) and idle in 1..600_000 <- limits["idleTimeoutMs"],
+         frames when is_integer(frames) and frames in 1..10_000 <- limits["maxFramesPerWindow"],
+         window when is_integer(window) and window in 1_000..60_000 <- limits["rateWindowMs"] do
       {:ok,
        %{
          max_frame_bytes: frame,
          max_queued_bytes: queued,
          heartbeat_interval_ms: heartbeat,
-         idle_timeout_ms: idle
+         idle_timeout_ms: idle,
+         max_frames_per_window: frames,
+         rate_window_ms: window
        }}
     else
       _other -> {:error, :service_unavailable}
