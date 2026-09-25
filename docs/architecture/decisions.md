@@ -74,9 +74,9 @@ session and would not survive a device with no open session. The daemon reports 
 transition per device in `daemon.info.remoteEndpoints` and invalidates clients with the
 capability-free `remote_endpoints_changed` delivery; the transient delivery carries no status and
 grants no authority. The status write happens before the state takes effect and a failed write
-blocks the bridge, so the durable record is never behind the state a daemon acts on. This replaces
-the earlier "typed canonical daemon event" wording in the atomic-witness plan; if the daemon gains a
-daemon-level canonical log later, these transitions move there without changing their shape.
+blocks the bridge, so the durable record is never behind the state a daemon acts on. If the daemon
+gains a daemon-level canonical log later, these transitions move there without changing their
+shape.
 
 ## Generated files
 
