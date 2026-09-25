@@ -1135,6 +1135,8 @@ export class SessionManager {
       const active = this.sessions.get(sessionId);
       const events =
         active?.events ?? (await JsonlEventLog.open(join(directory, entry.name), sessionId)).events;
+      // A reserved log whose creation never committed has no session to list yet.
+      if (events.length === 0) continue;
       summaries.push(summarizeSession(events));
     }
     return summaries.sort((left, right) => right.updatedAt - left.updatedAt);

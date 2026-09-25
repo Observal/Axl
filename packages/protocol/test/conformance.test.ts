@@ -40,6 +40,11 @@ function methods(values: readonly unknown[]): readonly string[] {
   return values.map((value) => (value as { readonly method: string }).method).sort();
 }
 
+test("session opening reports provider catalog failures instead of internal errors", () => {
+  assert.equal(isRpcErrorAllowed("session.create", "catalog_refresh_failed"), true);
+  assert.equal(isRpcErrorAllowed("session.resume", "catalog_refresh_failed"), true);
+});
+
 test("language-neutral fixtures cover and validate every RPC request and success", () => {
   assert.equal(document.wireVersion, WIRE_PROTOCOL_VERSION);
   const requests = document.requests.map((value) => parseWireRequest(value));

@@ -7,9 +7,9 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { chmod, lstat, mkdir, realpath, unlink } from "node:fs/promises";
+import { appendFile, chmod, lstat, mkdir, realpath, rename, stat, unlink } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { ExtensionHostError } from "@axl/kernel";
@@ -90,6 +90,29 @@ const MAX_EVENT_CURSORS = 16_384;
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const PRESENCE_TIMEOUT_MS = 60_000;
 const SOCKET_PROBE_TIMEOUT_MS = 500;
+const MAX_DIAGNOSTIC_LOG_BYTES = 1024 * 1024;
+const MAX_DIAGNOSTIC_ENTRY_CHARS = 4_096;
+
+/** Describe an internal failure for the private daemon log, following a short cause chain. */
+function describeInternalError(error: unknown): string {
+  const parts: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+    if (current instanceof Error) {
+      const code =
+        "code" in current && typeof current.code === "string" ? ` [${current.code}]` : "";
+      parts.push(`${current.name}${code}: ${current.message}`);
+      current = current.cause;
+    } else {
+      parts.push(String(current));
+      current = undefined;
+    }
+  }
+  return parts
+    .join(" <- caused by ")
+    .replace(/[\r\n]+/gu, " ")
+    .slice(0, MAX_DIAGNOSTIC_ENTRY_CHARS);
+}
 
 export function normalizeDaemonRpcErrorCode(method: WireRequest["method"], code: string): string {
   return isKnownRpcErrorCode(code) && isRpcErrorAllowed(method, code) ? code : "internal_error";
@@ -235,6 +258,7 @@ export class AxlDaemon {
   private readonly connectionStates = new Set<ConnectionState>();
   private readonly cursors = new Map<EventCursor, CursorRecord>();
   private sessionCatalogGeneration = 0;
+  private diagnosticWrites: Promise<void> = Promise.resolve();
 
   constructor(options: DaemonOptions) {
     this.hostOptions = options;
@@ -870,6 +894,7 @@ export class AxlDaemon {
                 ? "cancelled"
                 : "internal_error";
       const code = normalizeDaemonRpcErrorCode(request.method, reportedCode);
+      if (code === "internal_error") this.recordInternalError(request.method, error);
       send({
         kind: "error",
         id: request.id,
@@ -1754,6 +1779,33 @@ export class AxlDaemon {
     subscription.pageResults.set(pageCursor, page);
     if (page.complete) subscription.finalPageServed = true;
     return { snapshotId, page };
+  }
+
+  /**
+   * Clients receive only a generic internal error. Keep the actionable detail in a private,
+   * size-bounded log beside the daemon data and on stderr for foreground daemons.
+   */
+  private recordInternalError(method: string, error: unknown): void {
+    const path = join(this.dataDirectory, "daemon.log");
+    const line = `${new Date().toISOString()} internal_error ${method}: ${describeInternalError(error)}\n`;
+    process.stderr.write(line);
+    this.diagnosticWrites = this.diagnosticWrites
+      .then(async () => {
+        const size = await stat(path).then(
+          (info) => info.size,
+          (cause: NodeJS.ErrnoException) => {
+            if (cause.code === "ENOENT") return 0;
+            throw cause;
+          },
+        );
+        if (size > MAX_DIAGNOSTIC_LOG_BYTES) await rename(path, `${path}.1`);
+        await appendFile(path, line, { mode: 0o600 });
+      })
+      .catch((cause: unknown) => {
+        process.stderr.write(
+          `Axl daemon could not write ${path}: ${cause instanceof Error ? cause.message : String(cause)}\n`,
+        );
+      });
   }
 
   private acknowledge(

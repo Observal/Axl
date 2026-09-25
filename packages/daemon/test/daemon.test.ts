@@ -17,6 +17,7 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   symlink,
   truncate,
   writeFile,
@@ -395,6 +396,26 @@ test("the daemon response boundary enforces every method's allowed-error matrix"
   }
 });
 
+test("session listing skips a reserved log whose creation never committed", async (context) => {
+  const fixture = await startDaemon(context);
+  const client = await connectUnixClient(fixture.socketPath);
+  context.after(() => client.close());
+  const created = await client.request("session.create", { cwd: fixture.cwd });
+  await writeFile(join(fixture.dataDirectory, "sessions", `${randomUUID()}.jsonl`), "", {
+    mode: 0o600,
+  });
+
+  const listed = await client.request("session.list", {
+    scope: "all_local",
+    order: "recent",
+    pageSize: 100,
+  });
+  assert.deepEqual(
+    listed.sessions.map((session) => session.sessionId),
+    [created.sessionId],
+  );
+});
+
 test("internal RPC failures do not expose subsystem messages", async (context) => {
   const fixture = await startDaemon(context);
   const client = await connectUnixClient(fixture.socketPath);
@@ -416,6 +437,16 @@ test("internal RPC failures do not expose subsystem messages", async (context) =
       error.message === "Request failed" &&
       !error.message.includes(fixture.dataDirectory),
   );
+  // The actionable detail stays in the private daemon log instead of being discarded.
+  const logPath = join(fixture.dataDirectory, "daemon.log");
+  let logged = "";
+  for (let attempt = 0; attempt < 50 && !logged.includes(sensitiveMessage); attempt += 1) {
+    logged = await readFile(logPath, "utf8").catch(() => "");
+    if (!logged.includes(sensitiveMessage)) await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.match(logged, /internal_error session\.workspace\.status: Error: ENOENT/u);
+  assert.ok(logged.includes(sensitiveMessage));
+  assert.equal((await stat(logPath)).mode & 0o777, 0o600);
 });
 
 test("returns actionable extension failures without exposing unrelated internals", async (context) => {

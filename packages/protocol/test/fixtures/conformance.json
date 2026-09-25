@@ -5086,6 +5086,20 @@
       "id": 2417,
       "method": "session.create",
       "error": {
+        "code": "catalog_refresh_failed",
+        "message": "Fixture session.create error: catalog_refresh_failed",
+        "retryable": false,
+        "details": {
+          "category": "provider",
+          "action": "configure_provider"
+        }
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2418,
+      "method": "session.create",
+      "error": {
         "code": "authentication_required",
         "message": "Fixture session.create error: authentication_required",
         "retryable": false,
@@ -5097,7 +5111,7 @@
     },
     {
       "kind": "error",
-      "id": 2418,
+      "id": 2419,
       "method": "session.create",
       "error": {
         "code": "authentication_failed",
@@ -5111,7 +5125,7 @@
     },
     {
       "kind": "error",
-      "id": 2419,
+      "id": 2420,
       "method": "session.create",
       "error": {
         "code": "entitlement_required",
@@ -5125,7 +5139,7 @@
     },
     {
       "kind": "error",
-      "id": 2420,
+      "id": 2421,
       "method": "session.create",
       "error": {
         "code": "entitlement_exhausted",
@@ -5139,7 +5153,7 @@
     },
     {
       "kind": "error",
-      "id": 2421,
+      "id": 2422,
       "method": "session.create",
       "error": {
         "code": "region_required",
@@ -5153,7 +5167,7 @@
     },
     {
       "kind": "error",
-      "id": 2422,
+      "id": 2423,
       "method": "session.create",
       "error": {
         "code": "region_unsupported",
@@ -5167,7 +5181,7 @@
     },
     {
       "kind": "error",
-      "id": 2423,
+      "id": 2424,
       "method": "session.create",
       "error": {
         "code": "provider_configuration_required",
@@ -5181,7 +5195,7 @@
     },
     {
       "kind": "error",
-      "id": 2424,
+      "id": 2425,
       "method": "session.create",
       "error": {
         "code": "extension_failed",
@@ -5350,6 +5364,20 @@
       "id": 2515,
       "method": "session.resume",
       "error": {
+        "code": "catalog_refresh_failed",
+        "message": "Fixture session.resume error: catalog_refresh_failed",
+        "retryable": false,
+        "details": {
+          "category": "provider",
+          "action": "configure_provider"
+        }
+      }
+    },
+    {
+      "kind": "error",
+      "id": 2516,
+      "method": "session.resume",
+      "error": {
         "code": "authentication_required",
         "message": "Fixture session.resume error: authentication_required",
         "retryable": false,
@@ -5361,7 +5389,7 @@
     },
     {
       "kind": "error",
-      "id": 2516,
+      "id": 2517,
       "method": "session.resume",
       "error": {
         "code": "authentication_failed",
@@ -5375,7 +5403,7 @@
     },
     {
       "kind": "error",
-      "id": 2517,
+      "id": 2518,
       "method": "session.resume",
       "error": {
         "code": "entitlement_required",
@@ -5389,7 +5417,7 @@
     },
     {
       "kind": "error",
-      "id": 2518,
+      "id": 2519,
       "method": "session.resume",
       "error": {
         "code": "entitlement_exhausted",
@@ -5403,7 +5431,7 @@
     },
     {
       "kind": "error",
-      "id": 2519,
+      "id": 2520,
       "method": "session.resume",
       "error": {
         "code": "region_required",
@@ -5417,7 +5445,7 @@
     },
     {
       "kind": "error",
-      "id": 2520,
+      "id": 2521,
       "method": "session.resume",
       "error": {
         "code": "region_unsupported",
@@ -5431,7 +5459,7 @@
     },
     {
       "kind": "error",
-      "id": 2521,
+      "id": 2522,
       "method": "session.resume",
       "error": {
         "code": "provider_configuration_required",
@@ -5445,7 +5473,7 @@
     },
     {
       "kind": "error",
-      "id": 2522,
+      "id": 2523,
       "method": "session.resume",
       "error": {
         "code": "extension_failed",
