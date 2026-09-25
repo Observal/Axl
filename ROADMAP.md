@@ -9,7 +9,7 @@
 
 Status: living product plan and delivery snapshot.
 
-Updated: 2026-09-12
+Updated: 2026-09-16
 
 This document records product intent, candidate designs, and a proposed implementation sequence. It is not normative agent instructions or the sole source of truth. Future features, ordering, languages, frameworks, and technology choices remain plans until adopted by current code or a focused architecture or policy document.
 
@@ -1361,6 +1361,10 @@ Requirements:
 
 The current mobile plan favors SwiftUI on iOS and Jetpack Compose on Android because native code supports Live Activities, Android foreground services, notification actions, widgets, share sheets, and efficient streaming text. This is not a binding stack decision. Choose the implementation when mobile work begins and its requirements are concrete.
 
+Remote transport uses pairwise application-level E2EE in addition to TLS. The prior PQXDH plus Triple Ratchet direction is superseded. The selected direction is one two-member OpenMLS group per remote device and daemon installation using revision 1 of the Axl-private `axl-e2ee-mls-pq-v1` profile. Revision 1 pins OpenMLS 0.9.0, `openmls_libcrux_crypto` 0.4.0, suite value `0x004e`, and the upstream `XWingDraft06` implementation. It makes no IETF draft-06 interoperability claim. The daemon is the sole commit creator; a phone generates its own private replacement leaf and sends a signed self-Update proposal. The profile and candidate graph may enter core implementation after [`docs/architecture/remote-e2ee-openmls.md`](docs/architecture/remote-e2ee-openmls.md) and its dependency decision receive human approval and merge into `RC`. Browser/WASM persistence remains mandatory Session 50 work. Production release remains blocked on transactional storage tests, cross-platform fixtures, browser and mobile measurements, packaging, and independent security review. Transport code treats every MLS application message, proposal, commit, receipt, KeyPackage, and Welcome as bounded opaque bytes. The relay never imports the E2EE implementation or decrypts traffic. The proposed remote action-binding and approval rules are in [`docs/architecture/remote-permission-authorization.md`](docs/architecture/remote-permission-authorization.md); that draft does not enable remote approval.
+
+The managed path uses two separately deployable services: the TypeScript control plane owns hosted state and one-use admission, while the Elixir/OTP relay owns bounded in-memory WebSocket routing. The daemon remains the command and session authority. Transport proof uses only disposable sessions, a deterministic fake provider, opaque fixtures, and a test-only fake E2EE adapter. Ordinary-session steering and remote permission approval remain disabled until the E2EE and release gates pass.
+
 #### 16.4 Headless and automation
 
 The same daemon serves non-interactive callers:
@@ -1573,7 +1577,7 @@ Phases 0 through 4 are complete. Selected TUI, web-tool, Agent Skills, and MCP w
 8. Add one focused runnable check for every non-trivial behavior.
 9. Do not implement a later phase merely to prepare for hypothetical use. Preserve the seam and stop.
 10. Complete security prerequisites before activating the feature that depends on them.
-11. The current plan defers protocol code generation until a second implementation language creates a real need.
+11. The current plan defers Swift and Kotlin bindings, daemon-protocol code generation, mobile secure storage, and mobile application stack selection until Phase 13 and a real native client creates the need. Session 50 is limited to the Rust pairing contract and Node and browser/WASM endpoint bindings.
 
 ### Foundational dependency decisions
 
@@ -2109,7 +2113,7 @@ Child sessions remain inspectable, budgeted, cancellable, policy-narrowed, repla
 
 The local web client and only the TypeScript SDK, wire-protocol, transport, security, workspace, packaging, and transport-neutral browser boundaries required for it are brought forward as an explicit exception to phase ordering. This work may proceed while the current dogfood follow-up remains incomplete, but those prerequisites still block expanded dogfooding of credentialed or untrusted capabilities. Unavailable features remain explicitly unsupported. This exception does not bring forward remote accounts, pairing, encrypted relay transport, hosted-service deployment, the session viewer, media roles, public SDK publication, multi-language generation, cloud placement, or unrelated protocol work, and it does not mark Phase 9 complete.
 
-The current plan defers public or multi-language SDKs until a real second client creates the need.
+The current plan defers public or multi-language daemon SDKs until a real second client creates the need. Session 50 adds no Swift, Kotlin, C ABI, JNI, generated SDK, or mobile application code.
 
 #### Wire protocol
 
@@ -2129,7 +2133,7 @@ The current plan defers public or multi-language SDKs until a real second client
 - [ ] Make in-tree clients consume the public SDK surface.
 - [ ] Publish the SDK only when an external consumer exists.
 - [ ] Choose TypeSpec, Protobuf, or another generator only when the first non-TypeScript client creates a concrete need.
-- [ ] Keep Swift and Kotlin generation in Phase 13 with mobile implementation.
+- [ ] Keep Swift and Kotlin bindings, daemon-protocol generation, mobile secure storage, and mobile implementation in Phase 13. Session 50 is limited to the Rust pairing contract and Node and browser/WASM endpoint bindings.
 
 #### Web client
 
@@ -2328,7 +2332,7 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 #### Shared remote connectivity
 
-- [ ] Write and approve the pairing and remote-transport security RFC before implementing remote access.
+- [ ] Approve and merge revision 1 of the Axl-private OpenMLS security RFC before Session 40 begins. Core implementation may then proceed under its exact pinning and audit rules; this does not enable remote access or approve production release.
 - [ ] Add revocable device identities and observer, steering, approval, and session-management grants that the daemon maps to protocol capabilities.
 - [ ] Add bounded encrypted application frames, replay protection, reconnect, and published protocol test vectors.
 - [ ] Add the daemon's opt-in outbound connection and a ciphertext-only hosted relay with no public daemon port.
@@ -2341,16 +2345,58 @@ The shared remote-connectivity and remote-web subsections are a scoped sequencin
 
 - [ ] Serve a protocol-independent static account and installation shell from `app.axldev.ai`.
 - [ ] Retain immutable client bundles by compatible web-asset and wire version rather than placing multiple protocol implementations in one bundle.
-- [ ] Store a non-extractable browser device key through an IndexedDB adapter and require re-pairing when it is lost.
+- [ ] In Session 50, exercise browser OpenMLS identity and group state through the reviewed transactional browser adapter and require re-pairing when protected state is lost. Browser execution and durable-storage tests must pass before remote web is enabled, but they do not block Session 40's shared-core implementation. Pure-browser pairing remains disabled until an independent monotonic rollback anchor or a separately reviewed authenticated peer-witness design satisfies the endpoint storage contract.
 - [ ] Obtain a one-use, device-bound relay ticket through the authenticated API, then authenticate the WebSocket with a bounded initial frame rather than a URL or subprotocol credential.
 - [ ] Terminate end-to-end encryption in the browser and expose decrypted validated messages through the normal SDK transport contract.
 - [ ] List installations through the control plane, but obtain sessions, transcripts, and live state only from the selected daemon after encrypted attachment.
 - [ ] Keep disconnected input as an explicit draft until the daemon durably accepts it; do not create a browser-authoritative prompt queue.
 - [ ] Support existing-session observation and steering first. Require a daemon-owned approved workspace identifier before creating a remote Code session.
 
+The transport-first remote-control slice is an approved exception to phase ordering. It may establish service boundaries, opaque framing, one-use ticket admission, bounded relay routing, daemon authorization behind a test-only fake E2EE adapter, and reusable SDK delivery machinery. It must not implement cryptography, select production identity or storage infrastructure, enable ordinary-session remote access, or advertise production remote control.
+
+The original private transport slice was integrated into the shared `RC` branch. Draft PR #394 is the aggregate `RC` to `main` review. Each remaining Person 1 or Person 2 milestone branches from current `RC`, opens a focused PR targeting `RC`, and stops at its own review gate. Contributors do not push implementation directly to `RC` or rewrite shared integration history.
+
+#### Remote transport preflight
+
+- [x] Record the prior PQXDH plus Triple Ratchet direction as superseded and propose the versioned pairwise hybrid OpenMLS profile for architecture and security review.
+- [x] Add the separately deployable TypeScript control plane under `services/control-plane/` with authenticated ticket issuance and atomic one-use consumption through injected interfaces.
+- [x] Add the separately deployable Elixir/OTP relay under `services/relay/` with authenticated admission, opaque bounded framing, in-memory installation-scoped routing, backpressure, heartbeat, lease, revocation, and draining behavior.
+- [x] Publish language-neutral admission, revocation, and exact binary accept/reject fixtures consumed by both implementations.
+- [x] Run TypeScript and Mix formatting, compilation, tests, static analysis, dependency auditing, package-boundary, and SPDX/REUSE checks in CI.
+- [x] Draft the daemon-owned remote permission action-binding contract without enabling it.
+- [x] Stop at the transport architecture checkpoint before daemon, SDK, cryptographic rendezvous, attachment, or production integration work.
+
+#### Remote daemon authority checkpoint
+
+The transport checkpoint was approved. The next integration slice remains disabled for ordinary sessions and uses only the test fake E2EE adapter.
+
+- [x] Define independent `observe`, `steer`, `approve_within_policy`, and `manage_sessions` scopes.
+- [x] Persist installation-bound local device grants and hosted narrowing generations in the daemon data directory.
+- [x] Authorize from the intersection of current local and hosted grants.
+- [x] Make local and hosted revocation terminal for one device identity.
+- [x] Reject stale and conflicting hosted generations atomically.
+- [x] Verify authorization before the existing durable command-idempotency path with fake E2EE fixtures.
+- [x] Map each remotely callable daemon RPC to an explicit scope and connect the internal dispatcher.
+- [ ] Implement the reviewed permission-action events and RPC after protocol review.
+- [ ] Keep relay, runtime, CLI, SDK, and ordinary-session wiring disabled until their later gates.
+
+#### Remote SDK delivery checkpoint
+
+- [x] Add an injected atomic durable-outbox interface for opaque encrypted requests.
+- [x] Persist a stable crypto-session destination and resolve ephemeral relay routes for each attempt.
+- [x] Retry byte-identical opaque envelopes with new transport attempt IDs.
+- [x] Acquire one-use tickets and perform bounded first-frame WebSocket admission.
+- [x] Track route snapshots, replacements, daemon availability, and bounded reconnect.
+- [x] Keep relay admission and forwarding receipts diagnostic only.
+- [x] Permit removal only after authenticated daemon acceptance.
+- [x] Reset uncertain sending state to queued on reconnect without re-encryption.
+- [x] Prove the real control plane, relay, daemon authority, SDK, cursor resume, restart, duplicate, revocation, and overflow boundaries in one disposable fake-E2EE test.
+- [x] Replace production delivery ownership with the native OpenMLS outbox that persists state advancement and exact ciphertext together; retain the standalone opaque store only for transport tests.
+- [x] Implement the reviewed bounded authority-audit sink described in [`docs/architecture/remote-hosted-path.md`](docs/architecture/remote-hosted-path.md).
+
 #### Mobile clients
 
-- [ ] Choose mobile implementation stacks when work begins, based on concrete platform and product requirements.
+- [ ] Choose mobile implementation stacks when work begins, based on concrete platform and product requirements. Session 50 adds no Swift, Kotlin, C ABI, JNI, or mobile secure-storage implementation.
 - [ ] Add client SDKs through the current protocol contract, introducing schema generation only when the selected implementations need it.
 - [ ] Build the selected mobile clients with session list, start, open, live events, steering, permissions, diff review, detach, and reconnect.
 - [ ] Reuse the reviewed remote pairing, encryption, scope, relay, and revocation contracts.

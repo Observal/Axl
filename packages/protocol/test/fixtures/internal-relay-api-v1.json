@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "consumeTicket": {
+    "request": {
+      "version": 1,
+      "ticket": "fixture-ticket-never-valid-outside-tests",
+      "relayInstanceId": "relay-fixture-1",
+      "connectionNonce": "fixture-connection-nonce",
+      "possessionProof": "AAECA/8="
+    },
+    "result": {
+      "version": 1,
+      "installationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "sourceRouteId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "role": "device",
+      "grantGeneration": 7,
+      "leaseExpiresAt": 2000000000000,
+      "limits": {
+        "maxFrameBytes": 65535,
+        "maxQueuedBytes": 524288,
+        "heartbeatIntervalMs": 20000,
+        "idleTimeoutMs": 60000,
+        "maxFramesPerWindow": 100,
+        "rateWindowMs": 10000
+      }
+    }
+  },
+  "discovery": {
+    "deviceSnapshot": {
+      "version": 1,
+      "type": "route_snapshot",
+      "sourceRoute": {
+        "routeId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "role": "device",
+        "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+      },
+      "peers": [
+        {
+          "routeId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "role": "daemon"
+        }
+      ]
+    }
+  },
+  "revocation": {
+    "request": {
+      "version": 1,
+      "installationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "deviceId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "generation": 7,
+      "effectiveAt": 1900000000000
+    },
+    "result": {
+      "version": 1,
+      "accepted": true
+    }
+  }
+}

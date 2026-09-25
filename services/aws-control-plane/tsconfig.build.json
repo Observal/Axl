@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist"],
+  "references": [
+    { "path": "../../packages/protocol/tsconfig.build.json" },
+    { "path": "../control-plane/tsconfig.build.json" }
+  ]
+}

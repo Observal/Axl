@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -25,6 +26,7 @@ import {
   type RpcResult,
   type ServerMessage,
   type SessionId,
+  type RemoteEndpointsChangedDelivery,
   type SessionsChangedDelivery,
   type WireActivity,
   type WireEvent,
@@ -140,6 +142,9 @@ export class AxlClient {
   private readonly activityListeners = new Set<(event: WireActivity) => void>();
   private readonly presenceListeners = new Set<(presence: PresenceDelivery) => void>();
   private readonly sessionCatalogListeners = new Set<(delivery: SessionsChangedDelivery) => void>();
+  private readonly remoteEndpointListeners = new Set<
+    (delivery: RemoteEndpointsChangedDelivery) => void
+  >();
   private readonly disconnectListeners = new Set<(error: Error) => void>();
   private readonly reconnectListeners = new Set<() => void | Promise<void>>();
   private readonly stateListeners = new Set<(state: ConnectionState) => void>();
@@ -252,6 +257,20 @@ export class AxlClient {
       await this.reconnect();
       return attempt();
     });
+  }
+
+  /** Daemon security mode and the witness lifecycle of every remote device endpoint. */
+  daemonInfo(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"daemon.info">> {
+    return this.request("daemon.info", {}, options);
+  }
+
+  /** Start pairing a remote device; resolves with the one-time pairing link. Local clients only. */
+  startRemotePairing(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.pairing.start">> {
+    return this.request("remote.pairing.start", {}, options);
   }
 
   listCommands(
@@ -389,6 +408,17 @@ export class AxlClient {
     this.presenceListeners.add(listener);
     if (this.latestPresence !== undefined) listener(this.latestPresence);
     return () => this.presenceListeners.delete(listener);
+  }
+
+  /**
+   * A remote device endpoint changed witness state. Read `daemon.info` for the current statuses;
+   * the delivery carries no status itself.
+   */
+  onRemoteEndpointsChanged(
+    listener: (delivery: RemoteEndpointsChangedDelivery) => void,
+  ): () => void {
+    this.remoteEndpointListeners.add(listener);
+    return () => this.remoteEndpointListeners.delete(listener);
   }
 
   onSessionsChanged(listener: (delivery: SessionsChangedDelivery) => void): () => void {
@@ -665,6 +695,8 @@ export class AxlClient {
         return;
       }
       for (const listener of this.sessionCatalogListeners) listener(message);
+    } else if (message.kind === "remote_endpoints_changed") {
+      for (const listener of this.remoteEndpointListeners) listener(message);
     }
   }
 

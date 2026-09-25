@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -260,6 +261,7 @@ test("assembles an authoritative local runtime without a presentation client", a
   assert.deepEqual(await client.request("daemon.info", {}), {
     securityMode: "unsafe",
     sandboxProvider: "none",
+    remoteEndpoints: [],
   });
   const allProviders = await client.listProviders();
   assert.equal(allProviders.providers.length, 41);

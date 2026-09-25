@@ -1,4 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # `@axl/sdk`
@@ -28,6 +30,9 @@ The SDK owns:
 - explicit prompt delivery outcomes across send, steer, follow-up, queue, and interrupt workflows
 - bounded, content-verified blob uploads with progress and cancellation
 - generation-checked workspace browsing, file reads, diffs, and checkpoint controls
+- an injected atomic opaque-outbox store that persists stable crypto-session destinations, resolves ephemeral routes per attempt, retries exact ciphertext bytes, and removes mutations only after authenticated daemon acceptance
+- one-use relay-ticket acquisition, bounded WebSocket admission, role-filtered route discovery, and bounded reconnect
+- relay receipt diagnostics and opaque inbound delivery through an injected authenticated opener
 
 The SDK does not own:
 
@@ -38,7 +43,7 @@ The SDK does not own:
 - provider-specific authentication
 - terminal, browser, desktop, or mobile presentation
 
-Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages.
+Those responsibilities remain in the daemon, kernel, runtime, provider, and client packages. The remote delivery API consumes immutable prepared envelopes. `AxlClient.daemonInfo()` returns the witness lifecycle of every remote device endpoint the daemon serves, and `onRemoteEndpointsChanged` signals when to re-read it. `RemoteDeviceE2ee` and `NativeEndpointOutbox` consume one shared `WitnessedEndpoint`, which runs every endpoint mutation through the witness barrier (fresh read, reconciliation, mutation, continuation) before any ciphertext, plaintext, or acknowledgement is visible. `HostedWitnessClient` is the transport behind it: it submits byte-identical signed requests and returns the bounded certificate to the endpoint that verifies it. Neither API owns cryptographic state or decides acceptance. Production construction remains disabled until the Windows and hosted-deployment gates pass.
 
 ## Public entry points
 

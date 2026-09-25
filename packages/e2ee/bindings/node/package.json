@@ -1,0 +1,40 @@
+{
+  "name": "@axl/e2ee-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./loader/index.js"
+    }
+  },
+  "files": [
+    "LICENSE",
+    "NOTICE",
+    "README.md",
+    "THIRD_PARTY_LICENSES.txt",
+    "index.d.ts",
+    "integrity.json",
+    "loader/index.js",
+    "native/*.node",
+    "package.json"
+  ],
+  "scripts": {
+    "build:native": "node scripts/build.mjs production",
+    "build:test-native": "node scripts/build.mjs test",
+    "check:abi": "node scripts/check-abi.mjs",
+    "test": "node scripts/test.mjs",
+    "pack:local": "node scripts/package.mjs"
+  },
+  "devDependencies": {
+    "@axl/control-plane": "workspace:*",
+    "@axl/daemon": "workspace:*",
+    "@axl/kernel": "workspace:*",
+    "@axl/protocol": "workspace:*",
+    "@axl/sdk": "workspace:*"
+  }
+}

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "axl-e2ee-browser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+test-fixtures = ["axl-e2ee/browser-test-fixtures"]
+# Deployment-test builds accept replica trust named by a hash-pinned configuration file.
+deployment-test = []
+
+[dependencies]
+axl-e2ee = { path = "../..", features = ["browser"] }
+wasm-bindgen = { version = "=0.2.128", default-features = false }

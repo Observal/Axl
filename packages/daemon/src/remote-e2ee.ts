@@ -1,0 +1,1051 @@
+// SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 VishnuM049
+// SPDX-License-Identifier: Apache-2.0
+
+import { createHash, randomUUID } from "node:crypto";
+
+import {
+  type AuthenticatedRemoteRequest,
+  type DeviceId,
+  encodeRemoteDaemonMessageFrames,
+  encodeRemoteE2eeEnvelope,
+  isRemoteEndpointQuarantineReason,
+  MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES,
+  MAX_REMOTE_DELIVERY_BATCH,
+  type OperationId,
+  parseAuthenticatedRemoteRequest,
+  parseDeviceId,
+  parseRemoteE2eeEnvelope,
+  type RemoteDaemonMessage,
+  type RemoteE2eeEnvelope,
+  type RemoteEndpointQuarantineReason,
+  type RemoteEndpointWitnessState,
+  type RemoteEndpointWitnessStatus,
+  type RequestId,
+  type RouteId,
+  type ServerMessage,
+} from "@axl/protocol";
+
+import type { AuthenticatedRemoteAttachment, AxlDaemon } from "./daemon.ts";
+import type { RemoteDeviceAuthorityStore } from "./remote-authority.ts";
+import {
+  DaemonWitnessBarrier,
+  type DaemonWitnessEndpointOperations,
+  DaemonWitnessError,
+  type DaemonWitnessOutcome,
+  type DaemonWitnessRecoveryPolicy,
+  type DaemonWitnessResult,
+  type DaemonWitnessTransport,
+  releasedField,
+  witnessRecoveryDelay,
+  witnessRecoveryPolicy,
+} from "./remote-witness.ts";
+
+/** Released `outbox` result: the exact committed ciphertext and its envelope metadata. */
+export interface NativeCiphertext {
+  readonly operationId: Uint8Array;
+  readonly logicalMessageId: Uint8Array;
+  readonly messageClass: string;
+  readonly ciphertext: Uint8Array;
+}
+
+/** Released `plaintext` result of a completed receive. */
+export interface NativePlaintext {
+  readonly plaintext: Uint8Array;
+}
+
+/** Released `epoch_ready` result of an accepted epoch-ready message. */
+export interface NativeEpochReadyAcceptance {
+  readonly cryptoSessionId: Uint8Array;
+  readonly commitId: Uint8Array;
+}
+
+/**
+ * Narrow structural subset of the private Node binding used by the daemon. Every mutation returns
+ * a witness outcome; the bridge reads results only after the barrier completes.
+ */
+export interface NativeDaemonE2eeEndpoint extends DaemonWitnessEndpointOperations {
+  prepareApplication(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    plaintext: Uint8Array,
+  ): Promise<DaemonWitnessOutcome>;
+  receiveApplication(
+    operationId: Uint8Array,
+    ciphertext: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+  ): Promise<DaemonWitnessOutcome>;
+  receiveReplacementProposal?(
+    operationId: Uint8Array,
+    ciphertext: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+  ): Promise<DaemonWitnessOutcome>;
+  createUpdateCommit?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+  ): Promise<DaemonWitnessOutcome>;
+  acceptEpochReady?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    ciphertext: Uint8Array,
+  ): Promise<DaemonWitnessOutcome>;
+  prepareEpochReadyConfirmation?(
+    operationId: Uint8Array,
+    logicalId: Uint8Array,
+    hostedGrantGeneration: bigint,
+    acceptance: NativeEpochReadyAcceptance,
+  ): Promise<DaemonWitnessOutcome>;
+  acknowledgeOutbox(
+    operationId: Uint8Array,
+    targetOperationId: Uint8Array,
+  ): Promise<DaemonWitnessOutcome>;
+  acknowledgeReceive(
+    operationId: Uint8Array,
+    targetOperationId: Uint8Array,
+  ): Promise<DaemonWitnessOutcome>;
+  close(): void;
+}
+
+function outbox(result: DaemonWitnessResult): NativeCiphertext {
+  const value = releasedField<NativeCiphertext>(result, "outbox", "outbox");
+  if (
+    !(value.operationId instanceof Uint8Array) ||
+    !(value.logicalMessageId instanceof Uint8Array) ||
+    typeof value.messageClass !== "string" ||
+    !(value.ciphertext instanceof Uint8Array)
+  ) {
+    throw new Error("Native endpoint released an invalid outbox record");
+  }
+  return value;
+}
+
+function accepted(result: DaemonWitnessResult): void {
+  releasedField(result, "accepted", "accepted");
+}
+
+export interface RemoteEncryptedDelivery {
+  readonly sourceRouteId: RouteId;
+  readonly opaqueEnvelope: Uint8Array;
+}
+
+export interface RemoteEncryptedSender {
+  send(destinationRouteId: RouteId, opaqueEnvelope: Uint8Array): Promise<void> | void;
+}
+
+/** Injectable timer source so recovery scheduling is deterministic under test. */
+export interface WitnessRecoveryTimers {
+  setTimeout(run: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export interface WindowsRemoteE2eeBridgeOptions {
+  readonly daemon: AxlDaemon;
+  readonly deviceId: DeviceId;
+  readonly authority: RemoteDeviceAuthorityStore;
+  readonly endpoint: NativeDaemonE2eeEndpoint;
+  /** Daemon-owned authenticated witness transport for the endpoint's signed requests. */
+  readonly witness: DaemonWitnessTransport;
+  /** Backoff between witness recovery retries; defaults to 1 s doubling to a 30 s cap. */
+  readonly recovery?: Partial<DaemonWitnessRecoveryPolicy>;
+  readonly random?: () => number;
+  readonly timers?: WitnessRecoveryTimers;
+  readonly now?: () => number;
+  readonly sender: RemoteEncryptedSender;
+  readonly onError?: (error: Error) => void;
+  /** Longest a live delivery waits to be batched with the next; defaults to 50 ms. */
+  readonly deliveryFlushMs?: number;
+}
+
+/** A relay route as announced by the relay's authenticated route view. */
+export interface RemoteRelayRoute {
+  readonly routeId: RouteId;
+  readonly role: "daemon" | "device";
+  readonly deviceId?: DeviceId;
+}
+
+const WITNESS_CODE_PATTERN = /^witness_/u;
+
+function witnessCode(cause: unknown): string | undefined {
+  const code = (cause as { readonly code?: unknown } | undefined)?.code;
+  return typeof code === "string" &&
+    (WITNESS_CODE_PATTERN.test(code) || code === "endpoint_revoked")
+    ? code
+    : undefined;
+}
+
+function idBytes(value: string): Uint8Array {
+  const encoded = value.replaceAll("-", "");
+  if (!/^[0-9a-f]{32}$/u.test(encoded)) throw new Error("Invalid operation identity");
+  return Uint8Array.from({ length: 16 }, (_, index) =>
+    Number.parseInt(encoded.slice(index * 2, index * 2 + 2), 16),
+  );
+}
+
+function uuidText(value: Uint8Array): OperationId {
+  if (value.byteLength !== 16) throw new Error("Invalid native operation identity");
+  const encoded = Buffer.from(value).toString("hex");
+  return `${encoded.slice(0, 8)}-${encoded.slice(8, 12)}-${encoded.slice(12, 16)}-${encoded.slice(16, 20)}-${encoded.slice(20)}` as OperationId;
+}
+
+function derivedId(
+  domain: string,
+  requestId: string,
+): { readonly text: string; readonly bytes: Uint8Array } {
+  const digest = createHash("sha256").update(domain).update("\0").update(requestId).digest();
+  const value = new Uint8Array(digest.subarray(0, 16));
+  value[6] = ((value[6] ?? 0) & 0x0f) | 0x70;
+  value[8] = ((value[8] ?? 0) & 0x3f) | 0x80;
+  const encoded = Buffer.from(value).toString("hex");
+  return {
+    text: `${encoded.slice(0, 8)}-${encoded.slice(8, 12)}-${encoded.slice(12, 16)}-${encoded.slice(16, 20)}-${encoded.slice(20)}`,
+    bytes: value,
+  };
+}
+
+function encodePrepared(
+  prepared: NativeCiphertext,
+  hostedGrantGeneration: number,
+  expectedClass: RemoteE2eeEnvelope["messageClass"],
+): Uint8Array {
+  if (prepared.messageClass !== expectedClass) {
+    throw new Error("Native endpoint returned the wrong message class");
+  }
+  return encodeRemoteE2eeEnvelope({
+    operationId: uuidText(prepared.operationId),
+    logicalMessageId: uuidText(prepared.logicalMessageId),
+    messageClass: expectedClass,
+    hostedGrantGeneration,
+    ciphertext: prepared.ciphertext,
+  });
+}
+
+/** Bounds the replies retained for byte-exact replays of authenticated requests. */
+const MAX_REPLAY_ENTRIES = 64;
+/** Bounds the stale envelopes remembered so each is rejected once. */
+const MAX_REJECTED_OPERATIONS = 256;
+const DEFAULT_DELIVERY_FLUSH_MS = 50;
+/** Batch payload budget, leaving room for the batch framing inside one envelope. */
+const DELIVERY_BATCH_BYTES = MAX_REMOTE_APPLICATION_PLAINTEXT_BYTES - 1_024;
+
+interface PreparedDaemonMessage {
+  readonly envelope: Uint8Array;
+  readonly operationId: OperationId;
+}
+
+/** Replies already produced for one authenticated request envelope, in send order. */
+interface ReplayEntry {
+  readonly envelopes: Uint8Array[];
+  settled: boolean;
+}
+
+interface OpenedApplication {
+  readonly request: AuthenticatedRemoteRequest;
+  readonly operationId: OperationId;
+  readonly replay: ReplayEntry;
+}
+
+function safeRemoteError(cause: unknown, requestId: RequestId): RemoteDaemonMessage {
+  const candidate = cause as { readonly code?: unknown; readonly retryable?: unknown };
+  const code = typeof candidate?.code === "string" ? candidate.code : "internal_error";
+  return {
+    version: 1,
+    type: "daemon_error",
+    requestId,
+    code,
+    message: "The remote request failed safely.",
+    retryable: candidate?.retryable === true,
+  };
+}
+
+/**
+ * Bridges opaque relay delivery to one native daemon E2EE endpoint. Every endpoint mutation
+ * completes its witness barrier before the bridge frames ciphertext, parses plaintext, or
+ * authorizes a request. Cryptographic authentication precedes daemon authorization. All endpoint
+ * calls and outbound encryption are serialized; the serialization orders work, the barrier
+ * authorizes it.
+ *
+ * The bridge owns the endpoint's witness lifecycle. Ordinary work runs only while the recorded
+ * state is `ready`; before `start()` and throughout `recovering` it is refused with
+ * `witness_unavailable` without touching the endpoint. Recovery is an internal path: `start()` and
+ * the backoff timer reconcile the endpoint, and the first successful reconciliation records
+ * `ready`. `quarantined` and `revoked` are terminal; the bridge never retries them. Every transition
+ * is one durable audit record in the authority store, written before the state takes effect;
+ * retries record nothing. A failed status write faults the bridge closed: no state changes, no
+ * work or recovery runs, and every call reports the persistence failure.
+ */
+export class WindowsRemoteE2eeBridge {
+  private readonly options: WindowsRemoteE2eeBridgeOptions;
+  private readonly barrier: DaemonWitnessBarrier<NativeDaemonE2eeEndpoint>;
+  private readonly attachment: AuthenticatedRemoteAttachment;
+  private readonly policy: DaemonWitnessRecoveryPolicy;
+  private readonly timers: WitnessRecoveryTimers;
+  private readonly random: () => number;
+  private readonly now: () => number;
+  private readonly stateListeners = new Set<(status: RemoteEndpointWitnessStatus) => void>();
+  private tail: Promise<void> = Promise.resolve();
+  private readonly inFlight = new Set<Promise<void>>();
+  private readonly replies = new Map<string, ReplayEntry>();
+  private readonly rejected = new Set<OperationId>();
+  private readonly deliveryFlushMs: number;
+  private pendingDeliveries: ServerMessage[] = [];
+  private pendingDeliveryBytes = 0;
+  private deliveryTimer: ReturnType<typeof setTimeout> | undefined;
+  private deliveryBatchesInFlight = 0;
+  private currentRoute: RouteId | undefined;
+  private closed = false;
+  private witness: RemoteEndpointWitnessStatus | undefined;
+  private fault: Error | undefined;
+  private retryTimer: unknown;
+  private retryAttempt = 0;
+
+  constructor(options: WindowsRemoteE2eeBridgeOptions) {
+    this.options = options;
+    this.barrier = new DaemonWitnessBarrier(options.endpoint, options.witness);
+    this.policy = witnessRecoveryPolicy(options.recovery);
+    this.timers = options.timers ?? {
+      setTimeout: (run, delayMs) => setTimeout(run, delayMs),
+      clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    };
+    this.random = options.random ?? Math.random;
+    this.now = options.now ?? Date.now;
+    this.deliveryFlushMs = options.deliveryFlushMs ?? DEFAULT_DELIVERY_FLUSH_MS;
+    if (!Number.isSafeInteger(this.deliveryFlushMs) || this.deliveryFlushMs < 0) {
+      throw new TypeError("deliveryFlushMs must be a non-negative integer");
+    }
+    this.attachment = options.daemon.attachAuthenticatedRemoteDevice({
+      deviceId: options.deviceId,
+      authority: options.authority,
+      send: (message) => this.enqueueDaemonMessage(message),
+    });
+  }
+
+  /** Last recorded witness lifecycle, or undefined before the first barrier outcome. */
+  get witnessStatus(): RemoteEndpointWitnessStatus | undefined {
+    return this.witness;
+  }
+
+  onWitnessState(listener: (status: RemoteEndpointWitnessStatus) => void): () => void {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  }
+
+  /**
+   * Reconcile the endpoint with a fresh quorum read before admitting work. Resolves with the
+   * resulting state; `recovering` means retries are scheduled and work is refused meanwhile.
+   */
+  async start(): Promise<RemoteEndpointWitnessState> {
+    try {
+      await this.run(() => this.barrier.recover(), "recovery");
+    } catch (cause) {
+      if (witnessCode(cause) === undefined) throw cause;
+    }
+    const state = this.witness?.state;
+    if (state === undefined) throw new Error("Witness recovery finished without a state");
+    return state;
+  }
+
+  /**
+   * Authenticate one inbound envelope under the endpoint serialization, then execute an
+   * application request outside it so later envelopes (an interrupt, a replay) are not blocked
+   * behind a running turn. The returned promise settles once the request's replies are sent and
+   * its receive is acknowledged; callers must not serialize deliveries on it.
+   */
+  async receive(delivery: RemoteEncryptedDelivery): Promise<void> {
+    const copied = new Uint8Array(delivery.opaqueEnvelope);
+    const key = createHash("sha256").update(copied).digest("hex");
+    const opened = await this.run(
+      () => this.receiveOne(delivery.sourceRouteId, copied, key),
+      "work",
+    );
+    if (opened !== undefined) await this.dispatch(opened);
+  }
+
+  /** Serialize one unit of endpoint work behind the tail and inside the lifecycle gate. */
+  private run<T>(work: () => Promise<T>, kind: "work" | "recovery"): Promise<T> {
+    const operation = this.tail.then(() => this.guarded(work, kind));
+    this.tail = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
+  }
+
+  private async guarded<T>(work: () => Promise<T>, kind: "work" | "recovery"): Promise<T> {
+    if (this.fault !== undefined) throw this.fault;
+    const state = this.witness?.state;
+    if (state === "quarantined") {
+      throw new DaemonWitnessError(
+        "witness_quarantined",
+        "The endpoint is quarantined",
+        this.witness?.reason,
+      );
+    }
+    if (state === "revoked") {
+      throw new DaemonWitnessError("endpoint_revoked", "The endpoint is revoked");
+    }
+    if (kind === "work" && state !== "ready") {
+      throw new DaemonWitnessError(
+        "witness_unavailable",
+        state === undefined
+          ? "Endpoint witness lifecycle has not been established"
+          : "Endpoint witness recovery is in progress",
+      );
+    }
+    try {
+      const result = await work();
+      this.retryAttempt = 0;
+      await this.transition("ready");
+      return result;
+    } catch (cause) {
+      await this.classify(cause);
+      throw cause;
+    }
+  }
+
+  private async classify(cause: unknown): Promise<void> {
+    const code = witnessCode(cause);
+    if (code === undefined) return;
+    if (code === "endpoint_revoked") {
+      await this.transition("revoked");
+      return;
+    }
+    if (code === "witness_quarantined") {
+      const reason = (cause as { readonly reason?: unknown }).reason;
+      if (!isRemoteEndpointQuarantineReason(reason)) {
+        throw new Error("Native endpoint reported an unknown quarantine class");
+      }
+      await this.transition("quarantined", reason);
+      return;
+    }
+    await this.transition("recovering");
+    this.scheduleRecovery();
+  }
+
+  private scheduleRecovery(): void {
+    if (this.closed || this.retryTimer !== undefined) return;
+    const delay = witnessRecoveryDelay(this.policy, this.retryAttempt, this.random);
+    this.retryTimer = this.timers.setTimeout(() => {
+      this.retryTimer = undefined;
+      this.retryAttempt += 1;
+      this.run(() => this.barrier.recover(), "recovery").catch((cause: unknown) => {
+        if (witnessCode(cause) === undefined && cause !== this.fault) {
+          this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+        }
+      });
+    }, delay);
+  }
+
+  /**
+   * Record one lifecycle transition durably, then let it take effect. The durable record is the
+   * report every client and every restarted daemon reads, so a failed write must not leave this
+   * process believing a state nobody else can see: the bridge faults closed instead.
+   */
+  private async transition(
+    state: RemoteEndpointWitnessState,
+    reason?: RemoteEndpointQuarantineReason,
+  ): Promise<void> {
+    if (this.witness?.state === state && this.witness.reason === reason) return;
+    const status: RemoteEndpointWitnessStatus = {
+      deviceId: this.options.deviceId,
+      state,
+      ...(reason === undefined ? {} : { reason }),
+      changedAt: this.now(),
+    };
+    try {
+      await this.options.authority.recordEndpointWitnessState(
+        this.options.deviceId,
+        state,
+        reason,
+        status.changedAt,
+      );
+    } catch (cause) {
+      const fault = new Error(
+        `Remote endpoint witness state ${state} could not be recorded; the bridge is blocked`,
+        { cause },
+      );
+      this.fault = fault;
+      this.cancelRecovery();
+      this.options.onError?.(fault);
+      throw fault;
+    }
+    this.witness = status;
+    if (state !== "recovering") this.cancelRecovery();
+    for (const listener of this.stateListeners) listener(status);
+  }
+
+  /** Wait until no endpoint work is queued and no dispatched request is still settling. */
+  async drain(): Promise<void> {
+    while (true) {
+      this.flushDeliveries();
+      const current = this.tail;
+      const dispatched = [...this.inFlight];
+      await Promise.allSettled([current, ...dispatched]);
+      if (current === this.tail && this.inFlight.size === 0) return;
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.cancelRecovery();
+    this.attachment.close();
+    await this.drain();
+    this.options.endpoint.close();
+    this.currentRoute = undefined;
+    this.replies.clear();
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.cancelRecovery();
+    if (this.deliveryTimer !== undefined) clearTimeout(this.deliveryTimer);
+    this.deliveryTimer = undefined;
+    this.pendingDeliveries = [];
+    this.pendingDeliveryBytes = 0;
+    this.attachment.close();
+    this.options.endpoint.close();
+    this.currentRoute = undefined;
+    this.replies.clear();
+  }
+
+  /**
+   * Follow the relay's route for this device. The relay learns it from ticket admission, so a
+   * device that reconnected keeps receiving deliveries before it sends anything. Losing the route
+   * keeps the last one; sends to it fail at the relay until the device returns.
+   */
+  observeRelayRoutes(routes: readonly RemoteRelayRoute[]): void {
+    if (this.closed) return;
+    const route = routes.find(
+      (candidate) => candidate.role === "device" && candidate.deviceId === this.options.deviceId,
+    );
+    if (route !== undefined) this.currentRoute = route.routeId;
+  }
+
+  private cancelRecovery(): void {
+    if (this.retryTimer === undefined) return;
+    this.timers.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+  }
+
+  /**
+   * Authenticate one envelope. Control classes complete here; an application request is returned
+   * for dispatch outside the serialization. The reply route moves only after the endpoint
+   * authenticated the envelope, or when it is a byte-exact replay of one it already authenticated.
+   */
+  private async receiveOne(
+    sourceRouteId: RouteId,
+    bytes: Uint8Array,
+    key: string,
+  ): Promise<OpenedApplication | undefined> {
+    if (this.closed) throw new Error("Remote E2EE bridge is closed");
+    let requestId: RequestId | undefined;
+    let incomingOperation: Uint8Array | undefined;
+    try {
+      const envelope = parseRemoteE2eeEnvelope(bytes);
+      const authority = this.options.authority.snapshot(this.options.deviceId);
+      if (authority?.hostedGeneration === undefined || authority.effectiveScopes.length === 0) {
+        throw new Error("Remote hosted grant is unavailable");
+      }
+      if (envelope.hostedGrantGeneration < authority.hostedGeneration) {
+        await this.rejectStale(sourceRouteId, envelope.operationId, authority.hostedGeneration);
+        throw new Error("Remote hosted grant generation is stale");
+      }
+      if (envelope.hostedGrantGeneration !== authority.hostedGeneration) {
+        throw new Error("Remote hosted grant generation is ahead of the daemon");
+      }
+      const replay = this.replies.get(key);
+      if (replay !== undefined) {
+        await this.replay(sourceRouteId, replay);
+        return undefined;
+      }
+      incomingOperation = idBytes(envelope.operationId);
+      if (envelope.messageClass === "update_proposal") {
+        await this.receiveUpdateProposal(sourceRouteId, envelope, incomingOperation);
+        return undefined;
+      }
+      if (envelope.messageClass === "epoch_ready") {
+        await this.receiveEpochReady(sourceRouteId, envelope, incomingOperation);
+        return undefined;
+      }
+      if (envelope.messageClass !== "application_request") {
+        throw new Error("Remote E2EE envelope has an invalid device-to-daemon class");
+      }
+      const logical = idBytes(envelope.logicalMessageId);
+      const target = incomingOperation;
+      const opened = releasedField<NativePlaintext>(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.receiveApplication(
+            target,
+            envelope.ciphertext,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+          ),
+        ),
+        "plaintext",
+        "plaintext",
+      );
+      if (!(opened.plaintext instanceof Uint8Array)) {
+        throw new Error("Native endpoint released invalid plaintext");
+      }
+      const request = parseAuthenticatedRemoteRequest(
+        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(opened.plaintext)),
+      );
+      requestId = request.requestId;
+      if (parseDeviceId(request.deviceId) !== this.options.deviceId) {
+        throw new Error("Authenticated request device does not match the endpoint");
+      }
+      this.currentRoute = sourceRouteId;
+      const entry: ReplayEntry = { envelopes: [], settled: false };
+      this.remember(key, entry);
+      return { request, operationId: envelope.operationId, replay: entry };
+    } catch (cause) {
+      if (requestId !== undefined) {
+        await this.sendMessage(sourceRouteId, safeRemoteError(cause, requestId));
+      } else {
+        this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+      }
+      throw cause;
+    } finally {
+      bytes.fill(0);
+      incomingOperation?.fill(0);
+    }
+  }
+
+  /**
+   * Execute one authenticated request. `daemon_accepted` is sent when the command journal accepts
+   * the request, and `daemon_result` is queued before any subscription activation events, so the
+   * device observes acceptance, result, then deliveries. The receive is acknowledged only after
+   * every reply reached the relay.
+   */
+  private async dispatch(opened: OpenedApplication): Promise<void> {
+    const { request, replay } = opened;
+    const replies: Promise<void>[] = [];
+    const reply = (message: RemoteDaemonMessage): Promise<void> => {
+      // Deliveries produced before this reply are sealed ahead of it.
+      this.flushDeliveries();
+      const sent = this.run(() => this.sendReply(replay, message), "work");
+      sent.catch(() => undefined);
+      replies.push(sent);
+      return sent;
+    };
+    let acceptanceSent = false;
+    const accept = (): void => {
+      if (acceptanceSent || request.idempotencyKey === undefined) return;
+      acceptanceSent = true;
+      void reply({
+        version: 1,
+        type: "daemon_accepted",
+        requestId: request.requestId,
+        idempotencyKey: request.idempotencyKey,
+      });
+    };
+    let resultQueued = false;
+    const operation = (async () => {
+      try {
+        await this.attachment.request(request, {
+          accepted: accept,
+          completed: (response) => {
+            accept();
+            resultQueued = true;
+            void reply({
+              version: 1,
+              type: "daemon_result",
+              requestId: response.requestId,
+              method: response.method,
+              result: response.result,
+            });
+          },
+        });
+      } catch (cause) {
+        if (resultQueued) {
+          // The device already holds the result; a later failure is the daemon's to report.
+          this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+        } else {
+          void reply(safeRemoteError(cause, request.requestId));
+          await Promise.allSettled(replies);
+          throw cause;
+        }
+      }
+      await Promise.all(replies);
+      await this.run(() => this.acknowledgeReceive(opened.operationId), "work");
+    })();
+    this.inFlight.add(operation);
+    try {
+      await operation;
+    } finally {
+      replay.settled = true;
+      this.inFlight.delete(operation);
+    }
+  }
+
+  private async sendReply(replay: ReplayEntry, message: RemoteDaemonMessage): Promise<void> {
+    if (this.closed) throw new Error("Remote E2EE bridge is closed");
+    const route = this.currentRoute;
+    if (route === undefined) throw new Error("Remote route is unavailable");
+    const prepared = await this.prepareMessage(message);
+    // Cache every sealed part before sending any, so a replay can always re-send the whole reply.
+    for (const { envelope } of prepared) replay.envelopes.push(envelope);
+    for (const { envelope, operationId } of prepared) {
+      await this.options.sender.send(route, envelope.slice());
+      await this.releaseOutbox(operationId);
+    }
+  }
+
+  /**
+   * Tell the device, once per envelope, that it was sealed under a superseded hosted grant. The
+   * envelope is never decrypted or executed, so the device must fail the request rather than
+   * retry the same ciphertext forever. The reply is sealed under the current grant and goes to
+   * the frame's source without moving the reply route, since the frame is unauthenticated.
+   */
+  private async rejectStale(
+    sourceRouteId: RouteId,
+    operationId: OperationId,
+    hostedGrantGeneration: number,
+  ): Promise<void> {
+    if (this.rejected.has(operationId)) return;
+    if (this.rejected.size >= MAX_REJECTED_OPERATIONS) {
+      const oldest = this.rejected.values().next().value;
+      if (oldest !== undefined) this.rejected.delete(oldest);
+    }
+    this.rejected.add(operationId);
+    await this.sendMessage(sourceRouteId, {
+      version: 1,
+      type: "daemon_rejected",
+      operationId,
+      code: "stale_grant_generation",
+      hostedGrantGeneration,
+    });
+  }
+
+  /** Re-send the replies already produced for a byte-exact replay, and follow the device's route. */
+  private async replay(routeId: RouteId, replay: ReplayEntry): Promise<void> {
+    this.currentRoute = routeId;
+    for (const envelope of replay.envelopes) {
+      await this.options.sender.send(routeId, envelope.slice());
+    }
+  }
+
+  private remember(key: string, entry: ReplayEntry): void {
+    if (this.replies.size >= MAX_REPLAY_ENTRIES) {
+      let evicted: string | undefined;
+      for (const [candidate, value] of this.replies) {
+        evicted ??= candidate;
+        if (value.settled) {
+          evicted = candidate;
+          break;
+        }
+      }
+      if (evicted !== undefined) this.replies.delete(evicted);
+    }
+    this.replies.set(key, entry);
+  }
+
+  private async acknowledgeReceive(operationId: OperationId): Promise<void> {
+    const target = idBytes(operationId);
+    const acknowledgement = derivedId("axl-e2ee-receive-ack-v1", operationId);
+    try {
+      accepted(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.acknowledgeReceive(acknowledgement.bytes, target),
+        ),
+      );
+    } finally {
+      target.fill(0);
+      acknowledgement.bytes.fill(0);
+    }
+  }
+
+  private async receiveUpdateProposal(
+    routeId: RouteId,
+    envelope: RemoteE2eeEnvelope,
+    incomingOperation: Uint8Array,
+  ): Promise<void> {
+    const logical = idBytes(envelope.logicalMessageId);
+    try {
+      accepted(
+        await this.barrier.mutate((endpoint) => {
+          if (endpoint.receiveReplacementProposal === undefined) {
+            throw new Error("Native endpoint does not support MLS updates");
+          }
+          return endpoint.receiveReplacementProposal(
+            incomingOperation,
+            envelope.ciphertext,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+          );
+        }),
+      );
+      this.currentRoute = routeId;
+      const commitOperation = derivedId(
+        "axl-e2ee-daemon-commit-operation-v1",
+        envelope.operationId,
+      );
+      const commitLogical = {
+        text: envelope.operationId,
+        bytes: idBytes(envelope.operationId),
+      };
+      try {
+        const commit = outbox(
+          await this.barrier.mutate((endpoint) => {
+            if (endpoint.createUpdateCommit === undefined) {
+              throw new Error("Native endpoint does not support MLS updates");
+            }
+            return endpoint.createUpdateCommit(
+              commitOperation.bytes,
+              commitLogical.bytes,
+              BigInt(envelope.hostedGrantGeneration),
+            );
+          }),
+        );
+        await this.sendPrepared(routeId, commit, envelope.hostedGrantGeneration, "commit");
+      } finally {
+        commitOperation.bytes.fill(0);
+        commitLogical.bytes.fill(0);
+      }
+      const acknowledgement = derivedId(
+        "axl-e2ee-update-proposal-receive-ack-v1",
+        envelope.operationId,
+      );
+      try {
+        accepted(
+          await this.barrier.mutate((endpoint) =>
+            endpoint.acknowledgeReceive(acknowledgement.bytes, incomingOperation),
+          ),
+        );
+      } finally {
+        acknowledgement.bytes.fill(0);
+      }
+    } finally {
+      logical.fill(0);
+    }
+  }
+
+  private async receiveEpochReady(
+    routeId: RouteId,
+    envelope: RemoteE2eeEnvelope,
+    incomingOperation: Uint8Array,
+  ): Promise<void> {
+    const logical = idBytes(envelope.logicalMessageId);
+    try {
+      const acceptance = releasedField<NativeEpochReadyAcceptance>(
+        await this.barrier.mutate((endpoint) => {
+          if (endpoint.acceptEpochReady === undefined) {
+            throw new Error("Native endpoint does not support epoch readiness");
+          }
+          return endpoint.acceptEpochReady(
+            incomingOperation,
+            logical,
+            BigInt(envelope.hostedGrantGeneration),
+            envelope.ciphertext,
+          );
+        }),
+        "epoch_ready",
+        "epochReady",
+      );
+      if (
+        !(acceptance.cryptoSessionId instanceof Uint8Array) ||
+        !(acceptance.commitId instanceof Uint8Array)
+      ) {
+        throw new Error("Native endpoint released an invalid epoch-ready acceptance");
+      }
+      this.currentRoute = routeId;
+      const confirmationOperation = derivedId(
+        "axl-e2ee-epoch-ready-confirmation-operation-v1",
+        envelope.operationId,
+      );
+      const confirmationLogical = {
+        text: envelope.operationId,
+        bytes: idBytes(envelope.operationId),
+      };
+      try {
+        const confirmation = outbox(
+          await this.barrier.mutate((endpoint) => {
+            if (endpoint.prepareEpochReadyConfirmation === undefined) {
+              throw new Error("Native endpoint does not support epoch-ready confirmation");
+            }
+            return endpoint.prepareEpochReadyConfirmation(
+              confirmationOperation.bytes,
+              confirmationLogical.bytes,
+              BigInt(envelope.hostedGrantGeneration),
+              acceptance,
+            );
+          }),
+        );
+        await this.sendPrepared(
+          routeId,
+          confirmation,
+          envelope.hostedGrantGeneration,
+          "resync_control",
+        );
+      } finally {
+        confirmationOperation.bytes.fill(0);
+        confirmationLogical.bytes.fill(0);
+      }
+      const commitAcknowledgement = derivedId(
+        "axl-e2ee-commit-outbox-ack-v1",
+        envelope.logicalMessageId,
+      );
+      const commitOperation = idBytes(envelope.logicalMessageId);
+      try {
+        outbox(
+          await this.barrier.mutate((endpoint) =>
+            endpoint.acknowledgeOutbox(commitAcknowledgement.bytes, commitOperation),
+          ),
+        );
+      } finally {
+        commitAcknowledgement.bytes.fill(0);
+        commitOperation.fill(0);
+      }
+    } finally {
+      logical.fill(0);
+    }
+  }
+
+  /**
+   * Coalesce live deliveries into `daemon_deliveries` batches. A batch waits at most the flush
+   * window, and keeps growing while earlier batches still wait for the endpoint, so a slow witness
+   * or relay budget produces fewer, larger envelopes instead of an unbounded queue of small ones.
+   */
+  private enqueueDaemonMessage(message: ServerMessage): void {
+    if (this.currentRoute === undefined || this.closed) return;
+    const bytes = Buffer.byteLength(JSON.stringify(message)) + 1;
+    if (
+      this.pendingDeliveries.length > 0 &&
+      (this.pendingDeliveryBytes + bytes > DELIVERY_BATCH_BYTES ||
+        this.pendingDeliveries.length >= MAX_REMOTE_DELIVERY_BATCH)
+    ) {
+      this.flushDeliveries();
+    }
+    this.pendingDeliveries.push(message);
+    this.pendingDeliveryBytes += bytes;
+    // A delivery too large for a batch is sent alone and fragmented.
+    if (this.pendingDeliveryBytes >= DELIVERY_BATCH_BYTES) this.flushDeliveries();
+    else this.armDeliveryTimer();
+  }
+
+  private armDeliveryTimer(): void {
+    if (this.deliveryTimer !== undefined || this.closed) return;
+    this.deliveryTimer = setTimeout(() => {
+      this.deliveryTimer = undefined;
+      if (this.deliveryBatchesInFlight > 0) this.armDeliveryTimer();
+      else this.flushDeliveries();
+    }, this.deliveryFlushMs);
+  }
+
+  /** Queue every pending delivery now, ahead of anything queued after this call. */
+  private flushDeliveries(): void {
+    if (this.deliveryTimer !== undefined) clearTimeout(this.deliveryTimer);
+    this.deliveryTimer = undefined;
+    if (this.pendingDeliveries.length === 0) return;
+    const batch = this.pendingDeliveries;
+    this.pendingDeliveries = [];
+    this.pendingDeliveryBytes = 0;
+    const [first] = batch;
+    const message: RemoteDaemonMessage =
+      batch.length === 1 && first !== undefined
+        ? { version: 1, type: "daemon_delivery", message: first }
+        : { version: 1, type: "daemon_deliveries", messages: batch };
+    this.deliveryBatchesInFlight += 1;
+    this.run(async () => {
+      // Resolve the route at send time so a device that reconnected keeps receiving.
+      const route = this.currentRoute;
+      if (route === undefined || this.closed) return;
+      await this.sendMessage(route, message);
+    }, "work")
+      .catch((cause: unknown) => {
+        this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+      })
+      .finally(() => {
+        this.deliveryBatchesInFlight -= 1;
+      });
+  }
+
+  private async sendMessage(routeId: RouteId, message: RemoteDaemonMessage): Promise<void> {
+    for (const prepared of await this.prepareMessage(message)) {
+      await this.options.sender.send(routeId, prepared.envelope);
+      await this.releaseOutbox(prepared.operationId);
+    }
+  }
+
+  /**
+   * Seal one daemon message as one or more envelopes. A message larger than one envelope is split
+   * into `daemon_fragment` messages, each sealed under its own derived operation.
+   */
+  private async prepareMessage(message: RemoteDaemonMessage): Promise<PreparedDaemonMessage[]> {
+    const authority = this.options.authority.snapshot(this.options.deviceId);
+    if (authority?.hostedGeneration === undefined || authority.effectiveScopes.length === 0) {
+      throw new Error("Remote authority is unavailable");
+    }
+    const hostedGeneration = authority.hostedGeneration;
+    const requestIdentity = "requestId" in message ? message.requestId : randomUUID();
+    const frames = encodeRemoteDaemonMessageFrames(message, randomUUID);
+    const prepared: PreparedDaemonMessage[] = [];
+    try {
+      for (const [index, plaintext] of frames.entries()) {
+        const identity = frames.length === 1 ? requestIdentity : `${requestIdentity}:${index}`;
+        const operation = derivedId(`axl-e2ee-daemon-${message.type}-operation-v1`, identity);
+        const logical = derivedId(`axl-e2ee-daemon-${message.type}-logical-v1`, identity);
+        try {
+          const sealed = outbox(
+            await this.barrier.mutate((endpoint) =>
+              endpoint.prepareApplication(
+                operation.bytes,
+                logical.bytes,
+                BigInt(hostedGeneration),
+                plaintext,
+              ),
+            ),
+          );
+          prepared.push({
+            envelope: encodePrepared(sealed, hostedGeneration, "application_delivery"),
+            operationId: uuidText(sealed.operationId),
+          });
+        } finally {
+          operation.bytes.fill(0);
+          logical.bytes.fill(0);
+        }
+      }
+      return prepared;
+    } finally {
+      for (const plaintext of frames) plaintext.fill(0);
+    }
+  }
+
+  /**
+   * Drop a sent envelope from the native outbox. The bridge never resends from that outbox:
+   * replies are replayed from memory and deliveries resume from cursors, so a retained record
+   * would only grow the endpoint's durable state.
+   */
+  private async releaseOutbox(operationId: OperationId): Promise<void> {
+    const target = idBytes(operationId);
+    const acknowledgement = derivedId("axl-e2ee-daemon-outbox-ack-v1", operationId);
+    try {
+      outbox(
+        await this.barrier.mutate((endpoint) =>
+          endpoint.acknowledgeOutbox(acknowledgement.bytes, target),
+        ),
+      );
+    } finally {
+      target.fill(0);
+      acknowledgement.bytes.fill(0);
+    }
+  }
+
+  private async sendPrepared(
+    routeId: RouteId,
+    prepared: NativeCiphertext,
+    hostedGrantGeneration: number,
+    expectedClass: RemoteE2eeEnvelope["messageClass"],
+  ): Promise<void> {
+    await this.options.sender.send(
+      routeId,
+      encodePrepared(prepared, hostedGrantGeneration, expectedClass),
+    );
+  }
+}

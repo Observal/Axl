@@ -26,9 +26,7 @@
     "@axl/extension-skills": "workspace:*",
     "@axl/kernel": "workspace:*",
     "@axl/protocol": "workspace:*",
-    "@axl/sandbox": "workspace:*"
-  },
-  "devDependencies": {
+    "@axl/sandbox": "workspace:*",
     "@axl/sdk": "workspace:*"
   }
 }

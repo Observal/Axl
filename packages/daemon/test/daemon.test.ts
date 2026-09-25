@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -147,7 +148,6 @@ async function startDaemon(
   } = {},
 ): Promise<{ daemon: AxlDaemon; socketPath: string; dataDirectory: string; cwd: string }> {
   const directory = await mkdtemp(join(tmpdir(), "axl-daemon-"));
-  context.after(() => rm(directory, { recursive: true, force: true }));
   const cwd = await realpath(directory);
   const socketPath = join(directory, "axl.sock");
   const dataDirectory = join(directory, "data");
@@ -166,8 +166,19 @@ async function startDaemon(
       ...(retry === undefined ? {} : { retry }),
     }),
   });
-  await daemon.start();
-  context.after(() => daemon.stop());
+  try {
+    await daemon.start();
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+  context.after(async () => {
+    try {
+      await daemon.stop();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   return { daemon, socketPath, dataDirectory, cwd };
 }
 
@@ -892,6 +903,7 @@ test("reports the daemon security mode", async (context) => {
   assert.deepEqual(await sandboxedClient.request("daemon.info", {}), {
     securityMode: "sandboxed",
     sandboxProvider: "unknown",
+    remoteEndpoints: [],
   });
 
   const unsafe = await startDaemon(context, replyPort(), "unsafe");
@@ -900,6 +912,7 @@ test("reports the daemon security mode", async (context) => {
   assert.deepEqual(await unsafeClient.request("daemon.info", {}), {
     securityMode: "unsafe",
     sandboxProvider: "unknown",
+    remoteEndpoints: [],
   });
 
   const image = `example.invalid/image@sha256:${"a".repeat(64)}`;
@@ -910,6 +923,7 @@ test("reports the daemon security mode", async (context) => {
     securityMode: "sandboxed",
     sandboxProvider: "podman",
     sandboxImage: image,
+    remoteEndpoints: [],
   });
 });
 
@@ -3264,6 +3278,12 @@ test("queue restore leaves queue and active work untouched when its event append
     release();
     await active;
   }
+  await waitFor(
+    () =>
+      subscription.projector.state.queue.find((item) => item.queueItemId === queued.queueItemId)
+        ?.status === "completed",
+    "queued prompt completion after failed restore",
+  );
 });
 
 test("queued prompts become paused after restart and require explicit re-queueing", async (context) => {

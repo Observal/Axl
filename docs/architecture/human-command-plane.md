@@ -1,11 +1,12 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Human command plane
 
 Status: implementation in progress for [issue #389](https://github.com/Observal/Axl/issues/389)
 
-The wire-version 16 baseline implements a capability-filtered daemon catalog, strict protocol validation, an SDK command controller, daemon-backed TUI and web discovery, TUI shared-command dispatch, dynamic client presentation-command merging, and staged browser session creation. Dynamic daemon catalog invalidation and daemon extension registration remain pending.
+The wire-version 16 baseline (unchanged in version 17) implements a capability-filtered daemon catalog, strict protocol validation, an SDK command controller, daemon-backed TUI and web discovery, TUI shared-command dispatch, dynamic client presentation-command merging, and staged browser session creation. Dynamic daemon catalog invalidation and daemon extension registration remain pending.
 
 ## Purpose
 

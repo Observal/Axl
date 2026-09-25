@@ -91,6 +91,7 @@ import {
 import { type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
+import { encodeQrCode, QR_QUIET_ZONE, qrTerminalWidth, renderQrCode } from "./qr-code.ts";
 import {
   AUTOWRAP_OFF,
   AUTOWRAP_ON,
@@ -372,6 +373,7 @@ const TUI_COMMANDS: readonly { readonly name: string; readonly description: stri
   { name: "history", description: "search prompt history" },
   { name: "edit", description: "open the prompt in VISUAL or EDITOR" },
   { name: "web", description: "open this session in the browser" },
+  { name: "remote", description: "pair a phone browser with this daemon" },
   { name: "hotkeys", description: "browse and search keyboard shortcuts" },
   { name: "help", description: "show commands and keys" },
   { name: "detach", description: "leave the session running in the daemon" },
@@ -825,8 +827,10 @@ export class AxlApp {
     return [
       ...TUI_COMMANDS.filter(
         (command) =>
-          command.name !== "login" ||
-          this.client.connection.grantedCapabilities?.includes("provider.auth.login") !== true,
+          (command.name !== "login" ||
+            this.client.connection.grantedCapabilities?.includes("provider.auth.login") !== true) &&
+          (command.name !== "remote" ||
+            this.client.connection.grantedCapabilities?.includes("remote.pairing.start") === true),
       ).map((command) => ({
         id: `tui.${command.name}`,
         name: command.name,
@@ -1208,6 +1212,22 @@ export class AxlApp {
     this.view.setWidth(width);
     if (widthChanged) this.rebuildTranscript(false);
     return true;
+  }
+
+  /** The pairing link as a terminal QR code, or a hint when the terminal is too narrow for one. */
+  private pairingCode(link: string): string[] {
+    const code = encodeQrCode(link, "L");
+    const width = this.detectWidth();
+    const quietZone = [QR_QUIET_ZONE, 2].find((zone) => qrTerminalWidth(code, zone) <= width);
+    if (quietZone === undefined) {
+      return [
+        this.view.palette.dim(
+          `  Widen the terminal to ${qrTerminalWidth(code, 2)} columns and run /remote again for a QR code.`,
+        ),
+        "",
+      ];
+    }
+    return [...renderQrCode(code, { quietZone, color: this.options.color !== false }), ""];
   }
 
   private detectWidth(): number {
@@ -2448,6 +2468,23 @@ export class AxlApp {
             this.loginProviderFromWeb(request.providerId, request.method, options?.signal),
         });
         this.notice = this.view.palette.dim(`· opened ${origin}`);
+        return;
+      }
+      case "remote": {
+        const pairing = await this.client.startRemotePairing();
+        const { accent, dim } = this.view.palette;
+        const minutes = Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60_000));
+        this.commitLines([
+          accent("Remote pairing"),
+          dim(`  Scan the code or open the link on your phone within ${minutes} minutes. It pairs`),
+          dim(
+            "  one device and carries deployment-test credentials, so share it only with yourself.",
+          ),
+          "",
+          ...this.pairingCode(pairing.link),
+          pairing.link,
+          "",
+        ]);
         return;
       }
       case "hotkeys":
