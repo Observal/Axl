@@ -376,14 +376,12 @@ test(
         1,
       );
       await delivery.flush();
-      await waitFor("epoch-ready confirmation", async () => {
-        try {
-          return (await pair.deviceEndpoint.pairStatus()) === "active";
-        } catch (error) {
-          if (error?.code === "lifecycle_busy") return false;
-          throw error;
-        }
-      });
+      // Poll through the same serialized endpoint that applies the inbound commit. A direct
+      // endpoint call can race that commit and make the native endpoint reject it as busy.
+      await waitFor(
+        "epoch-ready confirmation",
+        async () => (await witnessedDevice.read((endpoint) => endpoint.pairStatus())) === "active",
+      );
       await waitFor("control outbox acknowledgement", async () => {
         try {
           return (await nativeOutbox.list()).length === 0;
