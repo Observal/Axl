@@ -1881,6 +1881,15 @@ test("pending steering and follow-ups display their actual injection order above
 
   input.write("one\r");
   await until(() => calls === 1, "first model call");
+  // The daemon reaches the model before the TUI projects the active operation;
+  // input typed in that gap is queued as prompts instead of steered.
+  const projected = app as unknown as {
+    sessionSubscription?: { projector: { overview: { activeOperationId?: string } } };
+  };
+  await until(
+    () => projected.sessionSubscription?.projector.overview.activeOperationId !== undefined,
+    "TUI to own the active operation",
+  );
   input.write("follow A\x1b[13;3usteer A\rfollow B\x1b[13;3usteer B\r");
   await until(() => text().includes("4. Follow-up: follow B"), "ordered queue");
   const queuedTerminal = new VirtualTerminal(100, 24);
