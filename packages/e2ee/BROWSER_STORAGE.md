@@ -232,6 +232,41 @@ Corruption, rollback, and state loss never create a replacement database automat
 observed loss returns `state_loss`; a later open returns `re_pair_required`. Re-pairing must use fresh
 identity, crypto-session, KeyPackage, and group identifiers.
 
+## Browser mutation coverage
+
+The Rust `BrowserEndpoint` runner accepts exactly these operation kinds, each releasing one exact
+typed result through the barrier: 32 KeyPackage creation at endpoint creation (the counter-1
+register), 8 Welcome join, 9 activation send, 12 application send, 13 application receive, 14
+self-Update proposal send, 17 received commit apply (one transition), 18 epoch-ready send as a
+separate operation, 21 epoch-ready confirmation receive, and 24 received removal.
+
+The native-only pairing lifecycle has no browser implementation. Its state machines live in redb
+tables, and redb does not run on `wasm32-unknown-unknown`; bringing them to the browser needs a
+separate decision between a storage abstraction over an in-memory WASM backend and an independent
+browser implementation. Deferred rows: device pre-join creation from an invitation, claim
+publication, and pre-join and Welcome expiry (kinds 2, 30, 31; the browser creates its KeyPackage
+directly and receives the Welcome out of band); published-Welcome join with claim hash and expiry
+(the browser join carries only the Welcome bytes and group ID); activation acknowledgement, typed
+epoch-ready acknowledgement, epoch-ready receive, and epoch-ready confirmation send (kinds 11, 22,
+19, 20); local revocation, reset, outbox acknowledgement, and receive acknowledgement (kinds 25 to
+28) and the outbox and accepted-message records they operate on (the browser retains released bytes
+in its image index and keeps no separate outbox); and every daemon-only operation.
+
+Two browser fingerprints differ from the native rows because the browser has no claim lifecycle.
+Kind 9 fingerprints the logical message ID and the exact activation plaintext, so a differing
+payload under the same operation ID is a conflict rather than a replay. Kind 18 takes the applied
+commit's exact metadata, refuses any commit other than the one the image applied and has not yet
+announced, and derives the canonical epoch-ready plaintext itself; the image carries that pending
+commit from kind 17 to kind 18, and a removal clears it.
+
+The image retains completed operations with their exact results for the shared
+`IDEMPOTENCY_RETENTION_GENERATIONS` horizon (4,096 successors). Inside it a duplicate returns the
+exact result without a transition. Outside it the endpoint prepares a fresh transition, the witness
+lineage index (which never forgets an operation ID) refuses it as `witness_operation_conflict`, and
+the endpoint is quarantined rather than releasing a second result under an old ID. After a restart
+the whole restored image is a cache: no retained exact result of any age leaves the endpoint until a
+fresh unanimous head equals the confirmed head or a verified certificate advances it.
+
 ## Browser evidence and limitations
 
 The real-browser suite uses each browser's IndexedDB, Web Locks, WebCrypto, and workers. It covers

@@ -34,8 +34,7 @@ recovery reopens from committed data. Version 1 and unknown newer databases fail
 `unsupported_schema`. No WASM class has a JavaScript constructor, and the page protocol never
 receives the endpoint, the store, a key, a transition, or a plaintext buffer. The native-only pairing
 lifecycle (claims, reservations, acknowledgements, outbox, reset) has no browser implementation yet;
-see the coverage table in
-[`../../../../docs/architecture/atomic-witness-integration.md`](../../../../docs/architecture/atomic-witness-integration.md).
+see "Browser mutation coverage" in [`../../BROWSER_STORAGE.md`](../../BROWSER_STORAGE.md).
 
 The separate test artifact drives the byte-identical driver and store from inside the dedicated
 test worker with an in-WASM peer daemon and an in-WASM deterministic three-replica witness. Its
