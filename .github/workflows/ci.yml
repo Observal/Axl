@@ -277,6 +277,11 @@ jobs:
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/axl-playwright-browsers
         run: pnpm --filter @axl/e2ee-browser exec playwright test --project=${{ matrix.browser }}
+      - name: Pair ${{ matrix.browser }} with a native daemon through the deployment-test artifact
+        if: needs.changes.outputs.e2ee == 'true'
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/axl-playwright-browsers
+        run: pnpm --filter @axl/e2ee-browser test:deployment --project=${{ matrix.browser }}
 
   e2ee-browser-safari:
     name: E2EE browser (Safari WebDriver)

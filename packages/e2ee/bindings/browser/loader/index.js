@@ -199,7 +199,7 @@ function bindingWorker() {
   }
 }
 
-function request(operation, bytes, validate) {
+function request(operation, bytes, validate, params) {
   try {
     ensureUsable();
   } catch (cause) {
@@ -216,6 +216,12 @@ function request(operation, bytes, validate) {
   if (bytes !== undefined) {
     message.bytes = bytes;
     transfer.push(bytes.buffer);
+  }
+  if (params !== undefined) {
+    message.params = params;
+    for (const value of Object.values(params)) {
+      if (value instanceof Uint8Array) transfer.push(value.buffer);
+    }
   }
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject, validate });
@@ -259,6 +265,136 @@ const unreachableSuccess = () => {
   throw failure("internal_error");
 };
 
+const RESULT_FIELDS = Object.freeze([
+  "bytes",
+  "commitId",
+  "epoch",
+  "epochAuthenticator",
+  "hostedGeneration",
+  "logicalMessageId",
+  "messageClass",
+  "removal",
+  "status",
+  "tag",
+]);
+
+function isBytes(value, minimum, maximum) {
+  return value instanceof Uint8Array && value.byteLength >= minimum && value.byteLength <= maximum;
+}
+
+/** The exact released result of one operation that completed through the worker's barrier. */
+function releasedResult(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    value.status !== "completed" ||
+    typeof value.tag !== "string" ||
+    Object.keys(value).some((key) => !RESULT_FIELDS.includes(key))
+  ) {
+    throw failure("internal_error");
+  }
+  return Object.freeze(value);
+}
+
+const bytesResult = (maximum) => (value) => {
+  if (!isBytes(value, 1, maximum)) throw failure("internal_error");
+  return value;
+};
+
+function nullResult(value) {
+  if (value !== null) throw failure("internal_error");
+  return null;
+}
+
+/** Copy page inputs: the copies are transferred to the worker and cleared there. */
+function copied(params) {
+  const output = {};
+  for (const [name, value] of Object.entries(params)) {
+    output[name] = value instanceof Uint8Array ? new Uint8Array(value) : value;
+  }
+  return output;
+}
+
+function endpointCall(operation, params, validate) {
+  try {
+    return request(operation, undefined, validate, copied(params));
+  } catch (cause) {
+    return Promise.reject(cause);
+  }
+}
+
+/**
+ * The page's handle to the worker-private device endpoint. It carries no keys, storage,
+ * transitions, or witness material; every call is one validated request to the worker, which runs
+ * the complete witness barrier and answers with the exact released result.
+ */
+function deviceEndpointHandle() {
+  let closed = false;
+  const call = (operation, params, validate) =>
+    closed ? Promise.reject(failure("endpoint_closed")) : endpointCall(operation, params, validate);
+  return Object.freeze({
+    pairingClaim: (invitation) => call("pairing_claim", { invitation }, bytesResult(bounds.claim)),
+    joinPublished: (operationId, welcome) =>
+      call("join_published", { operationId, welcome }, releasedResult),
+    preparePairActivation: (operationId, logicalMessageId, claim) =>
+      call("prepare_pair_activation", { operationId, logicalMessageId, claim }, releasedResult),
+    prepareApplication: (operationId, logicalMessageId, hostedGeneration, plaintext) =>
+      call(
+        "prepare_application",
+        { operationId, logicalMessageId, hostedGeneration, plaintext },
+        releasedResult,
+      ),
+    receiveApplication: (operationId, logicalMessageId, hostedGeneration, ciphertext) =>
+      call(
+        "receive_application",
+        { operationId, logicalMessageId, hostedGeneration, ciphertext },
+        releasedResult,
+      ),
+    prepareReplacement: (operationId, logicalMessageId, hostedGeneration) =>
+      call(
+        "prepare_replacement",
+        { operationId, logicalMessageId, hostedGeneration },
+        releasedResult,
+      ),
+    applyUpdateCommit: (operationId, logicalMessageId, hostedGeneration, ciphertext) =>
+      call(
+        "apply_update_commit",
+        { operationId, logicalMessageId, hostedGeneration, ciphertext },
+        releasedResult,
+      ),
+    prepareEpochReady: (operationId, logicalMessageId, hostedGeneration, commit) =>
+      call(
+        "prepare_epoch_ready",
+        {
+          operationId,
+          logicalMessageId,
+          hostedGeneration,
+          commitId: commit?.commitId,
+          targetEpoch: commit?.targetEpoch,
+          epochAuthenticator: commit?.epochAuthenticator,
+        },
+        releasedResult,
+      ),
+    acceptEpochReadyConfirmation: (operationId, logicalMessageId, hostedGeneration, ciphertext) =>
+      call(
+        "accept_epoch_ready_confirmation",
+        { operationId, logicalMessageId, hostedGeneration, ciphertext },
+        releasedResult,
+      ),
+    applyRemoval: (operationId, logicalMessageId, hostedGeneration, ciphertext) =>
+      call(
+        "apply_removal",
+        { operationId, logicalMessageId, hostedGeneration, ciphertext },
+        releasedResult,
+      ),
+    close: () => {
+      if (closed) return Promise.resolve();
+      closed = true;
+      return endpointCall("close_device_endpoint", {}, nullResult);
+    },
+  });
+}
+
 export const getBindingInfo = () => request("binding_info", undefined, bindingInfo);
 export const inspectPairingInvitation = (bytes) =>
   inspection("inspect_invitation", "pairing_invitation", bytes, bounds.invitation);
@@ -267,9 +403,37 @@ export const inspectPairingClaim = (bytes) =>
 export const createDaemonEndpoint = () =>
   request("create_daemon_endpoint", undefined, unreachableSuccess);
 export const openDaemonEndpoint = () => request("open_daemon_endpoint", undefined, unreachableSuccess);
-export const createDeviceEndpoint = () =>
-  request("create_device_endpoint", undefined, unreachableSuccess);
-export const openDeviceEndpoint = () => request("open_device_endpoint", undefined, unreachableSuccess);
+/**
+ * Give the worker the account credential its same-origin witness gateway authenticates. It stays
+ * inside the worker and is never returned.
+ */
+export const authorizeWitness = (authorization) =>
+  endpointCall("authorize_witness", { authorization }, nullResult);
+/**
+ * Create this browser profile's device endpoint and certify its registration. Fails with
+ * `rollback_anchor_unavailable` in a build that carries no replica trust.
+ */
+export const createDeviceEndpoint = ({
+  accountId,
+  installationId,
+  deviceId,
+  cryptoSessionId,
+  operationId,
+} = {}) =>
+  endpointCall(
+    "create_device_endpoint",
+    { accountId, installationId, deviceId, cryptoSessionId, operationId },
+    (value) => {
+      nullResult(value);
+      return deviceEndpointHandle();
+    },
+  );
+/** Reopen the committed device endpoint for a crypto session. */
+export const openDeviceEndpoint = ({ cryptoSessionId } = {}) =>
+  endpointCall("open_device_endpoint", { cryptoSessionId }, (value) => {
+    nullResult(value);
+    return deviceEndpointHandle();
+  });
 export const closeBrowserBinding = () => {
   if (state === "closed") return;
   state = "closed";

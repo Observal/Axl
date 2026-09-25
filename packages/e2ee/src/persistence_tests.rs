@@ -35,14 +35,14 @@ fn id(value: u8) -> [u8; 16] {
     [value; 16]
 }
 
-struct ManualClock(AtomicU64);
+pub(crate) struct ManualClock(AtomicU64);
 
 impl ManualClock {
     fn new(now_ms: u64) -> Arc<Self> {
         Arc::new(Self(AtomicU64::new(now_ms)))
     }
 
-    fn advance(&self, milliseconds: u64) {
+    pub(crate) fn advance(&self, milliseconds: u64) {
         self.0.fetch_add(milliseconds, Ordering::SeqCst);
     }
 
@@ -75,7 +75,7 @@ impl Clock for ScriptedClock {
     }
 }
 
-fn sequence_id(tag: u8, value: u64) -> [u8; 16] {
+pub(crate) fn sequence_id(tag: u8, value: u64) -> [u8; 16] {
     let mut id = [tag; 16];
     id[8..].copy_from_slice(&value.to_be_bytes());
     id
@@ -2449,11 +2449,11 @@ fn unrelated_groups_make_progress_on_separate_databases() {
 }
 
 #[derive(Clone)]
-struct PairingIds {
-    account: [u8; 16],
-    installation: [u8; 16],
-    session: [u8; 16],
-    device: [u8; 16],
+pub(crate) struct PairingIds {
+    pub(crate) account: [u8; 16],
+    pub(crate) installation: [u8; 16],
+    pub(crate) session: [u8; 16],
+    pub(crate) device: [u8; 16],
 }
 
 fn pairing_ids(seed: u8) -> PairingIds {
@@ -2465,19 +2465,19 @@ fn pairing_ids(seed: u8) -> PairingIds {
     }
 }
 
-struct PendingFixture {
+pub(crate) struct PendingFixture {
     root: PathBuf,
-    endpoint: DurablePendingInvitation,
-    publication: crate::persistence::InvitationPublication,
+    pub(crate) endpoint: DurablePendingInvitation,
+    pub(crate) publication: crate::persistence::InvitationPublication,
     keys: Arc<TestKeys>,
     witness: Arc<TestWitness>,
-    clock: Arc<ManualClock>,
-    ids: PairingIds,
+    pub(crate) clock: Arc<ManualClock>,
+    pub(crate) ids: PairingIds,
 }
 
 impl PendingFixture {
     /// Run one witnessed daemon mutation through the full barrier.
-    fn run<T>(
+    pub(crate) fn run<T>(
         &mut self,
         mutate: impl FnOnce(
             &mut DurablePendingInvitation,
@@ -2491,7 +2491,7 @@ impl PendingFixture {
     }
 }
 
-fn pending_fixture(seed: u8) -> PendingFixture {
+pub(crate) fn pending_fixture(seed: u8) -> PendingFixture {
     let ids = pairing_ids(seed);
     let root = temp_root("pending-invitation");
     let keys = TestKeys::enabled();

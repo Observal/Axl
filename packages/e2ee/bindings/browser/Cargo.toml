@@ -14,6 +14,8 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 test-fixtures = ["axl-e2ee/browser-test-fixtures"]
+# Deployment-test builds accept replica trust named by a hash-pinned configuration file.
+deployment-test = []
 
 [dependencies]
 axl-e2ee = { path = "../..", features = ["browser"] }

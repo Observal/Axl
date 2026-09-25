@@ -38,10 +38,12 @@ const loader = readFileSync(join(production, "loader/index.js"), "utf8");
 const worker = readFileSync(join(production, "worker/index.js"), "utf8");
 const productionStorage = readFileSync(join(production, "worker/storage.js"), "utf8");
 const productionEndpoint = readFileSync(join(production, "worker/endpoint.js"), "utf8");
+const productionBarrier = readFileSync(join(production, "worker/barrier.js"), "utf8");
+const productionTrust = readFileSync(join(production, "worker/trust.js"), "utf8");
 const glue = readFileSync(join(production, "wasm/axl_e2ee_browser.js"), "utf8");
 const declarations = readFileSync(join(production, "index.d.ts"), "utf8");
 const wasm = readFileSync(join(production, "wasm/axl_e2ee_browser_bg.wasm"));
-const productionText = `${loader}\n${worker}\n${productionStorage}\n${productionEndpoint}\n${glue}\n${wasm.toString("latin1")}`;
+const productionText = `${loader}\n${worker}\n${productionStorage}\n${productionEndpoint}\n${productionBarrier}\n${productionTrust}\n${glue}\n${wasm.toString("latin1")}`;
 for (const forbidden of [
   "test_browser_persistence_receive",
   "test_browser_persistence_seed",
@@ -79,12 +81,22 @@ for (const forbidden of [
   "new Function",
   "http://",
   "https://",
+  "deployment_test",
+  "replica-trust",
 ]) {
   assert(!productionText.includes(forbidden), `production artifact contains ${forbidden}`);
 }
 assert(!/(?:fetch|import|new URL)\s*\(\s*["'`](?:blob|data):/u.test(productionText), "production artifact contains an inline-code URL");
 assert.match(worker, /import \{ BrowserDeviceEndpoint \} from "\.\/endpoint\.js"/u, "worker must statically import the production endpoint driver");
-assert.match(worker, /const PRODUCTION_REPLICA_TRUST = undefined;/u, "production replica trust must remain unpinned until its gate");
+assert.match(worker, /import \{ loadReplicaTrust \} from "\.\/trust\.js"/u, "worker must take replica trust only from its trust module");
+assert.match(
+  productionTrust,
+  /export async function loadReplicaTrust\(\) \{\n  return undefined;\n\}/u,
+  "production replica trust must remain unpinned until its gate",
+);
+assert(!/import|fetch/u.test(productionTrust), "the production trust module must not load trust from anywhere");
+assert.match(worker, /import \{ WorkerWitnessBarrier \} from "\.\/barrier\.js"/u, "worker must run the witness barrier itself");
+assert(!/test|fixture|fault/iu.test(productionBarrier), "production witness barrier contains test controls");
 assert.match(productionEndpoint, /import \{ ProductionBrowserStore \} from "\.\/storage\.js"/u, "endpoint driver must statically import production storage");
 assert.match(worker, /import initializeWasm,/u, "worker must statically import WASM glue");
 assert.match(productionStorage, /indexedDB/u, "production storage must use IndexedDB");
@@ -123,6 +135,9 @@ assert.deepEqual(
     "reconcileWitness",
     "pendingWitness",
     "continueWitness",
+    "pairingClaim",
+    "joinPublished",
+    "preparePairActivation",
     "join",
     "prepareActivation",
     "prepareApplication",
@@ -203,6 +218,7 @@ assert.deepEqual(
 const valueExports = [
   "AxlE2eeError",
   "ERROR_CODES",
+  "authorizeWitness",
   "closeBrowserBinding",
   "createDaemonEndpoint",
   "createDeviceEndpoint",
@@ -283,7 +299,15 @@ const cargoLockSha256 = createHash("sha256").update(readFileSync(join(e2eeRoot, 
 assertManifestShape(manifest, "browser", cargoLockSha256);
 assert.deepEqual(
   manifest.artifacts.map((artifact) => artifact.path).sort(),
-  ["wasm/axl_e2ee_browser.js", "wasm/axl_e2ee_browser_bg.wasm", "worker/endpoint.js", "worker/index.js", "worker/storage.js"],
+  [
+    "wasm/axl_e2ee_browser.js",
+    "wasm/axl_e2ee_browser_bg.wasm",
+    "worker/barrier.js",
+    "worker/endpoint.js",
+    "worker/index.js",
+    "worker/storage.js",
+    "worker/trust.js",
+  ],
   "every production module is hashed",
 );
 
@@ -299,7 +323,7 @@ for (const name of ["test_browser_persistence_seed", "TestWitness", "TestPeerDae
 for (const forbidden of [...derived, ...FORBIDDEN_PRODUCTION_STRINGS]) {
   assert(!productionText.includes(forbidden), `production artifact contains ${forbidden}`);
 }
-const ownProductionJs = `${loader}\n${worker}\n${productionStorage}\n${productionEndpoint}`;
+const ownProductionJs = `${loader}\n${worker}\n${productionStorage}\n${productionEndpoint}\n${productionBarrier}\n${productionTrust}`;
 for (const forbidden of FORBIDDEN_PRODUCTION_JS) {
   assert(!ownProductionJs.includes(forbidden), `production JavaScript contains ${forbidden}`);
 }
@@ -332,7 +356,7 @@ assert.deepEqual(
     BrowserCommittedTransition: ["commitment", "committed_record", "counter", "current_key_id", "fingerprint", "generation", "operation_id", "predecessor_commitment", "request_hash", "token", "witness_request"],
     BrowserCompletion: ["certificate_hash", "commitment", "counter"],
     BrowserCreatedEndpoint: ["take_endpoint", "take_transition"],
-    BrowserEndpoint: ["accept_epoch_ready_confirmation", "apply_removal", "apply_update_commit", "completion_head", "confirm_quorum", "discard_candidate", "generation", "has_candidate", "has_obsolete_key", "head_commitment", "head_counter", "is_restored", "join", "local_commit_complete", "mark_current_key_active", "mark_obsolete_key_erased", "pending_descriptor", "pending_witness", "prepare_activation", "prepare_application", "prepare_epoch_ready", "prepare_replacement", "receive_application", "reconcile_witness", "release", "restore", "take_unpersisted_terminal", "terminal", "witness_read_request"],
+    BrowserEndpoint: ["accept_epoch_ready_confirmation", "apply_removal", "apply_update_commit", "completion_head", "confirm_quorum", "discard_candidate", "generation", "has_candidate", "has_obsolete_key", "head_commitment", "head_counter", "is_restored", "join", "join_published", "local_commit_complete", "mark_current_key_active", "mark_obsolete_key_erased", "pairing_claim", "pending_descriptor", "pending_witness", "prepare_activation", "prepare_application", "prepare_epoch_ready", "prepare_pair_activation", "prepare_replacement", "receive_application", "reconcile_witness", "release", "restore", "take_unpersisted_terminal", "terminal", "witness_read_request"],
     BrowserExactResult: ["bytes", "commit_id", "epoch", "epoch_authenticator", "hosted_generation", "logical_message_id", "message_class", "removal", "tag"],
     BrowserMutationOutcome: ["kind", "take_pending", "take_result", "take_transition"],
     BrowserPendingWitness: ["kind", "operation_id", "request_hash", "witness_request"],
@@ -362,7 +386,46 @@ assert(!/postMessage\([^)]*(?:transaction|IDBTransaction|db\b)/u.test(`${product
 const storeClass = productionStorage.slice(productionStorage.indexOf("export class ProductionBrowserStore"));
 assert(storeClass.length > 0, "production store class missing");
 assert(!/return (?:transaction|tx|database|db|this\.#database);/u.test(storeClass), "the store must not hand out transaction or database handles");
-for (const call of worker.matchAll(/fetch\(([^,)]*)/gu)) {
+for (const call of `${worker}\n${productionBarrier}`.matchAll(/fetch\(([^,)]*)/gu)) {
   assert.match(call[1], /^new URL\(/u, `worker fetch must use a static same-origin URL: ${call[0]}`);
+}
+// A deployment-test artifact, when built, is the production artifact with hash-pinned trust.
+const deploymentTest = join(root, "dist/deployment-test");
+let deploymentBuilt = true;
+try {
+  readdirSync(deploymentTest);
+} catch {
+  deploymentBuilt = false;
+}
+if (deploymentBuilt) {
+  const deploymentManifest = JSON.parse(readFileSync(join(deploymentTest, "integrity.json"), "utf8"));
+  assert.equal(deploymentManifest.artifactKind, "deployment-test");
+  for (const artifact of deploymentManifest.artifacts) {
+    const digest = createHash("sha256").update(readFileSync(join(deploymentTest, artifact.path))).digest("hex");
+    assert.equal(digest, artifact.sha256, `deployment-test ${artifact.path} integrity drift`);
+  }
+  assert.deepEqual(
+    deploymentManifest.artifacts.map((artifact) => artifact.kind).sort(),
+    ["glue", "replica-trust", "wasm", "worker", "worker-barrier", "worker-endpoint", "worker-storage", "worker-trust"],
+    "deployment-test modules drift",
+  );
+  for (const name of ["loader/index.js", "worker/index.js", "worker/storage.js", "worker/endpoint.js", "worker/barrier.js"]) {
+    assert.equal(
+      readFileSync(join(deploymentTest, name), "utf8"),
+      readFileSync(join(production, name), "utf8"),
+      `deployment-test ${name} must be the byte-identical production module`,
+    );
+  }
+  const deploymentGlue = readFileSync(join(deploymentTest, "wasm/axl_e2ee_browser.js"), "utf8");
+  assert.deepEqual(
+    [...deploymentGlue.matchAll(/^export function ([a-z0-9_]+)/gmu)].map((match) => match[1]).sort(),
+    [...generatedExports, "deployment_test_replica_trust"].sort(),
+    "deployment-test Rust/WASM export drift",
+  );
+  const deploymentWasm = readFileSync(join(deploymentTest, "wasm/axl_e2ee_browser_bg.wasm"));
+  const deploymentText = `${deploymentGlue}\n${deploymentWasm.toString("latin1")}`;
+  for (const forbidden of [...derived, ...FORBIDDEN_PRODUCTION_STRINGS]) {
+    assert(!deploymentText.includes(forbidden), `deployment-test artifact contains ${forbidden}`);
+  }
 }
 console.log("Browser ABI, artifact separation, bounds, CSP sources, isolation, provenance, and integrity metadata match.");

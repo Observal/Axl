@@ -443,7 +443,6 @@ impl PairingClaimV1 {
         Self::create_after_verification(invitation, device_credential, key_package, device_signer)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn create_at(
         invitation: &PairingInvitation,
         device_credential: PairingCredential,
@@ -1020,6 +1019,21 @@ impl PairingClaimAccountant {
 
 fn provider() -> Result<CoreProvider, PairingError> {
     CoreProvider::new().map_err(|_| PairingError::CryptographicFailure)
+}
+
+/// The exact plaintext a device sends in its pair activation. The daemon accepts only this value
+/// for its accepted claim and the group it created, so both endpoints derive it the same way.
+pub fn pair_activation_payload(
+    crypto_session_id: Id,
+    claim_hash: [u8; 48],
+    group_id: [u8; 32],
+) -> Vec<u8> {
+    let mut out = b"Axl pair activation v1".to_vec();
+    out.extend_from_slice(&PROFILE_REVISION.to_be_bytes());
+    out.extend_from_slice(&crypto_session_id);
+    out.extend_from_slice(&group_id);
+    out.extend_from_slice(&claim_hash);
+    out
 }
 
 pub(crate) fn sha384(bytes: &[u8]) -> Result<[u8; 48], PairingError> {
