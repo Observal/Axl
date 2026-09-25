@@ -65,12 +65,22 @@ if ! aws secretsmanager describe-secret \
 import base64
 import json
 import secrets
+import time
 import uuid
+
+
+def uuid7() -> str:
+    # E2EE pairing accepts only UUIDv7 installation, session, and device identities.
+    value = bytearray((time.time_ns() // 1_000_000).to_bytes(6, "big") + secrets.token_bytes(10))
+    value[6] = 0x70 | (value[6] & 0x0F)
+    value[8] = 0x80 | (value[8] & 0x3F)
+    return str(uuid.UUID(bytes=bytes(value)))
+
 
 print(json.dumps({
     "accountId": str(uuid.uuid4()),
-    "installationId": str(uuid.uuid4()),
-    "deviceId": str(uuid.uuid4()),
+    "installationId": uuid7(),
+    "deviceId": uuid7(),
     "relayInstanceId": str(uuid.uuid4()),
     "publicToken": secrets.token_urlsafe(48),
     "relayToken": secrets.token_urlsafe(48),
