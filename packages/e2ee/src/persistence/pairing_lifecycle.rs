@@ -3318,12 +3318,7 @@ fn activation_acceptance(
 }
 
 fn activation_payload(crypto_session_id: Id, claim_hash: [u8; 48], group_id: [u8; 32]) -> Vec<u8> {
-    let mut out = b"Axl pair activation v1".to_vec();
-    out.extend_from_slice(&PROFILE_REVISION.to_be_bytes());
-    out.extend_from_slice(&crypto_session_id);
-    out.extend_from_slice(&group_id);
-    out.extend_from_slice(&claim_hash);
-    out
+    crate::pairing::pair_activation_payload(crypto_session_id, claim_hash, group_id)
 }
 
 fn validate_activation_payload(

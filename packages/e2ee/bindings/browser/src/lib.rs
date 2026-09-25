@@ -89,6 +89,7 @@ fn map_endpoint(value: BrowserEndpointError) -> JsValue {
         BrowserEndpointError::Core(error) => map_core(error),
         BrowserEndpointError::CandidateOutstanding => error("lifecycle_busy"),
         BrowserEndpointError::NotOpened => error("endpoint_closed"),
+        BrowserEndpointError::Pairing(error) => map_pairing(error),
     }
 }
 
@@ -141,6 +142,20 @@ pub fn get_binding_info_json() -> String {
 #[wasm_bindgen]
 pub struct BrowserReplicaTrust {
     trust: Arc<ReplicaTrustSet>,
+}
+
+/// Replica trust for a deployment-test build. The worker passes the trust configuration whose
+/// SHA-256 the build pinned in its integrity manifest; production builds do not contain this.
+#[cfg(feature = "deployment-test")]
+#[wasm_bindgen]
+pub fn deployment_test_replica_trust(mut config: Vec<u8>) -> Result<BrowserReplicaTrust, JsValue> {
+    let result = ReplicaTrustSet::decode_config(&config)
+        .map(|trust| BrowserReplicaTrust {
+            trust: Arc::new(trust),
+        })
+        .map_err(|_| error("invalid_argument"));
+    config.fill(0);
+    result
 }
 
 fn fixed<const N: usize>(mut value: Vec<u8>) -> Result<[u8; N], JsValue> {
@@ -766,7 +781,56 @@ impl BrowserEndpoint {
         self.inner.has_candidate()
     }
 
+    /// Canonical device claim for a daemon invitation, signed over this endpoint's own retained
+    /// KeyPackage. Read-only; no witness round.
+    pub fn pairing_claim(&self, mut invitation: Vec<u8>, now: f64) -> Result<Vec<u8>, JsValue> {
+        let result = bounded(&invitation, PAIRING_INVITATION_MAX_BYTES).and_then(|()| {
+            self.inner
+                .pairing_claim(&invitation, now_ms(now)?)
+                .map_err(map_endpoint)
+        });
+        invitation.fill(0);
+        result
+    }
+
     // Mutations.
+
+    pub fn join_published(
+        &mut self,
+        operation_id: Vec<u8>,
+        mut welcome: Vec<u8>,
+        now: f64,
+    ) -> Result<BrowserMutationOutcome, JsValue> {
+        let result = (|| {
+            bounded(&welcome, axl_e2ee::HANDSHAKE_MAX_BYTES)?;
+            self.inner
+                .join_published(fixed::<16>(operation_id)?, &welcome, now_ms(now)?)
+                .map_err(map_endpoint)
+        })();
+        welcome.fill(0);
+        outcome(result)
+    }
+
+    pub fn prepare_pair_activation(
+        &mut self,
+        operation_id: Vec<u8>,
+        logical_message_id: Vec<u8>,
+        claim: Vec<u8>,
+        now: f64,
+    ) -> Result<BrowserMutationOutcome, JsValue> {
+        let result = (|| {
+            bounded(&claim, PAIRING_CLAIM_MAX_BYTES)?;
+            self.inner
+                .prepare_pair_activation(
+                    fixed::<16>(operation_id)?,
+                    fixed::<16>(logical_message_id)?,
+                    &claim,
+                    now_ms(now)?,
+                )
+                .map_err(map_endpoint)
+        })();
+        outcome(result)
+    }
 
     pub fn join(
         &mut self,
@@ -1175,6 +1239,14 @@ impl TestWitness {
         TestWitness {
             inner: test_witness::TestWitness::new(),
         }
+    }
+
+    /// Canonical trust configuration naming this witness's replica keys.
+    pub fn trust_config(&self) -> Result<Vec<u8>, JsValue> {
+        self.inner
+            .trust()
+            .encode_config()
+            .map_err(|_| error("internal_error"))
     }
 
     pub fn trust(&self) -> BrowserReplicaTrust {

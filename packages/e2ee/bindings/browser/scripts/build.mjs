@@ -17,13 +17,26 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const mode = process.argv[2];
-if (mode !== "production" && mode !== "test") throw new Error("usage: build.mjs production|test");
+if (mode !== "production" && mode !== "test" && mode !== "deployment-test") {
+  throw new Error("usage: build.mjs production|test|deployment-test");
+}
+// A deployment-test artifact is the production worker, store, and endpoint driver with replica
+// trust named by a hash-pinned configuration file instead of build-pinned production trust.
+const deploymentTrust =
+  mode === "deployment-test" ? process.env.AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE : undefined;
+if (mode === "deployment-test" && !deploymentTrust) {
+  throw new Error("AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE names the replica trust configuration");
+}
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const e2eeRoot = resolve(packageRoot, "../..");
 const repositoryRoot = resolve(e2eeRoot, "../..");
 const targetDirectory = join(e2eeRoot, "target", `browser-${mode}`);
 const generated = join(packageRoot, "dist", `.generated-${mode}`);
-const staging = join(packageRoot, "dist", mode === "production" ? "package" : "test-artifact");
+const staging = join(
+  packageRoot,
+  "dist",
+  { production: "package", test: "test-artifact", "deployment-test": "deployment-test" }[mode],
+);
 const toolManifest = join(packageRoot, "scripts/wasm-bindgen-driver/Cargo.toml");
 const wasmName = "axl_e2ee_browser";
 
@@ -45,6 +58,7 @@ const cargoArguments = [
   "axl-e2ee-browser",
 ];
 if (mode === "test") cargoArguments.push("--features", "test-fixtures");
+if (mode === "deployment-test") cargoArguments.push("--features", "deployment-test");
 execFileSync("cargo", cargoArguments, { cwd: e2eeRoot, stdio: "inherit" });
 const inputWasm = join(targetDirectory, "wasm32-unknown-unknown/release", `${wasmName}.wasm`);
 execFileSync(
@@ -68,21 +82,32 @@ for (const name of [`${wasmName}.js`, `${wasmName}_bg.wasm`]) {
   cpSync(join(generated, name), join(staging, "wasm", name));
 }
 cpSync(
-  mode === "production" ? join(packageRoot, "worker/index.js") : join(packageRoot, "test/worker.js"),
+  mode === "test" ? join(packageRoot, "test/worker.js") : join(packageRoot, "worker/index.js"),
   join(staging, "worker/index.js"),
 );
-// The production endpoint driver and store are byte-identical in both artifacts. The test worker
-// drives them against the fixture WASM so transitions and trust come from the same module instance.
-for (const name of ["worker/storage.js", "worker/endpoint.js"]) {
+// The production endpoint driver, store, and barrier are byte-identical in every artifact. The test
+// worker drives them against the fixture WASM so transitions and trust come from the same module
+// instance.
+for (const name of ["worker/storage.js", "worker/endpoint.js", "worker/barrier.js"]) {
   cpSync(join(packageRoot, name), join(staging, name));
+}
+cpSync(
+  join(packageRoot, mode === "deployment-test" ? "worker/trust-deployment-test.js" : "worker/trust.js"),
+  join(staging, "worker/trust.js"),
+);
+if (mode === "deployment-test") {
+  mkdirSync(join(staging, "trust"), { recursive: true });
+  cpSync(deploymentTrust, join(staging, "trust/replica-trust.bin"));
 }
 if (mode === "test") {
   cpSync(join(packageRoot, "test/browser-storage.js"), join(staging, "worker/browser-storage.js"));
   cpSync(join(packageRoot, "test/barrier-scenario.js"), join(staging, "worker/barrier-scenario.js"));
 }
-if (mode === "production") {
+if (mode !== "test") {
   mkdirSync(join(staging, "loader"), { recursive: true });
   cpSync(join(packageRoot, "loader/index.js"), join(staging, "loader/index.js"));
+}
+if (mode === "production") {
   for (const name of ["index.d.ts", "README.md"]) cpSync(join(packageRoot, name), join(staging, name));
   for (const name of ["LICENSE", "NOTICE"]) {
     cpSync(join(repositoryRoot, name), join(staging, name));
@@ -120,6 +145,9 @@ const artifactFiles = [
   { kind: "worker", path: "worker/index.js" },
   { kind: "worker-storage", path: "worker/storage.js" },
   { kind: "worker-endpoint", path: "worker/endpoint.js" },
+  { kind: "worker-barrier", path: "worker/barrier.js" },
+  { kind: "worker-trust", path: "worker/trust.js" },
+  ...(mode === "deployment-test" ? [{ kind: "replica-trust", path: "trust/replica-trust.bin" }] : []),
 ];
 const artifacts = artifactFiles.map((entry) => ({
   ...entry,

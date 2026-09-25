@@ -596,6 +596,36 @@ fn windows_test_config(
     })
 }
 
+/// Test storage with replica trust named by a deployment instead of an in-process witness. Used by
+/// deployment tests whose endpoints certify through a hosted witness; production storage and
+/// build-pinned production trust remain unavailable.
+#[cfg(feature = "test-fixtures")]
+fn configured_config(
+    root: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+    device: Option<Buffer>,
+    trust: Buffer,
+) -> Result<Config> {
+    let trust = copy_bounded(
+        trust.as_ref(),
+        axl_e2ee::witness::REPLICA_TRUST_CONFIG_MAX_BYTES,
+        "bound_exceeded",
+    )?;
+    Ok(Config {
+        root: PathBuf::from(root),
+        account: id(account.as_ref())?,
+        installation: id(installation.as_ref())?,
+        session: id(session.as_ref())?,
+        device: device.map(|v| id(v.as_ref())).transpose()?,
+        keys: Arc::new(test_store::TestKeys::default()),
+        trust: Arc::new(
+            ReplicaTrustSet::decode_config(&trust).map_err(|_| error("invalid_argument"))?,
+        ),
+    })
+}
+
 #[cfg(feature = "test-fixtures")]
 fn daemon_handle(config: Config) -> DaemonEndpoint {
     DaemonEndpoint {
@@ -712,6 +742,16 @@ impl TestWitness {
         bigint(self.inner.responses())
     }
 
+    /// The canonical trust configuration naming this witness's replica keys.
+    #[napi(getter)]
+    pub fn trust_config(&self) -> Result<Buffer> {
+        self.inner
+            .trust()
+            .encode_config()
+            .map(Buffer::from)
+            .map_err(map_witness)
+    }
+
     fn known_request(&self, request: Buffer) -> Result<Vec<u8>> {
         let request = copy_bounded(
             request.as_ref(),
@@ -768,6 +808,44 @@ pub fn test_device_endpoint(
         session,
         Some(device),
         witness,
+    )?))
+}
+
+#[cfg(feature = "test-fixtures")]
+#[napi]
+pub fn configured_daemon_endpoint(
+    root: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+    trust: Buffer,
+) -> Result<DaemonEndpoint> {
+    Ok(daemon_handle(configured_config(
+        root,
+        account,
+        installation,
+        session,
+        None,
+        trust,
+    )?))
+}
+#[cfg(feature = "test-fixtures")]
+#[napi]
+pub fn configured_device_endpoint(
+    root: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+    device: Buffer,
+    trust: Buffer,
+) -> Result<DeviceEndpoint> {
+    Ok(device_handle(configured_config(
+        root,
+        account,
+        installation,
+        session,
+        Some(device),
+        trust,
     )?))
 }
 

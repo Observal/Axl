@@ -34,7 +34,9 @@ use crate::{
     Clock, CommitMetadata, CoreProvider, ENVELOPE_MAX_BYTES, Endpoint, Error, HANDSHAKE_MAX_BYTES,
     Id, Identity, MAX_PAST_EPOCHS, MessageClass, PairContext, PairWelcome, Phone, PreparedEnvelope,
     PreparedPlaintext, Role, SUITE,
-    pairing::PairingCredential,
+    pairing::{
+        PairingClaimV1, PairingCredential, PairingError, PairingInvitation, pair_activation_payload,
+    },
     witness::{
         EndpointQuarantineReason, EndpointReconciliation, EndpointTerminalState,
         EndpointWitnessState, FreshQuorumState, MAX_INNER_STATE_BYTES, MAX_RESULT_BYTES,
@@ -82,6 +84,14 @@ pub enum BrowserEndpointError {
     CandidateOutstanding,
     /// The endpoint has no committed image; create or open it first.
     NotOpened,
+    /// A pairing invitation or claim was invalid for this endpoint.
+    Pairing(PairingError),
+}
+
+impl From<PairingError> for BrowserEndpointError {
+    fn from(value: PairingError) -> Self {
+        Self::Pairing(value)
+    }
 }
 
 impl From<WitnessError> for BrowserEndpointError {
@@ -1414,6 +1424,118 @@ impl BrowserEndpoint {
         )
     }
 
+    /// The canonical device claim for a daemon's pairing invitation. Read-only: it signs, with this
+    /// endpoint's own credential, over the KeyPackage the endpoint retained from its creation, so
+    /// page code can neither substitute a KeyPackage nor claim for another identity. Only an
+    /// unjoined endpoint whose confirmed head is witness authority in this lifetime can claim.
+    pub fn pairing_claim(&self, invitation: &[u8], now_ms: u64) -> Result<Vec<u8>> {
+        if self.candidate.is_some() {
+            return Err(BrowserEndpointError::CandidateOutstanding);
+        }
+        if let Some(error) = self.terminal_error() {
+            return Err(error.into());
+        }
+        let image = self.image.as_ref().ok_or(BrowserEndpointError::NotOpened)?;
+        if !self.head_validated || self.state.pending().is_ok() {
+            return Err(WitnessError::FreshWitnessRequired.into());
+        }
+        if image.joined.is_some() {
+            return Err(Error::TransactionPending.into());
+        }
+        let invitation = PairingInvitation::decode(invitation)?;
+        if invitation.account_id() != image.identity.account_id
+            || invitation.installation_id() != image.identity.installation_id
+            || invitation.crypto_session_id() != self.crypto_session_id
+        {
+            return Err(PairingError::IdentityMismatch.into());
+        }
+        let key_package = image
+            .operations
+            .iter()
+            .find(|entry| entry.operation_kind == op_kind::LEGACY_CREATE)
+            .map(|entry| BrowserTypedResult::decode(&entry.exact_result))
+            .transpose()?
+            .and_then(|typed| match typed {
+                BrowserTypedResult::KeyPackage { bytes } => Some(bytes),
+                _ => None,
+            })
+            .ok_or(WitnessError::CorruptState)?;
+        let signer = image.signer()?;
+        let credential = PairingCredential::new(image.identity.clone(), &signer)?;
+        Ok(
+            PairingClaimV1::create_at(&invitation, credential, &key_package, &signer, now_ms)?
+                .encode()?,
+        )
+    }
+
+    /// Published-Welcome join (kind 8). The group and its context come from the Welcome itself,
+    /// which must name this installation's daemon and this device as its only members.
+    pub fn join_published(
+        &mut self,
+        operation_id: Id,
+        welcome: &[u8],
+        now_ms: u64,
+    ) -> Result<BrowserMutation> {
+        if welcome.is_empty() || welcome.len() > HANDSHAKE_MAX_BYTES {
+            return Err(WitnessError::BoundExceeded.into());
+        }
+        let fingerprint = operation_fingerprint(
+            op_kind::WELCOME_JOIN,
+            &[
+                welcome,
+                &optional_field(None),
+                &optional_field(None),
+                &optional_field(None),
+            ],
+        )?;
+        let crypto_session_id = self.crypto_session_id;
+        self.run(
+            operation_id,
+            op_kind::WELCOME_JOIN,
+            fingerprint,
+            now_ms,
+            |_, phone| {
+                let daemon =
+                    Identity::daemon(phone.identity.account_id, phone.identity.installation_id);
+                phone.join_published_welcome(
+                    welcome,
+                    crypto_session_id,
+                    daemon,
+                    Arc::new(FixedClock(now_ms)),
+                )?;
+                let endpoint = phone.endpoint.as_ref().ok_or(Error::WrongGroup)?;
+                Ok(BrowserTypedResult::Joined {
+                    epoch: endpoint.epoch()?,
+                })
+            },
+        )
+    }
+
+    /// Pair activation send (kind 9) for this endpoint's own claim. The payload is derived here from
+    /// the joined group and the claim hash, exactly as the native device derives it, so the daemon
+    /// accepts it only for the claim it reserved and the group it created.
+    pub fn prepare_pair_activation(
+        &mut self,
+        operation_id: Id,
+        logical_message_id: Id,
+        claim: &[u8],
+        now_ms: u64,
+    ) -> Result<BrowserMutation> {
+        let image = self.image.as_ref().ok_or(BrowserEndpointError::NotOpened)?;
+        let joined = image.joined.as_ref().ok_or(Error::WrongGroup)?;
+        let claim_value = PairingClaimV1::decode(claim)?;
+        let credential = PairingCredential::new(image.identity.clone(), &image.signer()?)?;
+        if claim_value.crypto_session_id() != self.crypto_session_id
+            || claim_value.device_credential() != &credential
+        {
+            return Err(PairingError::IdentityMismatch.into());
+        }
+        let claim_hash = sha384(claim)?;
+        let payload =
+            pair_activation_payload(self.crypto_session_id, claim_hash, joined.context.group_id);
+        self.prepare_activation(operation_id, logical_message_id, &payload, now_ms)
+    }
+
     /// Activation send (kind 9). The native device derives this payload from its validated claim
     /// record; the browser has no claim lifecycle yet and takes the payload as input, so the exact
     /// plaintext is part of the browser fingerprint and a differing payload under the same
@@ -2038,6 +2160,166 @@ mod tests {
             BrowserTypedResult::Envelope { ciphertext, .. } => ciphertext.clone(),
             other => panic!("expected envelope, got {other:?}"),
         }
+    }
+
+    /// The browser device pairs with the real durable daemon lifecycle: the daemon validates the
+    /// browser's claim against its invitation, reserves it, creates the group, and accepts the
+    /// activation only because the browser derived the exact payload for that claim and group.
+    #[test]
+    fn browser_device_pairs_with_the_native_daemon_lifecycle() {
+        use crate::persistence::{
+            ActivationOutcome, ClaimSubmission, ReservationOutcome, WelcomeOutcome,
+        };
+        use crate::persistence_tests::{pending_fixture, sequence_id};
+
+        let mut daemon = pending_fixture(0x71);
+        let context = PairContext {
+            crypto_session_id: daemon.ids.session,
+            group_id: [0; 32],
+            account_id: daemon.ids.account,
+            installation_id: daemon.ids.installation,
+            device_id: daemon.ids.device,
+        };
+        let mut browser = Harness::create(&context);
+        let invitation = daemon.publication.bytes().to_vec();
+
+        // No claim before the KeyPackage registration completes.
+        assert_eq!(
+            browser
+                .endpoint
+                .pairing_claim(&invitation, now())
+                .unwrap_err(),
+            BrowserEndpointError::Witness(WitnessError::FreshWitnessRequired)
+        );
+        let pending = browser.endpoint.pending_witness().unwrap().unwrap();
+        let BrowserTypedResult::KeyPackage { bytes: key_package } = browser.finish(&pending) else {
+            panic!("expected key package");
+        };
+        let claim = browser.endpoint.pairing_claim(&invitation, now()).unwrap();
+        // The daemon's manual clock was fixed before the browser's KeyPackage lifetime began; a
+        // daemon behind the device's clock rejects the KeyPackage as not yet valid.
+        daemon.clock.advance(2_000);
+        // Deterministic signing over the retained KeyPackage: the same claim every time.
+        assert_eq!(
+            browser.endpoint.pairing_claim(&invitation, now()).unwrap(),
+            claim
+        );
+        assert_eq!(
+            PairingClaimV1::decode(&claim).unwrap().key_package(),
+            key_package
+        );
+
+        // An invitation for another installation is refused before signing.
+        let foreign = pending_fixture(0x72);
+        assert_eq!(
+            browser
+                .endpoint
+                .pairing_claim(foreign.publication.bytes(), now())
+                .unwrap_err(),
+            BrowserEndpointError::Pairing(PairingError::IdentityMismatch)
+        );
+
+        let claim_hash = match daemon
+            .run(|endpoint| endpoint.submit_claim(sequence_id(130, 1), &claim))
+            .unwrap()
+        {
+            ClaimSubmission::Pending { claim_hash, .. } => claim_hash,
+            other => panic!("unexpected claim result: {other:?}"),
+        };
+        let reservation_id = sequence_id(131, 1);
+        assert!(matches!(
+            daemon
+                .run(|endpoint| endpoint.confirm_claim(
+                    sequence_id(132, 1),
+                    claim_hash,
+                    reservation_id
+                ))
+                .unwrap(),
+            ReservationOutcome::Reserved(_)
+        ));
+        let welcome = match daemon
+            .run(|endpoint| endpoint.create_welcome(sequence_id(133, 1), reservation_id))
+            .unwrap()
+        {
+            WelcomeOutcome::Committed(welcome) => welcome,
+            other => panic!("unexpected Welcome result: {other:?}"),
+        };
+
+        // Activation needs a joined group.
+        assert_eq!(
+            browser
+                .endpoint
+                .prepare_pair_activation(id(0x22), id(0x50), &claim, now())
+                .unwrap_err(),
+            BrowserEndpointError::Core(Error::WrongGroup)
+        );
+        let joined =
+            browser.mutate(|endpoint, now| endpoint.join_published(id(0x21), welcome.bytes(), now));
+        assert_eq!(joined, BrowserTypedResult::Joined { epoch: 1 });
+        // A joined endpoint no longer claims.
+        assert_eq!(
+            browser
+                .endpoint
+                .pairing_claim(&invitation, now())
+                .unwrap_err(),
+            BrowserEndpointError::Core(Error::TransactionPending)
+        );
+        // Only this endpoint's own claim derives an activation.
+        let other_claim = {
+            let other = Harness::create(&PairContext {
+                device_id: test_uuid_v7_id(0x7e),
+                ..context.clone()
+            });
+            let mut other = other;
+            let pending = other.endpoint.pending_witness().unwrap().unwrap();
+            other.finish(&pending);
+            other.endpoint.pairing_claim(&invitation, now()).unwrap()
+        };
+        assert_eq!(
+            browser
+                .endpoint
+                .prepare_pair_activation(id(0x22), id(0x50), &other_claim, now())
+                .unwrap_err(),
+            BrowserEndpointError::Pairing(PairingError::IdentityMismatch)
+        );
+
+        let activation = browser.mutate(|endpoint, now| {
+            endpoint.prepare_pair_activation(id(0x22), id(0x50), &claim, now)
+        });
+        let acceptance = match daemon
+            .run(|endpoint| {
+                endpoint.accept_activation(sequence_id(134, 1), id(0x50), &envelope(&activation))
+            })
+            .unwrap()
+        {
+            ActivationOutcome::Activated(acceptance) => acceptance,
+            other => panic!("unexpected activation result: {other:?}"),
+        };
+        assert_eq!(acceptance.claim_hash(), claim_hash);
+        assert_eq!(acceptance.group_id(), welcome.group_id());
+
+        // Application traffic in both directions through the paired group.
+        let sent = browser.mutate(|endpoint, now| {
+            endpoint.prepare_application(id(0x23), id(0x51), 1, b"device request", now)
+        });
+        let received = daemon
+            .run(|endpoint| {
+                endpoint.receive_application(sequence_id(135, 1), &envelope(&sent), id(0x51), 1)
+            })
+            .unwrap();
+        assert_eq!(received.plaintext(), b"device request");
+        let reply = daemon
+            .run(|endpoint| {
+                endpoint.prepare_application(sequence_id(136, 1), id(0x52), 1, b"daemon reply")
+            })
+            .unwrap();
+        let delivered = browser.mutate(|endpoint, now| {
+            endpoint.receive_application(id(0x24), id(0x52), 1, &reply.ciphertext, now)
+        });
+        assert!(matches!(
+            delivered,
+            BrowserTypedResult::Plaintext { ref plaintext, .. } if plaintext == b"daemon reply"
+        ));
     }
 
     #[test]

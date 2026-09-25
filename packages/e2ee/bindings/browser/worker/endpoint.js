@@ -13,6 +13,8 @@ const MAX_ENVELOPE_BYTES = 65_497;
 const MAX_APPLICATION_BYTES = 60_000;
 const MAX_HANDSHAKE_BYTES = 16 * 1024;
 const MAX_CONTROL_BYTES = 2 * 1024;
+const MAX_INVITATION_BYTES = 2_048;
+const MAX_CLAIM_BYTES = 17_320;
 
 function failure(code) {
   return new Error(`AXL_E2EE:${code}`);
@@ -315,6 +317,29 @@ export class BrowserDeviceEndpoint {
     }
     this.#endpoint.mark_obsolete_key_erased();
     return resultView(this.#endpoint.release());
+  }
+
+  /** Canonical device claim for a daemon invitation. Read-only; Rust signs over its own KeyPackage. */
+  async pairingClaim(invitation) {
+    const invitationBytes = bytes(invitation, 1, MAX_INVITATION_BYTES);
+    return this.#rust(() => this.#endpoint.pairing_claim(invitationBytes, now()));
+  }
+
+  /** Join the group named by a published Welcome. */
+  async joinPublished(operationId, welcome) {
+    const operation = id(operationId);
+    const welcomeBytes = bytes(welcome, 1, MAX_HANDSHAKE_BYTES);
+    return this.#mutate(() => this.#endpoint.join_published(operation, welcomeBytes, now()));
+  }
+
+  /** Pair activation for this endpoint's own claim; Rust derives the exact payload. */
+  async preparePairActivation(operationId, logicalMessageId, claim) {
+    const operation = id(operationId);
+    const logical = id(logicalMessageId);
+    const claimBytes = bytes(claim, 1, MAX_CLAIM_BYTES);
+    return this.#mutate(() =>
+      this.#endpoint.prepare_pair_activation(operation, logical, claimBytes, now()),
+    );
   }
 
   async join(operationId, welcome, groupId) {
