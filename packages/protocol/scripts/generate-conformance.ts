@@ -302,6 +302,7 @@ const params = {
     name: "docs",
     definition: { url: "https://mcp.example.com/mcp", headers: { Authorization: "DOCS_TOKEN" } },
   },
+  "remote.pairing.start": {},
   "session.create": {
     cwd: "/workspace",
     providerId: "provider-1",
@@ -623,6 +624,12 @@ const results = {
     protocolVersion: "2025-11-25",
     tools: [],
     authorization: "required",
+  },
+  "remote.pairing.start": {
+    link: "https://axl.example/remote/#v=1",
+    cryptoSessionId: "01900000-0000-7000-8000-000000000001",
+    deviceId: "01900000-0000-7000-8000-000000000002",
+    expiresAt: 1_900_000_000_000,
   },
   "session.create": opened,
   "session.resume": opened,

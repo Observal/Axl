@@ -43,6 +43,7 @@ import {
   parseSessionId,
   parseWireRequest,
   type RemoteDeviceScope,
+  type RemotePairingStartResult,
   type RequestId,
   type RetryableMutationMethod,
   RPC_METHODS,
@@ -91,6 +92,15 @@ export interface DaemonOptions extends SessionManagerOptions {
    * `daemon.info` and `remote_endpoints_changed`. Absent when the daemon serves no remote devices.
    */
   readonly remoteAuthority?: RemoteDeviceAuthorityStore;
+  /**
+   * Starts pairing a remote device with this daemon. Absent when this daemon has no remote host;
+   * `remote.pairing.start` is then not granted. Never reachable from a remote device.
+   */
+  readonly remotePairing?: RemotePairingService;
+}
+
+export interface RemotePairingService {
+  start(): Promise<RemotePairingStartResult>;
 }
 
 export interface AuthenticatedRemoteAttachmentOptions {
@@ -289,6 +299,7 @@ export class AxlDaemon {
   private readonly mcpConfiguration: McpConfigurationService | undefined;
   private readonly extensionManagement: ExtensionManagementService | undefined;
   private readonly remoteAuthority: RemoteDeviceAuthorityStore | undefined;
+  private readonly remotePairing: RemotePairingService | undefined;
   private releaseRemoteAuthorityListener: (() => void) | undefined;
   private remoteEndpointsGeneration = 0;
   private readonly capabilities: readonly string[];
@@ -338,11 +349,13 @@ export class AxlDaemon {
     );
     this.mcpConfiguration = options.mcpConfiguration;
     this.extensionManagement = options.extensionManagement;
+    this.remotePairing = options.remotePairing;
     this.capabilities = WIRE_CAPABILITIES.filter(
       (capability) =>
         (this.providerManagement !== undefined || !capability.startsWith("provider.")) &&
         (this.mcpConfiguration !== undefined || !capability.startsWith("mcp.config.")) &&
-        (this.extensionManagement !== undefined || !capability.startsWith("extension.")),
+        (this.extensionManagement !== undefined || !capability.startsWith("extension.")) &&
+        (this.remotePairing !== undefined || capability !== "remote.pairing.start"),
     );
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
@@ -1294,6 +1307,17 @@ export class AxlDaemon {
           ...(this.sandboxImage === undefined ? {} : { sandboxImage: this.sandboxImage }),
           remoteEndpoints: this.remoteAuthority?.endpointWitnessStatuses() ?? [],
         };
+      case "remote.pairing.start": {
+        if (this.remotePairing === undefined) {
+          throw new DaemonError("remote_unavailable", "This daemon has no remote host");
+        }
+        try {
+          return await this.remotePairing.start();
+        } catch (cause) {
+          // The remote host logs its own cause; the client learns only that pairing is unavailable.
+          throw new DaemonError("remote_unavailable", "Remote pairing could not start", { cause });
+        }
+      }
       case "connection.initialize": {
         return {
           attachmentId: state.attachmentId,
