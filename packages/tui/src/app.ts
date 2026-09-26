@@ -155,6 +155,7 @@ import {
   type TranscriptRow,
 } from "./transcript-document.ts";
 import { VimModeController } from "./vim-mode.ts";
+import { closestMatch } from "./closest-match.js";
 
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 const FRAME_INTERVAL_MS = 16;
@@ -3312,7 +3313,15 @@ export class AxlApp {
       (path) => tokens.has(path) || tokens.has(JSON.stringify(path)) || tokens.has(`'${path}'`),
     );
     if (line.startsWith("/") && !images.includes(command ?? "")) {
-      this.notice = this.view.palette.error(`✖ unknown command ${command}`);
+      const suggestion = closestMatch(
+        command ?? "",
+        this.availableCommands().map((c) => c.name),
+      );
+      this.notice = this.view.palette.error(
+        suggestion
+          ? `✖ unknown command ${command} · did you mean ${suggestion}?`
+          : `✖ unknown command ${command}`,
+      );
       return;
     }
 
@@ -4359,7 +4368,12 @@ export class AxlApp {
     if (name) {
       const palette = this.themes[name];
       if (!palette) {
-        this.notice = this.view.palette.error(`✖ unknown theme ${name}`);
+        const suggestion = closestMatch(name, Object.keys(this.themes));
+        this.notice = this.view.palette.error(
+          suggestion
+            ? `✖ unknown theme ${name} · did you mean ${suggestion}?`
+            : `✖ unknown theme ${name}`,
+        );
         return;
       }
       this.currentTheme = name;
