@@ -274,6 +274,13 @@ export class AxlClient {
     return this.request("remote.pairing.start", {}, options);
   }
 
+  /** Report the local remote host: pairing phase, relay, device presence. Local clients only. */
+  remoteStatus(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.status">> {
+    return this.request("remote.status", {}, options);
+  }
+
   listCommands(
     params: RpcParams<"command.list"> = {},
     options: Omit<RequestOptions, "idempotencyKey"> = {},

@@ -80,7 +80,9 @@ import {
   parseProviderRpcErrorDetails,
 } from "./provider-management.ts";
 import {
+  isRemoteEndpointWitnessState,
   parseRemoteEndpointWitnessStatuses,
+  type RemoteEndpointWitnessState,
   type RemoteEndpointWitnessStatus,
 } from "./remote-endpoint-status.ts";
 
@@ -734,6 +736,7 @@ export const WIRE_CAPABILITIES = [
   "mcp.config.remove",
   "mcp.config.probe",
   "remote.pairing.start",
+  "remote.status",
 ] as const satisfies readonly CapabilityId[];
 
 export interface ClientIdentity {
@@ -814,6 +817,35 @@ export interface RemotePairingStartResult {
   readonly cryptoSessionId: string;
   readonly deviceId: string;
   readonly expiresAt: number;
+}
+
+export const REMOTE_STATUS_PHASES = ["unpaired", "pairing", "paired"] as const;
+export type RemoteStatusPhase = (typeof REMOTE_STATUS_PHASES)[number];
+export const REMOTE_RELAY_STATES = [
+  "disconnected",
+  "connecting",
+  "connected",
+  "reconnecting",
+  "closed",
+] as const;
+export type RemoteRelayState = (typeof REMOTE_RELAY_STATES)[number];
+
+/** The daemon's remote host, as `/remote status` shows it. */
+export interface RemoteStatusResult {
+  /** `unpaired` until `/remote` runs, `pairing` until a device activates, then `paired`. */
+  readonly phase: RemoteStatusPhase;
+  /** The daemon's relay connection. */
+  readonly relay: RemoteRelayState;
+  /** Whether the paired device holds a relay route right now. */
+  readonly deviceOnline: boolean;
+  readonly cryptoSessionId?: string;
+  readonly deviceId?: string;
+  /** The paired endpoint's witness lifecycle once the bridge serves it. */
+  readonly witness?: RemoteEndpointWitnessState;
+  /** The most recent remote failure, already safe to show. */
+  readonly lastError?: { readonly message: string; readonly at: number };
+  /** Owner-only file holding the remote host's log. */
+  readonly logPath?: string;
 }
 
 export interface RpcMethodMap {
@@ -916,6 +948,10 @@ export interface RpcMethodMap {
   readonly "remote.pairing.start": {
     readonly params: Record<string, never>;
     readonly result: RemotePairingStartResult;
+  };
+  readonly "remote.status": {
+    readonly params: Record<string, never>;
+    readonly result: RemoteStatusResult;
   };
   readonly "session.create": {
     readonly params: { readonly cwd: string } & SessionConfiguration;
@@ -1520,6 +1556,62 @@ function positiveInteger(value: unknown, path: string): number {
   return result;
 }
 
+function parseRemoteStatusResult(value: unknown, path: string): RemoteStatusResult {
+  const result = object(value, path);
+  exact(result, path, [
+    "phase",
+    "relay",
+    "deviceOnline",
+    "cryptoSessionId",
+    "deviceId",
+    "witness",
+    "lastError",
+    "logPath",
+  ]);
+  if (!(REMOTE_STATUS_PHASES as readonly unknown[]).includes(result.phase)) {
+    throw new ProtocolValidationError(`${path}.phase`, "is not a remote phase");
+  }
+  if (!(REMOTE_RELAY_STATES as readonly unknown[]).includes(result.relay)) {
+    throw new ProtocolValidationError(`${path}.relay`, "is not a relay state");
+  }
+  if (typeof result.deviceOnline !== "boolean") {
+    throw new ProtocolValidationError(`${path}.deviceOnline`, "must be a boolean");
+  }
+  if (result.witness !== undefined && !isRemoteEndpointWitnessState(result.witness)) {
+    throw new ProtocolValidationError(`${path}.witness`, "is not a witness state");
+  }
+  let lastError: RemoteStatusResult["lastError"];
+  if (result.lastError !== undefined) {
+    const failure = object(result.lastError, `${path}.lastError`);
+    exact(failure, `${path}.lastError`, ["message", "at"]);
+    if (!Number.isSafeInteger(failure.at) || (failure.at as number) < 0) {
+      throw new ProtocolValidationError(`${path}.lastError.at`, "must be a timestamp");
+    }
+    lastError = {
+      message: boundedString(failure.message, `${path}.lastError.message`, 4_096),
+      at: failure.at as number,
+    };
+  }
+  return {
+    phase: result.phase as RemoteStatusPhase,
+    relay: result.relay as RemoteRelayState,
+    deviceOnline: result.deviceOnline,
+    ...(result.cryptoSessionId === undefined
+      ? {}
+      : {
+          cryptoSessionId: boundedString(result.cryptoSessionId, `${path}.cryptoSessionId`, 36),
+        }),
+    ...(result.deviceId === undefined
+      ? {}
+      : { deviceId: boundedString(result.deviceId, `${path}.deviceId`, 36) }),
+    ...(result.witness === undefined ? {} : { witness: result.witness }),
+    ...(lastError === undefined ? {} : { lastError }),
+    ...(result.logPath === undefined
+      ? {}
+      : { logPath: boundedString(result.logPath, `${path}.logPath`, 4_096) }),
+  };
+}
+
 function boundedString(value: unknown, path: string, maximum: number): string {
   const result = string(value, path);
   if (new TextEncoder().encode(result).byteLength > maximum) {
@@ -1804,7 +1896,8 @@ export function parseWireRequest(value: unknown): WireRequest {
   if (
     method === "daemon.info" ||
     method === "connection.ping" ||
-    method === "remote.pairing.start"
+    method === "remote.pairing.start" ||
+    method === "remote.status"
   ) {
     exact(params, "request.params", []);
     return { ...base, method, params: {} };
@@ -2844,6 +2937,8 @@ export function parseRpcResult<Method extends RpcMethod>(
       deviceId: boundedString(result.deviceId, `${path}.deviceId`, 36),
       expiresAt: result.expiresAt,
     };
+  } else if (method === "remote.status") {
+    parsed = parseRemoteStatusResult(value, path);
   } else if (method === "session.create" || method === "session.resume") {
     parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
@@ -3262,6 +3357,7 @@ export const RPC_METHODS = [
   "mcp.config.remove",
   "mcp.config.probe",
   "remote.pairing.start",
+  "remote.status",
   "session.create",
   "session.resume",
   "session.list",
@@ -3398,6 +3494,7 @@ export const RPC_METHOD_ERROR_CODES = {
   "mcp.config.remove": [],
   "mcp.config.probe": ["mcp_probe_failed"],
   "remote.pairing.start": ["remote_unavailable"],
+  "remote.status": ["remote_unavailable"],
   "session.create": [
     "invalid_cwd",
     ...MUTATION_ERRORS,

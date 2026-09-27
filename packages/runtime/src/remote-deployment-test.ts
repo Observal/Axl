@@ -14,11 +14,25 @@
  * relay for the device's pairing notice, reserves and verifies the claim, publishes the Welcome,
  * and accepts the device's MLS-protected activation. Only then does the ordinary E2EE bridge take
  * over the endpoint and serve the device's requests. Starting a new pairing replaces the previous
- * session; a completed pairing survives daemon restarts.
+ * session; a completed pairing survives daemon restarts, and a restore that fails (the network or
+ * the witness is briefly unreachable) is retried with backoff.
+ *
+ * The host writes its log to an owner-only `remote.log` beside its state, because a daemon started
+ * by the terminal discards its output, and reports its phase, relay connection, and latest failure
+ * through `remote.status`.
  */
 
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -48,6 +62,7 @@ import {
   type RelayDelivery,
   type RemoteDeviceScope,
   type RemotePairingStartResult,
+  type RemoteStatusResult,
 } from "@axl/protocol";
 import {
   encodeRemotePairingLink,
@@ -62,6 +77,45 @@ const CONFIG_VERSION = 1;
 const STATE_VERSION = 1;
 const DEVICE_SCOPES: readonly RemoteDeviceScope[] = ["observe", "steer"];
 const HOSTED_GRANT_GENERATION = 1;
+/** Probe the relay this often, so a socket that died while the laptop slept is replaced. */
+const RELAY_HEARTBEAT_MS = 30_000;
+/** A reply waits this long for the relay to reconnect before it is dropped; the device resends. */
+const RELAY_RECONNECT_WAIT_MS = 15_000;
+const RESTORE_RETRY_MAX_MS = 60_000;
+const MAX_LOG_BYTES = 1024 * 1024;
+
+function isActivation(payload: Uint8Array): boolean {
+  try {
+    return parseRemoteE2eeEnvelope(payload).messageClass === "pair_activation";
+  } catch {
+    return false;
+  }
+}
+
+/** An error for the log, with the code and HTTP status that `String()` would drop. */
+function describe(cause: unknown): string {
+  const { code, status } = (cause ?? {}) as { readonly code?: unknown; readonly status?: unknown };
+  const detail = [code, status].filter(
+    (part) => typeof part === "string" || typeof part === "number",
+  );
+  return detail.length === 0 ? String(cause) : `${String(cause)} (${detail.join(" ")})`;
+}
+
+/** Resolve once the relay is connected or closed, or after `timeoutMs`. */
+function whenConnected(relay: RemoteRelayConnection, timeoutMs: number): Promise<void> {
+  if (relay.state === "connected") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      release();
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    const release = relay.onState((state) => {
+      if (state === "connected" || state === "closed") done();
+    });
+  });
+}
 
 export interface DeploymentTestRemoteConfig {
   /** HTTPS origin of the stack: control plane, witness, relay tickets, and the device page. */
@@ -187,11 +241,18 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
   readonly #authority: RemoteDeviceAuthorityStore;
   readonly #witness: HostedDaemonWitnessTransport;
   readonly #pairing: HostedPairingClient;
-  readonly #log: (message: string) => void;
+  readonly #output: (message: string) => void;
+  readonly #logPath: string;
+  #logWrites: Promise<void> = Promise.resolve();
+  #lastError: { readonly message: string; readonly at: number } | undefined;
   #binding: Promise<DeploymentTestBinding> | undefined;
   #daemon: AxlDaemon | undefined;
   #session: Session | undefined;
   #starting: Promise<RemotePairingStartResult> | undefined;
+  #restoreTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The restore in progress; a new pairing waits for it so it cannot revive a replaced session. */
+  #restoreRun: Promise<void> = Promise.resolve();
+  #restoring = false;
 
   private constructor(
     config: DeploymentTestRemoteConfig,
@@ -202,7 +263,8 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     this.#config = config;
     this.#root = root;
     this.#authority = authority;
-    this.#log = log;
+    this.#output = log;
+    this.#logPath = join(root, "remote.log");
     this.#witness = new HostedDaemonWitnessTransport({
       controlPlaneOrigin: config.origin,
       authenticationHeaders: async () => this.#headers(),
@@ -231,17 +293,89 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
   /** Attach the running daemon and restore a completed pairing, if one exists. */
   async attach(daemon: AxlDaemon): Promise<void> {
     this.#daemon = daemon;
+    this.#restoreRun = this.#restore(0);
+    await this.#restoreRun;
+  }
+
+  status(): RemoteStatusResult {
+    const session = this.#session;
+    const deviceOnline =
+      session?.relay.routes.some(
+        (peer) => peer.role === "device" && peer.deviceId === this.#config.deviceId,
+      ) ?? false;
+    const witness = session?.bridge?.witnessStatus?.state;
+    return {
+      phase:
+        session?.bridge !== undefined || this.#restoring
+          ? "paired"
+          : session === undefined
+            ? "unpaired"
+            : "pairing",
+      relay: session?.relay.state ?? "disconnected",
+      deviceOnline,
+      ...(session === undefined
+        ? {}
+        : { cryptoSessionId: session.id, deviceId: this.#config.deviceId }),
+      ...(witness === undefined ? {} : { witness }),
+      ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }),
+      logPath: this.#logPath,
+    };
+  }
+
+  /** Reopen a completed pairing, retrying with backoff until it succeeds or a new pairing starts. */
+  async #restore(attempt: number): Promise<void> {
+    this.#restoreTimer = undefined;
+    if (this.#session !== undefined || this.#starting !== undefined) return;
     const state = await this.#readState();
     if (state?.phase !== "paired") return;
+    this.#restoring = true;
     try {
       const session = await this.#openSession(state.cryptoSessionId);
       await session.endpoint.reopen();
       await this.#serve(session);
+      this.#restoring = false;
+      if (this.#session !== session) return;
       this.#log(`remote: restored paired session ${state.cryptoSessionId}`);
     } catch (cause) {
       await this.#closeSession();
-      this.#log(`remote: could not restore the paired session: ${String(cause)}`);
+      const delay = Math.min(RESTORE_RETRY_MAX_MS, 2_000 * 2 ** attempt);
+      this.#fail(
+        `remote: could not restore the paired session, retrying in ${Math.round(delay / 1_000)} s: ${describe(cause)}`,
+      );
+      this.#restoreTimer = setTimeout(() => {
+        this.#restoreRun = this.#restore(attempt + 1);
+      }, delay);
+      this.#restoreTimer.unref?.();
     }
+  }
+
+  #cancelRestore(): void {
+    if (this.#restoreTimer !== undefined) clearTimeout(this.#restoreTimer);
+    this.#restoreTimer = undefined;
+    this.#restoring = false;
+  }
+
+  /** Log a failure and remember it for `remote.status`. */
+  #fail(message: string): void {
+    this.#lastError = { message: message.slice(0, 1_024), at: Date.now() };
+    this.#log(message);
+  }
+
+  /** Write to the host's output and its private, size-bounded log file. */
+  #log(message: string): void {
+    this.#output(message);
+    const line = `${new Date().toISOString()} ${message}\n`;
+    const path = this.#logPath;
+    this.#logWrites = this.#logWrites
+      .then(async () => {
+        const size = await stat(path).then(
+          (info) => info.size,
+          () => 0,
+        );
+        if (size > MAX_LOG_BYTES) await rename(path, `${path}.1`);
+        await appendFile(path, line, { mode: 0o600 });
+      })
+      .catch(() => undefined);
   }
 
   start(): Promise<RemotePairingStartResult> {
@@ -251,8 +385,11 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     return this.#starting;
   }
 
+  /** Stop retrying and close the current session. */
   async close(): Promise<void> {
+    this.#cancelRestore();
     await this.#closeSession();
+    await this.#logWrites;
   }
 
   #headers(): Readonly<Record<string, string>> {
@@ -261,6 +398,9 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
 
   async #start(): Promise<RemotePairingStartResult> {
     if (this.#daemon === undefined) throw new Error("The remote host is not attached");
+    this.#cancelRestore();
+    // `/remote` can arrive while the daemon is still restoring the previous pairing at startup.
+    await this.#restoreRun;
     await this.#closeSession();
     const cryptoSessionId = parseCryptoSessionId(uuidV7());
     await this.#prune(cryptoSessionId);
@@ -291,7 +431,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
         expiresAt: Number(invitation.expiresAtMs),
       };
     } catch (cause) {
-      this.#log(`remote: pairing could not start: ${String(cause)}`);
+      this.#fail(`remote: pairing could not start: ${describe(cause)}`);
       await this.#closeSession();
       throw cause;
     }
@@ -323,6 +463,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
         },
       }),
       reconnect: { maximumAttempts: 1_000, maximumDelayMs: 30_000 },
+      heartbeatMs: RELAY_HEARTBEAT_MS,
     });
     const session: Session = {
       id: cryptoSessionId,
@@ -333,25 +474,36 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     };
     relay.onDelivery((delivery) => this.#deliver(session, delivery));
     relay.onFailure((failure) => this.#log(`remote: relay failure ${JSON.stringify(failure)}`));
+    relay.onState((state) => this.#log(`remote: relay ${state}`));
     this.#session = session;
     return session;
   }
 
   #deliver(session: Session, delivery: RelayDelivery): void {
     if (session.bridge !== undefined) {
+      // The device resends its activation until a request is answered; the first one paired it.
+      if (isActivation(delivery.opaquePayload)) return;
       void session.bridge
         .receive({ sourceRouteId: delivery.sourceRouteId, opaqueEnvelope: delivery.opaquePayload })
-        .catch((cause) => this.#log(`remote: request failed: ${String(cause)}`));
+        .catch((cause) => {
+          const message = `remote: request failed: ${describe(cause)}`;
+          // A request the daemon refused was already answered with its reason; it is no fault.
+          if ((cause as { readonly name?: unknown }).name === "DaemonError") this.#log(message);
+          else this.#fail(message);
+        });
       return;
     }
     const run = session.tail.then(() => this.#pairingStep(session, delivery));
-    session.tail = run.catch((cause) => this.#log(`remote: pairing step failed: ${String(cause)}`));
+    session.tail = run.catch((cause) =>
+      this.#fail(`remote: pairing step failed: ${describe(cause)}`),
+    );
   }
 
   async #pairingStep(session: Session, delivery: RelayDelivery): Promise<void> {
     if (this.#session !== session) return;
     if (session.bridge !== undefined) {
       // Queued behind the activation that handed the endpoint to the bridge.
+      if (isActivation(delivery.opaquePayload)) return;
       await session.bridge.receive({
         sourceRouteId: delivery.sourceRouteId,
         opaqueEnvelope: delivery.opaquePayload,
@@ -445,15 +597,24 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       endpoint: session.endpoint,
       witness: this.#witness,
       sender: {
-        send: (route, envelope) =>
-          session.relay.send(route, parseTransportAttemptId(randomUUID()), envelope),
+        // Wait out a short relay reconnect instead of dropping the reply; the device resends
+        // unanswered requests, and the bridge replays cached replies, if the wait runs out.
+        send: async (route, envelope) => {
+          await whenConnected(session.relay, RELAY_RECONNECT_WAIT_MS);
+          session.relay.send(route, parseTransportAttemptId(randomUUID()), envelope);
+        },
       },
-      onError: (error) => this.#log(`remote: ${error.message}`),
+      onError: (error) => this.#fail(`remote: ${error.message}`),
     });
     session.bridge = bridge;
     session.relay.onRoutes((peers) => bridge.observeRelayRoutes(peers));
     bridge.observeRelayRoutes(session.relay.routes);
     await bridge.start();
+    // A session replaced while its bridge started must not reconnect a second daemon route.
+    if (this.#session !== session) {
+      await bridge.shutdown();
+      return;
+    }
     await session.relay.start();
   }
 

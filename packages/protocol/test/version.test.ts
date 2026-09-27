@@ -9,7 +9,7 @@ import test from "node:test";
 
 import { EVENT_FORMAT_VERSION, WIRE_PROTOCOL_VERSION } from "../src/index.ts";
 
-test("keeps event format 1 and adds remote endpoint witness status in wire protocol 31", () => {
+test("keeps event format 1 and adds remote host status in wire protocol 32", () => {
   assert.equal(EVENT_FORMAT_VERSION, 1);
-  assert.equal(WIRE_PROTOCOL_VERSION, 31);
+  assert.equal(WIRE_PROTOCOL_VERSION, 32);
 });
