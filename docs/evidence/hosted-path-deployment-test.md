@@ -64,11 +64,33 @@ after correcting invalid client-originated WebSocket close codes exposed by the 
 The complete Node binding run reported 13 passed tests and no skips. The live relay case completed in
 approximately eight seconds on each successful run.
 
+## Phone browser through the deployed stack
+
+Date: 2026-09-27, RC after PR #442.
+
+The stack also serves the rollback witness from the control plane (three replicas in one process,
+PR #434) and the phone page under `/remote/` from a private S3 bucket behind the same CloudFront
+origin, with a strict content security policy (PR #439). A local sandboxed daemon ran with
+`AXL_REMOTE_DEPLOYMENT_TEST` and the deployment-test Node endpoint pinned to that witness.
+A phone-sized browser was driven through the page. It verified:
+
+1. `/remote` printed a QR code and link, and the page paired from the link;
+2. the page listed and opened sessions, sent prompts, and streamed replies;
+3. after a daemon restart with a thread open, the page recovered by itself and the next prompt was
+   answered;
+4. opening the page in a second tab moved the pairing there, and the first tab said so; and
+5. `/remote status` reported the unpaired, pairing, and paired phases, with the phone online and
+   the witness ready.
+
+The same flows, plus dropped, silent, and offline connections, a frozen page, and a relay restart,
+run in CI against a local copy of this stack (`pnpm --filter @axl/web test:remote-e2e`).
+
 ## Deliberate limitations
 
 The deployed services reject any environment mode other than `deployment-test`. Authentication and
-possession proof use randomly generated test credentials stored in Secrets Manager. Witness replicas
-are not deployed. No daemon is deployed as a hosted service; the daemon connection above was local,
+possession proof use randomly generated test credentials stored in Secrets Manager, and the pairing
+link carries them. The witness replicas share one process and keep their state in memory, so a
+control-plane restart requires every device to pair again. No daemon is deployed as a hosted service; the daemon connection above was local,
 temporary, and used test-only native storage. Production identity, independent witness failure
 domains, workload authentication, signed Windows artifacts, installer evidence, and independent
 security review remain release gates.

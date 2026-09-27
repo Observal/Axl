@@ -64,14 +64,16 @@ The internal attachment supports only methods listed in `packages/daemon/src/rem
 
 Retryable mutations enter the existing daemon command journal while the authority store serializes grant checks through durable acceptance. Revocation may proceed immediately after acceptance without waiting for operation completion. Non-mutating requests recheck authority immediately before dispatch.
 
-## Current non-capabilities
+## Current wiring and non-capabilities
 
-This module is not wired to the production runtime, CLI, or ordinary sessions. Outside explicit local integration tests, it does not:
+The runtime wires this module in deployment-test mode only. When `AXL_REMOTE_DEPLOYMENT_TEST` names a deployment-test configuration, `packages/runtime/src/remote-deployment-test.ts` loads the deployment-test Node endpoint, pairs one phone browser through `/remote`, and dispatches that device's requests through this module. `--unsafe` daemons still grant only `observe` remotely, and `remote.pairing.start` and `remote.status` stay local-only. That mode uses shared test credentials and test-only key storage, so it is evidence for the hosted path, not a user-facing feature.
+
+Outside that mode and explicit local integration tests, this module does not:
 
 - select or load a production cryptographic endpoint
-- define pairing or key storage
+- define production pairing or key storage
 - close a relay route through a production transport
 - implement permission interactions
-- enable remote control
+- enable remote control for users
 
 Those integrations remain behind later review gates.

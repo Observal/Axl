@@ -4,7 +4,8 @@
 
 # Production E2EE implementation briefs
 
-Status: non-normative implementation aid for draft PR #413
+Status: non-normative implementation aid. The phases below landed in RC through PR #413 and later
+integration PRs; production endpoint creation stays fail-closed until the gates below pass.
 
 The authoritative requirements are in
 [`production-e2ee-storage-and-rollback.md`](production-e2ee-storage-and-rollback.md). These briefs
