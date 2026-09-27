@@ -1947,6 +1947,10 @@ test("editing and /quit recover from a stale shutdown status", async (context) =
 
   input.write("helXX\x7f\x7flo\r"); // backspace editing before submit
   await until(() => text().includes("│ hello"), "edited send");
+  // A turn still settling changes the daemon's status revision, which would make shutdown retry
+  // for a second reason; wait for it so only the injected stale status is exercised.
+  await until(() => text().includes("the answer"), "reply");
+  while ((await host.status()).busy) await new Promise((resolve) => setTimeout(resolve, 5));
 
   input.write("/quit\r");
   await until(() => exited, "quit");
