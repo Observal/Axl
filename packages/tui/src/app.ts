@@ -3316,8 +3316,8 @@ export class AxlApp {
       const suggestion = closestMatch(
         command ?? "",
         this.commandController.commands.flatMap((c) => [
-          "/${c.name}",
-          ...c.aliases.map((alias) => "/${alias}"),
+          `/${c.name}`,
+          ...c.aliases.map((alias) => `/${alias}`),
         ]),
       );
       this.notice = this.view.palette.error(
