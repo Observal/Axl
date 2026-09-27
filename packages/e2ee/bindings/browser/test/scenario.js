@@ -7,6 +7,13 @@ function errorResult(error) {
   return { name: error.name, code: error.code, message: error.message };
 }
 
+/** A worker failure; scenario operations add the failing step, which the report needs. */
+function workerError(data) {
+  const error = new binding.AxlE2eeError(data.code);
+  if (typeof data.detail !== "string") return error;
+  return new Error(`${data.code}: ${data.detail}`, { cause: error });
+}
+
 function workerClient(url) {
   const worker = new Worker(url, { type: "module" });
   let id = 0;
@@ -28,7 +35,7 @@ function workerClient(url) {
     if (!entry) return;
     pending.delete(data.id);
     if (data.ok === true) entry.resolve(data.value);
-    else entry.reject(new binding.AxlE2eeError(data.code));
+    else entry.reject(workerError(data));
   });
   worker.addEventListener("error", () => {
     for (const entry of pending.values()) entry.reject(new binding.AxlE2eeError("internal_error"));
