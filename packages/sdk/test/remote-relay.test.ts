@@ -870,3 +870,101 @@ test("fails a queued request explicitly when the daemon rejects its grant genera
   assert.deepEqual(harness.errors, []);
   harness.delivery.close();
 });
+
+test("a liveness probe is answered by a relay receipt that never reaches listeners", async () => {
+  const factory = new FakeSocketFactory();
+  const { connection, socket } = await connect(factory);
+  const receipts: unknown[] = [];
+  const failures: unknown[] = [];
+  connection.onReceipt((receipt) => receipts.push(receipt));
+  connection.onFailure((failure) => failures.push(failure));
+  const probing = connection.checkAlive();
+  const probe = parseRelayBinaryFrame(socket.sent.at(-1) ?? new Uint8Array());
+  assert.ok("destinationRouteId" in probe);
+  assert.notEqual(probe.destinationRouteId, firstDaemonRoute, "probes go to an unrouted id");
+  socket.message(
+    encodeRelayBinaryFrame({
+      transportVersion: REMOTE_TRANSPORT_VERSION,
+      attemptId: probe.attemptId,
+      status: "admitted",
+    }),
+  );
+  assert.equal(await probing, true);
+  socket.message(
+    encodeRelayBinaryFrame({
+      transportVersion: REMOTE_TRANSPORT_VERSION,
+      attemptId: probe.attemptId,
+      code: "destination_offline",
+    }),
+  );
+  await nextTurn();
+  assert.deepEqual(receipts, []);
+  assert.deepEqual(failures, [], "the probe's expected failure is not a delivery failure");
+  assert.equal(connection.state, "connected");
+  connection.close();
+});
+
+test("a socket that stops answering probes is replaced without waiting for its close", async () => {
+  const factory = new FakeSocketFactory();
+  const connection = new RemoteRelayConnection({
+    tickets: { acquire: async () => credential() },
+    sockets: factory,
+    destinationCryptoSessionId: cryptoSessionId,
+    reconnect: { initialDelayMs: 1, maximumDelayMs: 1, jitterRatio: 0, maximumAttempts: 3 },
+    routeWaitMs: 100,
+    probeTimeoutMs: 5,
+    sleep: async () => undefined,
+  });
+  const states: RemoteRelayConnectionState[] = [];
+  connection.onState((state) => states.push(state));
+  const starting = connection.start();
+  await nextTurn();
+  const first = factory.sockets[0];
+  assert.ok(first);
+  first.open();
+  first.message(discovery("route_snapshot", firstDaemonRoute));
+  await starting;
+
+  assert.equal(await connection.checkAlive(), false);
+  assert.equal(first.closeCode, 4000);
+  await nextTurn();
+  const second = factory.sockets[1];
+  assert.ok(second, "a fresh socket replaces the silent one");
+  second.open();
+  second.message(discovery("route_snapshot", secondDaemonRoute));
+  await nextTurn();
+  assert.equal(connection.state, "connected");
+  assert.deepEqual(states, ["connecting", "connected", "reconnecting", "connected"]);
+  assert.equal(await connection.resolve(cryptoSessionId), secondDaemonRoute);
+  connection.close();
+});
+
+test("a connection that exhausted its reconnects starts over when checked", async () => {
+  const factory = new FakeSocketFactory();
+  let fail = true;
+  const connection = new RemoteRelayConnection({
+    tickets: {
+      async acquire() {
+        if (fail) throw new Error("offline");
+        return credential();
+      },
+    },
+    sockets: factory,
+    destinationCryptoSessionId: cryptoSessionId,
+    reconnect: { initialDelayMs: 1, maximumDelayMs: 1, jitterRatio: 0, maximumAttempts: 1 },
+    routeWaitMs: 100,
+    sleep: async () => undefined,
+  });
+  await assert.rejects(connection.start());
+  assert.equal(connection.state, "disconnected");
+  fail = false;
+  assert.equal(await connection.checkAlive(), false);
+  await nextTurn();
+  const socket = factory.sockets[0];
+  assert.ok(socket, "checking a stopped connection starts it again");
+  socket.open();
+  socket.message(discovery("route_snapshot", firstDaemonRoute));
+  await nextTurn();
+  assert.equal(connection.state, "connected");
+  connection.close();
+});

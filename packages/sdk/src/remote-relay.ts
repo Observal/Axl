@@ -16,6 +16,8 @@ import {
   parseRelayBinaryFrame,
   parseRelayDiscoveryMessage,
   parseRemoteE2eeEnvelope,
+  parseRouteId,
+  parseTransportAttemptId,
   RemoteDaemonMessageAssembler,
   REMOTE_TRANSPORT_VERSION,
   type RelayDelivery,
@@ -211,8 +213,27 @@ export interface RemoteRelayConnectionOptions {
   readonly destinationCryptoSessionId?: CryptoSessionId;
   readonly reconnect?: Partial<RemoteReconnectPolicy>;
   readonly routeWaitMs?: number;
+  /**
+   * Probe the relay this often while connected, replacing a socket that stops answering. Mobile
+   * browsers suspend pages and laptops sleep; both leave sockets that look open but are dead.
+   */
+  readonly heartbeatMs?: number;
+  /** How long a liveness probe may wait for the relay's receipt. */
+  readonly probeTimeoutMs?: number;
   readonly random?: () => number;
   readonly sleep?: (milliseconds: number) => Promise<void>;
+}
+
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+/** One byte addressed to a route nobody holds; the relay answers it with a receipt. */
+const PROBE_PAYLOAD = Uint8Array.of(0);
+
+function randomUuid(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x40;
+  bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 export type RemoteRelayErrorCode =
@@ -326,6 +347,8 @@ export class RemoteRelayConnection {
   private readonly sockets: RemoteWebSocketFactory;
   private readonly policy: RemoteReconnectPolicy;
   private readonly routeWaitMs: number;
+  private readonly heartbeatMs: number | undefined;
+  private readonly probeTimeoutMs: number;
   private readonly random: () => number;
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly receiptListeners = new Set<(receipt: RelayReceipt) => void>();
@@ -334,6 +357,12 @@ export class RemoteRelayConnection {
   private readonly routeListeners = new Set<(peers: readonly RelayPeerRoute[]) => void>();
   private readonly stateListeners = new Set<(state: RemoteRelayConnectionState) => void>();
   private readonly routeWaiters = new Set<RouteWaiter>();
+  /**
+   * Liveness probes by attempt. The relay answers each with an admission receipt and then a
+   * destination_offline failure; neither reaches listeners, and the entry leaves on the failure.
+   */
+  private readonly probes = new Map<string, () => void>();
+  private heartbeat: ReturnType<typeof setInterval> | undefined;
   private socket: RemoteWebSocket | undefined;
   private sourceRoute: RelayPeerRoute | undefined;
   private peers = new Map<RouteId, RelayPeerRoute>();
@@ -357,6 +386,14 @@ export class RemoteRelayConnection {
     this.sockets = options.sockets ?? new GlobalRemoteWebSocketFactory();
     this.policy = reconnectPolicy(options.reconnect);
     this.routeWaitMs = positiveInteger(options.routeWaitMs ?? DEFAULT_ROUTE_WAIT_MS, "routeWaitMs");
+    this.heartbeatMs =
+      options.heartbeatMs === undefined
+        ? undefined
+        : positiveInteger(options.heartbeatMs, "heartbeatMs");
+    this.probeTimeoutMs = positiveInteger(
+      options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS,
+      "probeTimeoutMs",
+    );
     this.random = options.random ?? Math.random;
     this.sleep =
       options.sleep ??
@@ -391,6 +428,7 @@ export class RemoteRelayConnection {
 
   close(): void {
     if (this.stopped && this.currentState === "closed") return;
+    this.stopHeartbeat();
     this.stopped = true;
     this.lifecycleGeneration += 1;
     this.generation += 1;
@@ -429,6 +467,43 @@ export class RemoteRelayConnection {
   onDelivery(listener: (delivery: RelayDelivery) => void): () => void {
     this.deliveryListeners.add(listener);
     return () => this.deliveryListeners.delete(listener);
+  }
+
+  /**
+   * Prove the socket still reaches the relay, and replace it when it does not. A browser cannot
+   * observe WebSocket pings, so the probe is one frame addressed to a route nobody holds, which the
+   * relay answers at once with a receipt. A connection that gave up reconnecting starts over.
+   * Resolves whether the current connection answered.
+   */
+  async checkAlive(): Promise<boolean> {
+    if (this.currentState === "disconnected" && this.starting === undefined) {
+      void this.start().catch(() => undefined);
+      return false;
+    }
+    if (this.currentState !== "connected") return false;
+    const generation = this.generation;
+    const attemptId = parseTransportAttemptId(randomUuid());
+    const answered = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        this.probes.delete(attemptId);
+        resolve(false);
+      }, this.probeTimeoutMs);
+      this.probes.set(attemptId, () => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+    try {
+      this.send(parseRouteId(randomUuid()), attemptId, PROBE_PAYLOAD);
+    } catch {
+      this.probes.delete(attemptId);
+      return false;
+    }
+    const alive = await answered;
+    if (!alive && generation === this.generation && this.currentState === "connected") {
+      this.abandonSocket(generation);
+    }
+    return alive;
   }
 
   async resolve(destinationCryptoSessionId: CryptoSessionId): Promise<RouteId> {
@@ -663,6 +738,7 @@ export class RemoteRelayConnection {
     this.activeMaxFrameBytes = credential.limits.maxFrameBytes;
     this.activeLimits = credential.limits;
     this.clearPaced();
+    this.startHeartbeat();
     this.setState("connected");
   }
 
@@ -688,6 +764,14 @@ export class RemoteRelayConnection {
       return discovery.type === "route_snapshot";
     }
     const frame = parseRelayBinaryFrame(bytes);
+    const probe = "sourceRouteId" in frame ? undefined : this.probes.get(frame.attemptId);
+    if (typeof probe === "function") {
+      probe();
+      if ("code" in frame || ("status" in frame && frame.status === "forwarded")) {
+        this.probes.delete(frame.attemptId);
+      }
+      return false;
+    }
     if ("status" in frame) {
       for (const listener of this.receiptListeners) listener(frame);
     } else if ("code" in frame) {
@@ -763,6 +847,7 @@ export class RemoteRelayConnection {
   private handleSocketClosed(generation: number, error: Error): void {
     if (generation !== this.generation) return;
     const wasConnected = this.currentState === "connected";
+    this.stopHeartbeat();
     this.socket = undefined;
     this.activeMaxFrameBytes = undefined;
     this.activeLimits = undefined;
@@ -777,6 +862,31 @@ export class RemoteRelayConnection {
     void reconnecting.finally(() => {
       if (this.reconnecting === reconnecting) this.reconnecting = undefined;
     });
+  }
+
+  /**
+   * Treat an unresponsive socket as closed now. Its close handshake could take minutes on a dead
+   * network, so the connection moves on to a new socket and ignores the old one's late events.
+   */
+  private abandonSocket(generation: number): void {
+    const socket = this.socket;
+    this.handleSocketClosed(
+      generation,
+      new RemoteRelayError("connection_closed", "Relay stopped answering"),
+    );
+    socket?.close(4000, "probe_timeout");
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    if (this.heartbeatMs === undefined) return;
+    this.heartbeat = setInterval(() => void this.checkAlive(), this.heartbeatMs);
+    (this.heartbeat as { unref?: () => void }).unref?.();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat !== undefined) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
   }
 
   private retryDelay(attempt: number): number {
