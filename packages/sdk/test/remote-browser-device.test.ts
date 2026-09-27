@@ -33,7 +33,7 @@ import {
   REMOTE_PAIRING_NOTICE_BYTES,
   type RemotePairingLink,
 } from "../src/remote-pairing-link.ts";
-import type { RemoteRelayConnection } from "../src/remote-relay.ts";
+import type { RemoteRelayConnection, RemoteRelayConnectionState } from "../src/remote-relay.ts";
 import { HttpRelayTicketProvider } from "../src/remote-relay.ts";
 import { HostedWitnessClient } from "../src/witness.ts";
 
@@ -114,28 +114,48 @@ interface FakeRelay {
   readonly connection: RemoteRelayConnection;
   readonly sent: Uint8Array[];
   deliver(payload: Uint8Array): void;
+  /** Move the connection through a state; sends fail while it is not connected. */
+  setState(state: RemoteRelayConnectionState): void;
 }
 
 function fakeRelay(): FakeRelay {
   const sent: Uint8Array[] = [];
   const listeners = new Set<(delivery: RelayDelivery) => void>();
+  const stateListeners = new Set<(state: RemoteRelayConnectionState) => void>();
+  let state: RemoteRelayConnectionState = "connected";
   const connection = {
+    get state() {
+      return state;
+    },
+    routes: [{ routeId: daemonRoute, role: "daemon" }],
     resolve: async (session: string) => {
       assert.equal(session, link.cryptoSessionId);
       return daemonRoute;
     },
     send: (route: string, _attempt: unknown, payload: Uint8Array) => {
       assert.equal(route, daemonRoute);
+      if (state !== "connected") throw new Error("Relay connection is not connected");
       sent.push(payload.slice());
     },
     onDelivery: (listener: (delivery: RelayDelivery) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    onState: (listener: (state: RemoteRelayConnectionState) => void) => {
+      stateListeners.add(listener);
+      return () => stateListeners.delete(listener);
+    },
+    onRoutes: () => () => undefined,
+    onFailure: () => () => undefined,
+    onReceipt: () => () => undefined,
   } as unknown as RemoteRelayConnection;
   return {
     connection,
     sent,
+    setState: (next) => {
+      state = next;
+      for (const listener of stateListeners) listener(next);
+    },
     deliver: (payload) => {
       for (const listener of listeners) {
         listener({
@@ -261,6 +281,181 @@ test("browser sessions seal requests and settle them from daemon replies", async
   assert.equal((await requestOf(2)).idempotencyKey, undefined);
   session.close();
   await assert.rejects(steered, { code: "closed" });
+});
+
+async function sentRequest(relay: FakeRelay, index: number) {
+  while (relay.sent.length <= index) await new Promise((resolve) => setImmediate(resolve));
+  const envelope = parseRemoteE2eeEnvelope(relay.sent[index] ?? new Uint8Array());
+  return JSON.parse(Buffer.from(envelope.ciphertext).toString("utf8")) as {
+    readonly requestId: string;
+  };
+}
+
+function resultEnvelope(requestId: string, operation = "01890a5d-ac96-774b-bcce-b302099a8066") {
+  return encodeRemoteE2eeEnvelope({
+    operationId: parseOperationId(operation),
+    logicalMessageId: parseOperationId("01890a5d-ac96-774b-bcce-b302099a8067"),
+    messageClass: "application_delivery",
+    hostedGrantGeneration: 1,
+    ciphertext: encodeRemoteDaemonMessage({
+      version: 1,
+      type: "daemon_result",
+      requestId: requestId as never,
+      method: "session.list",
+      result: { sessions: [] },
+    }),
+  });
+}
+
+test("unanswered requests are resent byte for byte after the relay reconnects", async () => {
+  const relay = fakeRelay();
+  const session = new RemoteBrowserSession({
+    endpoint: transparentEndpoint([]),
+    relay: relay.connection,
+    deviceId: link.deviceId,
+    cryptoSessionId: link.cryptoSessionId,
+  });
+  let reconnects = 0;
+  session.onReconnect(() => {
+    reconnects += 1;
+  });
+  const listed = session.request("session.list", { scope: "all_local" });
+  const { requestId } = await sentRequest(relay, 0);
+  assert.equal(session.unanswered, 1);
+
+  relay.setState("reconnecting");
+  relay.setState("connected");
+  await sentRequest(relay, 1);
+  assert.deepEqual(relay.sent[1], relay.sent[0], "the daemon recognizes the exact bytes");
+  assert.equal(reconnects, 1);
+
+  relay.deliver(resultEnvelope(requestId));
+  assert.deepEqual(await listed, { sessions: [] });
+  assert.equal(session.unanswered, 0);
+  relay.setState("reconnecting");
+  relay.setState("connected");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(relay.sent.length, 2, "answered requests are never resent");
+  session.close();
+});
+
+test("requests sealed while the relay is away leave once it connects", async () => {
+  const relay = fakeRelay();
+  relay.setState("reconnecting");
+  const session = new RemoteBrowserSession({
+    endpoint: transparentEndpoint([]),
+    relay: relay.connection,
+    deviceId: link.deviceId,
+    cryptoSessionId: link.cryptoSessionId,
+  });
+  const listed = session.request("session.list", { scope: "all_local" });
+  for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(relay.sent.length, 0);
+  relay.setState("connected");
+  const { requestId } = await sentRequest(relay, 0);
+  relay.deliver(resultEnvelope(requestId));
+  assert.deepEqual(await listed, { sessions: [] });
+  session.close();
+});
+
+test("replies the daemon replays for a resent request are ignored quietly", async () => {
+  const relay = fakeRelay();
+  const endpoint = transparentEndpoint([]);
+  const seen = new Set<string>();
+  const session = new RemoteBrowserSession({
+    endpoint: {
+      ...endpoint,
+      receiveApplication: async (operation, logical, generation, ciphertext) => {
+        const key = Buffer.from(operation).toString("hex");
+        if (seen.has(key)) throw Object.assign(new Error("replayed"), { code: "replay_rejected" });
+        seen.add(key);
+        return endpoint.receiveApplication(operation, logical, generation, ciphertext);
+      },
+    },
+    relay: relay.connection,
+    deviceId: link.deviceId,
+    cryptoSessionId: link.cryptoSessionId,
+  });
+  const errors: Error[] = [];
+  session.onError((error) => errors.push(error));
+  const listed = session.request("session.list", { scope: "all_local" });
+  const { requestId } = await sentRequest(relay, 0);
+  relay.deliver(resultEnvelope(requestId));
+  relay.deliver(resultEnvelope(requestId));
+  assert.deepEqual(await listed, { sessions: [] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(errors, []);
+  session.close();
+});
+
+test("an operation whose witness round trip failed is repeated with the same identity", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const relay = fakeRelay();
+  const endpoint = transparentEndpoint([]);
+  const operations: string[] = [];
+  const session = new RemoteBrowserSession({
+    endpoint: {
+      ...endpoint,
+      receiveApplication: async (operation, logical, generation, ciphertext) => {
+        operations.push(Buffer.from(operation).toString("hex"));
+        if (operations.length < 3) {
+          throw Object.assign(new Error("witness down"), { code: "witness_unavailable" });
+        }
+        return endpoint.receiveApplication(operation, logical, generation, ciphertext);
+      },
+    },
+    relay: relay.connection,
+    deviceId: link.deviceId,
+    cryptoSessionId: link.cryptoSessionId,
+  });
+  const listed = session.request("session.list", { scope: "all_local" });
+  const { requestId } = await sentRequest(relay, 0);
+  relay.deliver(resultEnvelope(requestId));
+  for (let tick = 0; tick < 20 && operations.length < 3; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    context.mock.timers.tick(8_000);
+  }
+  assert.deepEqual(await listed, { sessions: [] });
+  assert.equal(operations.length, 3);
+  assert.equal(new Set(operations).size, 1, "every repeat completes the same operation");
+  session.close();
+});
+
+test("browser pairing resends the activation until the daemon answers", async () => {
+  const relay = fakeRelay();
+  const welcome = Uint8Array.of(0xbe, 0xef);
+  const pairing = {
+    publishClaim: async () => undefined,
+    fetchWelcome: async () => ({
+      version: 1,
+      welcome,
+      welcomeHash: new Uint8Array(createHash("sha384").update(welcome).digest()),
+      expiresAt: Date.now() + 60_000,
+    }),
+    acknowledgeWelcome: async () => undefined,
+  } as unknown as HostedPairingClient;
+  let confirmations = 0;
+  await pairRemoteBrowserDevice({
+    link,
+    endpoint: transparentEndpoint([]),
+    pairing,
+    relay: relay.connection,
+    confirm: async () => {
+      confirmations += 1;
+      if (confirmations < 3) throw new Error("no answer yet");
+    },
+    sleep: async () => undefined,
+  });
+  const activations = relay.sent.filter((bytes) => {
+    try {
+      return parseRemoteE2eeEnvelope(bytes).messageClass === "pair_activation";
+    } catch {
+      return false;
+    }
+  });
+  assert.equal(confirmations, 3);
+  assert.equal(activations.length, 3);
+  assert.deepEqual(activations[2], activations[0]);
 });
 
 test("hosted clients call the global fetch unbound, as browsers require", async (context) => {
