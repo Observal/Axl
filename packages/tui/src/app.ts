@@ -3314,7 +3314,7 @@ export class AxlApp {
     );
     if (line.startsWith("/") && !images.includes(command ?? "")) {
       const suggestion = closestMatch(
-        command ?? "",
+        command?.toLowerCase() ?? "",
         this.commandController.commands.flatMap((c) => [
           `/${c.name}`,
           ...c.aliases.map((alias) => `/${alias}`),
