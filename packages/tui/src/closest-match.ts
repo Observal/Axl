@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2026 SHAURYA JAIN
 // SPDX-License-Identifier: Apache-2.0
 
+/**
+ * Computes the Levenshtein edit distance between two strings.
+ * Returns the minimum number of single-character insertions, deletions,
+ * or substitutions required to transform `a` into `b`.
+ */
 function levenshtein(a: string, b: string): number {
   const m = a.length;
   const n = b.length;
@@ -18,6 +23,13 @@ function levenshtein(a: string, b: string): number {
   return dp[m]![n]!;
 }
 
+/**
+ * Returns the closest candidate to `input` by Levenshtein edit distance,
+ * provided the distance is within `maxDistance`. Candidates whose length
+ * difference alone exceeds `maxDistance` are skipped without allocating a
+ * matrix. Returns `undefined` when no candidate is close enough or the
+ * candidate list is empty.
+ */
 export function closestMatch(
   input: string,
   candidates: readonly string[],
@@ -27,6 +39,7 @@ export function closestMatch(
   let best: string | undefined;
   let bestDist = Infinity;
   for (const candidate of candidates) {
+    if (Math.abs(input.length - candidate.length) > maxDistance) continue;
     const dist = levenshtein(input, candidate);
     if (dist < bestDist) {
       bestDist = dist;
