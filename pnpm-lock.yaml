@@ -299,6 +299,9 @@ importers:
       '@axl/extension-api':
         specifier: workspace:*
         version: link:../extensions/api
+      '@playwright/test':
+        specifier: 1.63.0
+        version: 1.63.0
       '@types/react':
         specifier: 19.2.18
         version: 19.2.18
