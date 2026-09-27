@@ -58,6 +58,8 @@ interface StoredPairing {
 
 const STORAGE_KEY = "axl.remote.deployment-test";
 const SEND_TIMEOUT_MS = 30 * 60_000;
+/** A prompt refused by a restarted daemon is sent again once, after reopening its session. */
+const SEND_REOPEN_ATTEMPTS = 2;
 /** Probe the relay this often; a suspended page's socket usually dies without a close event. */
 const HEARTBEAT_MS = 25_000;
 /** How long a new tab waits for an older one to release the endpoint. */
@@ -351,15 +353,23 @@ class RemotePage {
   }
 
   async openThread(summary: SessionSummary): Promise<void> {
-    await this.leaveThread(false);
-    show("thread");
-    view.title.textContent = summary.title ?? summary.cwd;
-    view.records.replaceChildren();
-    status("Opening session");
+    // Take over the view before any round trip, so a prompt sent while the thread reopens after a
+    // reconnect goes to this session instead of being dropped.
+    const previous = this.#subscriptionId;
+    this.#subscriptionId = undefined;
     this.#sessionId = summary.sessionId;
     this.#summary = summary;
     this.#ackedCursor = undefined;
     this.#projector = new ConversationProjector(summary.sessionId);
+    if (previous !== undefined) {
+      void this.#session
+        .request("session.unsubscribe", { subscriptionId: previous })
+        .catch(() => undefined);
+    }
+    show("thread");
+    view.title.textContent = summary.title ?? summary.cwd;
+    view.records.replaceChildren();
+    status("Opening session");
     try {
       // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
       // skips it and can still watch sessions that are open on the laptop.
@@ -412,7 +422,7 @@ class RemotePage {
     }
   }
 
-  async leaveThread(list = true): Promise<void> {
+  async leaveThread(): Promise<void> {
     const subscriptionId = this.#subscriptionId;
     this.#subscriptionId = undefined;
     this.#sessionId = undefined;
@@ -422,7 +432,7 @@ class RemotePage {
     if (subscriptionId !== undefined) {
       await this.#session.request("session.unsubscribe", { subscriptionId }).catch(() => undefined);
     }
-    if (list) await this.listSessions();
+    await this.listSessions();
   }
 
   #onMessage(message: ServerMessage): void {
@@ -532,16 +542,25 @@ class RemotePage {
     if (text.length === 0 || sessionId === undefined) return;
     const busy = this.#projector?.state.activeOperationId !== undefined;
     view.prompt.value = "";
+    const params = {
+      sessionId,
+      content: [{ type: "text", text }],
+      delivery: busy ? "follow_up" : "prompt",
+    };
     try {
-      await this.#session.request(
-        "session.send",
-        {
-          sessionId,
-          content: [{ type: "text", text }],
-          delivery: busy ? "follow_up" : "prompt",
-        },
-        SEND_TIMEOUT_MS,
-      );
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await this.#session.request("session.send", params, SEND_TIMEOUT_MS);
+          return;
+        } catch (cause) {
+          // A daemon restart closes sessions, and a prompt resent before the thread reopens is
+          // refused with unknown_session. Refused means it never ran, so reopen and send it again.
+          const code = (cause as { readonly code?: unknown }).code;
+          if (code !== "unknown_session" || attempt === SEND_REOPEN_ATTEMPTS) throw cause;
+          trace("send refused by a restarted daemon; reopening the session");
+          await this.#session.request("session.resume", { sessionId });
+        }
+      }
     } catch (cause) {
       status(`Send failed: ${describe(cause)}`, "error");
     }
