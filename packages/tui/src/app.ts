@@ -31,6 +31,7 @@ import type {
   ProviderInventoryGroup,
   ProviderLoginMethod,
   ProviderTextModel,
+  RemoteStatusResult,
   SessionId,
   SessionOpenResult,
   SessionProfile,
@@ -406,7 +407,7 @@ const TUI_COMMANDS: readonly { readonly name: string; readonly description: stri
   { name: "history", description: "search prompt history" },
   { name: "edit", description: "open the prompt in VISUAL or EDITOR" },
   { name: "web", description: "open this session in the browser" },
-  { name: "remote", description: "pair a phone browser with this daemon" },
+  { name: "remote", description: "pair a phone browser, or /remote status to check it" },
   { name: "hotkeys", description: "browse and search keyboard shortcuts" },
   { name: "help", description: "show commands and keys" },
   { name: "detach", description: "leave the session running in the daemon" },
@@ -1300,6 +1301,41 @@ export class AxlApp {
     this.view.setWidth(width);
     if (widthChanged) this.rebuildTranscript(false);
     return true;
+  }
+
+  /** `/remote status`: the phone pairing, the daemon's relay connection, and the latest failure. */
+  private remoteStatusLines(status: RemoteStatusResult): string[] {
+    const { accent, dim, error } = this.view.palette;
+    const good = this.view.palette.success ?? ((text: string) => text);
+    const warn = this.view.palette.warning ?? ((text: string) => text);
+    const row = (label: string, value: string) => `  ${dim(label.padEnd(9))}${value}`;
+    const phase = {
+      unpaired: warn("not paired; run /remote to pair a phone"),
+      pairing: warn("waiting for a phone to open the pairing link"),
+      paired: good("paired"),
+    }[status.phase];
+    const relay = status.relay === "connected" ? good("connected") : warn(status.relay);
+    const lines = [accent("Remote status"), row("Pairing", phase), row("Relay", relay)];
+    if (status.phase === "paired") {
+      lines.push(
+        row(
+          "Phone",
+          status.deviceOnline ? good("online") : dim("offline (the page is closed or asleep)"),
+        ),
+      );
+    }
+    if (status.witness !== undefined) {
+      lines.push(row("Witness", status.witness === "ready" ? good("ready") : warn(status.witness)));
+    }
+    if (status.lastError !== undefined) {
+      const at = new Date(status.lastError.at).toLocaleTimeString();
+      lines.push(
+        row("Last error", error(`${at} ${sanitizeTerminalText(status.lastError.message)}`)),
+      );
+    }
+    if (status.logPath !== undefined) lines.push(row("Log", sanitizeTerminalText(status.logPath)));
+    lines.push("");
+    return lines;
   }
 
   /** The pairing link as a terminal QR code, or a hint when the terminal is too narrow for one. */
@@ -2977,6 +3013,14 @@ export class AxlApp {
         return;
       }
       case "remote": {
+        if (argument === "status") {
+          this.commitLines(this.remoteStatusLines(await this.client.remoteStatus()));
+          return;
+        }
+        if (argument) {
+          this.notice = this.view.palette.error("✖ use /remote or /remote status");
+          return;
+        }
         const pairing = await this.client.startRemotePairing();
         const { accent, dim } = this.view.palette;
         const minutes = Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60_000));

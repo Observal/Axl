@@ -53,6 +53,14 @@ async function openApp(context: TestContext, columns: number) {
         deviceId: "01890a5d-ac96-774b-bcce-b302099a8058",
         expiresAt: Date.now() + 10 * 60_000,
       }),
+      status: () => ({
+        phase: "paired",
+        relay: "reconnecting",
+        deviceOnline: false,
+        witness: "ready",
+        lastError: { message: "remote: relay stopped answering", at: Date.now() },
+        logPath: join(directory, "remote.log"),
+      }),
     },
     runtime: async () => ({ model, tools: new ToolRegistry() }),
   });
@@ -102,4 +110,16 @@ test("/remote explains how to get a code in a narrow terminal", async (context) 
   await until(() => text().includes("Remote pairing"), "pairing");
   await until(() => text().includes("Widen the terminal to 93 columns"), "width hint");
   assert.doesNotMatch(text(), /█▀{5}█/u);
+});
+
+test("/remote status shows the pairing, relay, phone, and latest failure", async (context) => {
+  const { input, text } = await openApp(context, 100);
+  input.write("/remote status\r");
+  await until(() => text().includes("Remote status"), "status");
+  await until(() => text().includes("remote.log"), "log path");
+  assert.match(text(), /Pairing {2}paired/u);
+  assert.match(text(), /Relay {4}reconnecting/u);
+  assert.match(text(), /Phone {4}offline/u);
+  assert.match(text(), /relay stopped answering/u);
+  assert.doesNotMatch(text(), /Remote pairing/u, "status never starts a new pairing");
 });

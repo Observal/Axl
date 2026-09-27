@@ -9,7 +9,7 @@ import test, { type TestContext } from "node:test";
 
 import type { ModelPort } from "@axl/kernel";
 import { ToolRegistry } from "@axl/kernel";
-import type { RemotePairingStartResult } from "@axl/protocol";
+import type { RemotePairingStartResult, RemoteStatusResult } from "@axl/protocol";
 import { AxlClientError } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
 
@@ -31,6 +31,15 @@ const pairing: RemotePairingStartResult = {
   cryptoSessionId: "01890a5d-ac96-774b-bcce-b302099a8059",
   deviceId: "01890a5d-ac96-774b-bcce-b302099a8058",
   expiresAt: 1_900_000_000_000,
+};
+
+const status: RemoteStatusResult = {
+  phase: "paired",
+  relay: "reconnecting",
+  deviceOnline: false,
+  cryptoSessionId: pairing.cryptoSessionId,
+  deviceId: pairing.deviceId,
+  lastError: { message: "remote: relay stopped answering", at: 1_900_000_000_000 },
 };
 
 async function start(context: TestContext, remotePairing?: RemotePairingService) {
@@ -57,6 +66,7 @@ test("grants remote pairing only when the daemon hosts it", async (context) => {
     without.startRemotePairing(),
     (error) => error instanceof AxlClientError && error.code === "unsupported_capability",
   );
+  assert.equal(without.connection.grantedCapabilities.includes("remote.status"), false);
 
   let calls = 0;
   const hosted = await start(context, {
@@ -64,10 +74,12 @@ test("grants remote pairing only when the daemon hosts it", async (context) => {
       calls += 1;
       return pairing;
     },
+    status: () => status,
   });
   assert.equal(hosted.connection.grantedCapabilities.includes("remote.pairing.start"), true);
   assert.deepEqual(await hosted.startRemotePairing(), pairing);
   assert.equal(calls, 1);
+  assert.deepEqual(await hosted.remoteStatus(), status);
 });
 
 test("reports a failed pairing start as remote_unavailable", async (context) => {
@@ -75,6 +87,7 @@ test("reports a failed pairing start as remote_unavailable", async (context) => 
     start: async () => {
       throw new Error("witness down: secret-detail");
     },
+    status: () => status,
   });
   await assert.rejects(client.startRemotePairing(), (error) => {
     assert.ok(error instanceof AxlClientError);
@@ -86,6 +99,7 @@ test("reports a failed pairing start as remote_unavailable", async (context) => 
 
 test("remote devices cannot start another pairing", () => {
   assert.equal(requiredRemoteScope("remote.pairing.start"), undefined);
+  assert.equal(requiredRemoteScope("remote.status"), undefined);
 });
 
 test("remote devices reopen closed sessions only with steer", () => {

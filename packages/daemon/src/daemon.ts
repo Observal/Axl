@@ -44,6 +44,7 @@ import {
   parseWireRequest,
   type RemoteDeviceScope,
   type RemotePairingStartResult,
+  type RemoteStatusResult,
   type RequestId,
   type RetryableMutationMethod,
   RPC_METHODS,
@@ -101,6 +102,8 @@ export interface DaemonOptions extends SessionManagerOptions {
 
 export interface RemotePairingService {
   start(): Promise<RemotePairingStartResult>;
+  /** What `/remote status` shows: pairing phase, relay connection, and the latest failure. */
+  status(): RemoteStatusResult;
 }
 
 export interface AuthenticatedRemoteAttachmentOptions {
@@ -355,7 +358,7 @@ export class AxlDaemon {
         (this.providerManagement !== undefined || !capability.startsWith("provider.")) &&
         (this.mcpConfiguration !== undefined || !capability.startsWith("mcp.config.")) &&
         (this.extensionManagement !== undefined || !capability.startsWith("extension.")) &&
-        (this.remotePairing !== undefined || capability !== "remote.pairing.start"),
+        (this.remotePairing !== undefined || !capability.startsWith("remote.")),
     );
     if (
       !Number.isSafeInteger(this.snapshotIdleLifetimeMs) ||
@@ -1318,6 +1321,11 @@ export class AxlDaemon {
           throw new DaemonError("remote_unavailable", "Remote pairing could not start", { cause });
         }
       }
+      case "remote.status":
+        if (this.remotePairing === undefined) {
+          throw new DaemonError("remote_unavailable", "This daemon has no remote host");
+        }
+        return this.remotePairing.status();
       case "connection.initialize": {
         return {
           attachmentId: state.attachmentId,
