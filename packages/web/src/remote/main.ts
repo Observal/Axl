@@ -9,6 +9,12 @@
  * browser's own storage, removes it from the address bar, pairs the browser binding's device
  * endpoint with the daemon, and then drives sessions through end-to-end encrypted requests over
  * the relay. Replica trust is pinned into the binding build, never taken from the link.
+ *
+ * Phones suspend pages and drop sockets, so the page keeps its own connection honest: it probes
+ * the relay on a heartbeat and whenever it becomes visible again, the session resends requests
+ * the daemon has not answered, and an open conversation resumes from its last acknowledged cursor
+ * after any reconnect. One tab owns the pairing at a time; a newer tab asks the older one to let
+ * go of the endpoint instead of failing on its lock.
  */
 
 import {
@@ -52,6 +58,14 @@ interface StoredPairing {
 
 const STORAGE_KEY = "axl.remote.deployment-test";
 const SEND_TIMEOUT_MS = 30 * 60_000;
+/** Probe the relay this often; a suspended page's socket usually dies without a close event. */
+const HEARTBEAT_MS = 25_000;
+/** How long a new tab waits for an older one to release the endpoint. */
+const HANDOFF_WAIT_MS = 5_000;
+/** How long the pairing waits for the daemon to answer before resending its activation. */
+const CONFIRM_TIMEOUT_MS = 5_000;
+const TAB_CHANNEL = "axl-remote-tabs";
+const TAB_ID = crypto.randomUUID();
 const STEP_LABELS: Readonly<Record<RemoteBrowserPairingStep, string>> = {
   claim: "Create this device's pairing claim",
   notice: "Reach the daemon through the relay",
@@ -72,6 +86,7 @@ const view = {
   pairing: element<HTMLElement>("pairing"),
   steps: element<HTMLOListElement>("steps"),
   hint: element<HTMLParagraphElement>("pairing-hint"),
+  retry: element<HTMLButtonElement>("retry"),
   sessions: element<HTMLElement>("sessions"),
   sessionList: element<HTMLUListElement>("session-list"),
   refresh: element<HTMLButtonElement>("refresh"),
@@ -156,6 +171,35 @@ async function openEndpoint(binding: DeviceBinding, link: RemotePairingLink) {
   }
 }
 
+const sleep = (milliseconds: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+
+function tabChannel(): BroadcastChannel | undefined {
+  return typeof BroadcastChannel === "function" ? new BroadcastChannel(TAB_CHANNEL) : undefined;
+}
+
+/**
+ * Open the endpoint, first asking any older tab holding this pairing to let go. The binding keeps
+ * one exclusive lock per pairing, so without the handoff a second tab fails with lifecycle_busy.
+ */
+async function openExclusive(
+  binding: DeviceBinding,
+  link: RemotePairingLink,
+  channel: BroadcastChannel | undefined,
+): Promise<BrowserDeviceEndpoint> {
+  channel?.postMessage({ type: "takeover", session: link.cryptoSessionId, tab: TAB_ID });
+  const deadline = Date.now() + HANDOFF_WAIT_MS;
+  for (;;) {
+    try {
+      return await openEndpoint(binding, link);
+    } catch (cause) {
+      if ((cause as { readonly code?: unknown }).code !== "lifecycle_busy") throw cause;
+      if (Date.now() > deadline) throw cause;
+      await sleep(250);
+    }
+  }
+}
+
 function relayFor(link: RemotePairingLink): RemoteRelayConnection {
   return new RemoteRelayConnection({
     tickets: new HttpRelayTicketProvider({
@@ -171,6 +215,7 @@ function relayFor(link: RemotePairingLink): RemoteRelayConnection {
     }),
     destinationCryptoSessionId: link.cryptoSessionId,
     reconnect: { maximumAttempts: 1_000, maximumDelayMs: 15_000 },
+    heartbeatMs: HEARTBEAT_MS,
   });
 }
 
@@ -181,6 +226,8 @@ const REFUSALS: Readonly<Record<string, string>> = {
   scope_forbidden: "this phone is not allowed to do that.",
   device_revoked: "this phone was removed. Run /remote again to pair it.",
   timeout: "the daemon did not answer in time.",
+  lifecycle_busy:
+    "this pairing is open in another tab or window that did not let go. Close it, then tap Retry.",
 };
 
 function describe(cause: unknown): string {
@@ -240,13 +287,19 @@ class RemotePage {
   #projector: ConversationProjector | undefined;
   #subscriptionId: string | undefined;
   #sessionId: string | undefined;
+  #summary: SessionSummary | undefined;
   #ackTimer: ReturnType<typeof setTimeout> | undefined;
   #lastCursor: string | undefined;
+  /** The newest cursor the daemon confirmed; only an acknowledged cursor can resume a view. */
+  #ackedCursor: string | undefined;
+  /** The session list request in flight; refreshes and reconnects share it. */
+  #listing: Promise<void> | undefined;
 
   constructor(session: RemoteBrowserSession) {
     this.#session = session;
     session.onServerMessage((message) => this.#onMessage(message));
     session.onError((error) => status(error.message, "error"));
+    session.onReconnect(() => void this.#resume());
     view.refresh.addEventListener("click", () => void this.listSessions());
     view.back.addEventListener("click", () => void this.leaveThread());
     view.composer.addEventListener("submit", (event) => {
@@ -256,8 +309,15 @@ class RemotePage {
     view.stop.addEventListener("click", () => void this.#interrupt());
   }
 
-  async listSessions(): Promise<void> {
+  listSessions(): Promise<void> {
     show("sessions");
+    this.#listing ??= this.#listSessions().finally(() => {
+      this.#listing = undefined;
+    });
+    return this.#listing;
+  }
+
+  async #listSessions(): Promise<void> {
     status("Loading sessions");
     try {
       const result = (await this.#session.request("session.list", {
@@ -297,6 +357,8 @@ class RemotePage {
     view.records.replaceChildren();
     status("Opening session");
     this.#sessionId = summary.sessionId;
+    this.#summary = summary;
+    this.#ackedCursor = undefined;
     this.#projector = new ConversationProjector(summary.sessionId);
     try {
       // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
@@ -341,6 +403,7 @@ class RemotePage {
           subscriptionId: subscribed.subscriptionId,
           cursor: snapshot.boundaryCursor,
         });
+        this.#ackedCursor = snapshot.boundaryCursor;
       }
       this.#render();
       status("Connected");
@@ -353,6 +416,8 @@ class RemotePage {
     const subscriptionId = this.#subscriptionId;
     this.#subscriptionId = undefined;
     this.#sessionId = undefined;
+    this.#summary = undefined;
+    this.#ackedCursor = undefined;
     this.#projector = undefined;
     if (subscriptionId !== undefined) {
       await this.#session.request("session.unsubscribe", { subscriptionId }).catch(() => undefined);
@@ -383,8 +448,59 @@ class RemotePage {
       const subscriptionId = this.#subscriptionId;
       const cursor = this.#lastCursor;
       if (subscriptionId === undefined || cursor === undefined) return;
-      void this.#session.request("session.ack", { subscriptionId, cursor }).catch(() => undefined);
+      void this.#session
+        .request("session.ack", { subscriptionId, cursor })
+        .then(() => {
+          if (this.#subscriptionId === subscriptionId) this.#ackedCursor = cursor;
+        })
+        .catch(() => undefined);
     }, 500);
+  }
+
+  /**
+   * Deliveries sent while the phone or the daemon was away are lost. Subscribing again after the
+   * last acknowledged cursor replays exactly what was missed in one round trip, and the projector
+   * drops events it already applied. A cursor the daemon no longer knows (it restarted, or the
+   * gap outgrew its buffer) falls back to reopening the session with a fresh snapshot.
+   */
+  async #resume(): Promise<void> {
+    if (!view.sessions.hidden) {
+      await this.listSessions();
+      return;
+    }
+    const summary = this.#summary;
+    const previous = this.#subscriptionId;
+    const after = this.#ackedCursor;
+    if (summary === undefined) return;
+    if (previous === undefined) {
+      // Opening the session failed while the daemon was away; try again now that it is back.
+      await this.openThread(summary);
+      return;
+    }
+    status("Catching up");
+    try {
+      if (after === undefined) throw new Error("No acknowledged cursor to resume from");
+      const resumed = (await this.#session.request("session.subscribe", {
+        sessionId: summary.sessionId,
+        after,
+      })) as { readonly subscriptionId: string };
+      if (this.#subscriptionId !== previous) {
+        // The view changed while resuming; drop the subscription nobody reads.
+        void this.#session
+          .request("session.unsubscribe", { subscriptionId: resumed.subscriptionId })
+          .catch(() => undefined);
+        return;
+      }
+      this.#subscriptionId = resumed.subscriptionId;
+      trace(`resumed ${summary.sessionId} after ${after}`);
+      void this.#session
+        .request("session.unsubscribe", { subscriptionId: previous })
+        .catch(() => undefined);
+      status("Connected");
+    } catch (cause) {
+      trace(`resume from cursor failed: ${describe(cause)}`);
+      if (this.#subscriptionId === previous) await this.openThread(summary);
+    }
   }
 
   #render(): void {
@@ -508,8 +624,45 @@ async function main(): Promise<void> {
     /* @vite-ignore */ new URL("./e2ee/loader/index.js", location.href).href
   )) as DeviceBinding;
   await binding.authorizeWitness(`Bearer ${link.accessToken}`);
-  const endpoint = traced(await openEndpoint(binding, link));
+  const channel = tabChannel();
+  status("Opening this device's keys");
+  const endpoint = traced(await openExclusive(binding, link, channel));
   const relay = relayFor(link);
+  const session = new RemoteBrowserSession({ endpoint, relay, ...link, trace });
+
+  // A newer tab for the same pairing takes over; this one lets go of the endpoint and its lock.
+  let released = false;
+  const release = async (reason: string) => {
+    if (released) return;
+    released = true;
+    session.close();
+    relay.close();
+    await endpoint.close().catch(() => undefined);
+    show("pairing");
+    view.steps.replaceChildren();
+    status(reason);
+    view.hint.textContent = "Tap the button to use this pairing here instead.";
+    view.retry.textContent = "Use this tab";
+    view.retry.hidden = false;
+  };
+  if (channel !== undefined) {
+    channel.onmessage = (event: MessageEvent) => {
+      const message = event.data as { type?: unknown; session?: unknown; tab?: unknown };
+      if (
+        message.type === "takeover" &&
+        message.session === link.cryptoSessionId &&
+        message.tab !== TAB_ID
+      ) {
+        void release("This pairing moved to another tab");
+      }
+    };
+  }
+  // A page restored from the back-forward cache let go of everything when it was hidden.
+  addEventListener("pagehide", () => void release("Paused"));
+  addEventListener("pageshow", (event) => {
+    if (event.persisted) location.reload();
+  });
+
   relay.onState((state) => {
     trace(`relay ${state}`);
     if (state === "reconnecting") status("Reconnecting to the relay");
@@ -519,6 +672,20 @@ async function main(): Promise<void> {
   });
   relay.onDelivery((delivery) => trace(`delivery ${delivery.opaquePayload.byteLength} bytes`));
   relay.onFailure((failure) => trace(`relay failure ${JSON.stringify(failure)}`));
+  const DAEMON_OFFLINE = "The daemon is offline; waiting for it to come back";
+  relay.onRoutes((peers) => {
+    const online = peers.some((peer) => peer.role === "daemon");
+    if (!online && relay.state === "connected") status(DAEMON_OFFLINE);
+    else if (online && view.status.textContent === DAEMON_OFFLINE) status("Connected");
+  });
+  // A phone that wakes the page or regains its network checks the socket at once, rather than
+  // waiting for the next heartbeat to notice it died while suspended.
+  const wake = () => {
+    if (document.visibilityState === "visible" && !released) void relay.checkAlive();
+  };
+  document.addEventListener("visibilitychange", wake);
+  addEventListener("online", wake);
+
   status("Connecting to the relay");
   await relay.start();
   if (!stored.paired) {
@@ -532,21 +699,35 @@ async function main(): Promise<void> {
         authorization: async () => link.accessToken,
       }),
       relay,
+      // Any answered request proves the daemon accepted the activation.
+      confirm: async () => {
+        await session.request(
+          "session.list",
+          { scope: "all_local", order: "recent", pageSize: 1 },
+          CONFIRM_TIMEOUT_MS,
+        );
+      },
       onStep: renderSteps,
     });
     save({ fragment: stored.fragment, paired: true });
   }
-  const page = new RemotePage(new RemoteBrowserSession({ endpoint, relay, ...link, trace }));
+  const page = new RemotePage(session);
   await page.listSessions();
 }
 
 // A new link opened in an already open tab only changes the fragment; start over with it.
 addEventListener("hashchange", () => location.reload());
+view.retry.addEventListener("click", () => location.reload());
 
 main().catch((cause: unknown) => {
   const code = (cause as { readonly code?: unknown }).code;
+  const known = typeof code === "string" && REFUSALS[code] !== undefined;
   status(
-    `${cause instanceof Error ? cause.message : String(cause)}${typeof code === "string" ? ` (${code})` : ""}`,
+    known
+      ? `Could not start: ${describe(cause)}`
+      : `${cause instanceof Error ? cause.message : String(cause)}${typeof code === "string" ? ` (${code})` : ""}`,
     "error",
   );
+  view.retry.textContent = "Retry";
+  view.retry.hidden = false;
 });
