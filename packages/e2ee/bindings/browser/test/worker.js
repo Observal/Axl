@@ -211,6 +211,14 @@ async function start() {
 }
 
 const ready = start();
+
+// Scenario operations run many steps, so a failure also carries its message: a flaky CI run then
+// names the step that broke instead of only "internal_error".
+const SCENARIO_OPERATIONS = new Set([
+  "device_barrier_scenario",
+  "device_termination_phase_one",
+  "device_termination_phase_two",
+]);
 let persistenceEndpoint;
 let persistenceReceive;
 
@@ -239,8 +247,10 @@ function endpoint(receive) {
 self.addEventListener("message", async ({ data }) => {
   const id = Number.isSafeInteger(data?.id) ? data.id : 0;
   let bytes;
+  let operation;
   try {
     const validated = request(data);
+    operation = validated.operation;
     bytes = validated.bytes;
     const exports = await ready;
     let value;
@@ -298,7 +308,9 @@ self.addEventListener("message", async ({ data }) => {
     }
     self.postMessage({ id, ok: true, value });
   } catch (cause) {
-    self.postMessage({ id, ok: false, code: codeFrom(cause), fatal: false });
+    const failure = { id, ok: false, code: codeFrom(cause), fatal: false };
+    if (SCENARIO_OPERATIONS.has(operation)) failure.detail = String(cause?.message ?? cause);
+    self.postMessage(failure);
   } finally {
     if (bytes instanceof Uint8Array) bytes.fill(0);
     bytes = undefined;

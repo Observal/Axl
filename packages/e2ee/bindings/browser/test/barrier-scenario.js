@@ -608,7 +608,9 @@ export async function runDeviceBarrierScenario() {
     }
     return evidence;
   } catch (cause) {
-    throw new Error(`${stage}:${String(cause)}`);
+    // The binding's errors carry only a code; keep it in the AXL_E2EE form the worker reports.
+    const code = typeof cause?.code === "string" ? ` AXL_E2EE:${cause.code}` : "";
+    throw new Error(`${stage}:${code} ${String(cause)}`);
   } finally {
     await device?.close();
     await competing?.close();
