@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { createServer } from "node:http";
+import { Agent, createServer, request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -27,13 +27,15 @@ const bob = "7a1c2a3b-5d6e-4f70-8192-a3b4c5d6e7f9";
 const RELAY_TOKEN = "relay-service-token";
 
 /** A user pool's JWKS on a local port, and access tokens it signs. */
-async function startPool() {
+async function startPool(delayMs = 0) {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const jwk = { ...(await exportJWK(publicKey)), kid: "pool-key", alg: "RS256", use: "sig" };
   const server = createServer((request, response) => {
     if (request.url === "/pool/.well-known/jwks.json") {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ keys: [jwk] }));
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ keys: [jwk] }));
+      }, delayMs);
       return;
     }
     response.writeHead(404).end();
@@ -75,9 +77,9 @@ async function installationKey() {
   };
 }
 
-test("the production runtime admits only opted-in accounts, each to its own installations", async (context) => {
+async function startRuntime(context: TestContext, poolDelayMs = 0) {
   const db = await startFakeDynamoDb();
-  const pool = await startPool();
+  const pool = await startPool(poolDelayMs);
   const port = await freePort();
   const child = spawn(process.execPath, [runtime], {
     env: {
@@ -117,6 +119,11 @@ test("the production runtime admits only opted-in accounts, each to its own inst
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 
+  return { child, pool, port, output: () => output };
+}
+
+test("the production runtime admits only opted-in accounts, each to its own installations", async (context) => {
+  const { pool, port } = await startRuntime(context);
   const origin = `http://127.0.0.1:${port}`;
   const post = async (path: string, body: unknown, token: string) => {
     const response = await fetch(`${origin}${path}`, {
@@ -193,4 +200,43 @@ test("the production runtime admits only opted-in accounts, each to its own inst
   const admitted = await consume(await key.sign(remoteDevicePossessionMessage(value, "nonce-1")));
   assert.equal(admitted.status, 200);
   assert.equal(admitted.body.role, "daemon");
+});
+
+test("a stopping control plane finishes its requests and keeps no connection open", async (context) => {
+  // The first request waits on the pool's keys, so it is still running when the signal arrives.
+  const { child, pool, port } = await startRuntime(context, 500);
+  const agent = new Agent({ keepAlive: true });
+  context.after(() => agent.destroy());
+  const token = await pool.sign(alice, { client_id: "daemon", "cognito:groups": ["remote"] });
+  const answered = new Promise<{ status: number; connection: string | undefined }>(
+    (resolve, reject) => {
+      const request = httpRequest(
+        {
+          host: "127.0.0.1",
+          port,
+          method: "POST",
+          path: "/v1/relay/tickets",
+          agent,
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        },
+        (response) => {
+          response.resume();
+          response.on("end", () =>
+            resolve({ status: response.statusCode ?? 0, connection: response.headers.connection }),
+          );
+        },
+      );
+      request.on("error", reject);
+      request.end(JSON.stringify({ installationId, role: "daemon" }));
+    },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const stopped = Date.now();
+  child.kill("SIGTERM");
+  const response = await answered;
+  assert.equal(response.status, 403, "the request in flight was answered");
+  assert.equal(response.connection, "close", "and its connection was not kept alive");
+  await once(child, "exit");
+  // Well within the keep-alive timeout a kept connection would have held the process for.
+  assert.ok(Date.now() - stopped < 3_000, `exit took ${Date.now() - stopped} ms`);
 });
