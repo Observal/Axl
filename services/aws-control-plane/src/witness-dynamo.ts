@@ -7,13 +7,16 @@
  * A replica record is an append-only ledger with its accepted operations, retained responses, and
  * used recovery reads. A record can outgrow one 400 KB item, so each entry is its own item under
  * the record's partition, next to a `head` item that carries the record's small fields, its entry
- * counts, and a revision. A transaction rereads the head with a consistent read, applies the
- * replica's pure transaction function, and writes only the new or changed entries together with
- * the next head in one `TransactWriteItems` conditioned on the revision it read. Ledger, response,
- * and recovery entries are write-once; only an operation's receipt fields may be filled in later.
+ * counts, and a revision. A transaction applies the replica's pure transaction function to the
+ * record at its last known revision and writes only the new or changed entries together with the
+ * next head in one `TransactWriteItems` conditioned on that revision, so a record another writer
+ * moved is reloaded and the step rerun. A step that writes nothing is answered only after a
+ * consistent head read confirms the revision it was computed from. Ledger, response, and recovery
+ * entries are write-once; only an operation's receipt fields may be filled in later.
  *
  * The high-water journal lives in its own table as one write-once item per sequence number, so the
- * record table's credentials cannot rewrite it. Both tables serve all three replicas of one
+ * record table's credentials cannot rewrite it. An append after the last sequence this process
+ * wrote or read is one conditional put; anything else first reads what is stored. Both tables serve all three replicas of one
  * process, which is the deployment-test limitation the design documents name: independent
  * replicas need separate accounts, stores, and recovery paths.
  */
@@ -160,11 +163,21 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
     const lineage = witnessBytesHex(lineageHash);
     return this.#serialized(lineage, async () => {
       for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt += 1) {
-        const loaded = await this.#load(lineage);
+        // The conditional write proves a cached record current; a fresh load happens on a miss or
+        // after another writer moved the record.
+        const cached = this.#cache.get(lineage);
+        const loaded = cached ?? (await this.#load(lineage));
         const outcome = transaction(
           loaded.record === undefined ? undefined : structuredClone(loaded.record),
         );
-        if (outcome.next === undefined) return structuredClone(outcome.value);
+        if (outcome.next === undefined) {
+          // Nothing is written, so nothing proves the record current: confirm its revision.
+          if (cached !== undefined && (await this.#headRevision(lineage)) !== cached.revision) {
+            this.#cache.delete(lineage);
+            continue;
+          }
+          return structuredClone(outcome.value);
+        }
         if (!witnessBytesEqual(outcome.next.lineageHash, lineageHash)) {
           throw new Error("A witness record cannot move to another lineage");
         }
@@ -211,21 +224,31 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
     }
   }
 
+  /** The stored head's revision, from a consistent read; 0 when the lineage has no record. */
+  async #headRevision(lineage: string): Promise<number> {
+    const head = await this.#client.send(
+      new GetItemCommand({
+        TableName: this.#tableName,
+        Key: { pk: { S: this.#partition(lineage) }, sk: { S: "head" } },
+        ConsistentRead: true,
+      }),
+    );
+    if (head.Item === undefined) return 0;
+    const revision = Number(head.Item.revision?.N);
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new Error("Stored witness record head is invalid");
+    }
+    return revision;
+  }
+
   /** The current record: one consistent head read, plus a full read when the cache is stale. */
   async #load(lineage: string): Promise<Loaded> {
     for (let attempt = 0; attempt < MAX_CONFLICT_RETRIES; attempt += 1) {
-      const head = await this.#client.send(
-        new GetItemCommand({
-          TableName: this.#tableName,
-          Key: { pk: { S: this.#partition(lineage) }, sk: { S: "head" } },
-          ConsistentRead: true,
-        }),
-      );
-      if (head.Item === undefined) {
+      const revision = await this.#headRevision(lineage);
+      if (revision === 0) {
         this.#cache.delete(lineage);
         return EMPTY;
       }
-      const revision = Number(head.Item.revision?.N);
       const cached = this.#cache.get(lineage);
       if (cached !== undefined && cached.revision === revision) return cached;
       try {
@@ -423,6 +446,8 @@ export class DynamoWitnessHighWaterJournal implements WitnessHighWaterJournal {
   readonly #client: DynamoDBClient;
   readonly #tableName: string;
   readonly #replica: string;
+  /** The newest sequence this process wrote or read per lineage. Stored items never change. */
+  readonly #known = new Map<string, bigint>();
 
   constructor(options: DynamoWitnessStorageOptions) {
     if (options.tableName.length === 0) throw new TypeError("DynamoDB table name is required");
@@ -435,16 +460,33 @@ export class DynamoWitnessHighWaterJournal implements WitnessHighWaterJournal {
     return `journal#${this.#replica}#${witnessBytesHex(lineageHash)}`;
   }
 
+  #learn(lineageHash: Uint8Array, sequence: bigint): void {
+    const lineage = witnessBytesHex(lineageHash);
+    if (sequence > (this.#known.get(lineage) ?? 0n)) this.#known.set(lineage, sequence);
+  }
+
   async append(entry: WitnessHighWaterEntry): Promise<void> {
     const sequence = entry.sequence.toString().padStart(SEQUENCE_DIGITS, "0");
+    // The entry right after the newest one seen needs no read: the put's condition refuses it if
+    // another writer got there first, and that case is checked below as before.
+    const known = this.#known.get(witnessBytesHex(entry.lineageHash));
+    if (known !== undefined && entry.sequence === known + 1n) {
+      await this.#put(entry, sequence);
+      return;
+    }
     const existing = await this.#entry(entry.lineageHash, sequence);
     if (existing !== undefined) {
       if (!sameEntry(existing, entry)) throw new Error("immutable journal conflict");
+      this.#learn(entry.lineageHash, entry.sequence);
       return;
     }
     if (entry.sequence !== ((await this.latest(entry.lineageHash))?.sequence ?? 0n) + 1n) {
       throw new Error("immutable journal gap");
     }
+    await this.#put(entry, sequence);
+  }
+
+  async #put(entry: WitnessHighWaterEntry, sequence: string): Promise<void> {
     try {
       await this.#client.send(
         new PutItemCommand({
@@ -464,6 +506,7 @@ export class DynamoWitnessHighWaterJournal implements WitnessHighWaterJournal {
         throw new Error("immutable journal conflict");
       }
     }
+    this.#learn(entry.lineageHash, entry.sequence);
   }
 
   async latest(lineageHash: Uint8Array): Promise<WitnessHighWaterEntry | undefined> {
@@ -478,7 +521,10 @@ export class DynamoWitnessHighWaterJournal implements WitnessHighWaterJournal {
       }),
     );
     const value = page.Items?.[0]?.value?.S;
-    return value === undefined ? undefined : decodeWitnessValue<WitnessHighWaterEntry>(value);
+    if (value === undefined) return undefined;
+    const latest = decodeWitnessValue<WitnessHighWaterEntry>(value);
+    this.#learn(lineageHash, latest.sequence);
+    return latest;
   }
 
   async #entry(
