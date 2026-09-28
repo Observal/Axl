@@ -44,6 +44,7 @@ import {
   type EventPayloadMap,
   encodeCanonicalEvent,
   type InteractionAction,
+  type InteractionKind,
   type JsonObject,
   type JsonValue,
   MAX_WIRE_MESSAGE_BYTES,
@@ -2952,6 +2953,11 @@ export class SessionManager {
       if (timeout !== undefined) clearTimeout(timeout);
       signal?.removeEventListener("abort", abort);
     }
+  }
+
+  /** The kind of a pending interaction; undefined when none is pending under that ID. */
+  pendingInteractionKind(sessionId: unknown, interactionId: string): InteractionKind | undefined {
+    return this.managed(sessionId).interactions.get(interactionId)?.request.kind;
   }
 
   async respondToInteraction(

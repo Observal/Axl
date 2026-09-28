@@ -17,11 +17,11 @@ import { ExtensionHostError } from "@axl/kernel";
 import {
   type AttachmentPresence,
   type AuthenticatedRemoteRequest,
-  type DeviceId,
   type CanonicalEvent,
   CanonicalEventSizeError,
   type ClientIdentity,
   type DaemonHostStatus,
+  type DeviceId,
   type EventCursor,
   type EventId,
   encodeWireMessage,
@@ -61,13 +61,13 @@ import {
 } from "@axl/protocol";
 
 import { commandCatalog } from "./command-catalog.ts";
-import { findExtension, type ExtensionManagementService } from "./extension-management.ts";
 import { type CommandAcceptance, CommandJournal, CommandJournalError } from "./command-journal.ts";
 import { DataDirectoryLock } from "./data-directory-lock.ts";
+import { type ExtensionManagementService, findExtension } from "./extension-management.ts";
 import type { McpConfigurationService } from "./mcp-configuration.ts";
 import type { ProviderManagementService } from "./provider-management.ts";
 import { RemoteAuthorityError, type RemoteDeviceAuthorityStore } from "./remote-authority.ts";
-import { requiredRemoteScope } from "./remote-rpc.ts";
+import { remoteRespondableInteraction, requiredRemoteScope } from "./remote-rpc.ts";
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
 export type DaemonSecurityMode = "sandboxed" | "unsafe";
@@ -1236,6 +1236,18 @@ export class AxlDaemon {
     }
     const journal = this.commandJournal;
     if (journal === undefined) throw new Error("Command journal is not open");
+    if (remoteAuthority !== undefined && normalized.method === "session.interaction.respond") {
+      const kind = this.sessions.pendingInteractionKind(
+        normalized.params.sessionId,
+        normalized.params.interactionId,
+      );
+      if (kind !== undefined && !remoteRespondableInteraction(kind)) {
+        throw new RemoteAuthorityError(
+          "scope_forbidden",
+          "Only the agent's questions can be answered from a remote device",
+        );
+      }
+    }
     const params = normalized.params as { readonly sessionId?: SessionId };
     const intendedSessionId =
       normalized.method === "session.create" ||

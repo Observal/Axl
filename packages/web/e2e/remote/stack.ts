@@ -128,7 +128,9 @@ class Service {
 
 /**
  * An OpenAI chat-completions stand-in that streams `Echo: <prompt>` and counts every prompt it is
- * asked to answer, so a test can prove each prompt reached the model exactly once.
+ * asked to answer, so a test can prove each prompt reached the model exactly once. A prompt that
+ * starts with `ask:` first calls `ask_user_question`; the request carrying the tool's answer is
+ * answered with `Echo: answered <answer>` and not counted as a new prompt.
  */
 async function startModel() {
   const prompts = new Map();
@@ -139,19 +141,58 @@ async function startModel() {
     });
     request.on("end", async () => {
       const body = JSON.parse(raw || "{}");
-      const user = [...(body.messages ?? [])].reverse().find((message) => message.role === "user");
+      const messages = body.messages ?? [];
+      const last = messages.at(-1);
+      const user = [...messages].reverse().find((message) => message.role === "user");
       const text = (
         typeof user?.content === "string"
           ? user.content
           : (user?.content ?? []).map((part) => part.text ?? "").join("")
       ).trim();
-      prompts.set(text, (prompts.get(text) ?? 0) + 1);
+      const answering = last?.role === "tool";
+      if (!answering) prompts.set(text, (prompts.get(text) ?? 0) + 1);
       response.writeHead(200, { "content-type": "text/event-stream" });
       const chunk = (delta, finish = null) =>
         response.write(
           `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`,
         );
-      for (const word of `Echo: ${text}`.split(/(?<= )/u)) {
+      if (text.startsWith("ask:") && !answering) {
+        const question = {
+          questions: [
+            {
+              header: "Color",
+              question: `Which color for ${text.slice(4).trim()}?`,
+              options: [
+                { label: "Red", description: "A warm color" },
+                { label: "Blue", description: "A cool color" },
+              ],
+            },
+          ],
+        };
+        chunk({
+          tool_calls: [
+            {
+              index: 0,
+              id: `call_${prompts.size}`,
+              type: "function",
+              function: { name: "ask_user_question", arguments: JSON.stringify(question) },
+            },
+          ],
+        });
+        chunk({}, "tool_calls");
+        response.end(
+          `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1 } })}\n\ndata: [DONE]\n\n`,
+        );
+        return;
+      }
+      const toolText =
+        typeof last?.content === "string"
+          ? last.content
+          : (last?.content ?? []).map((part) => part.text ?? "").join("");
+      const reply = answering
+        ? `Echo: answered ${toolText.replace(/\s+/gu, " ").trim()}`
+        : `Echo: ${text}`;
+      for (const word of reply.split(/(?<= )/u)) {
         chunk({ content: word });
         await delay(40);
       }
@@ -479,7 +520,12 @@ export async function startStack(directory) {
     remoteStatus: () => client((connected) => connected.remoteStatus()),
     createSession: () =>
       client((connected) =>
-        connected.request("session.create", { cwd: workspace }, { idempotencyKey: randomUUID() }),
+        connected.request(
+          "session.create",
+          // The agent may ask the user questions, which the phone answers.
+          { cwd: workspace, userQuestions: true },
+          { idempotencyKey: randomUUID() },
+        ),
       ),
     dropConnections: (side = "all") => originServer.drop(side),
     stallConnections: (side = "all") => originServer.stall(side),

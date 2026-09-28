@@ -11,13 +11,13 @@
  */
 
 import type { ConversationState } from "@axl/sdk";
-import { Conversation, Markdown } from "@axl/ui/react";
+import { Conversation, type InteractionResponder, Markdown } from "@axl/ui/react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 
 import "@axl/ui/conversation.css";
 
-import { elapsed, turnStage, turnStartedAt } from "./turn.ts";
+import { elapsed, phoneCanAnswer, turnStage, turnStartedAt } from "./turn.ts";
 
 /** A prompt the phone sent that the transcript does not show yet. */
 export interface PendingPrompt {
@@ -114,12 +114,23 @@ function Pending({ prompt }: { readonly prompt: PendingPrompt }) {
   );
 }
 
-function Thread({ snapshot }: { readonly snapshot: ThreadSnapshot }) {
+function Thread({
+  snapshot,
+  respond,
+}: {
+  readonly snapshot: ThreadSnapshot;
+  readonly respond: InteractionResponder;
+}) {
   const copy = (text: string) => void navigator.clipboard?.writeText(text).catch(() => undefined);
   return (
     <>
       <div id="records" className="remote-records">
-        <Conversation conversation={snapshot.state} onCopyMessage={copy} />
+        <Conversation
+          conversation={snapshot.state}
+          onCopyMessage={copy}
+          onRespondInteraction={respond}
+          canRespondInteraction={phoneCanAnswer}
+        />
       </div>
       <div className="remote-tail">
         {snapshot.pending.map((prompt) => (
@@ -136,6 +147,7 @@ export class ThreadRenderer {
   readonly #root: Root;
   readonly #scroller: HTMLElement;
   readonly #onFollowChange: (following: boolean) => void;
+  readonly #respond: InteractionResponder;
   #snapshot: ThreadSnapshot | undefined;
   #frame: number | undefined;
   #following = true;
@@ -144,8 +156,10 @@ export class ThreadRenderer {
     container: HTMLElement,
     scroller: HTMLElement,
     onFollowChange: (following: boolean) => void,
+    respond: InteractionResponder,
   ) {
     this.#root = createRoot(container);
+    this.#respond = respond;
     this.#scroller = scroller;
     this.#onFollowChange = onFollowChange;
     scroller.addEventListener("scroll", () => this.#setFollowing(this.#atBottom()), {
@@ -161,7 +175,7 @@ export class ThreadRenderer {
       const next = this.#snapshot;
       if (next === undefined) return;
       const follow = this.#following;
-      flushSync(() => this.#root.render(<Thread snapshot={next} />));
+      flushSync(() => this.#root.render(<Thread snapshot={next} respond={this.#respond} />));
       // Stay pinned to the newest output unless the reader scrolled up to read something.
       if (follow) this.#scroller.scrollTop = this.#scroller.scrollHeight;
     });
