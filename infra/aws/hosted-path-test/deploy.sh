@@ -126,7 +126,7 @@ terraform -chdir="$stack" apply -auto-approve \
   -target=aws_ecr_repository.relay \
   -var="image_tag=$image_tag" \
   -var="domain_name=$domain_name" \
-  -var="google_client_id=$google_client_id"   -var="control_plane_mode=$control_plane_mode"
+  -var="google_client_id=$google_client_id" \n  -var="control_plane_mode=$control_plane_mode"
 
 registry="${account}.dkr.ecr.${region}.amazonaws.com"
 aws ecr get-login-password --profile "$profile" --region "$region" |
@@ -143,7 +143,7 @@ docker push "$relay_image"
 terraform -chdir="$stack" apply -auto-approve \
   -var="image_tag=$image_tag" \
   -var="domain_name=$domain_name" \
-  -var="google_client_id=$google_client_id"   -var="control_plane_mode=$control_plane_mode"
+  -var="google_client_id=$google_client_id" \n  -var="control_plane_mode=$control_plane_mode"
 cluster="$(terraform -chdir="$stack" output -raw cluster_name)"
 aws ecs wait services-stable \
   --profile "$profile" \
