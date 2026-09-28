@@ -1625,6 +1625,8 @@ test("every TUI command has an explicit owner", async (context) => {
       "logout",
       "refresh",
       "reload",
+      // Pairing runs in the daemon; without a remote host it only explains how to set one up.
+      "remote",
       "rename",
     ],
     "sdk-workflow": [
