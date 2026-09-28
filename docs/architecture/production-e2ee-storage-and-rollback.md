@@ -151,6 +151,7 @@ No target is production-supported at the date of this RFC. The table records the
 | Linux glibc arm64, desktop login session | Secret Service 0.2 item in an unlocked user collection, restricted to tested service implementations | Hosted witness quorum | Selected with an explicit non-claim against malicious same-user processes. A missing session bus, prompt requirement, unknown service, or locked collection fails closed. |
 | Linux glibc x64, desktop login session | Same Secret Service design | Hosted witness quorum | Selected with the same non-claim and gates. |
 | Linux glibc arm64 or x64, headless | No v1 store | Hosted witness quorum would still be required | Unsupported. TPM 2.0 sealing is the preferred later candidate, not an approved fallback. |
+| Linux glibc x64 in WSL 2 on Windows x64 | Record files in WSL sealed by nested DPAPI through a stateless Windows helper ([amendment](remote-production-wsl.md)) | Hosted witness quorum | Proposed. Enabled only through a per-account opt-in until its evidence and the independent review pass. |
 | Windows MSVC arm64 | Nested machine-scope and user-scope DPAPI record under a dedicated user identity | Hosted witness quorum | Design selected, implementation unsupported until the complete Windows matrix passes. |
 | Windows MSVC x64 | Same nested DPAPI design | Hosted witness quorum | Design selected, implementation unsupported until the complete Windows matrix passes. |
 | Browser | Origin-bound non-extractable AES-KW `CryptoKey` stored in IndexedDB | Hosted witness quorum | Selected under the browser threat model. Pairing remains disabled until production promotion and the complete browser matrix pass. |
@@ -259,7 +260,7 @@ The freedesktop specification explicitly allows services to choose their own loc
 
 ### Linux headless evaluation
 
-Headless Linux is unsupported in the first production slice.
+Headless Linux is unsupported in the first production slice. WSL 2 on a Windows host is the one exception, through the DPAPI helper store in [Production remote access from a WSL daemon](remote-production-wsl.md), which keeps every record and its crash ordering on the Linux side.
 
 The preferred later candidate is TPM 2.0 sealing through the system TSS2 ESAPI. A sealed object would bind a wrapping key to one TPM and an explicit boot policy. A dedicated service account and restrictive file permissions would protect the public/private TPM object blobs. The hosted witness would remain mandatory because TPM sealing does not provide a portable per-operation monotonic anchor.
 
