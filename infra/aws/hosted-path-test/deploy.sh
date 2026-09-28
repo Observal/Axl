@@ -13,8 +13,8 @@ secret_name="axl/hosted-path/deployment-test"
 domain_name="${AXL_TEST_DOMAIN-remote.observal.io}"
 # The Google OAuth client the phone signs in with; empty turns phone sign-in off.
 google_client_id="${AXL_TEST_GOOGLE_CLIENT_ID-59486791027-ssd6oelb1sqmbo5bv4npivdi7elrau5t.apps.googleusercontent.com}"
-# deployment-test (the static test account) or production (Cognito accounts; see README.md).
-control_plane_mode="${AXL_CONTROL_PLANE_MODE:-deployment-test}"
+# production (Cognito accounts; see README.md), or deployment-test for the static test account.
+control_plane_mode="${AXL_CONTROL_PLANE_MODE:-production}"
 
 if ! git -C "$root" diff-index --quiet HEAD --; then
   echo "Refusing to deploy with tracked changes that are not committed." >&2

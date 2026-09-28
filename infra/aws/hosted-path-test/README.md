@@ -61,8 +61,8 @@ token.
 
 ## Production mode
 
-`AXL_CONTROL_PLANE_MODE=production deploy.sh` switches the same stack to production mode
-(`control_plane_mode`, default `deployment-test`). The control plane then runs
+`deploy.sh` runs the stack in production mode (`control_plane_mode`);
+`AXL_CONTROL_PLANE_MODE=deployment-test deploy.sh` switches it back to the static test account. The control plane then runs
 `production-runtime.js`, which holds no account credential and ignores the static test account,
 token, and possession proof:
 
