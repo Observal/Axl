@@ -169,8 +169,10 @@ async function start() {
     throw new Error("AXL_E2EE:artifact_integrity_failed");
   }
   const root = new URL("../", import.meta.url);
+  // Both fetches revalidate with the server rather than skip the cache: an unchanged artifact comes
+  // back as 304 instead of megabytes, and the digest below still covers the cached bytes.
   const manifestResponse = await fetch(new URL("integrity.json", root), {
-    cache: "no-store",
+    cache: "no-cache",
     credentials: "same-origin",
   });
   if (!manifestResponse.ok) throw new Error("AXL_E2EE:artifact_integrity_failed");
@@ -186,7 +188,7 @@ async function start() {
     throw new Error("AXL_E2EE:artifact_integrity_failed");
   }
   const wasmResponse = await fetch(new URL(wasmEntry.path, root), {
-    cache: "no-store",
+    cache: "no-cache",
     credentials: "same-origin",
   });
   if (!wasmResponse.ok) throw new Error("AXL_E2EE:artifact_integrity_failed");

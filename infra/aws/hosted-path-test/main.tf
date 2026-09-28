@@ -225,10 +225,12 @@ resource "aws_lb_listener_rule" "relay" {
 }
 
 resource "aws_cloudfront_distribution" "main" {
+  # PriceClass_100 has no edges in Asia, so phones and daemons in India reached ap-south-2 through
+  # Europe, and every witness call paid that detour several times per request.
   enabled         = true
   http_version    = "http2and3"
   is_ipv6_enabled = true
-  price_class     = "PriceClass_100"
+  price_class     = "PriceClass_200"
   aliases         = local.custom_domain ? [var.domain_name] : []
 
   origin {
@@ -249,13 +251,16 @@ resource "aws_cloudfront_distribution" "main" {
     origin_access_control_id = aws_cloudfront_origin_access_control.remote_page.id
   }
 
+  # The page uses Managed-CachingOptimized: it honors each object's Cache-Control (see
+  # remote-page.sh) and compresses, which shrinks the wasm on the wire.
   ordered_cache_behavior {
     path_pattern               = "/remote*"
     target_origin_id           = "remote-page"
     viewer_protocol_policy     = "redirect-to-https"
     allowed_methods            = ["GET", "HEAD"]
     cached_methods             = ["GET", "HEAD"]
-    cache_policy_id            = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+    cache_policy_id            = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+    compress                   = true
     response_headers_policy_id = aws_cloudfront_response_headers_policy.remote_page.id
 
     function_association {

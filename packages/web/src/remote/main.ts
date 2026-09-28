@@ -38,6 +38,8 @@ import {
   pairRemoteBrowserDevice,
   parseRemotePairingLink,
   parseShortRemotePairingFragment,
+  type RelayAdmissionCredential,
+  type RelayTicketProvider,
   type RemoteBrowserPairingStep,
   RemoteBrowserSession,
   RemoteDeviceControlPlane,
@@ -63,6 +65,7 @@ import { elapsed, turnStage, turnStartedAt } from "./turn.ts";
 const threadView = import("./thread-view.tsx");
 
 interface DeviceBinding {
+  getBindingInfo(): Promise<unknown>;
   authorizeWitness(authorization: string): Promise<null>;
   createDeviceEndpoint(identity: {
     readonly accountId: Uint8Array;
@@ -74,6 +77,20 @@ interface DeviceBinding {
   openDeviceEndpoint(session: {
     readonly cryptoSessionId: Uint8Array;
   }): Promise<BrowserDeviceEndpoint>;
+}
+
+/** What `session.subscribe` answers: the subscription and, for a fresh view, its snapshot. */
+interface SessionSubscription {
+  readonly subscriptionId: string;
+  readonly snapshot?: {
+    readonly snapshotId: string;
+    readonly boundaryCursor: string;
+    readonly page: {
+      readonly events: readonly CanonicalEvent[];
+      readonly nextPageCursor?: string;
+      readonly complete: boolean;
+    };
+  };
 }
 
 interface StoredPairing {
@@ -353,18 +370,42 @@ async function enroll(
   }
 }
 
+/** Time a prefetched relay ticket must still have left for the relay's first connect to use it. */
+const TICKET_MARGIN_MS = 10_000;
+
+/**
+ * Start fetching the relay's first ticket at once, so it arrives while the encryption module loads,
+ * and hand it to the first connect. Later connects, and a first connect that finds the early ticket
+ * failed or close to expiry, fetch their own.
+ */
+function prefetched(provider: RelayTicketProvider): RelayTicketProvider {
+  let early: Promise<RelayAdmissionCredential | undefined> | undefined = provider
+    .acquire()
+    .catch(() => undefined);
+  return {
+    async acquire() {
+      const ticket = await early;
+      early = undefined;
+      if (ticket !== undefined && ticket.expiresAt - Date.now() > TICKET_MARGIN_MS) return ticket;
+      return provider.acquire();
+    },
+  };
+}
+
 function relayFor(
   link: RemotePairingLink,
   key: RemoteDeviceKey,
   token: () => Promise<string>,
 ): RemoteRelayConnection {
   return new RemoteRelayConnection({
-    tickets: new HttpRelayTicketProvider({
-      controlPlaneOrigin: location.origin,
-      request: { installationId: link.installationId, role: "device", deviceId: link.deviceId },
-      authenticationHeaders: async () => ({ authorization: `Bearer ${await token()}` }),
-      proof: remoteDevicePossession(key),
-    }),
+    tickets: prefetched(
+      new HttpRelayTicketProvider({
+        controlPlaneOrigin: location.origin,
+        request: { installationId: link.installationId, role: "device", deviceId: link.deviceId },
+        authenticationHeaders: async () => ({ authorization: `Bearer ${await token()}` }),
+        proof: remoteDevicePossession(key),
+      }),
+    ),
     destinationCryptoSessionId: link.cryptoSessionId,
     reconnect: { maximumAttempts: 1_000, maximumDelayMs: 15_000 },
     heartbeatMs: HEARTBEAT_MS,
@@ -548,28 +589,26 @@ class RemotePage {
     this.#renderer.clear();
     this.#renderActivity();
     try {
-      // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
-      // skips it and can still watch sessions that are open on the laptop.
-      await this.#session
-        .request("session.resume", { sessionId: summary.sessionId })
-        .catch((cause: unknown) => {
-          const code = (cause as { readonly code?: unknown }).code;
-          if (code !== "unsafe_remote_forbidden" && code !== "scope_forbidden") throw cause;
-        });
-      const subscribed = (await this.#session.request("session.subscribe", {
-        sessionId: summary.sessionId,
-      })) as {
-        readonly subscriptionId: string;
-        readonly snapshot?: {
-          readonly snapshotId: string;
-          readonly boundaryCursor: string;
-          readonly page: {
-            readonly events: readonly CanonicalEvent[];
-            readonly nextPageCursor?: string;
-            readonly complete: boolean;
-          };
-        };
-      };
+      const subscribe = async () =>
+        (await this.#session.request("session.subscribe", {
+          sessionId: summary.sessionId,
+        })) as SessionSubscription;
+      let subscribed: SessionSubscription;
+      try {
+        // A session still open on the laptop needs no reopening, which saves a round trip.
+        subscribed = await subscribe();
+      } catch (cause) {
+        if ((cause as { readonly code?: unknown }).code !== "unknown_session") throw cause;
+        // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
+        // skips it and can still watch sessions that are open on the laptop.
+        await this.#session
+          .request("session.resume", { sessionId: summary.sessionId })
+          .catch((cause: unknown) => {
+            const code = (cause as { readonly code?: unknown }).code;
+            if (code !== "unsafe_remote_forbidden" && code !== "scope_forbidden") throw cause;
+          });
+        subscribed = await subscribe();
+      }
       this.#subscriptionId = subscribed.subscriptionId;
       const snapshot = subscribed.snapshot;
       if (snapshot !== undefined) {
@@ -919,8 +958,27 @@ function tokenFor(signIn: PhoneSignIn | undefined, link: RemotePairingLink): () 
   return async () => accessToken;
 }
 
+let bindingLoad: Promise<DeviceBinding> | undefined;
+
+/**
+ * The encryption module, imported once. Its worker fetches and verifies the wasm as soon as it
+ * exists, so asking for the binding info starts that download while sign-in is still running.
+ */
+function loadBinding(): Promise<DeviceBinding> {
+  bindingLoad ??= (
+    import(
+      /* @vite-ignore */ new URL("./e2ee/loader/index.js", location.href).href
+    ) as Promise<DeviceBinding>
+  ).then((binding) => {
+    void binding.getBindingInfo().catch(() => undefined);
+    return binding;
+  });
+  return bindingLoad;
+}
+
 async function main(): Promise<void> {
   followColorScheme();
+  void loadBinding().catch(() => undefined);
   const signIn = await startSignIn();
   if (signIn === null) return;
   let stored: StoredPairing | undefined;
@@ -965,10 +1023,10 @@ async function main(): Promise<void> {
     await enroll(link, key, token);
     save({ ...stored, enrolled: true });
   }
+  // The relay's first ticket is fetched while the encryption module loads and the endpoint opens.
+  const relay = relayFor(link, key, token);
   status("Loading the encryption module");
-  const binding = (await import(
-    /* @vite-ignore */ new URL("./e2ee/loader/index.js", location.href).href
-  )) as DeviceBinding;
+  const binding = await loadBinding();
   await binding.authorizeWitness(`Bearer ${await token()}`);
   if (signIn !== undefined) {
     // Each refreshed access token goes to the witness too. Checking every minute (and when the
@@ -987,7 +1045,6 @@ async function main(): Promise<void> {
   const channel = tabChannel();
   status("Opening this device's keys");
   const endpoint = traced(await openExclusive(binding, link, channel));
-  const relay = relayFor(link, key, token);
   const session = new RemoteBrowserSession({ endpoint, relay, ...link, trace });
 
   // A newer tab for the same pairing takes over; this one lets go of the endpoint and its lock.

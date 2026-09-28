@@ -62,10 +62,20 @@ content_type() {
   esac
 }
 
+# Vite names every file under assets/ by its content hash, so a browser keeps those for good. The
+# rest keep their names across builds and are revalidated on every load, which costs a 304 when
+# they have not changed.
+cache_control() {
+  case "$1" in
+    assets/*) echo "public, max-age=31536000, immutable" ;;
+    *) echo "no-cache" ;;
+  esac
+}
+
 aws s3 rm "s3://$bucket/remote/" --recursive >/dev/null
 (cd "$stage" && find . -type f | sed 's|^\./||') | while read -r path; do
   aws s3 cp "$stage/$path" "s3://$bucket/remote/$path" \
     --content-type "$(content_type "$path")" \
-    --cache-control "no-store" >/dev/null
+    --cache-control "$(cache_control "$path")" >/dev/null
 done
 echo "Published the phone page at $page_url"
