@@ -69,13 +69,27 @@ resource "aws_s3_bucket_policy" "remote_page" {
 }
 
 # S3 has no directory index behind an origin access control: serve /remote/ as its index.html.
+# With a public host name, the page is served only there: a pairing is kept in the page origin's
+# storage and the relay URL names that host, so the CloudFront host name redirects. A browser keeps
+# the link's fragment across the redirect.
 resource "aws_cloudfront_function" "remote_page_index" {
   name    = "${local.name}-remote-index"
   runtime = "cloudfront-js-2.0"
   publish = true
   code    = <<-JS
+    var PUBLIC_HOST = "${var.domain_name}";
     function handler(event) {
       var request = event.request;
+      var host = request.headers.host ? request.headers.host.value : "";
+      if (PUBLIC_HOST !== "" && host !== PUBLIC_HOST) {
+        var query = [];
+        for (var key in request.querystring) {
+          var entry = request.querystring[key];
+          query.push(entry.value === "" ? key : key + "=" + entry.value);
+        }
+        var location = "https://" + PUBLIC_HOST + request.uri + (query.length > 0 ? "?" + query.join("&") : "");
+        return { statusCode: 301, statusDescription: "Moved Permanently", headers: { location: { value: location } } };
+      }
       if (request.uri === "/remote") {
         return { statusCode: 302, statusDescription: "Found", headers: { location: { value: "/remote/" } } };
       }
