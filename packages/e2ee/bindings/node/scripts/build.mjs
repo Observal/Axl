@@ -9,11 +9,14 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const mode = process.argv[2];
-if (mode !== "production" && mode !== "test" && mode !== "deployment-test") {
-  throw new Error("usage: build.mjs production|test|deployment-test");
+if (!["production", "test", "deployment-test", "hosted-wsl"].includes(mode)) {
+  throw new Error("usage: build.mjs production|test|deployment-test|hosted-wsl");
 }
 if (mode === "deployment-test" && !process.env.AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE) {
   throw new Error("deployment-test builds require AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE");
+}
+if (mode === "hosted-wsl" && (!process.env.AXL_E2EE_HOSTED_TRUST_FILE || process.platform !== "linux")) {
+  throw new Error("hosted-wsl builds run on Linux and require AXL_E2EE_HOSTED_TRUST_FILE");
 }
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const e2eeRoot = resolve(packageRoot, "../..");
@@ -31,13 +34,19 @@ const targetDirectory = join(e2eeRoot, "target", `node-${mode}`);
 const staging = join(
   packageRoot,
   "dist",
-  { production: "package", test: "test-artifact", "deployment-test": "deployment-test" }[mode],
+  {
+    production: "package",
+    test: "test-artifact",
+    "deployment-test": "deployment-test",
+    "hosted-wsl": "hosted-wsl",
+  }[mode],
 );
 rmSync(staging, { recursive: true, force: true });
 mkdirSync(join(staging, "native"), { recursive: true });
 const cargoArguments = ["build", "--locked", "--release", "-p", "axl-e2ee-node", "--target-dir", targetDirectory];
 if (mode === "test") cargoArguments.push("--features", "test-fixtures");
 if (mode === "deployment-test") cargoArguments.push("--features", "deployment-test");
+if (mode === "hosted-wsl") cargoArguments.push("--features", "hosted-wsl");
 execFileSync("cargo", cargoArguments, { cwd: e2eeRoot, stdio: "inherit" });
 const library = join(
   targetDirectory,
@@ -116,13 +125,13 @@ if (mode === "production") {
   const packaged = { name: sourcePackage.name, version: sourcePackage.version, private: true, type: "module", engines: sourcePackage.engines, exports: sourcePackage.exports, files: sourcePackage.files };
   writeFileSync(join(staging, "package.json"), `${JSON.stringify(packaged, null, 2)}\n`);
 }
-if (mode === "deployment-test") {
+if (mode === "deployment-test" || mode === "hosted-wsl") {
   // The production loader with exactly one appended export; nothing else is packaged.
   mkdirSync(join(staging, "loader"), { recursive: true });
   writeFileSync(
     join(staging, "loader/index.js"),
     `${readFileSync(join(packageRoot, "loader/index.js"), "utf8")}${readFileSync(
-      join(packageRoot, "loader/deployment-test-exports.js"),
+      join(packageRoot, `loader/${mode}-exports.js`),
       "utf8",
     )}`,
   );

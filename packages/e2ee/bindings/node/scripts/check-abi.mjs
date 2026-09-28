@@ -159,6 +159,8 @@ for (const forbidden of [
   "deployment_test",
   "deployment-test-keys",
   "axl-deployment-test-keys",
+  "hostedWslDaemonEndpoint",
+  "hosted_wsl_daemon_endpoint",
 ]) {
   assert(!nativeBytes.includes(Buffer.from(forbidden)), `production binary contains ${forbidden}`);
   assert(!loaderText.includes(forbidden), `production loader contains ${forbidden}`);
@@ -204,4 +206,28 @@ if (existsSync(join(deploymentRoot, "integrity.json"))) {
     assert(!scanned.includes(Buffer.from(forbidden)), `deployment-test binary contains ${forbidden}`);
   }
   assertNoFixtureBytes(deploymentBytes, "deployment-test native binary");
+}
+
+// A hosted WSL artifact, when built, is the production binding plus one daemon constructor.
+const hostedRoot = join(root, "dist/hosted-wsl");
+if (existsSync(join(hostedRoot, "integrity.json"))) {
+  const hostedManifest = JSON.parse(readFileSync(join(hostedRoot, "integrity.json"), "utf8"));
+  assert.equal(hostedManifest.artifactKind, "hosted-wsl");
+  const [hostedArtifact] = hostedManifest.artifacts;
+  const hostedBytes = readFileSync(join(hostedRoot, hostedArtifact.path));
+  assert.equal(
+    createHash("sha256").update(hostedBytes).digest("hex"),
+    hostedArtifact.sha256,
+    "hosted-wsl native integrity drift",
+  );
+  assert.equal(
+    readFileSync(join(hostedRoot, "loader/index.js"), "utf8"),
+    `${loaderText}${readFileSync(join(root, "loader/hosted-wsl-exports.js"), "utf8")}`,
+    "the hosted-wsl loader must be the production loader plus its one appended export",
+  );
+  assert(hostedBytes.includes(Buffer.from("hostedWslDaemonEndpoint")));
+  for (const forbidden of [...derived, "deploymentTestDaemonEndpoint", "axl-deployment-test-keys"]) {
+    assert(!hostedBytes.includes(Buffer.from(forbidden)), `hosted-wsl binary contains ${forbidden}`);
+  }
+  assertNoFixtureBytes(hostedBytes, "hosted-wsl native binary");
 }

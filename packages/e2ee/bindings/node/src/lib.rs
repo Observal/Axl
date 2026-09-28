@@ -628,7 +628,11 @@ fn configured_config(
     })
 }
 
-#[cfg(any(feature = "test-fixtures", feature = "deployment-test"))]
+#[cfg(any(
+    feature = "test-fixtures",
+    feature = "deployment-test",
+    all(feature = "hosted-wsl", target_os = "linux")
+))]
 fn daemon_handle(config: Config) -> DaemonEndpoint {
     DaemonEndpoint {
         state: Arc::new(DaemonState {
@@ -649,10 +653,12 @@ fn device_handle(config: Config) -> DeviceEndpoint {
     }
 }
 
-/// The replica trust configuration pinned into this deployment-test build.
-#[cfg(feature = "deployment-test")]
-const DEPLOYMENT_TEST_REPLICA_TRUST: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/replica-trust.bin"));
+/// The replica trust configuration pinned into this hosted build.
+#[cfg(any(
+    feature = "deployment-test",
+    all(feature = "hosted-wsl", target_os = "linux")
+))]
+const PINNED_REPLICA_TRUST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/replica-trust.bin"));
 
 /// Hosted deployment-test daemon endpoint: storage under `root`, envelope keys in an owner-only
 /// file beside it, and certificates verified against the build-pinned replica trust. It is the
@@ -668,7 +674,7 @@ pub fn deployment_test_daemon_endpoint(
     let root = PathBuf::from(root);
     let keys = deployment_store::DeploymentTestFileKeys::open(&root.join("keys"))
         .map_err(map_persistence)?;
-    let trust = ReplicaTrustSet::decode_config(DEPLOYMENT_TEST_REPLICA_TRUST)
+    let trust = ReplicaTrustSet::decode_config(PINNED_REPLICA_TRUST)
         .map_err(|_| error("rollback_anchor_unavailable"))?;
     Ok(daemon_handle(Config {
         root,
@@ -677,6 +683,37 @@ pub fn deployment_test_daemon_endpoint(
         session: id(session.as_ref())?,
         device: None,
         keys: Arc::new(keys),
+        trust: Arc::new(trust),
+    }))
+}
+
+/// Hosted daemon endpoint for a daemon in WSL 2: storage under `root`, envelope keys sealed by
+/// Windows DPAPI for the Windows user through `helper` (that user's `axl-dpapi-helper.exe`), and
+/// certificates verified against the build-pinned replica trust.
+#[cfg(all(feature = "hosted-wsl", target_os = "linux"))]
+#[napi]
+pub fn hosted_wsl_daemon_endpoint(
+    root: String,
+    helper: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+) -> Result<DaemonEndpoint> {
+    let root = PathBuf::from(root);
+    let keys = axl_e2ee::persistence::wsl_dpapi_envelope_key_store(
+        &root.join("keys"),
+        std::path::Path::new(&helper),
+    )
+    .map_err(map_persistence)?;
+    let trust = ReplicaTrustSet::decode_config(PINNED_REPLICA_TRUST)
+        .map_err(|_| error("rollback_anchor_unavailable"))?;
+    Ok(daemon_handle(Config {
+        root,
+        account: id(account.as_ref())?,
+        installation: id(installation.as_ref())?,
+        session: id(session.as_ref())?,
+        device: None,
+        keys,
         trust: Arc::new(trust),
     }))
 }
