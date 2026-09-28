@@ -56,13 +56,25 @@ export interface ControlPlaneHandlerOptions {
 
 class HttpRequestError extends Error {
   readonly status: number;
+  readonly code: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, code = "bad_request") {
     super(message);
     this.name = "HttpRequestError";
     this.status = status;
+    this.code = code;
   }
 }
+
+/** The routes a phone sign-in may call: pairing and running a device, nothing the daemon does. */
+const PHONE_PATHS: ReadonlySet<string> = new Set([
+  "/v1/relay/tickets",
+  "/v1/e2ee/pairing/claims",
+  "/v1/e2ee/pairing/welcomes/fetch",
+  "/v1/e2ee/pairing/welcomes/acknowledge",
+  REMOTE_DEVICE_ENROLLMENT_PATH,
+  WITNESS_HTTP_PATH,
+]);
 
 async function readBody(
   request: IncomingMessage,
@@ -143,7 +155,7 @@ function respondError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof HttpRequestError) {
     respond(response, error.status, {
-      error: { code: "bad_request", message: error.message },
+      error: { code: error.code, message: error.message },
     });
     return;
   }
@@ -172,6 +184,16 @@ function requestPath(request: IncomingMessage): string | undefined {
 }
 
 export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): RequestListener {
+  const authenticate = async (
+    request: IncomingMessage,
+    path: string,
+  ): Promise<AccountPrincipal | undefined> => {
+    const principal = await options.publicAuthentication.authenticate(request);
+    if (principal?.scope === "phone" && !PHONE_PATHS.has(path)) {
+      throw new HttpRequestError(403, "A phone sign-in cannot call this route", "scope_forbidden");
+    }
+    return principal;
+  };
   return (request, response) => {
     void (async () => {
       if (request.method !== "POST") {
@@ -180,7 +202,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
       }
       const path = requestPath(request);
       if (path === "/v1/relay/tickets") {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -190,7 +212,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === "/v1/e2ee/pairing/claims" && options.pairing !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -203,7 +225,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === "/v1/e2ee/pairing/claims/reserve" && options.pairing !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -216,7 +238,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === "/v1/e2ee/pairing/welcomes" && options.pairing !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -229,7 +251,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === "/v1/e2ee/pairing/welcomes/fetch" && options.pairing !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -242,7 +264,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === "/v1/e2ee/pairing/welcomes/acknowledge" && options.pairing !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -256,7 +278,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === PAIRING_LINK_PUBLISH_PATH && options.pairingLinks !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -290,8 +312,8 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
               : path === REMOTE_DEVICE_REVOCATION_PATH
                 ? devices.revoke.bind(devices)
                 : undefined;
-      if (deviceAction !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+      if (deviceAction !== undefined && path !== undefined) {
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
@@ -301,7 +323,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       if (path === WITNESS_HTTP_PATH && options.witness !== undefined) {
-        const principal = await options.publicAuthentication.authenticate(request);
+        const principal = await authenticate(request, path);
         if (principal === undefined) {
           respond(response, 401, { error: { code: "unauthorized" } });
           return;

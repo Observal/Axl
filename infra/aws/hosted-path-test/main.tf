@@ -483,14 +483,18 @@ resource "aws_ecs_task_definition" "control_plane" {
     essential              = true
     readonlyRootFilesystem = true
     portMappings           = [{ containerPort = 8080, hostPort = 8080, protocol = "tcp" }]
-    environment = [
+    environment = concat([
       { name = "AXL_ENVIRONMENT", value = "deployment-test" },
       # Clients connect to the relay on the host that serves the phone page, which its CSP requires.
       { name = "AXL_TEST_RELAY_URL", value = "wss://${local.public_host}/v1/connect" },
       { name = "AXL_TICKET_TABLE", value = aws_dynamodb_table.control_plane.name },
       { name = "AXL_WITNESS_TABLE", value = aws_dynamodb_table.witness.name },
       { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name }
-    ]
+      ], local.phone_sign_in ? [
+      # Access tokens from the phone sign-in pool get the phone scope; see cognito.tf.
+      { name = "AXL_TEST_PHONE_ISSUER", value = "https://${aws_cognito_user_pool.phone[0].endpoint}" },
+      { name = "AXL_TEST_PHONE_CLIENT_ID", value = aws_cognito_user_pool_client.phone[0].id }
+    ] : [])
     secrets = [
       { name = "AXL_TEST_ACCOUNT_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:accountId::" },
       { name = "AXL_TEST_INSTALLATION_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:installationId::" },

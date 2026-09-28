@@ -105,7 +105,7 @@ resource "aws_cloudfront_response_headers_policy" "remote_page" {
   security_headers_config {
     content_security_policy {
       override                = true
-      content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+      content_security_policy = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'${local.phone_sign_in ? " https://${local.auth_host}" : ""}; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
     }
     content_type_options {
       override = true

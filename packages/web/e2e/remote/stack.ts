@@ -7,9 +7,11 @@
 // HTTPS origin that serves the phone page and forwards to both (like the stack's CloudFront); a
 // scripted model; and a real sandboxed daemon. The origin can drop or stall every relay socket, and
 // the relay, control plane, and daemon can be restarted, so tests inject the failures phones see.
+// A fake of the stack's Cognito user pool signs the phone in, so every scenario pairs the way the
+// stack does with phone sign-in: the link carries no account token.
 
 import { spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, createSign, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createWriteStream, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
@@ -208,14 +210,148 @@ async function startModel() {
 }
 
 /**
+ * A stand-in for the stack's Cognito user pool with Google behind it: `/oauth2/authorize` signs in
+ * at once and redirects back with a code, `/oauth2/token` checks PKCE and issues RS256 access
+ * tokens shaped like Cognito's, and the pool's JWKS is served over plain HTTP for the control plane.
+ */
+async function startAuthority() {
+  const clientId = "e2e-phone-page";
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid: "e2e", alg: "RS256", use: "sig" };
+  const codes = new Map();
+  const refreshTokens = new Set();
+  let signIns = 0;
+  const keys = createHttpServer((request, response) => {
+    if (request.url === "/pool/.well-known/jwks.json") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ keys: [jwk] }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  keys.listen(0, "127.0.0.1");
+  await once(keys, "listening");
+  const issuer = `http://127.0.0.1:${keys.address().port}/pool`;
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const accessToken = () => {
+    const now = Math.floor(Date.now() / 1000);
+    const signed = `${encode({ alg: "RS256", kid: "e2e", typ: "JWT" })}.${encode({
+      iss: issuer,
+      sub: "e2e-google-user",
+      token_use: "access",
+      client_id: clientId,
+      scope: "openid email",
+      iat: now,
+      exp: now + 3600,
+    })}`;
+    const signature = createSign("RSA-SHA256").update(signed).sign(privateKey, "base64url");
+    return `${signed}.${signature}`;
+  };
+  const json = (response, status, body) => {
+    response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
+    response.end(JSON.stringify(body));
+  };
+  return {
+    issuer,
+    clientId,
+    get signIns() {
+      return signIns;
+    },
+    close: () => keys.close(),
+    /** Answer the pool's routes on the origin; false for any other request. */
+    handle(request, response, path) {
+      if (path === "/oauth2/authorize") {
+        const query = new URL(request.url, "https://origin.invalid").searchParams;
+        if (
+          query.get("client_id") !== clientId ||
+          query.get("code_challenge_method") !== "S256" ||
+          query.get("identity_provider") !== "Google"
+        ) {
+          json(response, 400, { error: "invalid_request" });
+          return true;
+        }
+        const code = randomBytes(16).toString("hex");
+        const redirect = query.get("redirect_uri");
+        codes.set(code, { challenge: query.get("code_challenge"), redirect });
+        const back = new URL(redirect);
+        back.search = new URLSearchParams({ code, state: query.get("state") ?? "" }).toString();
+        response.writeHead(302, { location: back.toString() });
+        response.end();
+        return true;
+      }
+      if (path === "/oauth2/token" && request.method === "POST") {
+        let body = "";
+        request.on("data", (chunk) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          const form = new URLSearchParams(body);
+          if (form.get("client_id") !== clientId)
+            return json(response, 400, { error: "invalid_client" });
+          if (form.get("grant_type") === "authorization_code") {
+            const pending = codes.get(form.get("code"));
+            codes.delete(form.get("code"));
+            const challenge = createHash("sha256")
+              .update(form.get("code_verifier") ?? "")
+              .digest("base64url");
+            if (
+              pending === undefined ||
+              pending.challenge !== challenge ||
+              pending.redirect !== form.get("redirect_uri")
+            ) {
+              return json(response, 400, { error: "invalid_grant" });
+            }
+            signIns += 1;
+            const refresh = randomBytes(24).toString("base64url");
+            refreshTokens.add(refresh);
+            return json(response, 200, {
+              access_token: accessToken(),
+              refresh_token: refresh,
+              expires_in: 3600,
+              token_type: "Bearer",
+            });
+          }
+          if (
+            form.get("grant_type") === "refresh_token" &&
+            refreshTokens.has(form.get("refresh_token"))
+          ) {
+            return json(response, 200, {
+              access_token: accessToken(),
+              expires_in: 3600,
+              token_type: "Bearer",
+            });
+          }
+          return json(response, 400, { error: "invalid_grant" });
+        });
+        return true;
+      }
+      return false;
+    },
+  };
+}
+
+/**
  * The stack's single HTTPS origin: `/remote/` is the phone page, `/v1/connect` upgrades to the
  * relay, and everything else goes to the control plane. Relay sockets pass through here so a test
  * can close them all (a dropped network) or stop forwarding without closing (a dead path).
  */
-async function startOrigin({ port, tls, pageDirectory, controlPlanePort, relayPort }) {
+async function startOrigin({ port, tls, pageDirectory, controlPlanePort, relayPort, authority }) {
   const tunnels = new Set();
   const server = createHttpsServer(tls, (request, response) => {
     const path = new URL(request.url, "https://origin.invalid").pathname;
+    if (authority.handle(request, response, path)) return;
+    if (path === "/remote/sign-in.json") {
+      // The deployed page learns its authority the same way; here it is this origin.
+      response.writeHead(200, { ...PAGE_HEADERS, "content-type": CONTENT_TYPES[".json"] });
+      response.end(
+        JSON.stringify({
+          authority: `https://127.0.0.1:${port}`,
+          clientId: authority.clientId,
+          provider: "Google",
+        }),
+      );
+      return;
+    }
     if (path === "/remote") {
       response.writeHead(302, { location: "/remote/" });
       response.end();
@@ -346,6 +482,7 @@ export async function startStack(directory) {
   const keys = readFileSync(join(directory, "keys.json"), "utf8");
 
   const model = await startModel();
+  const authority = await startAuthority();
   const dynamo = new Service(
     "dynamodb",
     process.execPath,
@@ -380,6 +517,8 @@ export async function startStack(directory) {
           AXL_TEST_POSSESSION_PROOF: possessionProof,
           AXL_TEST_RELAY_URL: `wss://127.0.0.1:${originPort}/v1/connect`,
           AXL_TEST_WITNESS_KEYS: keys,
+          AXL_TEST_PHONE_ISSUER: authority.issuer,
+          AXL_TEST_PHONE_CLIENT_ID: authority.clientId,
           PORT: String(controlPlanePort),
         },
       },
@@ -417,6 +556,7 @@ export async function startStack(directory) {
     pageDirectory: resolve(directory, "page"),
     controlPlanePort,
     relayPort,
+    authority,
   });
 
   const home = join(directory, "home");
@@ -455,6 +595,7 @@ export async function startStack(directory) {
       accountId,
       installationId,
       accessToken,
+      phoneSignIn: true,
       possessionProof,
       binding: join(
         repositoryRoot,
@@ -515,6 +656,8 @@ export async function startStack(directory) {
     origin,
     model,
     logs,
+    /** How many times a phone signed in with the fake user pool. */
+    signIns: () => authority.signIns,
     /** A fresh pairing link, as `/remote` prints it. */
     pair: () => client(async (connected) => (await connected.startRemotePairing()).link),
     remoteStatus: () => client((connected) => connected.remoteStatus()),
@@ -551,6 +694,7 @@ export async function startStack(directory) {
       originServer.server.closeAllConnections();
       originServer.server.close();
       model.server.close();
+      authority.close();
     },
   };
 }

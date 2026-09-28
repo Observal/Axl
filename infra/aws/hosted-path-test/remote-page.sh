@@ -25,6 +25,7 @@ terraform -chdir="$stack" init -reconfigure \
   -backend-config="dynamodb_table=axl-terraform-locks-${region}" >/dev/null
 bucket="$(terraform -chdir="$stack" output -raw remote_page_bucket)"
 page_url="$(terraform -chdir="$stack" output -raw remote_page_url)"
+sign_in="$(terraform -chdir="$stack" output -raw phone_sign_in)"
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
@@ -40,6 +41,10 @@ mkdir -p "$stage/e2ee"
 cp "$source_root/packages/web/dist/remote/remote.html" "$stage/index.html"
 cp -R "$source_root/packages/web/dist/remote/assets" "$stage/assets"
 cp -R "$browser/dist/deployment-test/." "$stage/e2ee/"
+# The page signs in only when this file says where; without it the link's token is used.
+if [ -n "$sign_in" ]; then
+  printf '%s\n' "$sign_in" >"$stage/sign-in.json"
+fi
 
 content_type() {
   case "$1" in

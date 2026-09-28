@@ -84,8 +84,8 @@ test("short pairing links seal the full link under a key only the short link car
   assert.deepEqual(short.linkId, sealed.linkId);
   // The ciphertext alone reveals nothing of the invitation or the credentials.
   const text = Buffer.from(sealed.sealed).toString("latin1");
-  assert.equal(text.includes(link.accessToken), false);
-  assert.equal(sealed.shortLink.includes(link.accessToken), false);
+  assert.equal(text.includes(String(link.accessToken)), false);
+  assert.equal(sealed.shortLink.includes(String(link.accessToken)), false);
 
   const fragment = await openRemotePairingLink(sealed.sealed, short.linkId, short.key);
   assert.equal(fragment, new URL(full).hash.slice(1));
@@ -121,6 +121,15 @@ test("only a well-formed short fragment parses as one", () => {
   assert.throws(() => parseShortRemotePairingFragment(`p=${id}.${key}.C`), /malformed/u);
   assert.throws(() => parseShortRemotePairingFragment(`p=${id.slice(1)}.${key}`), /short link ID/u);
   assert.throws(() => parseShortRemotePairingFragment(`p=${id}.${key}A`), /short link key/u);
+});
+
+test("a pairing link for a phone that signs in carries no account token", () => {
+  const { accessToken: _, ...signedIn } = link;
+  const encoded = encodeRemotePairingLink("https://stack.example/remote/", signedIn);
+  const url = new URL(encoded);
+  assert.equal(new URLSearchParams(url.hash.slice(1)).has("t"), false);
+  assert.deepEqual(parseRemotePairingLink(url.hash), signedIn);
+  assert.throws(() => parseRemotePairingLink(`${url.hash}&t=`), /token/u);
 });
 
 test("pairing notices carry exactly one 48-byte claim hash", () => {

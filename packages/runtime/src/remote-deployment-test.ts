@@ -151,6 +151,11 @@ export interface DeploymentTestRemoteConfig {
   readonly accountId: string;
   readonly installationId: InstallationId;
   readonly accessToken: string;
+  /**
+   * The phone page signs in (Google through the stack's user pool), so pairing links leave out
+   * `accessToken` and the phone never holds the account credential.
+   */
+  readonly phoneSignIn: boolean;
   /** The daemon's relay possession proof. Each device proves its own key instead. */
   readonly possessionProof: Uint8Array;
   /** Path of the deployment-test Node binding loader (`dist/deployment-test/loader/index.js`). */
@@ -186,6 +191,7 @@ export async function loadDeploymentTestRemoteConfig(
     accountId: text(value.accountId, "accountId", 36),
     installationId: parseInstallationId(value.installationId),
     accessToken: text(value.accessToken, "accessToken"),
+    phoneSignIn: value.phoneSignIn === true,
     possessionProof: new Uint8Array(
       Buffer.from(text(value.possessionProof, "possessionProof"), "base64"),
     ),
@@ -464,7 +470,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
         installationId: this.#config.installationId,
         deviceId,
         cryptoSessionId,
-        accessToken: this.#config.accessToken,
+        ...(this.#config.phoneSignIn ? {} : { accessToken: this.#config.accessToken }),
         enrollmentSecret,
       });
       return {

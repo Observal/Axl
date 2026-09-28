@@ -11,6 +11,8 @@ stack="$root/infra/aws/hosted-path-test"
 secret_name="axl/hosted-path/deployment-test"
 # The stack's public host name; set AXL_TEST_DOMAIN= (empty) to use only the CloudFront host name.
 domain_name="${AXL_TEST_DOMAIN-remote.observal.io}"
+# The Google OAuth client the phone signs in with; empty turns phone sign-in off.
+google_client_id="${AXL_TEST_GOOGLE_CLIENT_ID-59486791027-ssd6oelb1sqmbo5bv4npivdi7elrau5t.apps.googleusercontent.com}"
 
 if ! git -C "$root" diff-index --quiet HEAD --; then
   echo "Refusing to deploy with tracked changes that are not committed." >&2
@@ -121,7 +123,8 @@ terraform -chdir="$stack" apply -auto-approve \
   -target=aws_ecr_repository.control_plane \
   -target=aws_ecr_repository.relay \
   -var="image_tag=$image_tag" \
-  -var="domain_name=$domain_name"
+  -var="domain_name=$domain_name" \
+  -var="google_client_id=$google_client_id"
 
 registry="${account}.dkr.ecr.${region}.amazonaws.com"
 aws ecr get-login-password --profile "$profile" --region "$region" |
@@ -137,7 +140,8 @@ docker push "$relay_image"
 
 terraform -chdir="$stack" apply -auto-approve \
   -var="image_tag=$image_tag" \
-  -var="domain_name=$domain_name"
+  -var="domain_name=$domain_name" \
+  -var="google_client_id=$google_client_id"
 cluster="$(terraform -chdir="$stack" output -raw cluster_name)"
 aws ecs wait services-stable \
   --profile "$profile" \

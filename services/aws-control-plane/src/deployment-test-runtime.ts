@@ -26,6 +26,7 @@ import {
 import { type ConsumeRelayTicketRequest, parseInstallationId } from "@axl/protocol";
 
 import {
+  CognitoPhoneAuthenticator,
   DynamoPairingLinkStore,
   DynamoPairingRendezvousStore,
   DynamoRelayTicketStore,
@@ -169,6 +170,17 @@ const witness =
         },
       });
 
+// Optional: a Cognito user pool the phone page signs in with. Its tokens get the phone scope.
+const phoneIssuer = process.env.AXL_TEST_PHONE_ISSUER;
+const phoneClientId = process.env.AXL_TEST_PHONE_CLIENT_ID;
+if ((phoneIssuer === undefined) !== (phoneClientId === undefined)) {
+  throw new Error("AXL_TEST_PHONE_ISSUER and AXL_TEST_PHONE_CLIENT_ID go together");
+}
+const phoneSignIn =
+  phoneIssuer === undefined || phoneClientId === undefined
+    ? undefined
+    : new CognitoPhoneAuthenticator({ issuer: phoneIssuer, clientId: phoneClientId, accountId });
+
 const handler = createControlPlaneHandler({
   tickets,
   pairing,
@@ -177,9 +189,8 @@ const handler = createControlPlaneHandler({
   ...(witness === undefined ? {} : { witness }),
   publicAuthentication: {
     async authenticate(request): Promise<AccountPrincipal | undefined> {
-      return secretEqual(request.headers.authorization, `Bearer ${publicToken}`)
-        ? { accountId }
-        : undefined;
+      if (secretEqual(request.headers.authorization, `Bearer ${publicToken}`)) return { accountId };
+      return phoneSignIn?.authenticate(request);
     },
   },
   internalAuthentication: {

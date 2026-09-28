@@ -22,6 +22,7 @@ function config(directory: string): DeploymentTestRemoteConfig {
     accountId: "0f0e0d0c-0b0a-4908-8706-050403020100",
     installationId: parseInstallationId("01890a5d-ac96-774b-bcce-b302099a8057"),
     accessToken: "test-token",
+    phoneSignIn: false,
     possessionProof: new Uint8Array(48),
     // No binding exists here, so restoring the paired session fails the way an outage would.
     binding: join(directory, "missing-binding.js"),

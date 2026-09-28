@@ -33,6 +33,18 @@ variable "domain_name" {
   }
 }
 
+variable "google_client_id" {
+  description = "Optional Google OAuth client ID for phone sign-in. Needs domain_name and the client secret in SSM."
+  type        = string
+  default     = ""
+}
+
+variable "google_client_secret_parameter" {
+  description = "SSM SecureString parameter holding the Google OAuth client secret."
+  type        = string
+  default     = "/axl-hosted-test/google-oauth-client-secret"
+}
+
 variable "secret_name" {
   description = "Existing Secrets Manager JSON secret populated outside Terraform."
   type        = string

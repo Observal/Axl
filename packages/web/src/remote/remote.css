@@ -222,6 +222,17 @@ svg {
   color: var(--muted);
 }
 
+.remote-sign-in {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.remote-sign-in[hidden] {
+  display: none;
+}
+
 .remote-list {
   display: grid;
   gap: 8px;
