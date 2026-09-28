@@ -196,7 +196,7 @@ jobs:
       - name: Compile target-gated storage and tests
         if: needs.changes.outputs.e2ee == 'true'
         working-directory: packages/e2ee
-        run: cargo check --locked -p axl-e2ee --tests --target ${{ matrix.target }}
+        run: cargo check --locked -p axl-e2ee -p axl-dpapi-helper --tests --target ${{ matrix.target }}
 
   e2ee-windows-model:
     name: E2EE Windows DPAPI model (x64)
