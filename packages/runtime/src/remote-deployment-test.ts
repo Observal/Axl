@@ -73,6 +73,7 @@ import {
   parseRemotePairingNotice,
   RemoteDeviceControlPlane,
   RemoteRelayConnection,
+  sealRemotePairingLink,
   uuidToBytes,
 } from "@axl/sdk";
 
@@ -457,16 +458,17 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       });
       await session.relay.start();
       this.#log(`remote: pairing session ${cryptoSessionId} is waiting for a device`);
+      const full = encodeRemotePairingLink(`${this.#config.origin}${this.#config.pagePath}`, {
+        invitation: invitation.bytes,
+        accountId: this.#config.accountId,
+        installationId: this.#config.installationId,
+        deviceId,
+        cryptoSessionId,
+        accessToken: this.#config.accessToken,
+        enrollmentSecret,
+      });
       return {
-        link: encodeRemotePairingLink(`${this.#config.origin}${this.#config.pagePath}`, {
-          invitation: invitation.bytes,
-          accountId: this.#config.accountId,
-          installationId: this.#config.installationId,
-          deviceId,
-          cryptoSessionId,
-          accessToken: this.#config.accessToken,
-          enrollmentSecret,
-        }),
+        link: await this.#shortLink(full, Number(invitation.expiresAtMs)),
         cryptoSessionId,
         deviceId,
         expiresAt: Number(invitation.expiresAtMs),
@@ -537,6 +539,26 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     relay.onState((state) => this.#log(`remote: relay ${state}`));
     this.#session = session;
     return session;
+  }
+
+  /**
+   * The link to show: a short one that names the sealed full link parked on the control plane, so
+   * the QR code stays small. A control plane that cannot park it gets the full link instead.
+   */
+  async #shortLink(full: string, expiresAt: number): Promise<string> {
+    try {
+      const sealed = await sealRemotePairingLink(full);
+      await this.#pairing.publishLink({
+        version: 1,
+        linkId: sealed.linkId,
+        sealed: sealed.sealed,
+        expiresAt,
+      });
+      return sealed.shortLink;
+    } catch (cause) {
+      this.#log(`remote: showing the full pairing link: ${describe(cause)}`);
+      return full;
+    }
   }
 
   #deliver(session: Session, delivery: RelayDelivery): void {

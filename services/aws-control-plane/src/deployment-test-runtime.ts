@@ -13,10 +13,12 @@ import { createServer } from "node:http";
 import {
   type AccountPrincipal,
   createControlPlaneHandler,
+  InMemoryPairingLinkStore,
   InMemoryPairingRendezvousStore,
   InMemoryRelayTicketStore,
-  PairingRendezvousService,
   InMemoryRemoteDeviceStore,
+  PairingLinkService,
+  PairingRendezvousService,
   type RelayTicketRecord,
   RelayTicketService,
   RemoteDeviceService,
@@ -24,6 +26,7 @@ import {
 import { type ConsumeRelayTicketRequest, parseInstallationId } from "@axl/protocol";
 
 import {
+  DynamoPairingLinkStore,
   DynamoPairingRendezvousStore,
   DynamoRelayTicketStore,
   DynamoRemoteDeviceStore,
@@ -76,6 +79,12 @@ const pairing = new PairingRendezvousService({
     tableName === undefined
       ? new InMemoryPairingRendezvousStore()
       : new DynamoPairingRendezvousStore({ tableName }),
+});
+const pairingLinks = new PairingLinkService({
+  store:
+    tableName === undefined
+      ? new InMemoryPairingLinkStore()
+      : new DynamoPairingLinkStore({ tableName }),
 });
 const devices = new RemoteDeviceService({
   store:
@@ -163,6 +172,7 @@ const witness =
 const handler = createControlPlaneHandler({
   tickets,
   pairing,
+  pairingLinks,
   devices,
   ...(witness === undefined ? {} : { witness }),
   publicAuthentication: {

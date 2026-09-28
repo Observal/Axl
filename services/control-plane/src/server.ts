@@ -6,13 +6,18 @@ import type { IncomingMessage, RequestListener, ServerResponse } from "node:http
 
 import {
   encodeInternalConsumeRelayTicketResult,
+  encodePairingLinkPublication,
   encodePairingReservation,
   encodePairingWelcomePublication,
+  PAIRING_LINK_FETCH_PATH,
+  PAIRING_LINK_PUBLISH_PATH,
   ProtocolValidationError,
   parseAcknowledgePairingWelcomeRequest,
+  parseFetchPairingLinkRequest,
   parseFetchPairingWelcomeRequest,
   parseInternalConsumeRelayTicketRequest,
   parsePublishPairingClaimRequest,
+  parsePublishPairingLinkRequest,
   parsePublishPairingWelcomeRequest,
   parseReservePairingClaimRequest,
   REMOTE_DEVICE_ENROLLMENT_PATH,
@@ -25,6 +30,7 @@ import {
 
 import { RemoteDeviceError, type RemoteDeviceService } from "./devices.ts";
 import { PairingRendezvousError, type PairingRendezvousService } from "./pairing.ts";
+import type { PairingLinkService } from "./pairing-links.ts";
 import { type AccountPrincipal, RelayTicketError, type RelayTicketService } from "./tickets.ts";
 import { type WitnessGateway, WitnessServiceError } from "./witness.ts";
 
@@ -44,6 +50,7 @@ export interface ControlPlaneHandlerOptions {
   readonly internalAuthentication: InternalRelayAuthenticator;
   readonly witness?: WitnessGateway;
   readonly pairing?: PairingRendezvousService;
+  readonly pairingLinks?: PairingLinkService;
   readonly devices?: RemoteDeviceService;
 }
 
@@ -148,6 +155,16 @@ function respondError(response: ServerResponse, error: unknown): void {
   });
 }
 
+/** Parse a request body, answering 400 rather than 503 when it is malformed. */
+function parseRequest<T>(parse: (value: unknown) => T, value: unknown): T {
+  try {
+    return parse(value);
+  } catch (cause) {
+    if (cause instanceof TypeError) throw new HttpRequestError(400, "Request validation failed");
+    throw cause;
+  }
+}
+
 function requestPath(request: IncomingMessage): string | undefined {
   if (request.url === undefined) return undefined;
   const url = new URL(request.url, "http://control-plane.invalid");
@@ -236,6 +253,30 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         );
         response.writeHead(204, { "cache-control": "no-store" });
         response.end();
+        return;
+      }
+      if (path === PAIRING_LINK_PUBLISH_PATH && options.pairingLinks !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        await options.pairingLinks.publish(
+          principal,
+          parseRequest(
+            parsePublishPairingLinkRequest,
+            parseJson(await readBody(request, 8 * 1024)),
+          ),
+        );
+        respond(response, 201, { version: 1, accepted: true });
+        return;
+      }
+      if (path === PAIRING_LINK_FETCH_PATH && options.pairingLinks !== undefined) {
+        // The phone opening a short link has no credential yet; see pairing-links.ts.
+        const result = await options.pairingLinks.fetch(
+          parseRequest(parseFetchPairingLinkRequest, parseJson(await readBody(request))),
+        );
+        respond(response, 200, encodePairingLinkPublication(result));
         return;
       }
       const devices = options.devices;

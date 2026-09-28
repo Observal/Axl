@@ -29,10 +29,13 @@ import {
   type CanonicalEvent,
   ConversationProjector,
   createRemoteDeviceKeyPair,
+  fetchRemotePairingLink,
   HostedPairingClient,
   HttpRelayTicketProvider,
+  openRemotePairingLink,
   pairRemoteBrowserDevice,
   parseRemotePairingLink,
+  parseShortRemotePairingFragment,
   type RemoteBrowserPairingStep,
   RemoteBrowserSession,
   RemoteDeviceControlPlane,
@@ -208,12 +211,19 @@ function save(value: StoredPairing): void {
 }
 
 /** The pairing to use: a new link in the address bar wins over the stored one. */
-function currentPairing(): StoredPairing | undefined {
+async function currentPairing(): Promise<StoredPairing | undefined> {
   const stored = load();
-  const fragment = location.hash.slice(1);
+  let fragment = location.hash.slice(1);
   if (fragment.length === 0) return stored;
   // Keep credentials out of the address bar, history, and screenshots.
   history.replaceState(null, "", `${location.pathname}${location.search}`);
+  // A short link names the full link sealed on the control plane; its key opens it here.
+  const short = parseShortRemotePairingFragment(fragment);
+  if (short !== undefined) {
+    status("Opening the pairing link");
+    const published = await fetchRemotePairingLink({ origin: location.origin }, short.linkId);
+    fragment = await openRemotePairingLink(published.sealed, short.linkId, short.key);
+  }
   if (stored?.fragment === fragment) return stored;
   const fresh = { fragment, paired: false };
   save(fresh);
@@ -827,7 +837,16 @@ function traced(endpoint: BrowserDeviceEndpoint): BrowserDeviceEndpoint {
 
 async function main(): Promise<void> {
   followColorScheme();
-  const stored = currentPairing();
+  let stored: StoredPairing | undefined;
+  try {
+    stored = await currentPairing();
+  } catch (cause) {
+    show("pairing");
+    trace(`pairing link rejected: ${describe(cause)}`);
+    status("This pairing link expired or can no longer be opened", "error");
+    view.hint.textContent = "Run /remote in the Axl terminal again and scan the new code.";
+    return;
+  }
   if (stored === undefined) {
     show("pairing");
     status("Not paired");

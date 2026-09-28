@@ -1,20 +1,47 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
-import { parseOperationId, type OperationId } from "./event-envelope.ts";
+import { type OperationId, parseOperationId } from "./event-envelope.ts";
 import {
+  type CryptoSessionId,
+  type DeviceId,
   decodeBase64,
   encodeBase64,
+  type InstallationId,
   parseCryptoSessionId,
   parseDeviceId,
   parseInstallationId,
-  type CryptoSessionId,
-  type DeviceId,
-  type InstallationId,
 } from "./remote-transport.ts";
 
 export const PAIRING_CLAIM_MAX_BYTES = 17_320;
 export const PAIRING_WELCOME_MAX_BYTES = 16_384;
+
+/**
+ * A short pairing link names a sealed full link the daemon parked on the control plane. The key
+ * that opens it stays in the short link's fragment, so the control plane holds only ciphertext.
+ */
+export const PAIRING_LINK_PUBLISH_PATH = "/v1/e2ee/pairing/links";
+export const PAIRING_LINK_FETCH_PATH = "/v1/e2ee/pairing/links/fetch";
+export const PAIRING_LINK_ID_BYTES = 16;
+export const PAIRING_LINK_SEALED_MAX_BYTES = 4_096;
+
+export interface PublishPairingLinkRequest {
+  readonly version: 1;
+  readonly linkId: Uint8Array;
+  readonly sealed: Uint8Array;
+  readonly expiresAt: number;
+}
+
+export interface FetchPairingLinkRequest {
+  readonly version: 1;
+  readonly linkId: Uint8Array;
+}
+
+export interface PairingLinkPublication {
+  readonly version: 1;
+  readonly sealed: Uint8Array;
+  readonly expiresAt: number;
+}
 
 export interface PublishPairingClaimRequest {
   readonly version: 1;
@@ -227,5 +254,66 @@ export function encodePairingWelcomePublication(value: PairingWelcomePublication
     welcome: encodeBase64(value.welcome),
     welcomeHash: encodeBase64(value.welcomeHash),
     expiresAt: timestamp(value.expiresAt, "pairingWelcome.expiresAt"),
+  };
+}
+
+function linkId(value: unknown, path: string): Uint8Array {
+  const bytes = decodeBase64(value, path, PAIRING_LINK_ID_BYTES);
+  if (bytes.byteLength !== PAIRING_LINK_ID_BYTES) {
+    throw new TypeError(`${path} must contain ${PAIRING_LINK_ID_BYTES} bytes`);
+  }
+  return bytes;
+}
+
+function sealed(value: unknown, path: string): Uint8Array {
+  const bytes = decodeBase64(value, path, PAIRING_LINK_SEALED_MAX_BYTES);
+  if (bytes.byteLength === 0) throw new TypeError(`${path} must not be empty`);
+  return bytes;
+}
+
+export function parsePublishPairingLinkRequest(value: unknown): PublishPairingLinkRequest {
+  const candidate = object(value, "pairingLink");
+  exact(candidate, "pairingLink", ["version", "linkId", "sealed", "expiresAt"]);
+  requireVersion(candidate.version, "pairingLink.version");
+  return {
+    version: 1,
+    linkId: linkId(candidate.linkId, "pairingLink.linkId"),
+    sealed: sealed(candidate.sealed, "pairingLink.sealed"),
+    expiresAt: timestamp(candidate.expiresAt, "pairingLink.expiresAt"),
+  };
+}
+
+export function encodePublishPairingLinkRequest(value: PublishPairingLinkRequest): unknown {
+  return {
+    version: 1,
+    linkId: encodeBase64(value.linkId),
+    sealed: encodeBase64(value.sealed),
+    expiresAt: timestamp(value.expiresAt, "pairingLink.expiresAt"),
+  };
+}
+
+export function parseFetchPairingLinkRequest(value: unknown): FetchPairingLinkRequest {
+  const candidate = object(value, "pairingLinkFetch");
+  exact(candidate, "pairingLinkFetch", ["version", "linkId"]);
+  requireVersion(candidate.version, "pairingLinkFetch.version");
+  return { version: 1, linkId: linkId(candidate.linkId, "pairingLinkFetch.linkId") };
+}
+
+export function parsePairingLinkPublication(value: unknown): PairingLinkPublication {
+  const candidate = object(value, "pairingLinkPublication");
+  exact(candidate, "pairingLinkPublication", ["version", "sealed", "expiresAt"]);
+  requireVersion(candidate.version, "pairingLinkPublication.version");
+  return {
+    version: 1,
+    sealed: sealed(candidate.sealed, "pairingLinkPublication.sealed"),
+    expiresAt: timestamp(candidate.expiresAt, "pairingLinkPublication.expiresAt"),
+  };
+}
+
+export function encodePairingLinkPublication(value: PairingLinkPublication): unknown {
+  return {
+    version: 1,
+    sealed: encodeBase64(value.sealed),
+    expiresAt: timestamp(value.expiresAt, "pairingLinkPublication.expiresAt"),
   };
 }
