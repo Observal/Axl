@@ -518,6 +518,7 @@ class RemotePage {
       (following) => {
         view.jump.hidden = following;
       },
+      (interactionId, action, content) => this.#respond(interactionId, action, content),
     );
     this.#renderer.clear();
     this.#renderActivity();
@@ -755,6 +756,25 @@ class RemotePage {
       );
       this.#render();
       status(`Send failed: ${reason}`, "error");
+    }
+  }
+
+  /** Answer the agent's question; the card shows a refusal's reason and stays answerable. */
+  async #respond(
+    interactionId: string,
+    action: "accept" | "decline" | "cancel",
+    content?: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    const sessionId = this.#sessionId;
+    if (sessionId === undefined) throw new Error("This session is no longer open");
+    try {
+      await this.#session.request(
+        "session.interaction.respond",
+        { sessionId, interactionId, action, ...(content === undefined ? {} : { content }) },
+        SEND_TIMEOUT_MS,
+      );
+    } catch (cause) {
+      throw new Error(`Could not send the answer: ${describe(cause)}`);
     }
   }
 

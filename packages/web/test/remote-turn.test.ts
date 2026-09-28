@@ -14,6 +14,7 @@ function state(fields: Partial<Record<keyof ConversationState, unknown>>): Conve
     records: [],
     tools: [],
     operations: [],
+    interactions: [],
     ...fields,
   } as unknown as ConversationState;
 }
@@ -64,7 +65,29 @@ test("the turn stage follows what the running turn streams", () => {
         operations: [{ operationId: OPERATION, status: "waiting_interaction" }],
       }),
     ),
-    "Waiting for an answer on the computer",
+    "Waiting for approval on the computer",
+  );
+  const waiting = {
+    ...running,
+    operations: [{ operationId: OPERATION, status: "waiting_interaction" }],
+  };
+  const interaction = (kind: string, resolved = false) => ({
+    request: { operationId: OPERATION, payload: { kind } },
+    ...(resolved ? { resolution: {} } : {}),
+  });
+  assert.equal(
+    turnStage(state({ ...waiting, interactions: [interaction("user_question")] })),
+    "Waiting for your answer",
+  );
+  assert.equal(
+    turnStage(
+      state({
+        ...waiting,
+        interactions: [interaction("user_question", true), interaction("mcp_tool")],
+      }),
+    ),
+    "Waiting for approval on the computer",
+    "an answered question no longer counts",
   );
   // Activity left over from another operation says nothing about this one.
   assert.equal(

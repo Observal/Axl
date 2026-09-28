@@ -3,7 +3,12 @@
 
 /** What the phone says about a running turn: its stage and how long it has been running. */
 
-import type { ConversationState } from "@axl/sdk";
+import type { ConversationState, ProjectedInteraction } from "@axl/sdk";
+
+/** The agent's questions to the user can be answered from the phone; approvals cannot. */
+export function phoneCanAnswer(interaction: ProjectedInteraction): boolean {
+  return interaction.request.payload.kind === "user_question";
+}
 
 /** What the running turn is doing, in a few words; undefined when nothing runs. */
 export function turnStage(state: ConversationState): string | undefined {
@@ -11,7 +16,15 @@ export function turnStage(state: ConversationState): string | undefined {
   if (operation === undefined) return undefined;
   const activity = state.activity?.operationId === operation ? state.activity : undefined;
   const status = state.operations.find((entry) => entry.operationId === operation)?.status;
-  if (status === "waiting_interaction") return "Waiting for an answer on the computer";
+  if (status === "waiting_interaction") {
+    const waiting = state.interactions.filter(
+      (interaction) =>
+        interaction.resolution === undefined && interaction.request.operationId === operation,
+    );
+    return waiting.some(phoneCanAnswer)
+      ? "Waiting for your answer"
+      : "Waiting for approval on the computer";
+  }
   const running = state.tools.filter(
     (tool) => tool.operationId === operation && tool.result === undefined,
   );

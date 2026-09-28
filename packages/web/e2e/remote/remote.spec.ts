@@ -158,6 +158,25 @@ test("the pairing keeps working across a control-plane restart", async () => {
   await through("control plane restarted", page, "p8b after control-plane restart", 90_000);
 });
 
+test("the phone answers the agent's question and the turn finishes", async () => {
+  // Two model turns around the question, each a few encrypted round trips.
+  test.setTimeout(120_000);
+  const started = Date.now();
+  // Answered with the question's answer, not an echo, so it is checked here rather than in prompts.
+  await page.locator("#prompt").fill("ask: the sky");
+  await page.locator("#send").click();
+  const card = page.locator(".interaction-card.questionnaire");
+  await expect(card).toContainText("Which color for the sky?", { timeout: 60_000 });
+  await expect(page.locator("#activity")).toContainText("Waiting for your answer");
+  await card.getByRole("button", { name: /Blue/u }).click();
+  await card.locator("footer button.primary").click();
+  await expect(
+    page.locator("#records .message.assistant", { hasText: "Echo: answered" }),
+  ).toContainText("Blue", { timeout: 60_000 });
+  timings["question answered"] = Date.now() - started;
+  assert.equal(stack.model.prompts.get("ask: the sky"), 1, "the question's prompt ran once");
+});
+
 test("a second tab takes over and sees every reply exactly once", async () => {
   test.setTimeout(120_000);
   const second = await context.newPage();

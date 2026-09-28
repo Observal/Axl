@@ -28,7 +28,11 @@ import { CommandJournal, CommandJournalError } from "../src/command-journal.ts";
 import { AxlDaemon } from "../src/daemon.ts";
 import { RemoteAuthorityError, RemoteDeviceAuthorityStore } from "../src/remote-authority.ts";
 import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
-import { remoteRpcMethods, requiredRemoteScope } from "../src/remote-rpc.ts";
+import {
+  remoteRespondableInteraction,
+  remoteRpcMethods,
+  requiredRemoteScope,
+} from "../src/remote-rpc.ts";
 import {
   DaemonWitnessError,
   type DaemonWitnessOutcome,
@@ -143,7 +147,17 @@ test("remote RPC scope mapping is explicit and excludes dangerous surfaces", () 
   assert.equal(requiredRemoteScope("daemon.info"), "observe");
   assert.equal(requiredRemoteScope("session.send"), "steer");
   assert.equal(requiredRemoteScope("session.shell"), undefined);
-  assert.equal(requiredRemoteScope("session.interaction.respond"), undefined);
+  assert.equal(requiredRemoteScope("session.interaction.respond"), "steer");
+  assert.equal(remoteRespondableInteraction("user_question"), true);
+  for (const kind of [
+    "mcp_tool",
+    "mcp_sampling_request",
+    "mcp_sampling_response",
+    "mcp_elicitation_form",
+    "mcp_elicitation_url",
+  ] as const) {
+    assert.equal(remoteRespondableInteraction(kind), false, kind);
+  }
   assert.equal(requiredRemoteScope("provider.auth.login"), undefined);
   assert.ok(remoteRpcMethods().length > 0);
 });
