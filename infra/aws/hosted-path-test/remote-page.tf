@@ -126,10 +126,11 @@ resource "aws_cloudfront_response_headers_policy" "remote_page" {
   }
 
   custom_headers_config {
+    # remote-page.sh sets each object's own Cache-Control; this covers any object without one.
     items {
       header   = "Cache-Control"
-      value    = "no-store"
-      override = true
+      value    = "no-cache"
+      override = false
     }
     items {
       header   = "Cross-Origin-Opener-Policy"
