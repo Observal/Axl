@@ -31,7 +31,7 @@ import {
   parseRelayLimits,
   parseRouteId,
 } from "@axl/protocol";
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, type JWTVerifyGetKey, jwtVerify } from "jose";
 
 const MAX_TOKEN_BYTES = 16 * 1024;
 
@@ -445,6 +445,60 @@ export class DynamoRemoteDeviceStore implements RemoteDeviceStore {
 }
 
 /** OIDC bearer authentication for production control-plane requests. */
+/**
+ * A person signed in on the phone page through the Cognito user pool (Google as the identity
+ * provider). It verifies the pool's access tokens for the page's app client and grants the account
+ * a phone scope: pairing and running a device, never the daemon's routes. Which Google accounts may
+ * sign in is the user pool's decision; the pairing link's enrollment secret still decides which
+ * phone pairs.
+ */
+export class CognitoPhoneAuthenticator implements PublicPrincipalAuthenticator {
+  readonly #issuer: string;
+  readonly #clientId: string;
+  readonly #accountId: string;
+  readonly #keys: JWTVerifyGetKey;
+
+  constructor(options: {
+    /** `https://cognito-idp.<region>.amazonaws.com/<user pool ID>`. */
+    readonly issuer: string;
+    readonly clientId: string;
+    readonly accountId: string;
+    /** The pool's signing keys; fetched from the issuer's JWKS when omitted. */
+    readonly keys?: JWTVerifyGetKey;
+  }) {
+    if (options.clientId.length === 0 || options.accountId.length === 0) {
+      throw new TypeError("Cognito client and account IDs are required");
+    }
+    this.#issuer = new URL(options.issuer).href.replace(/\/$/u, "");
+    this.#clientId = options.clientId;
+    this.#accountId = options.accountId;
+    this.#keys =
+      options.keys ?? createRemoteJWKSet(new URL(`${this.#issuer}/.well-known/jwks.json`));
+  }
+
+  async authenticate(
+    request: Parameters<PublicPrincipalAuthenticator["authenticate"]>[0],
+  ): Promise<AccountPrincipal | undefined> {
+    const header = request.headers.authorization;
+    if (header === undefined || header.length > MAX_TOKEN_BYTES || !header.startsWith("Bearer ")) {
+      return undefined;
+    }
+    try {
+      const { payload } = await jwtVerify(header.slice(7), this.#keys, {
+        issuer: this.#issuer,
+        algorithms: ["RS256"],
+        requiredClaims: ["sub", "exp"],
+      });
+      // Cognito access tokens carry the app client in `client_id` rather than `aud`; an ID token
+      // or another client's token is refused.
+      if (payload.token_use !== "access" || payload.client_id !== this.#clientId) return undefined;
+      return { accountId: this.#accountId, scope: "phone" };
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 export class JwtPrincipalAuthenticator implements PublicPrincipalAuthenticator {
   readonly #issuer: string;
   readonly #audience: string;

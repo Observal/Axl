@@ -4,22 +4,27 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import {
+  type ConsumeRelayTicketRequest,
+  type ConsumeRelayTicketResult,
   defaultRelayLimits,
+  type IssueRelayTicketRequest,
+  type IssueRelayTicketResult,
   parseIssueRelayTicketRequest,
   parseIssueRelayTicketResult,
   parseRelayLimits,
   parseRouteId,
   RELAY_CONNECTION_LEASE_MS,
   RELAY_TICKET_LIFETIME_MS,
-  type ConsumeRelayTicketRequest,
-  type ConsumeRelayTicketResult,
-  type IssueRelayTicketRequest,
-  type IssueRelayTicketResult,
   type RelayLimits,
 } from "@axl/protocol";
 
 export interface AccountPrincipal {
   readonly accountId: string;
+  /**
+   * `phone` for a person signed in on a phone page: it may pair and run a device, never act as the
+   * daemon. Absent for the account's own credential, which may do both.
+   */
+  readonly scope?: "phone";
 }
 
 export interface Clock {
@@ -172,6 +177,13 @@ export class RelayTicketService {
 
   async issue(principal: AccountPrincipal, value: unknown): Promise<IssueRelayTicketResult> {
     const request = parseIssueRelayTicketRequest(value);
+    if (principal.scope === "phone" && request.role !== "device") {
+      throw new RelayTicketError(
+        "forbidden_route",
+        "A phone sign-in cannot act as the daemon",
+        403,
+      );
+    }
     const grantGeneration = await this.options.authorizer.currentGeneration(principal, request);
     if (grantGeneration === undefined) {
       throw new RelayTicketError("forbidden_route", "Principal cannot access this route", 403);

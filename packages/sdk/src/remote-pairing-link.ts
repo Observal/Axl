@@ -43,8 +43,11 @@ export interface RemotePairingLink {
   readonly installationId: InstallationId;
   readonly deviceId: DeviceId;
   readonly cryptoSessionId: CryptoSessionId;
-  /** Deployment-test bearer token for the control plane, relay tickets, and witness. */
-  readonly accessToken: string;
+  /**
+   * Deployment-test bearer token for the control plane, relay tickets, and witness. Absent when
+   * the phone signs in instead, so the link carries no account credential.
+   */
+  readonly accessToken?: string;
   /** One-time secret that enrolls the device's own key for `deviceId`. */
   readonly enrollmentSecret: Uint8Array;
 }
@@ -70,12 +73,6 @@ function fromBase64Url(value: string | null, field: string, maximumBytes: number
     throw new TypeError(`Pairing link ${field} is outside its bound`);
   }
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-function required(values: URLSearchParams, name: string): string {
-  const value = values.get(name);
-  if (value === null || value.length === 0) throw new TypeError(`Pairing link ${name} is missing`);
-  return value;
 }
 
 /** A UUID carried as its 16 bytes in base64url. */
@@ -105,7 +102,7 @@ export function encodeRemotePairingLink(pageUrl: string, link: RemotePairingLink
     n: base64Url(uuidToBytes(link.installationId)),
     d: base64Url(uuidToBytes(link.deviceId)),
     s: base64Url(uuidToBytes(link.cryptoSessionId)),
-    t: link.accessToken,
+    ...(link.accessToken === undefined ? {} : { t: link.accessToken }),
     e: base64Url(link.enrollmentSecret),
   });
   url.hash = values.toString();
@@ -118,8 +115,11 @@ export function parseRemotePairingLink(fragment: string): RemotePairingLink {
   if (values.get("v") !== String(REMOTE_PAIRING_LINK_VERSION)) {
     throw new TypeError("Pairing link version is unsupported");
   }
-  const accessToken = required(values, "t");
-  if (accessToken.length > MAX_TOKEN_CHARACTERS) {
+  const accessToken = values.get("t") ?? undefined;
+  if (
+    accessToken !== undefined &&
+    (accessToken.length === 0 || accessToken.length > MAX_TOKEN_CHARACTERS)
+  ) {
     throw new TypeError("Pairing link token is outside its bound");
   }
   return {
@@ -128,7 +128,7 @@ export function parseRemotePairingLink(fragment: string): RemotePairingLink {
     installationId: parseInstallationId(uuidField(values, "n", "installation")),
     deviceId: parseDeviceId(uuidField(values, "d", "device")),
     cryptoSessionId: parseCryptoSessionId(uuidField(values, "s", "session")),
-    accessToken,
+    ...(accessToken === undefined ? {} : { accessToken }),
     enrollmentSecret: enrollmentSecret(values),
   };
 }

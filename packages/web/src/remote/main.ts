@@ -5,9 +5,11 @@
  * Deployment-test phone page for remote access.
  *
  * `/remote` in the terminal prints a link to this page. The link fragment carries the daemon's
- * pairing invitation, this pairing's fresh device ID with a one-time enrollment secret, and the
- * deployment-test stack's access token; the page stores it in this browser's own storage and
- * removes it from the address bar. It creates this device's own signing key (kept in IndexedDB,
+ * pairing invitation and this pairing's fresh device ID with a one-time enrollment secret; the page
+ * stores it in this browser's own storage and removes it from the address bar. When the stack
+ * offers phone sign-in (`sign-in.json` next to this page), the person signs in with Google first
+ * and the page uses those tokens, which only reach the routes a phone needs; otherwise the link
+ * also carries the stack's deployment-test access token. It creates this device's own signing key (kept in IndexedDB,
  * never exported), enrolls it, pairs the browser binding's device endpoint with the daemon, and
  * then drives sessions through end-to-end encrypted requests over the relay. Every relay
  * connection is admitted with a signature by that key. Replica trust is pinned into the binding
@@ -53,6 +55,7 @@ import {
 import "@axl/ui/theme.css";
 import "./remote.css";
 
+import { loadSignInConfig, PhoneSignIn, SignInRequiredError } from "./sign-in.ts";
 import type { PendingPrompt, ThreadRenderer } from "./thread-view.tsx";
 import { elapsed, turnStage, turnStartedAt } from "./turn.ts";
 
@@ -121,6 +124,9 @@ const view = {
   back: element<HTMLButtonElement>("back"),
   refresh: element<HTMLButtonElement>("refresh"),
   retry: element<HTMLButtonElement>("retry"),
+  signIn: element<HTMLElement>("sign-in"),
+  signInHint: element<HTMLParagraphElement>("sign-in-hint"),
+  signInButton: element<HTMLButtonElement>("sign-in-button"),
   pairing: element<HTMLElement>("pairing"),
   steps: element<HTMLOListElement>("steps"),
   hint: element<HTMLParagraphElement>("pairing-hint"),
@@ -156,7 +162,8 @@ function status(text: string, tone: "normal" | "error" = "normal"): void {
   view.status.classList.toggle("error", tone === "error");
 }
 
-function show(section: "pairing" | "sessions" | "thread"): void {
+function show(section: "sign-in" | "pairing" | "sessions" | "thread"): void {
+  view.signIn.hidden = section !== "sign-in";
   view.pairing.hidden = section !== "pairing";
   view.sessions.hidden = section !== "sessions";
   view.thread.hidden = section !== "thread";
@@ -324,10 +331,14 @@ async function deviceKey(deviceId: string): Promise<RemoteDeviceKey> {
 const FINAL_ENROLLMENT = new Set([400, 401, 403, 404, 409, 410]);
 
 /** Enroll this device's key for the pairing's device ID once; a retry with the same key is fine. */
-async function enroll(link: RemotePairingLink, key: RemoteDeviceKey): Promise<void> {
+async function enroll(
+  link: RemotePairingLink,
+  key: RemoteDeviceKey,
+  token: () => Promise<string>,
+): Promise<void> {
   const devices = new RemoteDeviceControlPlane({
     controlPlaneOrigin: location.origin,
-    authenticationHeaders: async () => ({ authorization: `Bearer ${link.accessToken}` }),
+    authenticationHeaders: async () => ({ authorization: `Bearer ${await token()}` }),
   });
   for (let delay = 1_000; ; delay = Math.min(delay * 2, 15_000)) {
     try {
@@ -342,12 +353,16 @@ async function enroll(link: RemotePairingLink, key: RemoteDeviceKey): Promise<vo
   }
 }
 
-function relayFor(link: RemotePairingLink, key: RemoteDeviceKey): RemoteRelayConnection {
+function relayFor(
+  link: RemotePairingLink,
+  key: RemoteDeviceKey,
+  token: () => Promise<string>,
+): RemoteRelayConnection {
   return new RemoteRelayConnection({
     tickets: new HttpRelayTicketProvider({
       controlPlaneOrigin: location.origin,
       request: { installationId: link.installationId, role: "device", deviceId: link.deviceId },
-      authenticationHeaders: async () => ({ authorization: `Bearer ${link.accessToken}` }),
+      authenticationHeaders: async () => ({ authorization: `Bearer ${await token()}` }),
       proof: remoteDevicePossession(key),
     }),
     destinationCryptoSessionId: link.cryptoSessionId,
@@ -835,8 +850,79 @@ function traced(endpoint: BrowserDeviceEndpoint): BrowserDeviceEndpoint {
   };
 }
 
+/** Show the sign-in button; it leaves for the provider and comes back to this page. */
+function offerSignIn(signIn: PhoneSignIn, message: string, tone: "normal" | "error" = "normal") {
+  show("sign-in");
+  connection("offline");
+  status(tone === "error" ? message : "Signed out", tone);
+  view.signInHint.textContent =
+    tone === "error" ? "Sign in again to keep using this phone." : message;
+  view.signInButton.onclick = () => {
+    view.signInButton.disabled = true;
+    status("Opening sign-in");
+    void signIn
+      .authorizeUrl(location.hash)
+      .then((url) => location.assign(url))
+      .catch((cause: unknown) => {
+        view.signInButton.disabled = false;
+        status(`Could not start sign-in: ${describe(cause)}`, "error");
+      });
+  };
+}
+
+/**
+ * Sign in when the stack asks for it. Returns the signed-in session, undefined when the stack has
+ * no phone sign-in, or null when the page is waiting for the person to sign in.
+ */
+async function startSignIn(): Promise<PhoneSignIn | undefined | null> {
+  const config = await loadSignInConfig(new URL(location.href));
+  if (config === undefined) return undefined;
+  const signIn = new PhoneSignIn({
+    config,
+    redirectUri: `${location.origin}${location.pathname}`,
+    local: localStorage,
+    session: sessionStorage,
+  });
+  try {
+    status("Signing in");
+    const returned = await signIn.complete(location.search);
+    // Put the pairing link's fragment back where the pairing code looks for it.
+    if (returned !== undefined)
+      history.replaceState(null, "", `${location.pathname}${returned.fragment}`);
+  } catch (cause) {
+    history.replaceState(null, "", location.pathname);
+    trace(`sign-in failed: ${describe(cause)}`);
+    offerSignIn(signIn, cause instanceof Error ? cause.message : "Sign-in failed", "error");
+    return null;
+  }
+  if (!signIn.signedIn) {
+    offerSignIn(signIn, "Sign in to use this phone with Axl.");
+    return null;
+  }
+  try {
+    await signIn.accessToken();
+  } catch (cause) {
+    if (!(cause instanceof SignInRequiredError)) throw cause;
+    offerSignIn(signIn, cause.message, "error");
+    return null;
+  }
+  return signIn;
+}
+
+/** The bearer token for this phone: the signed-in session's, else the link's own. */
+function tokenFor(signIn: PhoneSignIn | undefined, link: RemotePairingLink): () => Promise<string> {
+  if (signIn !== undefined) return () => signIn.accessToken();
+  const accessToken = link.accessToken;
+  if (accessToken === undefined) {
+    throw new Error("This pairing link needs a sign-in this page does not offer");
+  }
+  return async () => accessToken;
+}
+
 async function main(): Promise<void> {
   followColorScheme();
+  const signIn = await startSignIn();
+  if (signIn === null) return;
   let stored: StoredPairing | undefined;
   try {
     stored = await currentPairing();
@@ -872,21 +958,36 @@ async function main(): Promise<void> {
   }
   // Enrollment comes first: a link already used on another device must be refused before this
   // browser touches any E2EE or witness state for its device ID.
+  const token = tokenFor(signIn, link);
   const key = await deviceKey(link.deviceId);
   if (stored.enrolled !== true) {
     status("Registering this device");
-    await enroll(link, key);
+    await enroll(link, key, token);
     save({ ...stored, enrolled: true });
   }
   status("Loading the encryption module");
   const binding = (await import(
     /* @vite-ignore */ new URL("./e2ee/loader/index.js", location.href).href
   )) as DeviceBinding;
-  await binding.authorizeWitness(`Bearer ${link.accessToken}`);
+  await binding.authorizeWitness(`Bearer ${await token()}`);
+  if (signIn !== undefined) {
+    // Each refreshed access token goes to the witness too. Checking every minute (and when the
+    // page wakes) refreshes it before it expires, even while nothing else asks for it.
+    signIn.onToken((accessToken) => void binding.authorizeWitness(`Bearer ${accessToken}`));
+    const keepFresh = () =>
+      void signIn.accessToken().catch((cause: unknown) => {
+        if (cause instanceof SignInRequiredError) offerSignIn(signIn, cause.message, "error");
+        else trace(`token refresh failed: ${describe(cause)}`);
+      });
+    setInterval(keepFresh, 60_000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") keepFresh();
+    });
+  }
   const channel = tabChannel();
   status("Opening this device's keys");
   const endpoint = traced(await openExclusive(binding, link, channel));
-  const relay = relayFor(link, key);
+  const relay = relayFor(link, key, token);
   const session = new RemoteBrowserSession({ endpoint, relay, ...link, trace });
 
   // A newer tab for the same pairing takes over; this one lets go of the endpoint and its lock.
@@ -957,7 +1058,7 @@ async function main(): Promise<void> {
       endpoint,
       pairing: new HostedPairingClient({
         origin: location.origin,
-        authorization: async () => link.accessToken,
+        authorization: token,
       }),
       relay,
       // Any answered request proves the daemon accepted the activation.

@@ -67,6 +67,18 @@ async function phone(browser: Browser, name: string): Promise<BrowserContext> {
   return created;
 }
 
+/** Open a pairing link the way a phone does, signing in first when the page asks. */
+async function openLink(target: Page, link: string): Promise<void> {
+  await target.goto(link.replace("#", "?debug#"));
+  await expect(target.locator("#status")).not.toHaveText(/^(Starting|Signing in)$/u, {
+    timeout: 30_000,
+  });
+  if (await target.locator("#sign-in").isVisible()) {
+    await target.locator("#sign-in-button").click();
+    await expect(target.locator("#sign-in")).toBeHidden({ timeout: 30_000 });
+  }
+}
+
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(600_000);
   if (directory === undefined) throw new Error("Run through scripts/remote-e2e.ts");
@@ -91,9 +103,11 @@ test("the phone pairs from the link and completes a turn", async () => {
   // `/remote` shows a short link naming the sealed full link, so its QR code stays small.
   expect(link).toMatch(/\/remote\/#p=[\w-]{22}\.[\w-]{43}$/u);
   const started = Date.now();
-  await page.goto(link.replace("#", "?debug#"));
+  await openLink(page, link);
   await expect(page.locator(".remote-session")).toHaveCount(1, { timeout: 180_000 });
   timings.pairing = Date.now() - started;
+  // The link carried no account token: the phone signed in and used the pool's tokens.
+  assert.equal(stack.signIns(), 1);
   await page.locator(".remote-session").click();
   await expect(page.locator("#thread")).toBeVisible();
   await through("first turn", page, "p1 first turn", 120_000);
@@ -203,7 +217,7 @@ test("pairing again moves the daemon to the new phone and locks the old one out"
   try {
     const nextPage = await next.newPage();
     const started = Date.now();
-    await nextPage.goto(link.replace("#", "?debug#"));
+    await openLink(nextPage, link);
     await expect(nextPage.locator(".remote-session")).toHaveCount(1, { timeout: 180_000 });
     timings["pairing again"] = Date.now() - started;
     await nextPage.locator(".remote-session").click();
@@ -211,7 +225,7 @@ test("pairing again moves the daemon to the new phone and locks the old one out"
 
     // The link enrolled the new phone's key, so a copy of it opened anywhere else enrolls nothing.
     const copied = await copy.newPage();
-    await copied.goto(link.replace("#", "?debug#"));
+    await openLink(copied, link);
     await expect(copied.locator("#status")).toHaveText(/already used on another device/u, {
       timeout: 60_000,
     });

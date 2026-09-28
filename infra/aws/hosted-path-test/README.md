@@ -47,6 +47,18 @@ phone page, and the CloudFront host name redirects `/remote/` there, keeping the
 Set `AXL_TEST_DOMAIN=` (empty) to deploy on the CloudFront host name alone, or another name whose
 parent zone is in this account.
 
+Phone sign-in uses a Cognito user pool that federates Google, answered on
+`auth.remote.observal.io` (cognito.tf). `deploy.sh` passes the Google OAuth client ID
+(`AXL_TEST_GOOGLE_CLIENT_ID`, empty turns sign-in off), and Terraform reads the client secret from
+the SSM SecureString `/axl-hosted-test/google-oauth-client-secret`, so it also lands in the
+encrypted Terraform state. Register `https://auth.remote.observal.io/oauth2/idpresponse` as an
+authorized redirect URI of the Google client. Any Google account may sign in. The control plane
+gives the pool's access tokens the phone scope: pairing, enrolling a device, device relay tickets,
+and the witness, never the daemon's routes (claim reservation, Welcome and link publication,
+device invitation and revocation, daemon relay tickets). `remote-page.sh` publishes `sign-in.json`
+beside the page and `remote-config.sh` sets `phoneSignIn`, so pairing links leave out the account
+token.
+
 Run the HTTPS and WebSocket opaque-delivery smoke test again:
 
 ```bash
