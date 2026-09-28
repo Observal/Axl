@@ -43,28 +43,33 @@ const LINK = `https://stack.example/remote/#v=1&i=${"A".repeat(401)}&a=${"B".rep
 // A short link, as `/remote` prints once the control plane parks the full one.
 const SHORT_LINK = `https://remote.example/remote/#p=${"H".repeat(22)}.${"I".repeat(43)}`;
 
-async function openApp(context: TestContext, columns: number, link = LINK) {
+async function openApp(context: TestContext, columns: number, link = LINK, remote = true) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "axl-tui-remote-")));
   const socketPath = join(directory, "axl.sock");
   const daemon = new AxlDaemon({
     socketPath,
     dataDirectory: join(directory, "data"),
-    remotePairing: {
-      start: async () => ({
-        link,
-        cryptoSessionId: "01890a5d-ac96-774b-bcce-b302099a8059",
-        deviceId: "01890a5d-ac96-774b-bcce-b302099a8058",
-        expiresAt: Date.now() + 10 * 60_000,
-      }),
-      status: () => ({
-        phase: "paired",
-        relay: "reconnecting",
-        deviceOnline: false,
-        witness: "ready",
-        lastError: { message: "remote: relay stopped answering", at: Date.now() },
-        logPath: join(directory, "remote.log"),
-      }),
-    },
+    // Without a remote host the daemon does not grant pairing.
+    ...(remote
+      ? {
+          remotePairing: {
+            start: async () => ({
+              link,
+              cryptoSessionId: "01890a5d-ac96-774b-bcce-b302099a8059",
+              deviceId: "01890a5d-ac96-774b-bcce-b302099a8058",
+              expiresAt: Date.now() + 10 * 60_000,
+            }),
+            status: () => ({
+              phase: "paired",
+              relay: "reconnecting",
+              deviceOnline: false,
+              witness: "ready",
+              lastError: { message: "remote: relay stopped answering", at: Date.now() },
+              logPath: join(directory, "remote.log"),
+            }),
+          },
+        }
+      : {}),
     runtime: async () => ({ model, tools: new ToolRegistry() }),
   });
   await daemon.start();
@@ -145,4 +150,10 @@ test("/remote status shows the pairing, relay, phone, and latest failure", async
   assert.match(text(), /Phone {4}offline/u);
   assert.match(text(), /relay stopped answering/u);
   assert.doesNotMatch(text(), /Pair a phone/u, "status never starts a new pairing");
+});
+
+test("/remote on a daemon without remote access says how to set it up", async (context) => {
+  const { input, text } = await openApp(context, 100, LINK, false);
+  input.write("/remote\r");
+  await until(() => text().includes("axl remote login"), "setup hint");
 });

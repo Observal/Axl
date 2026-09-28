@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
-// Phone remote-control failure evidence against a local deployment-test stack. This generates a
-// witness for the run, builds the deployment-test Node and browser bindings pinned to it, stages
-// the phone page, makes a throwaway certificate for 127.0.0.1, and runs e2e/remote with Playwright.
-// Existing deployment-test builds (for example ones pinned to the AWS stack) are restored after.
+// Phone remote-control failure evidence against a local copy of the hosted stack. This generates a
+// witness for the run, builds the Node and browser bindings pinned to it (the hosted WSL Node
+// artifact in production mode, the default, or the deployment-test one with
+// AXL_REMOTE_E2E_MODE=deployment-test), stages the phone page, makes a throwaway certificate for
+// 127.0.0.1, and runs e2e/remote with Playwright. Existing builds (for example ones pinned to the
+// AWS stack) are restored after.
 //
 // Needs the Rust toolchain the E2EE bindings build with, Elixir for the relay, bubblewrap for the
 // sandboxed daemon, and openssl. Set AXL_REMOTE_E2E_SKIP_BUILD=1 to reuse the TypeScript build.
@@ -27,6 +29,10 @@ import { join, resolve } from "node:path";
 const web = resolve(import.meta.dirname, "..");
 const root = resolve(web, "../..");
 const bindings = join(root, "packages/e2ee/bindings");
+const mode = process.env.AXL_REMOTE_E2E_MODE ?? "production";
+if (mode !== "production" && mode !== "deployment-test") {
+  throw new Error("AXL_REMOTE_E2E_MODE must be production or deployment-test");
+}
 const scratch = mkdtempSync(join(tmpdir(), "axl-remote-e2e-"));
 const run = (command, args, options = {}) =>
   execFileSync(command, args, { cwd: root, stdio: "inherit", ...options });
@@ -71,10 +77,15 @@ try {
     ),
   );
 
-  const env = { ...process.env, AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE: trustFile };
-  preserve(join(bindings, "node/dist/deployment-test"));
+  const env = {
+    ...process.env,
+    AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE: trustFile,
+    AXL_E2EE_HOSTED_TRUST_FILE: trustFile,
+  };
+  const nodeArtifact = mode === "production" ? "hosted-wsl" : "deployment-test";
+  preserve(join(bindings, `node/dist/${nodeArtifact}`));
   preserve(join(bindings, "browser/dist/deployment-test"));
-  run(process.execPath, [join(bindings, "node/scripts/build.mjs"), "deployment-test"], { env });
+  run(process.execPath, [join(bindings, "node/scripts/build.mjs"), nodeArtifact], { env });
   run(process.execPath, [join(bindings, "browser/scripts/build.mjs"), "deployment-test"], { env });
   run("pnpm", ["--filter", "@axl/web", "build:remote"]);
 
@@ -119,7 +130,10 @@ try {
       "e2e/remote/playwright.config.ts",
       ...process.argv.slice(2),
     ],
-    { cwd: web, env: { ...process.env, AXL_REMOTE_E2E_DIRECTORY: scratch } },
+    {
+      cwd: web,
+      env: { ...process.env, AXL_REMOTE_E2E_DIRECTORY: scratch, AXL_REMOTE_E2E_MODE: mode },
+    },
   );
 } finally {
   // Next to Playwright's results, so CI keeps them when a run fails.

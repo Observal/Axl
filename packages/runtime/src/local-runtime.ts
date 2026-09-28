@@ -377,18 +377,22 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
-  // Deployment-test remote access only; production has no remote host yet.
+  // Remote access: the deployment-test stack when AXL_REMOTE_DEPLOYMENT_TEST names its
+  // configuration, otherwise the account `axl remote login` stored on this machine, if any.
+  const remoteLog = (message: string) =>
+    process.stderr.write(`${message}
+`);
   const remoteConfig = process.env.AXL_REMOTE_DEPLOYMENT_TEST;
   const remote =
     remoteConfig === undefined || remoteConfig === ""
-      ? undefined
+      ? await import("./remote-production.ts").then((module) =>
+          module.openStoredRemoteHost(axlHome, stateDirectory, remoteLog),
+        )
       : await import("./remote-deployment-test.ts").then(async (module) =>
-          module.DeploymentTestRemoteHost.open(
+          module.openDeploymentTestRemoteHost(
             await module.loadDeploymentTestRemoteConfig(remoteConfig),
             stateDirectory,
-            (message) =>
-              process.stderr.write(`${message}
-`),
+            remoteLog,
           ),
         );
   let daemon: AxlDaemon;

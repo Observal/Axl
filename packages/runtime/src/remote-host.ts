@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Remote host for the hosted deployment-test stack.
+ * Remote host for a hosted stack: the control plane, relay, and witness behind one origin.
  *
- * It is enabled only when `AXL_REMOTE_DEPLOYMENT_TEST` names a configuration file, and it is not a
- * production remote host: the stack has one account, one installation, one device identity, and
- * shared test credentials, and the daemon endpoint comes from the deployment-test Node artifact
- * (build-pinned hosted witness trust, owner-only file keys).
+ * What differs between stacks comes in through `HostedRemoteSettings`: the account's credential,
+ * the daemon's relay possession proof, and where the daemon endpoint comes from. The deployment-test
+ * stack (`remote-deployment-test.ts`) passes its shared test credentials and the deployment-test
+ * Node artifact; production (`remote-production.ts`) passes the signed-in account, the
+ * installation's own key, and the hosted WSL artifact.
  *
  * `/remote` (`remote.pairing.start`) creates a fresh crypto session and daemon endpoint, registers
  * it with the hosted witness, and returns a link for the device page. The daemon then waits on the
@@ -33,8 +34,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { join } from "node:path";
 
 import {
   type AxlDaemon,
@@ -56,7 +56,6 @@ import {
   type OperationId,
   parseCryptoSessionId,
   parseDeviceId,
-  parseInstallationId,
   parseOperationId,
   parseRemoteE2eeEnvelope,
   parseTransportAttemptId,
@@ -77,7 +76,6 @@ import {
   uuidToBytes,
 } from "@axl/sdk";
 
-const CONFIG_VERSION = 1;
 /** Version 2 records the device ID minted for each pairing. */
 const STATE_VERSION = 2;
 const DEVICE_SCOPES: readonly RemoteDeviceScope[] = ["observe", "steer"];
@@ -143,64 +141,35 @@ function whenConnected(relay: RemoteRelayConnection, timeoutMs: number): Promise
   });
 }
 
-export interface DeploymentTestRemoteConfig {
+export interface HostedRemoteSettings {
   /** HTTPS origin of the stack: control plane, witness, relay tickets, and the device page. */
   readonly origin: string;
   /** Path of the device page under `origin`, for example `/remote/`. */
   readonly pagePath: string;
   readonly accountId: string;
   readonly installationId: InstallationId;
-  readonly accessToken: string;
-  /**
-   * The phone page signs in (Google through the stack's user pool), so pairing links leave out
-   * `accessToken` and the phone never holds the account credential.
-   */
-  readonly phoneSignIn: boolean;
-  /** The daemon's relay possession proof. Each device proves its own key instead. */
-  readonly possessionProof: Uint8Array;
-  /** Path of the deployment-test Node binding loader (`dist/deployment-test/loader/index.js`). */
-  readonly binding: string;
+  /** The account's bearer credential for control-plane requests. */
+  accessToken(): Promise<string>;
+  /** The daemon's relay admission proof for an issued ticket. */
+  possession(ticket: string): Promise<{
+    readonly connectionNonce: string;
+    readonly possessionProof: Uint8Array;
+  }>;
+  /** Put in pairing links, for a phone that does not sign in (deployment test only). */
+  readonly linkAccessToken?: string;
+  /** Run before a pairing starts or a paired session is restored; it may run again. */
+  prepare?(): Promise<void>;
+  /** The daemon endpoint for one crypto session, with its storage under `root`. */
+  endpoint(
+    root: string,
+    accountId: Uint8Array,
+    installationId: Uint8Array,
+    cryptoSessionId: Uint8Array,
+  ): Promise<HostedDaemonEndpoint>;
 }
 
-function text(value: unknown, name: string, maximum = 4_096): string {
-  if (typeof value !== "string" || value.length === 0 || value.length > maximum) {
-    throw new TypeError(`Remote deployment-test configuration ${name} is invalid`);
-  }
-  return value;
-}
-
-export async function loadDeploymentTestRemoteConfig(
-  path: string,
-): Promise<DeploymentTestRemoteConfig> {
-  const value = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
-  if (value.version !== CONFIG_VERSION) {
-    throw new TypeError("Remote deployment-test configuration version is unsupported");
-  }
-  const origin = new URL(text(value.origin, "origin"));
-  if (origin.protocol !== "https:" || origin.pathname !== "/" || origin.search || origin.hash) {
-    throw new TypeError("Remote deployment-test origin must be a bare HTTPS origin");
-  }
-  const pagePath = text(value.pagePath, "pagePath");
-  if (!pagePath.startsWith("/") || !pagePath.endsWith("/")) {
-    throw new TypeError("Remote deployment-test pagePath must start and end with /");
-  }
-  const binding = text(value.binding, "binding");
-  return {
-    origin: origin.origin,
-    pagePath,
-    accountId: text(value.accountId, "accountId", 36),
-    installationId: parseInstallationId(value.installationId),
-    accessToken: text(value.accessToken, "accessToken"),
-    phoneSignIn: value.phoneSignIn === true,
-    possessionProof: new Uint8Array(
-      Buffer.from(text(value.possessionProof, "possessionProof"), "base64"),
-    ),
-    binding: isAbsolute(binding) ? binding : resolve(path, "..", binding),
-  };
-}
-
-/** The deployment-test daemon endpoint surface this host drives. */
-interface DeploymentTestDaemonEndpoint extends NativeDaemonE2eeEndpoint {
+/** The daemon endpoint surface this host drives. */
+export interface HostedDaemonEndpoint extends NativeDaemonE2eeEndpoint {
   issue(operationId: Uint8Array): Promise<DaemonWitnessPending>;
   reopen(): Promise<unknown>;
   submitClaim(operationId: Uint8Array, claim: Uint8Array): Promise<DaemonWitnessOutcome>;
@@ -217,15 +186,6 @@ interface DeploymentTestDaemonEndpoint extends NativeDaemonE2eeEndpoint {
   ): Promise<DaemonWitnessOutcome>;
 }
 
-interface DeploymentTestBinding {
-  deploymentTestDaemonEndpoint(
-    root: string,
-    accountId: Uint8Array,
-    installationId: Uint8Array,
-    cryptoSessionId: Uint8Array,
-  ): DeploymentTestDaemonEndpoint;
-}
-
 interface HostState {
   readonly version: typeof STATE_VERSION;
   readonly cryptoSessionId: CryptoSessionId;
@@ -237,8 +197,8 @@ interface HostState {
 interface Session {
   readonly id: CryptoSessionId;
   readonly deviceId: DeviceId;
-  readonly endpoint: DeploymentTestDaemonEndpoint;
-  readonly barrier: DaemonWitnessBarrier<DeploymentTestDaemonEndpoint>;
+  readonly endpoint: HostedDaemonEndpoint;
+  readonly barrier: DaemonWitnessBarrier<HostedDaemonEndpoint>;
   readonly relay: RemoteRelayConnection;
   /** Serializes pairing work on the endpoint until the bridge owns it. */
   tail: Promise<void>;
@@ -269,8 +229,8 @@ function released<T>(result: DaemonWitnessResult, name: string): T {
   return value as T;
 }
 
-export class DeploymentTestRemoteHost implements RemotePairingService {
-  readonly #config: DeploymentTestRemoteConfig;
+export class HostedRemoteHost implements RemotePairingService {
+  readonly #config: HostedRemoteSettings;
   readonly #root: string;
   readonly #authority: RemoteDeviceAuthorityStore;
   readonly #witness: HostedDaemonWitnessTransport;
@@ -280,7 +240,6 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
   readonly #logPath: string;
   #logWrites: Promise<void> = Promise.resolve();
   #lastError: { readonly message: string; readonly at: number } | undefined;
-  #binding: Promise<DeploymentTestBinding> | undefined;
   #daemon: AxlDaemon | undefined;
   #session: Session | undefined;
   #starting: Promise<RemotePairingStartResult> | undefined;
@@ -290,7 +249,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
   #restoring = false;
 
   private constructor(
-    config: DeploymentTestRemoteConfig,
+    config: HostedRemoteSettings,
     root: string,
     authority: RemoteDeviceAuthorityStore,
     log: (message: string) => void,
@@ -302,27 +261,27 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     this.#logPath = join(root, "remote.log");
     this.#witness = new HostedDaemonWitnessTransport({
       controlPlaneOrigin: config.origin,
-      authenticationHeaders: async () => this.#headers(),
+      authenticationHeaders: () => this.#headers(),
     });
     this.#pairing = new HostedPairingClient({
       origin: config.origin,
-      authorization: async () => config.accessToken,
+      authorization: () => config.accessToken(),
     });
     this.#devices = new RemoteDeviceControlPlane({
       controlPlaneOrigin: config.origin,
-      authenticationHeaders: async () => this.#headers(),
+      authenticationHeaders: () => this.#headers(),
     });
   }
 
+  /** Open the host with its state in `root`, which holds nothing but this host's state. */
   static async open(
-    config: DeploymentTestRemoteConfig,
-    stateDirectory: string,
+    settings: HostedRemoteSettings,
+    root: string,
     log: (message: string) => void = () => undefined,
-  ): Promise<DeploymentTestRemoteHost> {
-    const root = join(stateDirectory, "remote-deployment-test");
+  ): Promise<HostedRemoteHost> {
     await mkdir(join(root, "sessions"), { recursive: true, mode: 0o700 });
-    const authority = await RemoteDeviceAuthorityStore.open(root, config.installationId);
-    return new DeploymentTestRemoteHost(config, root, authority, log);
+    const authority = await RemoteDeviceAuthorityStore.open(root, settings.installationId);
+    return new HostedRemoteHost(settings, root, authority, log);
   }
 
   get authority(): RemoteDeviceAuthorityStore {
@@ -367,6 +326,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     if (state?.phase !== "paired") return;
     this.#restoring = true;
     try {
+      await this.#config.prepare?.();
       const session = await this.#openSession(state.cryptoSessionId, state.deviceId);
       await session.endpoint.reopen();
       await this.#serve(session);
@@ -429,8 +389,8 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     await this.#logWrites;
   }
 
-  #headers(): Readonly<Record<string, string>> {
-    return { authorization: `Bearer ${this.#config.accessToken}` };
+  async #headers(): Promise<Readonly<Record<string, string>>> {
+    return { authorization: `Bearer ${await this.#config.accessToken()}` };
   }
 
   async #start(): Promise<RemotePairingStartResult> {
@@ -440,6 +400,12 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     await this.#restoreRun;
     await this.#closeSession();
     // One pairing at a time: the device of the pairing this one replaces loses access for good.
+    try {
+      await this.#config.prepare?.();
+    } catch (cause) {
+      this.#fail(`remote: pairing could not start: ${describe(cause)}`);
+      throw cause;
+    }
     const previous = await this.#readState();
     if (previous !== undefined) await this.#retire(previous.deviceId);
     const cryptoSessionId = parseCryptoSessionId(uuidV7());
@@ -470,7 +436,9 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
         installationId: this.#config.installationId,
         deviceId,
         cryptoSessionId,
-        ...(this.#config.phoneSignIn ? {} : { accessToken: this.#config.accessToken }),
+        ...(this.#config.linkAccessToken === undefined
+          ? {}
+          : { accessToken: this.#config.linkAccessToken }),
         enrollmentSecret,
       });
       return {
@@ -484,13 +452,6 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       await this.#closeSession();
       throw cause;
     }
-  }
-
-  #bindingModule(): Promise<DeploymentTestBinding> {
-    this.#binding ??= import(
-      pathToFileURL(this.#config.binding).href
-    ) as Promise<DeploymentTestBinding>;
-    return this.#binding;
   }
 
   /**
@@ -512,22 +473,18 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
   }
 
   async #openSession(cryptoSessionId: CryptoSessionId, deviceId: DeviceId): Promise<Session> {
-    const binding = await this.#bindingModule();
-    const endpoint = binding.deploymentTestDaemonEndpoint(
+    const endpoint = await this.#config.endpoint(
       join(this.#root, "sessions", cryptoSessionId),
       uuidToBytes(this.#config.accountId),
       uuidToBytes(this.#config.installationId),
       uuidToBytes(cryptoSessionId),
     );
-    const proof = this.#config.possessionProof;
     const relay = new RemoteRelayConnection({
       tickets: new HttpRelayTicketProvider({
         controlPlaneOrigin: this.#config.origin,
         request: { installationId: this.#config.installationId, role: "daemon" },
-        authenticationHeaders: async () => this.#headers(),
-        proof: {
-          create: async () => ({ connectionNonce: randomUUID(), possessionProof: proof.slice() }),
-        },
+        authenticationHeaders: () => this.#headers(),
+        proof: { create: (ticket) => this.#config.possession(ticket.ticket) },
       }),
       reconnect: { maximumAttempts: 1_000, maximumDelayMs: 30_000 },
       heartbeatMs: RELAY_HEARTBEAT_MS,

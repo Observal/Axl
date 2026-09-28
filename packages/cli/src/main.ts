@@ -67,6 +67,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl rpc [options]
        axl session export <session-id> --raw [--output <directory>]
        axl session migrate-events <session-id> [--confirm-prefix]
+       axl remote login|logout [options]
 
 Options:
   --cwd <path>       Set the workspace directory
@@ -789,6 +790,11 @@ function bridgeRpc(socketPath: string): Promise<void> {
 async function main(): Promise<void> {
   const timing = new StartupTimer();
   timing.mark("module load");
+  if (process.argv[2] === "remote") {
+    const { runRemoteCommand } = await import("./remote-cli.ts");
+    await runRemoteCommand(process.argv.slice(3), join(homedir(), ".axl"));
+    return;
+  }
   const cli = parseArguments(process.argv.slice(2));
   if (cli.showHelp) {
     process.stdout.write(HELP);

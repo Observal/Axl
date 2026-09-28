@@ -1,19 +1,31 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
-// A local copy of the deployment-test stack for phone remote-control evidence: the deployment-test
-// control plane with its in-process witness, keeping all of its state (tickets, devices, pairing,
-// and witness replicas) in a fake DynamoDB process like the stack's tables; the Elixir relay; one
-// HTTPS origin that serves the phone page and forwards to both (like the stack's CloudFront); a
-// scripted model; and a real sandboxed daemon. The origin can drop or stall every relay socket, and
-// the relay, control plane, and daemon can be restarted, so tests inject the failures phones see.
-// A fake of the stack's Cognito user pool signs the phone in, so every scenario pairs the way the
-// stack does with phone sign-in: the link carries no account token.
+// A local copy of the hosted stack for phone remote-control evidence: the control plane with its
+// in-process witness, keeping all of its state (tickets, installations, devices, pairing, and
+// witness replicas) in a fake DynamoDB process like the stack's tables; the Elixir relay; one HTTPS
+// origin that serves the phone page and forwards to both (like the stack's CloudFront); a scripted
+// model; and a real sandboxed daemon. The origin can drop or stall every relay socket, and the
+// relay, control plane, and daemon can be restarted, so tests inject the failures phones see.
+// A fake of the stack's Cognito user pool signs the phone in, so the link carries no account token.
+//
+// By default the stack runs in production mode (AXL_REMOTE_E2E_MODE=production): the production
+// control plane, a daemon signed in through `~/.axl/remote/account.json` with its secrets sealed by
+// a stand-in for the Windows DPAPI helper, the installation's own key admitting its relay
+// connections, and the hosted WSL Node binding. AXL_REMOTE_E2E_MODE=deployment-test runs the
+// deployment-test control plane and daemon configuration instead.
 
 import { spawn } from "node:child_process";
 import { createHash, createSign, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createWriteStream, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  createWriteStream,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect, createServer as createNetServer } from "node:net";
@@ -24,6 +36,7 @@ import { connectUnixClient } from "@axl/sdk/unix";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
 const RELAY_TOKEN = "internal-fixture";
+const production = (process.env.AXL_REMOTE_E2E_MODE ?? "production") === "production";
 const PAGE_HEADERS = {
   "content-security-policy":
     "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
@@ -50,6 +63,37 @@ function uuidV7() {
   const hex = bytes.toString("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
+
+/**
+ * A stand-in for `axl-dpapi-helper.exe` with the same frames: "sealing" is a keyed XOR behind a
+ * tag, and the Windows user is a fixed SID. Enough for the daemon's stores to run on Linux.
+ */
+const FAKE_DPAPI_HELPER = `#!/usr/bin/env node
+const TAG = Buffer.from("e2e-sealed:");
+let buffer = Buffer.alloc(0);
+const respond = (status, payload = Buffer.alloc(0)) => {
+  const header = Buffer.alloc(5);
+  header[0] = status;
+  header.writeUInt32BE(payload.length, 1);
+  process.stdout.write(Buffer.concat([header, payload]));
+};
+const xor = (value) => Buffer.from(value.map((byte) => byte ^ 0x5a));
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (buffer.length >= 5 && buffer.length >= 5 + buffer.readUInt32BE(1)) {
+    const op = buffer[0];
+    const payload = buffer.subarray(5, 5 + buffer.readUInt32BE(1));
+    buffer = buffer.subarray(5 + payload.length);
+    if (op === 0) respond(0, Buffer.from("axl-dpapi-helper-v1"));
+    else if (op === 1) respond(0, Buffer.from("S-1-5-21-1000-1000-1000-1001"));
+    else if (op === 2 && payload.length > 0) respond(0, Buffer.concat([TAG, xor(payload)]));
+    else if (op === 3 && payload.subarray(0, TAG.length).equals(TAG)) {
+      respond(0, xor(payload.subarray(TAG.length)));
+    } else if (op === 3) respond(2);
+    else respond(3);
+  }
+});
+`;
 
 async function freePort() {
   const server = createNetServer();
@@ -213,13 +257,17 @@ async function startModel() {
  * A stand-in for the stack's Cognito user pool with Google behind it: `/oauth2/authorize` signs in
  * at once and redirects back with a code, `/oauth2/token` checks PKCE and issues RS256 access
  * tokens shaped like Cognito's, and the pool's JWKS is served over plain HTTP for the control plane.
+ * One person (`accountId`), in the remote group, signs in with the phone page's client and the
+ * daemon's.
  */
-async function startAuthority() {
+async function startAuthority(accountId) {
   const clientId = "e2e-phone-page";
+  const daemonClientId = "e2e-daemon";
+  const clients = new Set([clientId, daemonClientId]);
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const jwk = { ...publicKey.export({ format: "jwk" }), kid: "e2e", alg: "RS256", use: "sig" };
   const codes = new Map();
-  const refreshTokens = new Set();
+  const refreshTokens = new Map();
   let signIns = 0;
   const keys = createHttpServer((request, response) => {
     if (request.url === "/pool/.well-known/jwks.json") {
@@ -233,13 +281,14 @@ async function startAuthority() {
   await once(keys, "listening");
   const issuer = `http://127.0.0.1:${keys.address().port}/pool`;
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  const accessToken = () => {
+  const accessToken = (client) => {
     const now = Math.floor(Date.now() / 1000);
     const signed = `${encode({ alg: "RS256", kid: "e2e", typ: "JWT" })}.${encode({
       iss: issuer,
-      sub: "e2e-google-user",
+      sub: accountId,
+      "cognito:groups": ["remote"],
       token_use: "access",
-      client_id: clientId,
+      client_id: client,
       scope: "openid email",
       iat: now,
       exp: now + 3600,
@@ -251,9 +300,22 @@ async function startAuthority() {
     response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
     response.end(JSON.stringify(body));
   };
+  const grant = (client) => {
+    const refresh = randomBytes(24).toString("base64url");
+    refreshTokens.set(refresh, client);
+    return {
+      access_token: accessToken(client),
+      refresh_token: refresh,
+      expires_in: 3600,
+      token_type: "Bearer",
+    };
+  };
   return {
     issuer,
     clientId,
+    daemonClientId,
+    /** Tokens for the daemon's client, as `axl remote login` would get them. */
+    daemonTokens: () => grant(daemonClientId),
     get signIns() {
       return signIns;
     },
@@ -263,7 +325,7 @@ async function startAuthority() {
       if (path === "/oauth2/authorize") {
         const query = new URL(request.url, "https://origin.invalid").searchParams;
         if (
-          query.get("client_id") !== clientId ||
+          !clients.has(query.get("client_id")) ||
           query.get("code_challenge_method") !== "S256" ||
           query.get("identity_provider") !== "Google"
         ) {
@@ -272,7 +334,11 @@ async function startAuthority() {
         }
         const code = randomBytes(16).toString("hex");
         const redirect = query.get("redirect_uri");
-        codes.set(code, { challenge: query.get("code_challenge"), redirect });
+        codes.set(code, {
+          challenge: query.get("code_challenge"),
+          redirect,
+          client: query.get("client_id"),
+        });
         const back = new URL(redirect);
         back.search = new URLSearchParams({ code, state: query.get("state") ?? "" }).toString();
         response.writeHead(302, { location: back.toString() });
@@ -286,8 +352,8 @@ async function startAuthority() {
         });
         request.on("end", () => {
           const form = new URLSearchParams(body);
-          if (form.get("client_id") !== clientId)
-            return json(response, 400, { error: "invalid_client" });
+          const client = form.get("client_id");
+          if (!clients.has(client)) return json(response, 400, { error: "invalid_client" });
           if (form.get("grant_type") === "authorization_code") {
             const pending = codes.get(form.get("code"));
             codes.delete(form.get("code"));
@@ -297,26 +363,20 @@ async function startAuthority() {
             if (
               pending === undefined ||
               pending.challenge !== challenge ||
-              pending.redirect !== form.get("redirect_uri")
+              pending.redirect !== form.get("redirect_uri") ||
+              pending.client !== client
             ) {
               return json(response, 400, { error: "invalid_grant" });
             }
             signIns += 1;
-            const refresh = randomBytes(24).toString("base64url");
-            refreshTokens.add(refresh);
-            return json(response, 200, {
-              access_token: accessToken(),
-              refresh_token: refresh,
-              expires_in: 3600,
-              token_type: "Bearer",
-            });
+            return json(response, 200, grant(client));
           }
           if (
             form.get("grant_type") === "refresh_token" &&
-            refreshTokens.has(form.get("refresh_token"))
+            refreshTokens.get(form.get("refresh_token")) === client
           ) {
             return json(response, 200, {
-              access_token: accessToken(),
+              access_token: accessToken(client),
               expires_in: 3600,
               token_type: "Bearer",
             });
@@ -482,7 +542,7 @@ export async function startStack(directory) {
   const keys = readFileSync(join(directory, "keys.json"), "utf8");
 
   const model = await startModel();
-  const authority = await startAuthority();
+  const authority = await startAuthority(accountId);
   const dynamo = new Service(
     "dynamodb",
     process.execPath,
@@ -495,32 +555,52 @@ export async function startStack(directory) {
   );
   await dynamo.ready(/fake DynamoDB listening/u, 30_000);
   const startControlPlane = async () => {
+    const shared = {
+      PATH: process.env.PATH,
+      AWS_ENDPOINT_URL_DYNAMODB: `http://127.0.0.1:${dynamoPort}`,
+      AWS_REGION: "us-east-1",
+      AWS_ACCESS_KEY_ID: "fake",
+      AWS_SECRET_ACCESS_KEY: "fake",
+      AXL_TICKET_TABLE: "state",
+      AXL_WITNESS_TABLE: "witness",
+      AXL_WITNESS_JOURNAL_TABLE: "witness-journal",
+      AXL_TEST_WITNESS_KEYS: keys,
+      PORT: String(controlPlanePort),
+    };
     const controlPlane = new Service(
       "control-plane",
       process.execPath,
-      [join(repositoryRoot, "services/aws-control-plane/dist/deployment-test-runtime.js")],
+      [
+        join(
+          repositoryRoot,
+          "services/aws-control-plane/dist",
+          production ? "production-runtime.js" : "deployment-test-runtime.js",
+        ),
+      ],
       {
-        env: {
-          PATH: process.env.PATH,
-          AXL_ENVIRONMENT: "deployment-test",
-          AWS_ENDPOINT_URL_DYNAMODB: `http://127.0.0.1:${dynamoPort}`,
-          AWS_REGION: "us-east-1",
-          AWS_ACCESS_KEY_ID: "fake",
-          AWS_SECRET_ACCESS_KEY: "fake",
-          AXL_TICKET_TABLE: "state",
-          AXL_WITNESS_TABLE: "witness",
-          AXL_WITNESS_JOURNAL_TABLE: "witness-journal",
-          AXL_TEST_ACCOUNT_ID: accountId,
-          AXL_TEST_INSTALLATION_ID: installationId,
-          AXL_TEST_PUBLIC_TOKEN: accessToken,
-          AXL_TEST_RELAY_TOKEN: RELAY_TOKEN,
-          AXL_TEST_POSSESSION_PROOF: possessionProof,
-          AXL_TEST_RELAY_URL: `wss://127.0.0.1:${originPort}/v1/connect`,
-          AXL_TEST_WITNESS_KEYS: keys,
-          AXL_TEST_PHONE_ISSUER: authority.issuer,
-          AXL_TEST_PHONE_CLIENT_ID: authority.clientId,
-          PORT: String(controlPlanePort),
-        },
+        env: production
+          ? {
+              ...shared,
+              AXL_ENVIRONMENT: "production",
+              AXL_RELAY_TOKEN: RELAY_TOKEN,
+              AXL_RELAY_URL: `wss://127.0.0.1:${originPort}/v1/connect`,
+              AXL_COGNITO_ISSUER: authority.issuer,
+              AXL_DAEMON_CLIENT_ID: authority.daemonClientId,
+              AXL_PHONE_CLIENT_ID: authority.clientId,
+              AXL_REMOTE_GROUP: "remote",
+            }
+          : {
+              ...shared,
+              AXL_ENVIRONMENT: "deployment-test",
+              AXL_TEST_ACCOUNT_ID: accountId,
+              AXL_TEST_INSTALLATION_ID: installationId,
+              AXL_TEST_PUBLIC_TOKEN: accessToken,
+              AXL_TEST_RELAY_TOKEN: RELAY_TOKEN,
+              AXL_TEST_POSSESSION_PROOF: possessionProof,
+              AXL_TEST_RELAY_URL: `wss://127.0.0.1:${originPort}/v1/connect`,
+              AXL_TEST_PHONE_ISSUER: authority.issuer,
+              AXL_TEST_PHONE_CLIENT_ID: authority.clientId,
+            },
       },
       logs,
     );
@@ -604,6 +684,29 @@ export async function startStack(directory) {
     }),
     { mode: 0o600 },
   );
+  if (production) {
+    // What `axl remote login` leaves behind, signed in through the fake pool's daemon client.
+    const helper = join(directory, "dpapi-helper.mjs");
+    writeFileSync(helper, FAKE_DPAPI_HELPER);
+    chmodSync(helper, 0o755);
+    const { saveRemoteAccount } = await import(
+      join(repositoryRoot, "packages/runtime/dist/index.js")
+    );
+    const tokens = authority.daemonTokens();
+    await saveRemoteAccount({
+      axlHome: join(home, ".axl"),
+      origin,
+      pagePath: "/remote/",
+      config: { authority: origin, clientId: authority.daemonClientId, provider: "Google" },
+      tokens: {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        expiresAt: Date.now() + tokens.expires_in * 1000,
+      },
+      helper,
+      binding: join(repositoryRoot, "packages/e2ee/bindings/node/dist/hosted-wsl/loader/index.js"),
+    });
+  }
   const socketPath = join(home, ".axl/axl.sock");
   const startDaemon = async () => {
     const daemon = new Service(
@@ -623,7 +726,7 @@ export async function startStack(directory) {
         env: {
           HOME: home,
           PATH: process.env.PATH,
-          AXL_REMOTE_DEPLOYMENT_TEST: remoteConfig,
+          ...(production ? {} : { AXL_REMOTE_DEPLOYMENT_TEST: remoteConfig }),
           // The daemon reaches the origin over HTTPS; trust only this run's certificate.
           NODE_EXTRA_CA_CERTS: join(directory, "tls/cert.pem"),
         },
