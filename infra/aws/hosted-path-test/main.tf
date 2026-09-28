@@ -226,6 +226,7 @@ resource "aws_cloudfront_distribution" "main" {
   http_version    = "http2and3"
   is_ipv6_enabled = true
   price_class     = "PriceClass_100"
+  aliases         = local.custom_domain ? [var.domain_name] : []
 
   origin {
     domain_name = aws_lb.main.dns_name
@@ -267,6 +268,11 @@ resource "aws_cloudfront_distribution" "main" {
     cached_methods           = ["GET", "HEAD"]
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
     origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.root_redirect.arn
+    }
   }
 
   restrictions {
@@ -274,9 +280,11 @@ resource "aws_cloudfront_distribution" "main" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = !local.custom_domain
+    acm_certificate_arn            = local.custom_domain ? aws_acm_certificate_validation.public[0].certificate_arn : null
+    ssl_support_method             = local.custom_domain ? "sni-only" : null
     # CloudFront ignores this field for its default certificate and reports TLSv1.
-    minimum_protocol_version = "TLSv1"
+    minimum_protocol_version = local.custom_domain ? "TLSv1.2_2021" : "TLSv1"
   }
 }
 
@@ -477,7 +485,8 @@ resource "aws_ecs_task_definition" "control_plane" {
     portMappings           = [{ containerPort = 8080, hostPort = 8080, protocol = "tcp" }]
     environment = [
       { name = "AXL_ENVIRONMENT", value = "deployment-test" },
-      { name = "AXL_TEST_RELAY_URL", value = "wss://${aws_cloudfront_distribution.main.domain_name}/v1/connect" },
+      # Clients connect to the relay on the host that serves the phone page, which its CSP requires.
+      { name = "AXL_TEST_RELAY_URL", value = "wss://${local.public_host}/v1/connect" },
       { name = "AXL_TICKET_TABLE", value = aws_dynamodb_table.control_plane.name },
       { name = "AXL_WITNESS_TABLE", value = aws_dynamodb_table.witness.name },
       { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name }

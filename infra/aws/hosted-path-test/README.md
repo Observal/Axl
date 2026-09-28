@@ -40,6 +40,13 @@ Deploy from a clean tracked checkout:
 AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/deploy.sh
 ```
 
+The stack answers on `remote.observal.io`. `deploy.sh` passes it as `domain_name`, and Terraform
+issues its certificate in us-east-1 (validated in the `observal.io` Route 53 zone), adds the A and
+AAAA alias records, and hands clients a relay URL on that host. The bare host redirects to the
+phone page, and the CloudFront host name redirects `/remote/` there, keeping the link's fragment.
+Set `AXL_TEST_DOMAIN=` (empty) to deploy on the CloudFront host name alone, or another name whose
+parent zone is in this account.
+
 Run the HTTPS and WebSocket opaque-delivery smoke test again:
 
 ```bash

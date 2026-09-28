@@ -22,6 +22,17 @@ variable "image_tag" {
   }
 }
 
+variable "domain_name" {
+  description = "Optional public host name, such as remote.observal.io. Its parent must be a Route 53 zone in this account."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.domain_name == "" || can(regex("^([a-z0-9-]+\\.){2,}[a-z]+$", var.domain_name))
+    error_message = "domain_name must be a lowercase host name below a zone, or empty."
+  }
+}
+
 variable "secret_name" {
   description = "Existing Secrets Manager JSON secret populated outside Terraform."
   type        = string

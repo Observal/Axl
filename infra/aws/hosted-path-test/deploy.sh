@@ -9,6 +9,8 @@ region="ap-south-2"
 root="$(git rev-parse --show-toplevel)"
 stack="$root/infra/aws/hosted-path-test"
 secret_name="axl/hosted-path/deployment-test"
+# The stack's public host name; set AXL_TEST_DOMAIN= (empty) to use only the CloudFront host name.
+domain_name="${AXL_TEST_DOMAIN-remote.observal.io}"
 
 if ! git -C "$root" diff-index --quiet HEAD --; then
   echo "Refusing to deploy with tracked changes that are not committed." >&2
@@ -118,7 +120,8 @@ terraform -chdir="$stack" init -reconfigure \
 terraform -chdir="$stack" apply -auto-approve \
   -target=aws_ecr_repository.control_plane \
   -target=aws_ecr_repository.relay \
-  -var="image_tag=$image_tag"
+  -var="image_tag=$image_tag" \
+  -var="domain_name=$domain_name"
 
 registry="${account}.dkr.ecr.${region}.amazonaws.com"
 aws ecr get-login-password --profile "$profile" --region "$region" |
@@ -132,7 +135,9 @@ docker build --platform linux/amd64 -f "$root/services/relay/Dockerfile" -t "$re
 docker push "$control_image"
 docker push "$relay_image"
 
-terraform -chdir="$stack" apply -auto-approve -var="image_tag=$image_tag"
+terraform -chdir="$stack" apply -auto-approve \
+  -var="image_tag=$image_tag" \
+  -var="domain_name=$domain_name"
 cluster="$(terraform -chdir="$stack" output -raw cluster_name)"
 aws ecs wait services-stable \
   --profile "$profile" \

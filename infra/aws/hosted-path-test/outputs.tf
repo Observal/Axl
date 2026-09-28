@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 output "control_plane_url" {
-  value = "https://${aws_cloudfront_distribution.main.domain_name}"
+  value = "https://${local.public_host}"
 }
 
 output "relay_url" {
-  value = "wss://${aws_cloudfront_distribution.main.domain_name}/v1/connect"
+  value = "wss://${local.public_host}/v1/connect"
+}
+
+output "cloudfront_url" {
+  value = "https://${aws_cloudfront_distribution.main.domain_name}"
 }
 
 output "control_plane_repository_url" {
@@ -22,7 +26,7 @@ output "cluster_name" {
 }
 
 output "remote_page_url" {
-  value = "https://${aws_cloudfront_distribution.main.domain_name}/remote/"
+  value = "https://${local.public_host}/remote/"
 }
 
 output "remote_page_bucket" {
