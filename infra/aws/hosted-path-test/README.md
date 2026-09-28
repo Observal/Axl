@@ -20,10 +20,14 @@ versioned and encrypted in a dedicated private S3 bucket.
 
 The control plane also serves the rollback witness at `/v1/e2ee/witness` with three in-process
 replicas. Their Ed25519 signing keys live in the `axl/hosted-path/witness-keys` secret, which
-`deploy.sh` generates once. Replica state is process memory: a control-plane restart or redeploy
-starts every replica empty, so endpoints registered before it fail closed and must pair again. The
-first endpoint to register after a start must make one fresh witness read before a second endpoint
-can register; that read moves the replicas from bootstrap to ready. Write the public replica trust
+`deploy.sh` generates once. Replica records live in the `witness` DynamoDB table and each
+replica's immutable high-water journal in the separate `witness-journal` table, whose items the
+task role can write once but never update or delete. A restarted or redeployed control plane
+resumes from them lineage by lineage: the first fresh witness read of a lineage, which endpoints
+make before every mutation, has all three replicas check that lineage's head against each other
+before it is used again, so paired phones keep working. On an empty table the first endpoint to
+register must make one fresh witness read before a second endpoint can register; that read moves
+the replicas from bootstrap to ready. Write the public replica trust
 for deployment-test client builds with:
 
 ```bash
@@ -62,9 +66,9 @@ AWS_PROFILE=axl-deploy infra/aws/hosted-path-test/remote-config.sh ~/.axl-remote
 
 Start the daemon with `AXL_REMOTE_DEPLOYMENT_TEST=~/.axl-remote.json`, run `/remote` in the
 terminal, and scan the QR code with the phone camera (or open the printed link on the phone). The
-code needs a terminal at least 93 columns wide. The link carries the stack's shared test
-credentials in its fragment, which browsers never send to a server; treat it as a secret. The
-witness keeps its state in memory, so a control-plane restart requires pairing again.
+code needs a terminal at least 93 columns wide. The link carries the stack's test account token
+and a one-time device enrollment secret in its fragment, which browsers never send to a server;
+treat it as a secret. A pairing survives control-plane restarts and redeploys.
 
 A paired phone can list, open, and follow sessions, send and queue prompts, and stop a running
 turn. A daemon started with `--unsafe` lets the phone watch sessions but not change them.

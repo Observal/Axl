@@ -157,8 +157,15 @@ export interface WindowsRemoteE2eeBridgeOptions {
   readonly now?: () => number;
   readonly sender: RemoteEncryptedSender;
   readonly onError?: (error: Error) => void;
+  /** A witness recovery attempt failed and another is scheduled. */
+  readonly onRecoveryFailure?: (error: Error) => void;
   /** Longest a live delivery waits to be batched with the next; defaults to 50 ms. */
   readonly deliveryFlushMs?: number;
+}
+
+/** The bytes one delivery adds to a batch. */
+function deliveryBytes(message: ServerMessage): number {
+  return Buffer.byteLength(JSON.stringify(message)) + 1;
 }
 
 /** A relay route as announced by the relay's authenticated route view. */
@@ -294,6 +301,8 @@ export class WindowsRemoteE2eeBridge {
   private readonly deliveryFlushMs: number;
   private pendingDeliveries: ServerMessage[] = [];
   private pendingDeliveryBytes = 0;
+  /** Batches the witness refused before any byte was sent, in the order they were refused. */
+  private heldDeliveries: ServerMessage[] = [];
   private deliveryTimer: ReturnType<typeof setTimeout> | undefined;
   private deliveryBatchesInFlight = 0;
   private currentRoute: RouteId | undefined;
@@ -433,8 +442,11 @@ export class WindowsRemoteE2eeBridge {
       this.retryTimer = undefined;
       this.retryAttempt += 1;
       this.run(() => this.barrier.recover(), "recovery").catch((cause: unknown) => {
+        const error = cause instanceof Error ? cause : new Error(String(cause));
         if (witnessCode(cause) === undefined && cause !== this.fault) {
-          this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
+          this.options.onError?.(error);
+        } else if (witnessCode(cause) !== undefined) {
+          this.options.onRecoveryFailure?.(error);
         }
       });
     }, delay);
@@ -475,6 +487,10 @@ export class WindowsRemoteE2eeBridge {
     }
     this.witness = status;
     if (state !== "recovering") this.cancelRecovery();
+    // Deliveries held through the recovery go out first, in order, now that work is admitted.
+    if (state === "ready" && this.heldDeliveries.length + this.pendingDeliveries.length > 0) {
+      this.armDeliveryTimer();
+    }
     for (const listener of this.stateListeners) listener(status);
   }
 
@@ -508,6 +524,7 @@ export class WindowsRemoteE2eeBridge {
     this.deliveryTimer = undefined;
     this.pendingDeliveries = [];
     this.pendingDeliveryBytes = 0;
+    this.heldDeliveries = [];
     this.attachment.close();
     this.options.endpoint.close();
     this.currentRoute = undefined;
@@ -914,7 +931,7 @@ export class WindowsRemoteE2eeBridge {
    */
   private enqueueDaemonMessage(message: ServerMessage): void {
     if (this.currentRoute === undefined || this.closed) return;
-    const bytes = Buffer.byteLength(JSON.stringify(message)) + 1;
+    const bytes = deliveryBytes(message);
     if (
       this.pendingDeliveries.length > 0 &&
       (this.pendingDeliveryBytes + bytes > DELIVERY_BATCH_BYTES ||
@@ -938,14 +955,45 @@ export class WindowsRemoteE2eeBridge {
     }, this.deliveryFlushMs);
   }
 
-  /** Queue every pending delivery now, ahead of anything queued after this call. */
+  /**
+   * Queue every pending delivery now, ahead of anything queued after this call. While the witness
+   * recovers, deliveries wait instead: the endpoint would refuse them.
+   */
   private flushDeliveries(): void {
     if (this.deliveryTimer !== undefined) clearTimeout(this.deliveryTimer);
     this.deliveryTimer = undefined;
-    if (this.pendingDeliveries.length === 0) return;
-    const batch = this.pendingDeliveries;
-    this.pendingDeliveries = [];
+    if (this.witness?.state === "recovering" || this.closed) return;
+    if (this.heldDeliveries.length > 0) {
+      this.pendingDeliveries = [...this.heldDeliveries, ...this.pendingDeliveries];
+      this.heldDeliveries = [];
+      this.pendingDeliveryBytes = this.pendingDeliveries.reduce(
+        (total, message) => total + deliveryBytes(message),
+        0,
+      );
+    }
+    while (this.pendingDeliveries.length > 0) {
+      // Held deliveries can exceed one batch; each batch keeps the usual bounds.
+      const batch: ServerMessage[] = [];
+      let bytes = 0;
+      for (const message of this.pendingDeliveries) {
+        const size = deliveryBytes(message);
+        if (
+          batch.length > 0 &&
+          (bytes + size > DELIVERY_BATCH_BYTES || batch.length >= MAX_REMOTE_DELIVERY_BATCH)
+        ) {
+          break;
+        }
+        batch.push(message);
+        bytes += size;
+      }
+      this.pendingDeliveries = this.pendingDeliveries.slice(batch.length);
+      this.pendingDeliveryBytes -= bytes;
+      this.sendDeliveryBatch(batch);
+    }
     this.pendingDeliveryBytes = 0;
+  }
+
+  private sendDeliveryBatch(batch: ServerMessage[]): void {
     const [first] = batch;
     const message: RemoteDaemonMessage =
       batch.length === 1 && first !== undefined
@@ -959,6 +1007,12 @@ export class WindowsRemoteE2eeBridge {
       await this.sendMessage(route, message);
     }, "work")
       .catch((cause: unknown) => {
+        // An unavailable witness refuses a batch before any of it is sent. Keep it for when the
+        // endpoint recovers instead of losing the events, so the device still sees the reply.
+        if (witnessCode(cause) === "witness_unavailable" && !this.closed) {
+          this.heldDeliveries.push(...batch);
+          return;
+        }
         this.options.onError?.(cause instanceof Error ? cause : new Error(String(cause)));
       })
       .finally(() => {

@@ -82,8 +82,8 @@ A phone-sized browser was driven through the page. It verified:
 5. `/remote status` reported the unpaired, pairing, and paired phases, with the phone online and
    the witness ready.
 
-The same flows, plus dropped, silent, and offline connections, a frozen page, a relay restart, and
-pairing a second phone (which locks the first one out and refuses a copied link), run in CI against a local copy of this stack (`pnpm --filter @axl/web test:remote-e2e`).
+The same flows, plus dropped, silent, and offline connections, a frozen page, relay and
+control-plane restarts, and pairing a second phone (which locks the first one out and refuses a copied link), run in CI against a local copy of this stack (`pnpm --filter @axl/web test:remote-e2e`).
 
 ## Deliberate limitations
 
@@ -91,8 +91,9 @@ The deployed services reject any environment mode other than `deployment-test`. 
 a randomly generated test account token stored in Secrets Manager, and the pairing link carries it.
 Relay admission is per device: each pairing mints a device ID and a one-time enrollment secret, and
 the phone signs every admission with its own non-extractable key. Only the daemon still presents a
-static test proof. The witness replicas share one process and keep their state in memory, so a
-control-plane restart requires every device to pair again. No daemon is deployed as a hosted service; the daemon connection above was local,
+static test proof. The witness replicas share one process, and their records and journals share
+two DynamoDB tables in one account, so they are one failure domain: they resume after a restart,
+but they give no protection against a rollback of those tables. No daemon is deployed as a hosted service; the daemon connection above was local,
 temporary, and used test-only native storage. Production identity, independent witness failure
 domains, workload authentication, signed Windows artifacts, installer evidence, and independent
 security review remain release gates.

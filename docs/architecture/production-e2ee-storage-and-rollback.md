@@ -437,6 +437,11 @@ A replica that restarts performs these checks before voting:
 - refuse to vote if its head is lower than a valid peer quorum, if peers conflict, or if its local stores disagree; and
 - catch up from a verified quorum chain without deleting or rewriting history.
 
+A replica may complete these checks one lineage at a time, because fresh signed heads exist only for
+lineages whose endpoints are reading. Until a lineage's check passes, the replica does not vote for
+it; the only other request it admits is the registration of a lineage that neither its store nor
+its journal has ever held. `WitnessReplica.resumeDurable` and `recoverLineage` implement this.
+
 System-wide recovery rules are:
 
 - never restore multiple replicas from one backup set or under one recovery credential;

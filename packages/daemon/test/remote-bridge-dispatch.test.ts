@@ -35,6 +35,7 @@ import {
 } from "../src/daemon.ts";
 import { RemoteAuthorityError, RemoteDeviceAuthorityStore } from "../src/remote-authority.ts";
 import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
+import { DaemonWitnessError, type DaemonWitnessTransport } from "../src/remote-witness.ts";
 
 const installationId = parseInstallationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 const deviceId = parseDeviceId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
@@ -155,7 +156,11 @@ async function waitFor(description: string, predicate: () => boolean): Promise<v
 async function harness(
   context: TestContext,
   handler: Handler,
-  options: { readonly deliveryFlushMs?: number } = {},
+  options: {
+    readonly deliveryFlushMs?: number;
+    readonly witness?: DaemonWitnessTransport;
+    readonly recovery?: { readonly initialDelayMs: number; readonly maximumDelayMs: number };
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "axl-bridge-dispatch-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -173,7 +178,7 @@ async function harness(
     deviceId,
     authority,
     endpoint: fake.endpoint,
-    witness: { respond: async () => Uint8Array.of(0xc3) },
+    witness: options.witness ?? { respond: async () => Uint8Array.of(0xc3) },
     sender: {
       send(route, bytes) {
         const envelope = parseRemoteE2eeEnvelope(bytes);
@@ -402,6 +407,57 @@ test("live deliveries are batched and never overtake the result they follow", as
   );
   assert.deepEqual(released, prepared, "every sent envelope left the native outbox");
   assert.deepEqual(errors, []);
+});
+
+test("deliveries refused by an unavailable witness are sent in order once it recovers", async (context) => {
+  let outage = 0;
+  const { bridge, sent, emit, errors } = await harness(
+    context,
+    async (request, observer) => {
+      const completed = result(request);
+      observer?.completed?.(completed);
+      return completed;
+    },
+    {
+      deliveryFlushMs: 1,
+      recovery: { initialDelayMs: 5, maximumDelayMs: 5 },
+      witness: {
+        async respond() {
+          if (outage > 0) {
+            outage -= 1;
+            throw new DaemonWitnessError("witness_unavailable", "The witness restarted");
+          }
+          return Uint8Array.of(0xc3);
+        },
+      },
+    },
+  );
+  await bridge.receive({
+    sourceRouteId: firstRoute,
+    opaqueEnvelope: requestEnvelope(infoRequest("c0000000")),
+  });
+  const before = sent.length;
+  outage = 1;
+  emit(changed(1));
+  emit(changed(2));
+  await waitFor("the refused batch", () => bridge.witnessStatus?.state === "recovering");
+  emit(changed(3));
+  const generations = () =>
+    sent
+      .slice(before)
+      .flatMap(({ message }) =>
+        message.type === "daemon_deliveries"
+          ? message.messages.map((delivery) =>
+              delivery.kind === "sessions_changed" ? delivery.generation : -1,
+            )
+          : message.type === "daemon_delivery" && message.message.kind === "sessions_changed"
+            ? [message.message.generation]
+            : [],
+      );
+  await waitFor("the held deliveries", () => generations().length === 3);
+  assert.deepEqual(generations(), [1, 2, 3], "nothing lost, nothing reordered");
+  assert.equal(bridge.witnessStatus?.state, "ready");
+  assert.deepEqual(errors, [], "a witness outage is not reported as lost work");
 });
 
 test("a large result is fragmented, released, and replayed whole", async (context) => {
