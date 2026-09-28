@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 locals {
-  name = "axl-hosted-test"
+  name       = "axl-hosted-test"
+  production = var.control_plane_mode == "production"
+  # Production reads the relay's service settings without the deployment-test prefix.
+  relay_setting = local.production ? "AXL_" : "AXL_TEST_"
 }
 
 data "aws_secretsmanager_secret" "runtime" {
@@ -477,25 +480,46 @@ resource "aws_ecs_task_definition" "control_plane" {
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.control_plane_task.arn
 
-  container_definitions = jsonencode([{
+  lifecycle {
+    precondition {
+      condition     = !local.production || local.phone_sign_in
+      error_message = "Production mode needs sign-in: domain_name and google_client_id."
+    }
+  }
+
+  container_definitions = jsonencode([merge({
     name                   = "control-plane"
     image                  = "${aws_ecr_repository.control_plane.repository_url}:${var.image_tag}"
     essential              = true
     readonlyRootFilesystem = true
     portMappings           = [{ containerPort = 8080, hostPort = 8080, protocol = "tcp" }]
-    environment = concat([
-      { name = "AXL_ENVIRONMENT", value = "deployment-test" },
-      # Clients connect to the relay on the host that serves the phone page, which its CSP requires.
-      { name = "AXL_TEST_RELAY_URL", value = "wss://${local.public_host}/v1/connect" },
+    # Production: Cognito accounts and per-installation keys, no shared account credential.
+    environment = local.production ? [
+      { name = "AXL_ENVIRONMENT", value = "production" },
+      { name = "AXL_RELAY_URL", value = "wss://${local.public_host}/v1/connect" },
       { name = "AXL_TICKET_TABLE", value = aws_dynamodb_table.control_plane.name },
       { name = "AXL_WITNESS_TABLE", value = aws_dynamodb_table.witness.name },
-      { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name }
-      ], local.phone_sign_in ? [
-      # Access tokens from the phone sign-in pool get the phone scope; see cognito.tf.
-      { name = "AXL_TEST_PHONE_ISSUER", value = "https://${aws_cognito_user_pool.phone[0].endpoint}" },
-      { name = "AXL_TEST_PHONE_CLIENT_ID", value = aws_cognito_user_pool_client.phone[0].id }
+      { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name },
+      { name = "AXL_COGNITO_ISSUER", value = "https://${aws_cognito_user_pool.phone[0].endpoint}" },
+      { name = "AXL_DAEMON_CLIENT_ID", value = aws_cognito_user_pool_client.daemon[0].id },
+      { name = "AXL_PHONE_CLIENT_ID", value = aws_cognito_user_pool_client.phone[0].id },
+      { name = "AXL_REMOTE_GROUP", value = aws_cognito_user_group.remote[0].name }
+      ] : concat([
+        { name = "AXL_ENVIRONMENT", value = "deployment-test" },
+        # Clients connect to the relay on the host that serves the phone page, which its CSP requires.
+        { name = "AXL_TEST_RELAY_URL", value = "wss://${local.public_host}/v1/connect" },
+        { name = "AXL_TICKET_TABLE", value = aws_dynamodb_table.control_plane.name },
+        { name = "AXL_WITNESS_TABLE", value = aws_dynamodb_table.witness.name },
+        { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name }
+        ], local.phone_sign_in ? [
+        # Access tokens from the phone sign-in pool get the phone scope; see cognito.tf.
+        { name = "AXL_TEST_PHONE_ISSUER", value = "https://${aws_cognito_user_pool.phone[0].endpoint}" },
+        { name = "AXL_TEST_PHONE_CLIENT_ID", value = aws_cognito_user_pool_client.phone[0].id }
     ] : [])
-    secrets = [
+    secrets = local.production ? [
+      { name = "AXL_RELAY_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayToken::" },
+      { name = "AXL_TEST_WITNESS_KEYS", valueFrom = data.aws_secretsmanager_secret.witness_keys.arn }
+      ] : [
       { name = "AXL_TEST_ACCOUNT_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:accountId::" },
       { name = "AXL_TEST_INSTALLATION_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:installationId::" },
       { name = "AXL_TEST_PUBLIC_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:publicToken::" },
@@ -511,7 +535,7 @@ resource "aws_ecs_task_definition" "control_plane" {
         awslogs-stream-prefix = "service"
       }
     }
-  }])
+  }, local.production ? { command = ["node", "services/aws-control-plane/dist/production-runtime.js"] } : {})])
 }
 
 resource "aws_ecs_task_definition" "relay" {
@@ -529,13 +553,13 @@ resource "aws_ecs_task_definition" "relay" {
     readonlyRootFilesystem = true
     portMappings           = [{ containerPort = 4000, hostPort = 4000, protocol = "tcp" }]
     environment = [
-      { name = "AXL_ENVIRONMENT", value = "deployment-test" },
-      { name = "AXL_TEST_CONTROL_PLANE_ORIGIN", value = "https://${aws_cloudfront_distribution.main.domain_name}" }
+      { name = "AXL_ENVIRONMENT", value = var.control_plane_mode },
+      { name = "${local.relay_setting}CONTROL_PLANE_ORIGIN", value = "https://${aws_cloudfront_distribution.main.domain_name}" }
     ]
     secrets = [
-      { name = "AXL_TEST_RELAY_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayToken::" },
-      { name = "AXL_TEST_CONTROL_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:controlToken::" },
-      { name = "AXL_TEST_RELAY_INSTANCE_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayInstanceId::" }
+      { name = "${local.relay_setting}RELAY_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayToken::" },
+      { name = "${local.relay_setting}CONTROL_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:controlToken::" },
+      { name = "${local.relay_setting}RELAY_INSTANCE_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayInstanceId::" }
     ]
     logConfiguration = {
       logDriver = "awslogs"

@@ -11,6 +11,7 @@
   "scripts": {
     "build": "tsc -b tsconfig.build.json --force",
     "start:deployment-test": "node dist/deployment-test-runtime.js",
+    "start:production": "node dist/production-runtime.js",
     "typecheck": "tsc --noEmit",
     "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/control-plane build && node --test test/*.test.ts"
   },

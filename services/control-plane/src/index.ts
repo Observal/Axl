@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "./devices.ts";
+export * from "./installations.ts";
 export * from "./pairing.ts";
 export * from "./pairing-links.ts";
 export * from "./revocations.ts";

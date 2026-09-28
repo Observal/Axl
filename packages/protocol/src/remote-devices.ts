@@ -13,17 +13,19 @@
  */
 
 import {
+  type DeviceId,
   decodeBase64,
   encodeBase64,
+  type InstallationId,
   parseDeviceId,
   parseInstallationId,
-  type DeviceId,
-  type InstallationId,
 } from "./remote-transport.ts";
 
 export const REMOTE_DEVICE_INVITATION_PATH = "/v1/devices/invitations";
 export const REMOTE_DEVICE_ENROLLMENT_PATH = "/v1/devices/enroll";
 export const REMOTE_DEVICE_REVOCATION_PATH = "/v1/devices/revoke";
+/** A signed-in daemon registers its installation's own P-256 key here. */
+export const REMOTE_INSTALLATION_REGISTRATION_PATH = "/v1/installations/register";
 export const REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES = 32;
 export const REMOTE_DEVICE_SECRET_DIGEST_BYTES = 32;
 /** An invited device must enroll within this window, the lifetime of a pairing invitation. */
@@ -49,6 +51,13 @@ export interface RemoteDeviceEnrollmentRequest {
   readonly deviceId: DeviceId;
   readonly secret: Uint8Array;
   /** DER SubjectPublicKeyInfo of the device's P-256 key. */
+  readonly publicKey: Uint8Array;
+}
+
+export interface RemoteInstallationRegistrationRequest {
+  readonly version: 1;
+  readonly installationId: InstallationId;
+  /** DER SubjectPublicKeyInfo of the daemon installation's P-256 key. */
   readonly publicKey: Uint8Array;
 }
 
@@ -150,6 +159,39 @@ export function encodeRemoteDeviceEnrollmentRequest(
     installationId: request.installationId,
     deviceId: request.deviceId,
     secret: encodeBase64(request.secret),
+    publicKey: encodeBase64(request.publicKey),
+  };
+}
+
+export function parseRemoteInstallationRegistrationRequest(
+  value: unknown,
+): RemoteInstallationRegistrationRequest {
+  const candidate = object(value, "installationRegistration");
+  exact(candidate, "installationRegistration", ["version", "installationId", "publicKey"]);
+  requireVersion(candidate.version, "installationRegistration.version");
+  const publicKey = decodeBase64(
+    candidate.publicKey,
+    "installationRegistration.publicKey",
+    REMOTE_DEVICE_PUBLIC_KEY_MAX_BYTES,
+  );
+  if (publicKey.byteLength === 0)
+    throw new TypeError("installationRegistration.publicKey is empty");
+  return {
+    version: 1,
+    installationId: parseInstallationId(
+      candidate.installationId,
+      "installationRegistration.installationId",
+    ),
+    publicKey,
+  };
+}
+
+export function encodeRemoteInstallationRegistrationRequest(
+  request: RemoteInstallationRegistrationRequest,
+): Record<string, unknown> {
+  return {
+    version: 1,
+    installationId: request.installationId,
     publicKey: encodeBase64(request.publicKey),
   };
 }

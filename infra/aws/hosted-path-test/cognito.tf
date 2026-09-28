@@ -12,6 +12,8 @@ locals {
   auth_host     = "auth.${var.domain_name}"
   # The page signs in and returns here; the fragment of a pairing link waits in session storage.
   phone_callback = "https://${var.domain_name}/remote/"
+  # `axl remote login` listens here for the redirect; Cognito allows http only for localhost.
+  daemon_callback = "http://localhost:47813/callback"
 }
 
 data "aws_ssm_parameter" "google_client_secret" {
@@ -137,4 +139,44 @@ resource "aws_route53_record" "auth" {
     zone_id                = aws_cognito_user_pool_domain.phone[0].cloudfront_distribution_zone_id
     evaluate_target_health = false
   }
+}
+
+# The daemon signs in with `axl remote login`: the authorization code flow and PKCE in the person's
+# browser, returning to a loopback port on their machine. A public client like the page's; in
+# production mode its access tokens get the full account.
+resource "aws_cognito_user_pool_client" "daemon" {
+  count                                = local.phone_sign_in ? 1 : 0
+  name                                 = "${local.name}-daemon"
+  user_pool_id                         = aws_cognito_user_pool.phone[0].id
+  generate_secret                      = false
+  allowed_oauth_flows_user_pool_client = true
+  allowed_oauth_flows                  = ["code"]
+  allowed_oauth_scopes                 = ["openid", "email"]
+  callback_urls                        = [local.daemon_callback]
+  logout_urls                          = [local.daemon_callback]
+  supported_identity_providers         = [aws_cognito_identity_provider.google[0].provider_name]
+  explicit_auth_flows                  = ["ALLOW_REFRESH_TOKEN_AUTH"]
+  prevent_user_existence_errors        = "ENABLED"
+  enable_token_revocation              = true
+  access_token_validity                = 60
+  id_token_validity                    = 60
+  # The daemon keeps its refresh token sealed by Windows DPAPI; sign in again after this.
+  refresh_token_validity = 90
+
+  token_validity_units {
+    access_token  = "minutes"
+    id_token      = "minutes"
+    refresh_token = "days"
+  }
+}
+
+# Remote access is opt-in per person. In production mode the control plane accepts only members of
+# this group, so any Google account can sign in and only those added can use remote access. Add a
+# person after their first sign-in (the user name is in the pool's user list):
+#   aws cognito-idp admin-add-user-to-group --user-pool-id <pool> --username <user> --group-name remote
+resource "aws_cognito_user_group" "remote" {
+  count        = local.phone_sign_in ? 1 : 0
+  name         = "remote"
+  user_pool_id = aws_cognito_user_pool.phone[0].id
+  description  = "People who may use Axl remote access."
 }

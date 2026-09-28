@@ -23,12 +23,14 @@ import {
   REMOTE_DEVICE_ENROLLMENT_PATH,
   REMOTE_DEVICE_INVITATION_PATH,
   REMOTE_DEVICE_REVOCATION_PATH,
+  REMOTE_INSTALLATION_REGISTRATION_PATH,
   WITNESS_HTTP_CONTENT_TYPE,
   WITNESS_HTTP_PATH,
   WITNESS_REQUEST_MAX_BYTES,
 } from "@axl/protocol";
 
 import { RemoteDeviceError, type RemoteDeviceService } from "./devices.ts";
+import type { RemoteInstallationService } from "./installations.ts";
 import { PairingRendezvousError, type PairingRendezvousService } from "./pairing.ts";
 import type { PairingLinkService } from "./pairing-links.ts";
 import { type AccountPrincipal, RelayTicketError, type RelayTicketService } from "./tickets.ts";
@@ -52,6 +54,7 @@ export interface ControlPlaneHandlerOptions {
   readonly pairing?: PairingRendezvousService;
   readonly pairingLinks?: PairingLinkService;
   readonly devices?: RemoteDeviceService;
+  readonly installations?: RemoteInstallationService;
 }
 
 class HttpRequestError extends Error {
@@ -299,6 +302,16 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
           parseRequest(parseFetchPairingLinkRequest, parseJson(await readBody(request))),
         );
         respond(response, 200, encodePairingLinkPublication(result));
+        return;
+      }
+      if (path === REMOTE_INSTALLATION_REGISTRATION_PATH && options.installations !== undefined) {
+        const principal = await authenticate(request, path);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        await options.installations.register(principal, parseJson(await readBody(request)));
+        respond(response, 201, { version: 1, accepted: true });
         return;
       }
       const devices = options.devices;

@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Deployment-test rollback witness: three in-process replicas.
+ * Rollback witness with three in-process replicas, for the deployment-test and production runtimes.
  *
- * This is not the production witness topology. The three replicas share one process, one account,
+ * This is not the RFC's target witness topology. The three replicas share one process, one account,
  * and one failure domain. Their state is kept in the storage the assembly passes, DynamoDB on the
  * AWS stack, or process memory when none is given. Signing keys come from Secrets Manager and
  * their public halves are the replica trust pinned into deployment-test client builds.
@@ -245,8 +245,11 @@ export interface DeploymentTestWitnessFailure {
 
 export interface DeploymentTestWitnessOptions {
   readonly keys: readonly DeploymentTestWitnessKey[];
-  /** The single deployment-test account, as the UUID the public authenticator returns. */
-  readonly accountId: string;
+  /**
+   * The single deployment-test account, as the UUID the public authenticator returns. Without it
+   * (production), every authenticated account is admitted, each only to its own lineages.
+   */
+  readonly accountId?: string;
   /** Durable stores for one replica. Without it, replica state lives in process memory. */
   readonly stores?: (key: DeploymentTestWitnessKey) => DeploymentTestWitnessStores;
   readonly audit?: (event: WitnessSecurityAuditEvent) => void;
@@ -323,7 +326,8 @@ export async function createDeploymentTestWitness(
     principal: HostedWitnessPrincipal,
     request: WitnessRequest,
   ): Promise<WitnessAdmission | undefined> =>
-    principal.accountId === options.accountId && accountMatches(principal, request)
+    (options.accountId === undefined || principal.accountId === options.accountId) &&
+    accountMatches(principal, request)
       ? { principal, mode: "active" }
       : undefined;
   return new RecoveringWitnessGateway(

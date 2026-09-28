@@ -21,6 +21,8 @@ import {
   type RelayTicketStore,
   type RemoteDeviceRecord,
   type RemoteDeviceStore,
+  type RemoteInstallationRecord,
+  type RemoteInstallationStore,
 } from "@axl/control-plane";
 import {
   type DeviceId,
@@ -444,7 +446,142 @@ export class DynamoRemoteDeviceStore implements RemoteDeviceStore {
   }
 }
 
-/** OIDC bearer authentication for production control-plane requests. */
+function parseStoredInstallation(serialized: string): RemoteInstallationRecord {
+  const value: unknown = JSON.parse(serialized);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Stored remote installation is invalid");
+  }
+  const record = value as Record<string, unknown>;
+  return {
+    accountId: requiredString(record, "accountId"),
+    installationId: parseInstallationId(requiredString(record, "installationId")),
+    publicKey: requiredString(record, "publicKey"),
+    registeredAt: requiredInteger(record, "registeredAt"),
+  };
+}
+
+/** DynamoDB-backed daemon installations. A record is written once and never expires. */
+export class DynamoRemoteInstallationStore implements RemoteInstallationStore {
+  readonly #client: DynamoDBClient;
+  readonly #tableName: string;
+
+  constructor(options: { readonly tableName: string; readonly client?: DynamoDBClient }) {
+    if (options.tableName.length === 0) throw new TypeError("DynamoDB table name is required");
+    this.#tableName = options.tableName;
+    this.#client = options.client ?? new DynamoDBClient({});
+  }
+
+  #key(installationId: InstallationId) {
+    return { pk: { S: `installation#${installationId}` } };
+  }
+
+  async get(
+    installationId: InstallationId,
+  ): Promise<Readonly<RemoteInstallationRecord> | undefined> {
+    const result = await this.#client.send(
+      new GetItemCommand({
+        TableName: this.#tableName,
+        Key: this.#key(installationId),
+        ConsistentRead: true,
+      }),
+    );
+    const serialized = result.Item?.record?.S;
+    return serialized === undefined ? undefined : parseStoredInstallation(serialized);
+  }
+
+  async create(
+    record: RemoteInstallationRecord,
+  ): Promise<Readonly<RemoteInstallationRecord> | undefined> {
+    try {
+      await this.#client.send(
+        new PutItemCommand({
+          TableName: this.#tableName,
+          Item: { ...this.#key(record.installationId), record: { S: JSON.stringify(record) } },
+          ConditionExpression: "attribute_not_exists(pk)",
+        }),
+      );
+      return undefined;
+    } catch (cause) {
+      if (!(cause instanceof ConditionalCheckFailedException)) throw cause;
+    }
+    const existing = await this.get(record.installationId);
+    if (existing === undefined) throw new Error("Remote installation vanished after a conflict");
+    return existing;
+  }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+/**
+ * Production accounts: people signed in through the Cognito user pool, with Google as the identity
+ * provider. The account is the pool's `sub`, a UUID that also binds the account's witness lineages.
+ *
+ * Two app clients reach the control plane. The daemon's client (`axl remote login`) gets the full
+ * account; the phone page's client gets the phone scope, which pairs and runs a device and never
+ * reaches the daemon's routes. Remote access is opt-in per account: a token is accepted only when the
+ * person is in the pool's remote group, so anyone may sign in and only those added may use it.
+ */
+export class CognitoAccountAuthenticator implements PublicPrincipalAuthenticator {
+  readonly #issuer: string;
+  readonly #daemonClientId: string;
+  readonly #phoneClientId: string;
+  readonly #group: string;
+  readonly #keys: JWTVerifyGetKey;
+
+  constructor(options: {
+    /** `https://cognito-idp.<region>.amazonaws.com/<user pool ID>`. */
+    readonly issuer: string;
+    readonly daemonClientId: string;
+    readonly phoneClientId: string;
+    /** The Cognito group whose members may use remote access. */
+    readonly group: string;
+    /** The pool's signing keys; fetched from the issuer's JWKS when omitted. */
+    readonly keys?: JWTVerifyGetKey;
+  }) {
+    if (
+      options.daemonClientId.length === 0 ||
+      options.phoneClientId.length === 0 ||
+      options.daemonClientId === options.phoneClientId ||
+      options.group.length === 0
+    ) {
+      throw new TypeError("Two distinct Cognito client IDs and a group are required");
+    }
+    this.#issuer = new URL(options.issuer).href.replace(/\/$/u, "");
+    this.#daemonClientId = options.daemonClientId;
+    this.#phoneClientId = options.phoneClientId;
+    this.#group = options.group;
+    this.#keys =
+      options.keys ?? createRemoteJWKSet(new URL(`${this.#issuer}/.well-known/jwks.json`));
+  }
+
+  async authenticate(
+    request: Parameters<PublicPrincipalAuthenticator["authenticate"]>[0],
+  ): Promise<AccountPrincipal | undefined> {
+    const header = request.headers.authorization;
+    if (header === undefined || header.length > MAX_TOKEN_BYTES || !header.startsWith("Bearer ")) {
+      return undefined;
+    }
+    try {
+      const { payload } = await jwtVerify(header.slice(7), this.#keys, {
+        issuer: this.#issuer,
+        algorithms: ["RS256"],
+        requiredClaims: ["sub", "exp"],
+      });
+      if (payload.token_use !== "access" || typeof payload.sub !== "string") return undefined;
+      if (!UUID.test(payload.sub)) return undefined;
+      const groups = payload["cognito:groups"];
+      if (!Array.isArray(groups) || !groups.includes(this.#group)) return undefined;
+      if (payload.client_id === this.#daemonClientId) return { accountId: payload.sub };
+      if (payload.client_id === this.#phoneClientId) {
+        return { accountId: payload.sub, scope: "phone" };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 /**
  * A person signed in on the phone page through the Cognito user pool (Google as the identity
  * provider). It verifies the pool's access tokens for the page's app client and grants the account
@@ -493,39 +630,6 @@ export class CognitoPhoneAuthenticator implements PublicPrincipalAuthenticator {
       // or another client's token is refused.
       if (payload.token_use !== "access" || payload.client_id !== this.#clientId) return undefined;
       return { accountId: this.#accountId, scope: "phone" };
-    } catch {
-      return undefined;
-    }
-  }
-}
-
-export class JwtPrincipalAuthenticator implements PublicPrincipalAuthenticator {
-  readonly #issuer: string;
-  readonly #audience: string;
-  readonly #jwks: ReturnType<typeof createRemoteJWKSet>;
-
-  constructor(options: { readonly issuer: string; readonly audience: string }) {
-    this.#issuer = new URL(options.issuer).href.replace(/\/$/u, "");
-    this.#audience = options.audience;
-    this.#jwks = createRemoteJWKSet(new URL(`${this.#issuer}/.well-known/jwks.json`));
-  }
-
-  async authenticate(
-    request: Parameters<PublicPrincipalAuthenticator["authenticate"]>[0],
-  ): Promise<AccountPrincipal | undefined> {
-    const header = request.headers.authorization;
-    if (header === undefined || header.length > MAX_TOKEN_BYTES || !header.startsWith("Bearer ")) {
-      return undefined;
-    }
-    try {
-      const result = await jwtVerify(header.slice(7), this.#jwks, {
-        issuer: this.#issuer,
-        audience: this.#audience,
-        algorithms: ["RS256", "ES256"],
-      });
-      return typeof result.payload.sub === "string" && result.payload.sub.length > 0
-        ? { accountId: result.payload.sub }
-        : undefined;
     } catch {
       return undefined;
     }

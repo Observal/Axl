@@ -14,7 +14,8 @@ defmodule AxlRelay.Router do
 
   @impl true
   def call(%{method: "GET", path_info: ["healthz"]} = connection, _options) do
-    json(connection, 200, %{"status" => "ok", "mode" => "deployment-test"})
+    mode = Application.get_env(:axl_relay, :mode, "deployment-test")
+    json(connection, 200, %{"status" => "ok", "mode" => mode})
   end
 
   def call(%{method: "GET", path_info: ["v1", "connect"]} = connection, options) do
