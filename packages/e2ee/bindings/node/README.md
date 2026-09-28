@@ -58,3 +58,12 @@ It is not a production artifact. Its envelope keys rest unwrapped in one owner-o
 `check-abi.mjs` verifies that production contains none of it and that the deployment-test binary
 carries no test identifiers. Without a trust file the Cargo feature still builds for unit tests and
 lint, and every endpoint then fails closed with `rollback_anchor_unavailable`.
+
+## Hosted WSL artifact
+
+`node scripts/build.mjs hosted-wsl` (on Linux, with `AXL_E2EE_HOSTED_TRUST_FILE`) builds
+`dist/hosted-wsl` for a production daemon in WSL 2. It adds exactly one export to the production
+binding, `hostedWslDaemonEndpoint(root, helper, accountId, installationId, cryptoSessionId)`, whose
+envelope keys are sealed by Windows DPAPI for the Windows user through `helper`, the path of that
+user's `axl-dpapi-helper.exe`, and whose endpoint verifies certificates against the replica trust
+pinned at build time. See `docs/architecture/remote-production-wsl.md`.

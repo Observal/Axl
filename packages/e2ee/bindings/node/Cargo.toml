@@ -17,6 +17,9 @@ crate-type = ["cdylib"]
 test-fixtures = ["axl-e2ee/node-test-fixtures"]
 # Hosted deployment-test daemon: build-pinned replica trust and owner-only file keys. Never production.
 deployment-test = []
+# Hosted daemon in WSL 2: build-pinned replica trust and envelope keys sealed by Windows DPAPI through
+# the Windows user's helper process.
+hosted-wsl = []
 
 [dependencies]
 axl-e2ee = { path = "../.." }

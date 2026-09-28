@@ -82,7 +82,9 @@ A helper that stops answering is restarted once per request; DPAPI's own refusal
 The Cognito user pool that signs the phone in (`auth.remote.observal.io`, Google as the identity provider) becomes the account system for remote access. The account ID is the pool's `sub`.
 
 - **Phone**: the page's app client, authorization code flow with PKCE, as today. Its access tokens carry the phone scope: pairing, device enrollment, device relay tickets, and the witness.
-- **Daemon**: `axl remote login` runs the same flow with a second public app client whose redirect is a loopback address, opening the Windows browser from WSL. The refresh token is sealed through the helper like an envelope key and stored beside the daemon's remote state. Its access tokens carry the daemon scope.
+- **Daemon**: `axl remote login` runs the same flow with a second public app client whose redirect is `http://localhost:47813/callback`, opening the Windows browser from WSL. It creates the installation's ID and P-256 key. The refresh token and the key's PKCS#8 bytes are sealed through the helper and stored in the owner-only `~/.axl/remote/account.json`. The daemon client's access tokens carry the full account.
+
+Remote access is opt-in per person: the control plane accepts a token only when its `cognito:groups` claim names the pool's `remote` group. Anyone with a Google account can sign in; only people an operator adds to the group can use remote access. The phone must sign in with the same Google account as the daemon, since the account is the `sub` both tokens carry.
 
 The control plane never accepts a static account token in production.
 
@@ -91,10 +93,11 @@ The control plane never accepts a static account token in production.
 A production runtime replaces the deployment-test runtime's single configured account:
 
 - accounts and installations come from tokens and registration, not from environment variables;
-- a daemon registers its installation with its own relay-possession key, which replaces the static possession proof. Each device already proves possession with its own key;
-- relay tickets, pairing, device enrollment, and witness admission are authorized per account, installation, and device;
-- remote access is refused unless the account is on the opt-in list; and
-- quotas bound pairing attempts, link publication, and witness requests per account.
+- a daemon registers its installation with its own relay-possession key (`/v1/installations/register`), which replaces the static possession proof. Each device already proves possession with its own key;
+- the relay routes by installation, so relay tickets of either role are issued only for an installation registered to the caller's account. Pairing, device enrollment, and witness admission are authorized per account, installation, and device; and
+- remote access is refused unless the account is in the remote group.
+
+Per-account quotas on pairing attempts, link publication, and witness requests are not in place yet; they are a prerequisite for widening the opt-in.
 
 It replaces the deployment-test runtime on the existing stack (`infra/aws/hosted-path-test`, `remote.observal.io`) rather than running beside it. In production mode the stack holds no shared account token, so none can be accepted. Deployment-test mode remains only in the local end-to-end harness.
 
@@ -108,12 +111,12 @@ Replica trust (the three public verification keys) is pinned into the production
 
 ## Enablement
 
-Production endpoint constructors stay fail-closed in every build except the WSL target, where the daemon uses them only when all of the following hold:
+Production endpoint constructors stay fail-closed in every build. The daemon's endpoint comes from the `hosted-wsl` Node artifact (`hostedWslDaemonEndpoint`), which exists only in that build, and the daemon uses it only when all of the following hold:
 
-1. the daemon's remote configuration sets `production: true`;
-2. `axl remote login` has stored a session for an account on the opt-in list;
+1. `axl remote login` has stored an account in `~/.axl/remote/account.json`;
+2. the control plane accepts that account, which requires the remote group;
 3. the helper answers and its identity matches the store's records; and
-4. the build carries production replica trust.
+4. the artifact carries the stack's pinned replica trust.
 
 `productionStorageReady` in the artifact metadata stays `false`. The browser page follows the same rule with its own production build.
 

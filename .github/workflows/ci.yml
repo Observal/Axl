@@ -136,6 +136,7 @@ jobs:
           cargo clippy --locked -p axl-e2ee-node --all-targets --features test-fixtures -- -D warnings
           cargo test --locked -p axl-e2ee-node --features deployment-test deployment_store
           cargo clippy --locked -p axl-e2ee-node --all-targets --features deployment-test -- -D warnings
+          cargo clippy --locked -p axl-e2ee-node --all-targets --features hosted-wsl -- -D warnings
           cargo audit --deny warnings
           cargo deny check
       - name: Sweep the crash and recovery matrix
