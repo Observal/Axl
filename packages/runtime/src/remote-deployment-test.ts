@@ -39,6 +39,7 @@ import { pathToFileURL } from "node:url";
 import {
   type AxlDaemon,
   DaemonWitnessBarrier,
+  DaemonWitnessError,
   type DaemonWitnessOutcome,
   type DaemonWitnessPending,
   type DaemonWitnessResult,
@@ -85,6 +86,10 @@ const RELAY_HEARTBEAT_MS = 30_000;
 /** A reply waits this long for the relay to reconnect before it is dropped; the device resends. */
 const RELAY_RECONNECT_WAIT_MS = 15_000;
 const RESTORE_RETRY_MAX_MS = 60_000;
+/** How many times one request waits out a witness recovery before the device's resend takes over. */
+const WITNESS_RECEIVE_ATTEMPTS = 5;
+/** The longest one request waits for the witness to recover before it is tried again. */
+const WITNESS_RECEIVE_WAIT_MS = 60_000;
 const MAX_LOG_BYTES = 1024 * 1024;
 
 function isActivation(payload: Uint8Array): boolean {
@@ -105,6 +110,23 @@ function describe(cause: unknown): string {
 }
 
 /** Resolve once the relay is connected or closed, or after `timeoutMs`. */
+/** Settle once the bridge's witness is out of recovery, or after `timeoutMs` regardless. */
+function whenWitnessSettles(bridge: WindowsRemoteE2eeBridge, timeoutMs: number): Promise<void> {
+  if (bridge.witnessStatus?.state !== "recovering") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      stop();
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    timer.unref?.();
+    const stop = bridge.onWitnessState((status) => {
+      if (status.state !== "recovering") done();
+    });
+  });
+}
+
 function whenConnected(relay: RemoteRelayConnection, timeoutMs: number): Promise<void> {
   if (relay.state === "connected") return Promise.resolve();
   return new Promise((resolve) => {
@@ -521,20 +543,48 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     if (session.bridge !== undefined) {
       // The device resends its activation until a request is answered; the first one paired it.
       if (isActivation(delivery.opaquePayload)) return;
-      void session.bridge
-        .receive({ sourceRouteId: delivery.sourceRouteId, opaqueEnvelope: delivery.opaquePayload })
-        .catch((cause) => {
-          const message = `remote: request failed: ${describe(cause)}`;
-          // A request the daemon refused was already answered with its reason; it is no fault.
-          if ((cause as { readonly name?: unknown }).name === "DaemonError") this.#log(message);
-          else this.#fail(message);
-        });
+      void this.#receive(session, session.bridge, delivery).catch((cause) => {
+        const message = `remote: request failed: ${describe(cause)}`;
+        // A request the daemon refused was already answered with its reason; it is no fault.
+        if ((cause as { readonly name?: unknown }).name === "DaemonError") this.#log(message);
+        else this.#fail(message);
+      });
       return;
     }
     const run = session.tail.then(() => this.#pairingStep(session, delivery));
     session.tail = run.catch((cause) =>
       this.#fail(`remote: pairing step failed: ${describe(cause)}`),
     );
+  }
+
+  /**
+   * Hand one request to the bridge. A witness that is recovering (a restarted control plane)
+   * refuses it before anything is committed, and the device resends only when its connection
+   * changes, so the request is received again once the witness recovers, exactly as a resend
+   * would be.
+   */
+  async #receive(
+    session: Session,
+    bridge: WindowsRemoteE2eeBridge,
+    delivery: RelayDelivery,
+  ): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await bridge.receive({
+          sourceRouteId: delivery.sourceRouteId,
+          opaqueEnvelope: delivery.opaquePayload,
+        });
+        return;
+      } catch (cause) {
+        const unavailable =
+          cause instanceof DaemonWitnessError && cause.code === "witness_unavailable";
+        if (!unavailable || attempt >= WITNESS_RECEIVE_ATTEMPTS || this.#session !== session) {
+          throw cause;
+        }
+        await whenWitnessSettles(bridge, WITNESS_RECEIVE_WAIT_MS);
+        if (this.#session !== session) throw cause;
+      }
+    }
   }
 
   async #pairingStep(session: Session, delivery: RelayDelivery): Promise<void> {
@@ -644,6 +694,8 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
         },
       },
       onError: (error) => this.#fail(`remote: ${error.message}`),
+      onRecoveryFailure: (error) =>
+        this.#log(`remote: witness recovery failed, retrying: ${describe(error)}`),
     });
     session.bridge = bridge;
     session.relay.onRoutes((peers) => bridge.observeRelayRoutes(peers));

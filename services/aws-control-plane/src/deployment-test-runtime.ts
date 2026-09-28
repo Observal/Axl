@@ -32,6 +32,7 @@ import {
   createDeploymentTestWitness,
   parseDeploymentTestWitnessKeys,
 } from "./witness-deployment-test.ts";
+import { DynamoWitnessHighWaterJournal, DynamoWitnessReplicaStorage } from "./witness-dynamo.ts";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -109,12 +110,50 @@ const tickets = new RelayTicketService({
 
 // Optional: without witness keys the witness path stays unrouted and E2EE endpoints fail closed.
 const witnessKeys = process.env.AXL_TEST_WITNESS_KEYS;
+// Witness replica records and their high-water journals, in two tables. Required with DynamoDB
+// state, so a restart never silently empties the witness; optional in the in-memory mode.
+const witnessTable = process.env.AXL_WITNESS_TABLE;
+const journalTable = process.env.AXL_WITNESS_JOURNAL_TABLE;
+if ((witnessTable === undefined) !== (journalTable === undefined)) {
+  throw new Error("AXL_WITNESS_TABLE and AXL_WITNESS_JOURNAL_TABLE go together");
+}
+if (tableName !== undefined && witnessTable === undefined) {
+  throw new Error("AXL_WITNESS_TABLE is required with DynamoDB state");
+}
+const witnessStores =
+  witnessTable === undefined || journalTable === undefined
+    ? undefined
+    : (key: { readonly replicaId: Uint8Array }) => ({
+        storage: new DynamoWitnessReplicaStorage({
+          tableName: witnessTable,
+          replicaId: key.replicaId,
+        }),
+        journal: new DynamoWitnessHighWaterJournal({
+          tableName: journalTable,
+          replicaId: key.replicaId,
+        }),
+      });
 const witness =
   witnessKeys === undefined || witnessKeys.length === 0
     ? undefined
     : await createDeploymentTestWitness({
         keys: parseDeploymentTestWitnessKeys(witnessKeys),
         accountId,
+        ...(witnessStores === undefined ? {} : { stores: witnessStores }),
+        onFailure({ stage, kind, lineageHash, cause }) {
+          const error = cause as { readonly code?: unknown; readonly message?: unknown };
+          process.stdout.write(
+            `${JSON.stringify({
+              witnessFailure: {
+                stage,
+                kind,
+                ...(lineageHash === undefined ? {} : { lineageHash: lineageHash.slice(0, 16) }),
+                code: typeof error.code === "string" ? error.code : "internal",
+                message: typeof error.message === "string" ? error.message : String(cause),
+              },
+            })}\n`,
+          );
+        },
         audit(event) {
           process.stdout.write(`${JSON.stringify({ witnessAudit: event })}
 `);

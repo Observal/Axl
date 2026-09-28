@@ -287,6 +287,11 @@ function cloneHead(head: WitnessHead): WitnessHead {
   };
 }
 
+/** The lineage a witness request addresses, as replicas and receipts identify it. */
+export function witnessLineageHash(request: WitnessRequest): Uint8Array {
+  return lineageHash(request);
+}
+
 function lineageHash(request: WitnessRequest): Uint8Array {
   const profile = utf8(request.lineage.profileId);
   const encoded = Uint8Array.from([
@@ -718,7 +723,9 @@ export class WitnessReplica implements WitnessReplicaClient {
   readonly #options: WitnessReplicaOptions;
   readonly #recoveryTrust: readonly WitnessReplicaTrust[];
   readonly #lineageQueues = new Map<string, Promise<void>>();
-  #state: "recovery_required" | "bootstrap" | "ready" = "recovery_required";
+  #state: "recovery_required" | "bootstrap" | "lineage_recovery" | "ready" = "recovery_required";
+  /** In `lineage_recovery`, the lineages this process has recovered or newly registered. */
+  readonly #recoveredLineages = new Set<string>();
 
   constructor(options: WitnessReplicaOptions) {
     if (options.signer.replicaId.byteLength !== 16 || options.signer.keyId.byteLength !== 16) {
@@ -752,6 +759,116 @@ export class WitnessReplica implements WitnessReplicaClient {
     this.#state = "bootstrap";
   }
 
+  /**
+   * Resume over durable storage after a restart. A whole-replica `recover` needs fresh endpoint
+   * reads for every lineage at once, which no restart can collect, so a resumed replica instead
+   * recovers each lineage on its own: it votes for a lineage again only after `recoverLineage` has
+   * matched that lineage's head against fresh heads from both other replicas. Until then it admits
+   * only the registration of a lineage that neither its store nor its journal has ever held.
+   */
+  async resumeDurable(): Promise<void> {
+    this.#state = "recovery_required";
+    this.#recoveredLineages.clear();
+    const lineages = await this.#options.storage.listLineageHashes();
+    if (lineages.length === 0) {
+      throw new WitnessServiceError(
+        "witness_unavailable",
+        "An empty witness replica requires explicit bootstrap",
+        503,
+      );
+    }
+    this.#state = "lineage_recovery";
+  }
+
+  /** Whether this replica votes for `lineage`: it is ready, or it recovered that lineage. */
+  lineageReady(lineage: Uint8Array): boolean {
+    return (
+      this.#state === "ready" ||
+      (this.#state === "lineage_recovery" && this.#recoveredLineages.has(witnessBytesHex(lineage)))
+    );
+  }
+
+  /**
+   * Recover one lineage of a resumed replica from fresh heads that both other replicas signed for
+   * one endpoint-signed read of it. The checks are exactly those of `recover` for that lineage.
+   */
+  async recoverLineage(peerEvidence: readonly WitnessPeerHeadEvidence[]): Promise<void> {
+    if (this.#state !== "lineage_recovery") {
+      throw new WitnessServiceError(
+        "witness_unavailable",
+        "Lineage recovery applies only to a resumed replica",
+        503,
+      );
+    }
+    const parsedEvidence = peerEvidence.map((evidence) => ({
+      request: parseWitnessRequest(evidence.requestBytes),
+      receipt: parseWitnessReplicaReceipt(evidence.receiptBytes),
+    }));
+    const first = parsedEvidence[0];
+    if (
+      first === undefined ||
+      parsedEvidence.some(
+        (evidence) => !witnessBytesEqual(lineageHash(evidence.request), lineageHash(first.request)),
+      )
+    ) {
+      throw new WitnessServiceError(
+        "witness_receipt_invalid",
+        "Lineage recovery evidence must address one lineage",
+        400,
+      );
+    }
+    const lineage = lineageHash(first.request);
+    const key = witnessBytesHex(lineage);
+    await this.#withLineage(key, async () => {
+      if (this.#recoveredLineages.has(key)) return;
+      if ((await this.#options.storage.read(lineage)) === undefined) {
+        throw new WitnessServiceError("witness_unavailable", "Recovery lineage is missing", 503);
+      }
+      const used = await this.#recoverOne(lineage, parsedEvidence, this.#otherReplicaIds());
+      if (used.length !== parsedEvidence.length) {
+        throw new WitnessServiceError(
+          "witness_receipt_invalid",
+          "Recovery evidence contains an unknown lineage",
+          400,
+        );
+      }
+      this.#recoveredLineages.add(key);
+    });
+  }
+
+  /** Run `work` after every earlier operation on the lineage `key` in this process. */
+  async #withLineage<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const prior = this.#lineageQueues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queued = prior.then(() => held);
+    this.#lineageQueues.set(key, queued);
+    await prior;
+    try {
+      return await work();
+    } finally {
+      release();
+      if (this.#lineageQueues.get(key) === queued) this.#lineageQueues.delete(key);
+    }
+  }
+
+  /** A resumed replica admits an unrecovered lineage only as a registration it never held. */
+  async #requireNeverHeld(request: WitnessRequest, lineage: Uint8Array): Promise<void> {
+    if (
+      request.kind !== "register" ||
+      (await this.#options.storage.read(lineage)) !== undefined ||
+      (await this.#options.journal.latest(lineage)) !== undefined
+    ) {
+      throw new WitnessServiceError(
+        "witness_unavailable",
+        "Witness lineage recovery is required",
+        503,
+      );
+    }
+  }
+
   async submit(admission: WitnessAdmission, exactRequest: Uint8Array): Promise<Uint8Array> {
     const request = parseWitnessRequest(exactRequest);
     if (this.#state === "recovery_required") {
@@ -768,21 +885,17 @@ export class WitnessReplica implements WitnessReplicaClient {
         503,
       );
     }
-    const key = witnessBytesHex(lineageHash(request));
-    const prior = this.#lineageQueues.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
+    const lineage = lineageHash(request);
+    const key = witnessBytesHex(lineage);
+    return this.#withLineage(key, async () => {
+      const unrecovered = this.#state === "lineage_recovery" && !this.#recoveredLineages.has(key);
+      if (unrecovered) await this.#requireNeverHeld(request, lineage);
+      const receipt = await this.#submit(admission, exactRequest);
+      if (unrecovered && parseWitnessReplicaReceipt(receipt).result === "registered") {
+        this.#recoveredLineages.add(key);
+      }
+      return receipt;
     });
-    const queued = prior.then(() => held);
-    this.#lineageQueues.set(key, queued);
-    await prior;
-    try {
-      return await this.#submit(admission, exactRequest);
-    } finally {
-      release();
-      if (this.#lineageQueues.get(key) === queued) this.#lineageQueues.delete(key);
-    }
   }
 
   async #submit(admission: WitnessAdmission, exactRequest: Uint8Array): Promise<Uint8Array> {
@@ -967,6 +1080,10 @@ export class WitnessReplica implements WitnessReplicaClient {
         ledger: nextLedger,
         operations: record?.operations ?? [],
         retainedResponses: record?.retainedResponses ?? [],
+        // Used recovery reads stay used across mutations.
+        ...(record?.recoveryRequestHashes === undefined
+          ? {}
+          : { recoveryRequestHashes: record.recoveryRequestHashes }),
         pendingJournalSequence: sequence,
         derivedHead: decision.mutation === "accept" ? cloneHead(successor) : cloneHead(base.head),
       };
@@ -1018,7 +1135,7 @@ export class WitnessReplica implements WitnessReplicaClient {
   }
 
   async revoke(lineage: Uint8Array, generation: bigint): Promise<void> {
-    if (this.#state !== "ready") {
+    if (!this.lineageReady(lineage)) {
       throw new WitnessServiceError(
         "witness_unavailable",
         "Witness replica recovery is required",
@@ -1090,170 +1207,12 @@ export class WitnessReplica implements WitnessReplicaClient {
         receipt: parseWitnessReplicaReceipt(evidence.receiptBytes),
       }));
       const usedEvidence = new Set<number>();
-      const otherReplicaIds = this.#recoveryTrust
-        .map((replica) => replica.replicaId)
-        .filter((replicaId) => !witnessBytesEqual(replicaId, this.replicaId));
-      if (otherReplicaIds.length !== 2) {
-        throw new WitnessServiceError(
-          "service_unavailable",
-          "Recovery trust does not contain two other replicas",
-          503,
-        );
-      }
+      const otherReplicaIds = this.#otherReplicaIds();
 
       for (const lineage of lineages) {
-        const stored = await this.#options.storage.read(lineage);
-        if (stored === undefined) {
-          throw new WitnessServiceError(
-            "service_unavailable",
-            "Witness lineage disappeared during recovery",
-            503,
-          );
+        for (const index of await this.#recoverOne(lineage, parsedEvidence, otherReplicaIds)) {
+          usedEvidence.add(index);
         }
-        const { record, state } = await this.#validateLocalState(lineage, stored);
-        const matches = parsedEvidence
-          .map((value, index) => ({ ...value, index }))
-          .filter((value) => witnessBytesEqual(lineageHash(value.request), lineage));
-        if (matches.length !== 2) {
-          throw new WitnessServiceError(
-            "witness_unavailable",
-            "Recovery requires fresh evidence from both other replicas",
-            503,
-          );
-        }
-        const first = matches[0];
-        const second = matches[1];
-        if (first === undefined || second === undefined) {
-          throw new WitnessServiceError("witness_unavailable", "Peer evidence is incomplete", 503);
-        }
-        usedEvidence.add(first.index);
-        usedEvidence.add(second.index);
-        if (!witnessBytesEqual(first.request.exactBytes, second.request.exactBytes)) {
-          throw new WitnessServiceError(
-            "witness_receipt_invalid",
-            "Peer heads do not answer the same fresh read request",
-            400,
-          );
-        }
-        const readRequest = first.request;
-        if (
-          readRequest.kind !== "read" ||
-          !witnessBytesEqual(
-            readRequest.credentialFingerprint,
-            record.binding.credentialFingerprint,
-          ) ||
-          !endpointSignatureValid(readRequest, record.binding.verificationKey)
-        ) {
-          throw new WitnessServiceError(
-            "witness_auth_failed",
-            "Recovery read request endpoint proof is invalid",
-            401,
-          );
-        }
-        const recoveryHash = digest(readRequest.exactBytes);
-        if (
-          (record.recoveryRequestHashes ?? []).some((value) =>
-            witnessBytesEqual(value, recoveryHash),
-          )
-        ) {
-          throw new WitnessServiceError(
-            "witness_receipt_invalid",
-            "Recovery read evidence has already been used",
-            400,
-          );
-        }
-        const expectedPeerIds = new Set(otherReplicaIds.map(witnessBytesHex));
-        const actualPeerIds = new Set([
-          witnessBytesHex(first.receipt.replicaId),
-          witnessBytesHex(second.receipt.replicaId),
-        ]);
-        if (
-          actualPeerIds.size !== 2 ||
-          actualPeerIds.has(witnessBytesHex(this.replicaId)) ||
-          [...actualPeerIds].some((replicaId) => !expectedPeerIds.has(replicaId))
-        ) {
-          throw new WitnessServiceError(
-            "witness_receipt_invalid",
-            "Recovery evidence must come from both other distinct replicas",
-            400,
-          );
-        }
-        const expectedResult: WitnessResult =
-          state.forkResult !== undefined
-            ? "forked"
-            : state.revocation !== undefined
-              ? "revoked"
-              : "head";
-        const now = this.#options.clock.nowMs();
-        for (const { receipt } of matches) {
-          verifyReceiptForRequest(readRequest, receipt, this.#recoveryTrust);
-          if (
-            receipt.result !== expectedResult ||
-            receipt.issuedAtMs > now ||
-            now - receipt.issuedAtMs > WITNESS_RECOVERY_EVIDENCE_MAX_AGE_MS
-          ) {
-            throw new WitnessServiceError(
-              "witness_receipt_invalid",
-              "Recovery peer evidence is stale or has the wrong terminal state",
-              400,
-            );
-          }
-        }
-        if (
-          first.receipt.counter !== second.receipt.counter ||
-          !witnessBytesEqual(first.receipt.commitment, second.receipt.commitment) ||
-          !witnessBytesEqual(
-            first.receipt.predecessorCommitment,
-            second.receipt.predecessorCommitment,
-          ) ||
-          first.receipt.revocationGeneration !== second.receipt.revocationGeneration
-        ) {
-          throw new WitnessServiceError("witness_unavailable", "Recovery peer heads conflict", 503);
-        }
-        if (
-          first.receipt.counter !== state.head.counter ||
-          !witnessBytesEqual(first.receipt.commitment, state.head.commitment) ||
-          !witnessBytesEqual(
-            first.receipt.predecessorCommitment,
-            state.head.predecessorCommitment,
-          ) ||
-          first.receipt.revocationGeneration !== state.revocationGeneration
-        ) {
-          await this.#audit("replica_behind", lineage);
-          throw new WitnessServiceError(
-            "witness_unavailable",
-            "Local and peer witness heads do not match",
-            503,
-          );
-        }
-        await this.#options.storage.transact(lineage, (current) => {
-          if (current === undefined) {
-            throw new WitnessServiceError(
-              "service_unavailable",
-              "Witness lineage disappeared during recovery",
-              503,
-            );
-          }
-          const currentState = rebuild(current);
-          if (!sameHead(currentState.head, state.head)) {
-            throw new WitnessServiceError(
-              "service_unavailable",
-              "Witness lineage changed during recovery",
-              503,
-            );
-          }
-          return {
-            value: undefined,
-            next: {
-              ...current,
-              recoveryRequestHashes: [
-                ...(current.recoveryRequestHashes ?? []),
-                recoveryHash.slice(),
-              ],
-              derivedHead: cloneHead(state.head),
-            },
-          };
-        });
       }
       if (usedEvidence.size !== peerEvidence.length) {
         throw new WitnessServiceError(
@@ -1267,6 +1226,175 @@ export class WitnessReplica implements WitnessReplicaClient {
       this.#state = "recovery_required";
       throw error;
     }
+  }
+
+  #otherReplicaIds(): Uint8Array[] {
+    const otherReplicaIds = this.#recoveryTrust
+      .map((replica) => replica.replicaId)
+      .filter((replicaId) => !witnessBytesEqual(replicaId, this.replicaId));
+    if (otherReplicaIds.length !== 2) {
+      throw new WitnessServiceError(
+        "service_unavailable",
+        "Recovery trust does not contain two other replicas",
+        503,
+      );
+    }
+    return otherReplicaIds;
+  }
+
+  /**
+   * Check one lineage against fresh heads from both other replicas and record the evidence as
+   * used. Returns the indices of the evidence it consumed.
+   */
+  async #recoverOne(
+    lineage: Uint8Array,
+    parsedEvidence: readonly {
+      readonly request: WitnessRequest;
+      readonly receipt: WitnessReplicaReceipt;
+    }[],
+    otherReplicaIds: readonly Uint8Array[],
+  ): Promise<number[]> {
+    const stored = await this.#options.storage.read(lineage);
+    if (stored === undefined) {
+      throw new WitnessServiceError(
+        "service_unavailable",
+        "Witness lineage disappeared during recovery",
+        503,
+      );
+    }
+    const { record, state } = await this.#validateLocalState(lineage, stored);
+    const matches = parsedEvidence
+      .map((value, index) => ({ ...value, index }))
+      .filter((value) => witnessBytesEqual(lineageHash(value.request), lineage));
+    if (matches.length !== 2) {
+      throw new WitnessServiceError(
+        "witness_unavailable",
+        "Recovery requires fresh evidence from both other replicas",
+        503,
+      );
+    }
+    const first = matches[0];
+    const second = matches[1];
+    if (first === undefined || second === undefined) {
+      throw new WitnessServiceError("witness_unavailable", "Peer evidence is incomplete", 503);
+    }
+    if (!witnessBytesEqual(first.request.exactBytes, second.request.exactBytes)) {
+      throw new WitnessServiceError(
+        "witness_receipt_invalid",
+        "Peer heads do not answer the same fresh read request",
+        400,
+      );
+    }
+    const readRequest = first.request;
+    if (
+      readRequest.kind !== "read" ||
+      !witnessBytesEqual(readRequest.credentialFingerprint, record.binding.credentialFingerprint) ||
+      !endpointSignatureValid(readRequest, record.binding.verificationKey)
+    ) {
+      throw new WitnessServiceError(
+        "witness_auth_failed",
+        "Recovery read request endpoint proof is invalid",
+        401,
+      );
+    }
+    const recoveryHash = digest(readRequest.exactBytes);
+    if (
+      (record.recoveryRequestHashes ?? []).some((value) => witnessBytesEqual(value, recoveryHash))
+    ) {
+      throw new WitnessServiceError(
+        "witness_receipt_invalid",
+        "Recovery read evidence has already been used",
+        400,
+      );
+    }
+    const expectedPeerIds = new Set(otherReplicaIds.map(witnessBytesHex));
+    const actualPeerIds = new Set([
+      witnessBytesHex(first.receipt.replicaId),
+      witnessBytesHex(second.receipt.replicaId),
+    ]);
+    if (
+      actualPeerIds.size !== 2 ||
+      actualPeerIds.has(witnessBytesHex(this.replicaId)) ||
+      [...actualPeerIds].some((replicaId) => !expectedPeerIds.has(replicaId))
+    ) {
+      throw new WitnessServiceError(
+        "witness_receipt_invalid",
+        "Recovery evidence must come from both other distinct replicas",
+        400,
+      );
+    }
+    const expectedResult: WitnessResult =
+      state.forkResult !== undefined
+        ? "forked"
+        : state.revocation !== undefined
+          ? "revoked"
+          : "head";
+    const now = this.#options.clock.nowMs();
+    for (const { receipt } of matches) {
+      verifyReceiptForRequest(readRequest, receipt, this.#recoveryTrust);
+      if (
+        receipt.result !== expectedResult ||
+        receipt.issuedAtMs > now ||
+        now - receipt.issuedAtMs > WITNESS_RECOVERY_EVIDENCE_MAX_AGE_MS
+      ) {
+        throw new WitnessServiceError(
+          "witness_receipt_invalid",
+          "Recovery peer evidence is stale or has the wrong terminal state",
+          400,
+        );
+      }
+    }
+    if (
+      first.receipt.counter !== second.receipt.counter ||
+      !witnessBytesEqual(first.receipt.commitment, second.receipt.commitment) ||
+      !witnessBytesEqual(
+        first.receipt.predecessorCommitment,
+        second.receipt.predecessorCommitment,
+      ) ||
+      first.receipt.revocationGeneration !== second.receipt.revocationGeneration
+    ) {
+      throw new WitnessServiceError("witness_unavailable", "Recovery peer heads conflict", 503);
+    }
+    if (
+      first.receipt.counter !== state.head.counter ||
+      !witnessBytesEqual(first.receipt.commitment, state.head.commitment) ||
+      !witnessBytesEqual(first.receipt.predecessorCommitment, state.head.predecessorCommitment) ||
+      first.receipt.revocationGeneration !== state.revocationGeneration
+    ) {
+      await this.#audit("replica_behind", lineage);
+      throw new WitnessServiceError(
+        "witness_unavailable",
+        "Local and peer witness heads do not match",
+        503,
+      );
+    }
+    await this.#options.storage.transact(lineage, (current) => {
+      if (current === undefined) {
+        throw new WitnessServiceError(
+          "service_unavailable",
+          "Witness lineage disappeared during recovery",
+          503,
+        );
+      }
+      const currentState = rebuild(current);
+      if (!sameHead(currentState.head, state.head)) {
+        throw new WitnessServiceError(
+          "service_unavailable",
+          "Witness lineage changed during recovery",
+          503,
+        );
+      }
+      return {
+        value: undefined,
+        next: {
+          ...current,
+          recoveryRequestHashes: [...(current.recoveryRequestHashes ?? []), recoveryHash.slice()],
+          derivedHead: cloneHead(state.head),
+        },
+      };
+    });
+
+    return [first.index, second.index];
   }
 
   async recoveryHead(
@@ -1512,6 +1640,9 @@ export class WitnessReplica implements WitnessReplicaClient {
               },
             ],
             retainedResponses: record?.retainedResponses ?? [],
+            ...(record?.recoveryRequestHashes === undefined
+              ? {}
+              : { recoveryRequestHashes: record.recoveryRequestHashes }),
             pendingJournalSequence: nextEvent.sequence,
             derivedHead: cloneHead(successor),
           };

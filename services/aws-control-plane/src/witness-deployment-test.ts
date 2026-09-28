@@ -2,19 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Deployment-test rollback witness: three in-process replicas with process-lifetime state.
+ * Deployment-test rollback witness: three in-process replicas.
  *
  * This is not the production witness topology. The three replicas share one process, one account,
- * and one failure domain, and their state lives only in memory. A replica can only recover persisted
- * state from fresh endpoint-signed reads covering every lineage, so a restarted deployment-test
- * control plane starts every replica empty instead: endpoints registered before the restart fail
- * closed and must pair again. Signing keys come from Secrets Manager and their public halves are
- * the replica trust pinned into deployment-test client builds.
+ * and one failure domain. Their state is kept in the storage the assembly passes, DynamoDB on the
+ * AWS stack, or process memory when none is given. Signing keys come from Secrets Manager and
+ * their public halves are the replica trust pinned into deployment-test client builds.
  *
  * Empty replicas start in bootstrap, which admits exactly one initial registration. They become
  * ready through the ordinary recovery exchange: the first endpoint-signed read after that
  * registration is answered by each replica's recovery head, and every replica recovers from the
  * other two receipts before the read itself is submitted.
+ *
+ * Replicas that start over durable state resume lineage by lineage. Endpoints make a fresh signed
+ * read before every mutation, so the first read of each lineage after a restart recovers that
+ * lineage on every replica the same way, and a paired phone keeps working without pairing again.
  */
 
 import { createPrivateKey, createPublicKey, type KeyObject, sign } from "node:crypto";
@@ -30,6 +32,7 @@ import {
   type WitnessReplicaStorage,
   type WitnessReplicaTransaction,
   type WitnessSecurityAuditEvent,
+  witnessLineageHash,
 } from "@axl/control-plane";
 import {
   parseWitnessRequest,
@@ -228,11 +231,27 @@ class MemoryHighWaterJournal implements WitnessHighWaterJournal {
   }
 }
 
+export interface DeploymentTestWitnessStores {
+  readonly storage: WitnessReplicaStorage;
+  readonly journal: WitnessHighWaterJournal;
+}
+
+export interface DeploymentTestWitnessFailure {
+  readonly stage: "recovery" | "submit";
+  readonly kind: WitnessRequest["kind"] | "unparsed";
+  readonly lineageHash?: string;
+  readonly cause: unknown;
+}
+
 export interface DeploymentTestWitnessOptions {
   readonly keys: readonly DeploymentTestWitnessKey[];
   /** The single deployment-test account, as the UUID the public authenticator returns. */
   readonly accountId: string;
+  /** Durable stores for one replica. Without it, replica state lives in process memory. */
+  readonly stores?: (key: DeploymentTestWitnessKey) => DeploymentTestWitnessStores;
   readonly audit?: (event: WitnessSecurityAuditEvent) => void;
+  /** A witness request that failed, and why; recovery failures come before their request's. */
+  readonly onFailure?: (failure: DeploymentTestWitnessFailure) => void;
 }
 
 function accountMatches(principal: HostedWitnessPrincipal, request: WitnessRequest): boolean {
@@ -251,11 +270,18 @@ export async function createDeploymentTestWitness(
       options.audit?.(event);
     },
   };
-  const replicas = options.keys.map(
+  const stores = options.keys.map(
     (key) =>
-      new WitnessReplica({
+      options.stores?.(key) ?? {
         storage: new MemoryReplicaStorage(),
         journal: new MemoryHighWaterJournal(),
+      },
+  );
+  const replicas = options.keys.map(
+    (key, index) =>
+      new WitnessReplica({
+        storage: (stores[index] as DeploymentTestWitnessStores).storage,
+        journal: (stores[index] as DeploymentTestWitnessStores).journal,
         signer: new ReceiptSigner(key),
         recoveryTrust: trust,
         admission: {
@@ -278,7 +304,17 @@ export async function createDeploymentTestWitness(
         audit,
       }),
   );
-  await Promise.all(replicas.map((replica) => replica.bootstrapEmpty()));
+  const held = await Promise.all(
+    stores.map(async (store) => (await store.storage.listLineageHashes()).length > 0),
+  );
+  if (held.some((value) => value !== held[0])) {
+    // A partly empty set of replicas cannot bootstrap or recover; it must not guess which is right.
+    throw new Error("The witness replicas disagree about whether they hold any state");
+  }
+  const bootstrapping = held[0] !== true;
+  await Promise.all(
+    replicas.map((replica) => (bootstrapping ? replica.bootstrapEmpty() : replica.resumeDurable())),
+  );
   const [first, second, third] = replicas;
   if (first === undefined || second === undefined || third === undefined) {
     throw new Error("The deployment-test witness requires three replicas");
@@ -290,7 +326,7 @@ export async function createDeploymentTestWitness(
     principal.accountId === options.accountId && accountMatches(principal, request)
       ? { principal, mode: "active" }
       : undefined;
-  return new BootstrappingWitnessGateway(
+  return new RecoveringWitnessGateway(
     {
       authorizer: { authorize: admit },
       replicas: [first, second, third],
@@ -311,17 +347,21 @@ export async function createDeploymentTestWitness(
     },
     [first, second, third],
     admit,
+    bootstrapping,
+    options.onFailure,
   );
 }
 
-class BootstrappingWitnessGateway extends WitnessGateway {
+class RecoveringWitnessGateway extends WitnessGateway {
   readonly #replicas: readonly WitnessReplica[];
   readonly #admit: (
     principal: HostedWitnessPrincipal,
     request: WitnessRequest,
   ) => Promise<WitnessAdmission | undefined>;
-  #ready = false;
+  #ready: boolean;
   #bootstrapping: Promise<void> | undefined;
+  readonly #recovering = new Map<string, Promise<void>>();
+  readonly #onFailure: ((failure: DeploymentTestWitnessFailure) => void) | undefined;
 
   constructor(
     options: ConstructorParameters<typeof WitnessGateway>[0],
@@ -330,10 +370,14 @@ class BootstrappingWitnessGateway extends WitnessGateway {
       principal: HostedWitnessPrincipal,
       request: WitnessRequest,
     ) => Promise<WitnessAdmission | undefined>,
+    bootstrapping: boolean,
+    onFailure?: (failure: DeploymentTestWitnessFailure) => void,
   ) {
     super(options);
     this.#replicas = replicas;
     this.#admit = admit;
+    this.#ready = !bootstrapping;
+    this.#onFailure = onFailure;
   }
 
   override async submit(
@@ -341,7 +385,78 @@ class BootstrappingWitnessGateway extends WitnessGateway {
     exactRequest: Uint8Array,
   ): Promise<Uint8Array> {
     if (!this.#ready) await this.#completeBootstrap(principal, exactRequest);
-    return super.submit(principal, exactRequest);
+    else await this.#recoverLineage(principal, exactRequest);
+    try {
+      return await super.submit(principal, exactRequest);
+    } catch (cause) {
+      if (this.#onFailure !== undefined) {
+        let request: WitnessRequest | undefined;
+        try {
+          request = parseWitnessRequest(exactRequest);
+        } catch {
+          request = undefined;
+        }
+        this.#onFailure({
+          stage: "submit",
+          kind: request?.kind ?? "unparsed",
+          ...(request === undefined
+            ? {}
+            : { lineageHash: witnessBytesHex(witnessLineageHash(request)) }),
+          cause,
+        });
+      }
+      throw cause;
+    }
+  }
+
+  /**
+   * Recover a resumed lineage with its first fresh read: every replica signs its head for that
+   * read, and each one that has not recovered the lineage checks its own head against the other two.
+   */
+  async #recoverLineage(principal: HostedWitnessPrincipal, exactRequest: Uint8Array) {
+    let request: WitnessRequest;
+    try {
+      request = parseWitnessRequest(exactRequest);
+    } catch {
+      return;
+    }
+    if (request.kind !== "read") return;
+    const lineage = witnessLineageHash(request);
+    const ready = () => this.#replicas.every((replica) => replica.lineageReady(lineage));
+    if (ready()) return;
+    const admission = await this.#admit(principal, request);
+    if (admission === undefined) return;
+    const key = witnessBytesHex(lineage);
+    for (let pending = this.#recovering.get(key); pending !== undefined; ) {
+      await pending.catch(() => undefined);
+      pending = this.#recovering.get(key);
+    }
+    if (ready()) return;
+    const attempt = (async () => {
+      const receipts = await Promise.all(
+        this.#replicas.map((replica) => replica.recoveryHead(admission, exactRequest)),
+      );
+      await Promise.all(
+        this.#replicas.map((replica, own) =>
+          replica.lineageReady(lineage)
+            ? undefined
+            : replica.recoverLineage(
+                receipts
+                  .filter((_receipt, index) => index !== own)
+                  .map((receiptBytes) => ({ requestBytes: exactRequest, receiptBytes })),
+              ),
+        ),
+      );
+    })();
+    this.#recovering.set(key, attempt);
+    try {
+      await attempt;
+    } catch (cause) {
+      // Not recovered: the submission below fails closed and a later read retries.
+      this.#onFailure?.({ stage: "recovery", kind: "read", lineageHash: key, cause });
+    } finally {
+      this.#recovering.delete(key);
+    }
   }
 
   /** Move every replica from bootstrap to ready with the first registered lineage's signed read. */

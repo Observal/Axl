@@ -151,6 +151,13 @@ test("the pairing keeps working across a relay restart", async () => {
   await through("relay restarted", page, "p8 after relay restart", 60_000);
 });
 
+test("the pairing keeps working across a control-plane restart", async () => {
+  test.setTimeout(180_000);
+  // The witness resumes from its tables: the next fresh read of each lineage recovers it.
+  await stack.restartControlPlane();
+  await through("control plane restarted", page, "p8b after control-plane restart", 90_000);
+});
+
 test("a second tab takes over and sees every reply exactly once", async () => {
   test.setTimeout(120_000);
   const second = await context.newPage();

@@ -313,6 +313,59 @@ resource "aws_dynamodb_table" "control_plane" {
   }
 }
 
+# Rollback witness replica records: per lineage, a head item and one item per ledger event,
+# operation, retained response, and used recovery read. Records are never deleted, so no TTL.
+resource "aws_dynamodb_table" "witness" {
+  name         = "${local.name}-witness"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}
+
+# The witness high-water journals, apart from the records: one write-once item per sequence.
+resource "aws_dynamodb_table" "witness_journal" {
+  name         = "${local.name}-witness-journal"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "pk"
+  range_key    = "sk"
+
+  attribute {
+    name = "pk"
+    type = "S"
+  }
+
+  attribute {
+    name = "sk"
+    type = "S"
+  }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  server_side_encryption {
+    enabled = true
+  }
+}
+
 resource "aws_cloudwatch_log_group" "control_plane" {
   name              = "/ecs/${local.name}/control-plane"
   retention_in_days = 14
@@ -373,15 +426,37 @@ resource "aws_iam_role_policy" "control_plane_state" {
   role = aws_iam_role.control_plane_task.id
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect = "Allow"
-      Action = [
-        "dynamodb:GetItem",
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem"
-      ]
-      Resource = aws_dynamodb_table.control_plane.arn
-    }]
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = aws_dynamodb_table.control_plane.arn
+      },
+      {
+        # Transactions need only the item actions they contain.
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:Query"
+        ]
+        Resource = aws_dynamodb_table.witness.arn
+      },
+      {
+        # No update or delete: journal items are written once, under a not-exists condition.
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:Query"
+        ]
+        Resource = aws_dynamodb_table.witness_journal.arn
+      }
+    ]
   })
 }
 
@@ -403,7 +478,9 @@ resource "aws_ecs_task_definition" "control_plane" {
     environment = [
       { name = "AXL_ENVIRONMENT", value = "deployment-test" },
       { name = "AXL_TEST_RELAY_URL", value = "wss://${aws_cloudfront_distribution.main.domain_name}/v1/connect" },
-      { name = "AXL_TICKET_TABLE", value = aws_dynamodb_table.control_plane.name }
+      { name = "AXL_TICKET_TABLE", value = aws_dynamodb_table.control_plane.name },
+      { name = "AXL_WITNESS_TABLE", value = aws_dynamodb_table.witness.name },
+      { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name }
     ]
     secrets = [
       { name = "AXL_TEST_ACCOUNT_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:accountId::" },

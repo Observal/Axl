@@ -2,10 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // A local copy of the deployment-test stack for phone remote-control evidence: the deployment-test
-// control plane with its in-process witness, the Elixir relay, one HTTPS origin that serves the
-// phone page and forwards to both (like the stack's CloudFront), a scripted model, and a real
-// sandboxed daemon. The origin can drop or stall every relay socket, and the relay and daemon can
-// be restarted, so tests inject the failures phones see.
+// control plane with its in-process witness, keeping all of its state (tickets, devices, pairing,
+// and witness replicas) in a fake DynamoDB process like the stack's tables; the Elixir relay; one
+// HTTPS origin that serves the phone page and forwards to both (like the stack's CloudFront); a
+// scripted model; and a real sandboxed daemon. The origin can drop or stall every relay socket, and
+// the relay, control plane, and daemon can be restarted, so tests inject the failures phones see.
 
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -290,7 +291,8 @@ export async function startStack(directory) {
     key: readFileSync(join(directory, "tls/key.pem")),
     cert: readFileSync(join(directory, "tls/cert.pem")),
   };
-  const [originPort, controlPlanePort, relayPort] = [
+  const [originPort, controlPlanePort, relayPort, dynamoPort] = [
+    await freePort(),
     await freePort(),
     await freePort(),
     await freePort(),
@@ -303,28 +305,49 @@ export async function startStack(directory) {
   const keys = readFileSync(join(directory, "keys.json"), "utf8");
 
   const model = await startModel();
-  const controlPlane = new Service(
-    "control-plane",
+  const dynamo = new Service(
+    "dynamodb",
     process.execPath,
-    [join(repositoryRoot, "services/aws-control-plane/dist/deployment-test-runtime.js")],
-    {
-      env: {
-        PATH: process.env.PATH,
-        AXL_ENVIRONMENT: "deployment-test",
-        AXL_TEST_IN_MEMORY: "1",
-        AXL_TEST_ACCOUNT_ID: accountId,
-        AXL_TEST_INSTALLATION_ID: installationId,
-        AXL_TEST_PUBLIC_TOKEN: accessToken,
-        AXL_TEST_RELAY_TOKEN: RELAY_TOKEN,
-        AXL_TEST_POSSESSION_PROOF: possessionProof,
-        AXL_TEST_RELAY_URL: `wss://127.0.0.1:${originPort}/v1/connect`,
-        AXL_TEST_WITNESS_KEYS: keys,
-        PORT: String(controlPlanePort),
-      },
-    },
+    [
+      join(repositoryRoot, "services/aws-control-plane/test/support/fake-dynamodb.ts"),
+      String(dynamoPort),
+    ],
+    { env: { PATH: process.env.PATH } },
     logs,
   );
-  await controlPlane.ready(/listening on/u, 30_000);
+  await dynamo.ready(/fake DynamoDB listening/u, 30_000);
+  const startControlPlane = async () => {
+    const controlPlane = new Service(
+      "control-plane",
+      process.execPath,
+      [join(repositoryRoot, "services/aws-control-plane/dist/deployment-test-runtime.js")],
+      {
+        env: {
+          PATH: process.env.PATH,
+          AXL_ENVIRONMENT: "deployment-test",
+          AWS_ENDPOINT_URL_DYNAMODB: `http://127.0.0.1:${dynamoPort}`,
+          AWS_REGION: "us-east-1",
+          AWS_ACCESS_KEY_ID: "fake",
+          AWS_SECRET_ACCESS_KEY: "fake",
+          AXL_TICKET_TABLE: "state",
+          AXL_WITNESS_TABLE: "witness",
+          AXL_WITNESS_JOURNAL_TABLE: "witness-journal",
+          AXL_TEST_ACCOUNT_ID: accountId,
+          AXL_TEST_INSTALLATION_ID: installationId,
+          AXL_TEST_PUBLIC_TOKEN: accessToken,
+          AXL_TEST_RELAY_TOKEN: RELAY_TOKEN,
+          AXL_TEST_POSSESSION_PROOF: possessionProof,
+          AXL_TEST_RELAY_URL: `wss://127.0.0.1:${originPort}/v1/connect`,
+          AXL_TEST_WITNESS_KEYS: keys,
+          PORT: String(controlPlanePort),
+        },
+      },
+      logs,
+    );
+    await controlPlane.ready(/listening on/u, 30_000);
+    return controlPlane;
+  };
+  let controlPlane = await startControlPlane();
 
   const startRelay = async () => {
     const relay = new Service(
@@ -469,10 +492,16 @@ export async function startStack(directory) {
       originServer.drop("all");
       relay = await startRelay();
     },
+    /** A new control-plane process over the same tables, as a redeploy starts one. */
+    async restartControlPlane() {
+      await controlPlane.stop();
+      controlPlane = await startControlPlane();
+    },
     async stop() {
       await daemon.stop();
       await relay.stop();
       await controlPlane.stop();
+      await dynamo.stop();
       originServer.server.closeAllConnections();
       originServer.server.close();
       model.server.close();

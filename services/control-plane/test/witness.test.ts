@@ -47,6 +47,7 @@ import {
   WitnessRevocationCoordinator,
   type WitnessSecurityAuditEvent,
   WitnessServiceError,
+  witnessLineageHash,
 } from "../src/index.ts";
 import {
   InMemoryWitnessHighWaterJournal,
@@ -352,7 +353,15 @@ function reconstructedReplica(
   index: 0 | 1 | 2,
   nowMs = 1_900_000_000_100n,
 ): WitnessReplica {
-  return new WitnessReplica({
+  return new WitnessReplica(replicaOptions(service, index, nowMs));
+}
+
+function replicaOptions(
+  service: Harness,
+  index: 0 | 1 | 2,
+  nowMs = 1_900_000_000_100n,
+): ConstructorParameters<typeof WitnessReplica>[0] {
+  return {
     storage: service.stores[index],
     journal: service.journals[index],
     signer: service.signers[index],
@@ -376,7 +385,7 @@ function reconstructedReplica(
         service.audits.push(event);
       },
     },
-  });
+  };
 }
 
 async function peerHeadEvidence(
@@ -819,6 +828,144 @@ test("conflicting peer heads and local journal disagreement keep recovery unavai
       { principal: principal(endpoint), mode: "active" },
       requestBytes(endpoint, { kind: 2, operationId: id(85) }),
     ),
+  );
+});
+
+test("resumed replicas recover each lineage from its own fresh read", async () => {
+  const phone = endpointFixture();
+  const other = { ...phone, cryptoSessionId: uuid(9) };
+  const service = await harness();
+  const registration = register(phone);
+  await service.gateway.submit(principal(phone), registration);
+  await recoverReplicas(service, phone);
+  await service.gateway.submit(principal(other), register(other, id(60)));
+
+  // A restart over the same durable stores: nothing is voted on until its lineage recovers.
+  const resumed = ([0, 1, 2] as const).map((index) =>
+    reconstructedReplica(service, index),
+  ) as unknown as readonly [WitnessReplica, WitnessReplica, WitnessReplica];
+  await Promise.all(resumed.map((replica) => replica.resumeDurable()));
+  const admission = { principal: principal(phone), mode: "active" } as const;
+  const unavailable = (error: unknown) =>
+    error instanceof WitnessServiceError && error.code === "witness_unavailable";
+  const commitment1 = proposedCommitment(registration);
+  await assert.rejects(
+    resumed[0].submit(admission, requestBytes(phone, { kind: 2, operationId: id(61) })),
+    unavailable,
+  );
+  await assert.rejects(
+    resumed[0].submit(admission, advance(phone, id(62), 1n, commitment1, new Uint8Array(48))),
+    unavailable,
+  );
+  await assert.rejects(resumed[0].submit(admission, registration), unavailable);
+  const phoneLineage = witnessLineageHash(parseWitnessRequest(registration));
+  await assert.rejects(resumed[0].revoke(phoneLineage, 1n), unavailable);
+  await assert.rejects(
+    new WitnessReplica({
+      ...replicaOptions(service, 0),
+      storage: new InMemoryWitnessReplicaStorage(),
+    }).resumeDurable(),
+    unavailable,
+    "an empty store bootstraps instead",
+  );
+
+  // One endpoint's fresh read recovers that endpoint's lineage on every replica.
+  const read = requestBytes(phone, {
+    kind: 2,
+    operationId: id(64),
+    nonce: new Uint8Array(32).fill(64),
+  });
+  const heads = await Promise.all(resumed.map((replica) => replica.recoveryHead(admission, read)));
+  const peers = (own: number) =>
+    heads
+      .filter((_receipt, index) => index !== own)
+      .map((receiptBytes) => ({ requestBytes: read, receiptBytes }));
+  const otherRead = requestBytes(other, {
+    kind: 2,
+    operationId: id(65),
+    nonce: new Uint8Array(32).fill(65),
+  });
+  const otherHead = await resumed[1].recoveryHead(
+    { principal: principal(other), mode: "active" },
+    otherRead,
+  );
+  await assert.rejects(
+    resumed[0].recoverLineage([
+      required(peers(0)[0]),
+      { requestBytes: otherRead, receiptBytes: otherHead },
+    ]),
+    (error) => error instanceof WitnessServiceError && error.code === "witness_receipt_invalid",
+  );
+  await assert.rejects(resumed[0].recoverLineage(peers(0).slice(0, 1)), unavailable);
+  await Promise.all(resumed.map((replica, index) => replica.recoverLineage(peers(index))));
+  const otherLineage = witnessLineageHash(parseWitnessRequest(otherRead));
+  assert.ok(resumed.every((replica) => replica.lineageReady(phoneLineage)));
+  assert.equal(resumed[0].lineageReady(otherLineage), false, "other lineages wait for their read");
+
+  const gateway = new WitnessGateway({
+    authorizer: {
+      async authorize(principalValue) {
+        return { principal: principalValue, mode: "active" };
+      },
+    },
+    replicas: resumed,
+    trust: service.trust,
+    deadline: {
+      async waitForReplica(_client, operation) {
+        return operation;
+      },
+    },
+    audit: {
+      async emit() {},
+    },
+  });
+  const head = parseWitnessQuorumCertificate(await gateway.submit(principal(phone), read));
+  assert.equal(head.receipts[0].result, "head");
+  assert.equal(head.receipts[0].counter, 1n);
+  const advanced = await gateway.submit(
+    principal(phone),
+    advance(phone, id(66), 1n, commitment1, new Uint8Array(48).fill(19)),
+  );
+  assert.equal(parseWitnessQuorumCertificate(advanced).receipts[0].result, "advanced");
+  assert.equal(
+    (await service.stores[0].read(phoneLineage))?.recoveryRequestHashes?.length,
+    2,
+    "the bootstrap and restart recovery reads both stay used after the lineage advances",
+  );
+  await assert.rejects(gateway.submit(principal(other), otherRead), unavailable);
+
+  // A lineage no replica has ever held registers without recovery and is then ready.
+  const fresh = { ...phone, cryptoSessionId: uuid(10) };
+  const registered = await gateway.submit(principal(fresh), register(fresh, id(67)));
+  assert.equal(parseWitnessQuorumCertificate(registered).receipts[0].result, "registered");
+  const freshRead = requestBytes(fresh, { kind: 2, operationId: id(68) });
+  assert.equal(
+    parseWitnessQuorumCertificate(await gateway.submit(principal(fresh), freshRead)).receipts[0]
+      .result,
+    "head",
+  );
+});
+
+test("a resumed replica refuses to re-register a lineage its journal remembers", async () => {
+  const endpoint = endpointFixture();
+  const service = await harness();
+  const registration = register(endpoint);
+  await service.gateway.submit(principal(endpoint), registration);
+  await recoverReplicas(service, endpoint);
+  const anchor = { ...endpoint, cryptoSessionId: uuid(11) };
+  await service.gateway.submit(principal(anchor), register(anchor, id(69)));
+
+  // The store lost the endpoint's lineage (a rollback); the immutable journal still holds it.
+  const rolledBack = new InMemoryWitnessReplicaStorage();
+  const anchorRecord = required(
+    await service.stores[0].read(witnessLineageHash(parseWitnessRequest(register(anchor, id(69))))),
+  );
+  await rolledBack.transact(anchorRecord.lineageHash, () => ({ value: 0, next: anchorRecord }));
+  const replica = new WitnessReplica({ ...replicaOptions(service, 0), storage: rolledBack });
+  await replica.resumeDurable();
+  await assert.rejects(
+    replica.submit({ principal: principal(endpoint), mode: "active" }, registration),
+    (error) => error instanceof WitnessServiceError && error.code === "witness_unavailable",
   );
 });
 
