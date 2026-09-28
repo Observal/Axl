@@ -219,6 +219,51 @@ test("two processes writing one lineage never lose a step", async (context) => {
   assert.equal((await second.read(lineage))?.ledger.length, 5);
 });
 
+test("a cached record is never answered from once another process moved it", async (context) => {
+  const { client } = await fake(context);
+  const storage = () =>
+    new DynamoWitnessReplicaStorage({ tableName: "witness", replicaId: replicaA, client });
+  const first = storage();
+  const second = storage();
+  await first.transact(lineage, () => ({ value: 0, next: record(1) }));
+  await second.transact(lineage, (current) => ({
+    value: 0,
+    next: record((current?.ledger.length ?? 0) + 1),
+  }));
+  // A step that writes nothing still sees the newer record, not the cached one.
+  const seen = await first.transact(lineage, (current) => ({ value: current?.ledger.length }));
+  assert.equal(seen, 2);
+  // A writing step from the stale cache is refused by its condition and rerun on fresh state.
+  await first.transact(lineage, (current) => ({
+    value: 0,
+    next: record((current?.ledger.length ?? 0) + 1),
+  }));
+  assert.equal((await second.read(lineage))?.ledger.length, 3);
+});
+
+test("a journal append from a stale process view still refuses a different entry", async (context) => {
+  const { client } = await fake(context);
+  const journal = () =>
+    new DynamoWitnessHighWaterJournal({ tableName: "journal", replicaId: replicaA, client });
+  const entry = (sequence: bigint, fill = 1): WitnessHighWaterEntry => ({
+    lineageHash: lineage,
+    sequence,
+    counter: sequence,
+    commitment: new Uint8Array(48).fill(fill),
+    revocationGeneration: 0n,
+    eventHash: new Uint8Array(48).fill(fill),
+  });
+  const first = journal();
+  const second = journal();
+  await first.append(entry(1n));
+  await second.append(entry(2n, 2));
+  // The first process last saw sequence 1, so it tries sequence 2 directly and must notice.
+  await assert.rejects(first.append(entry(2n, 3)), /conflict/u);
+  await first.append(entry(2n, 2));
+  await first.append(entry(3n));
+  assert.equal((await second.latest(lineage))?.sequence, 3n);
+});
+
 test("the journal is write-once, gapless, and per replica", async (context) => {
   const { client } = await fake(context);
   const journal = new DynamoWitnessHighWaterJournal({
