@@ -17,8 +17,12 @@ import {
   RelayTicketError,
   type RelayTicketRecord,
   type RelayTicketStore,
+  type RemoteDeviceRecord,
+  type RemoteDeviceStore,
 } from "@axl/control-plane";
 import {
+  type DeviceId,
+  type InstallationId,
   parseCryptoSessionId,
   parseDeviceId,
   parseInstallationId,
@@ -296,6 +300,90 @@ export class DynamoPairingRendezvousStore implements PairingRendezvousStore {
       }
     }
     throw new Error("Pairing rendezvous contention limit exceeded");
+  }
+}
+
+function parseStoredDevice(serialized: string): RemoteDeviceRecord {
+  const value: unknown = JSON.parse(serialized);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Stored remote device is invalid");
+  }
+  const record = value as Record<string, unknown>;
+  const optional = (name: string) =>
+    record[name] === undefined ? {} : { [name]: requiredInteger(record, name) };
+  return {
+    accountId: requiredString(record, "accountId"),
+    installationId: parseInstallationId(requiredString(record, "installationId")),
+    deviceId: parseDeviceId(requiredString(record, "deviceId")),
+    secretDigest: requiredString(record, "secretDigest"),
+    invitedAt: requiredInteger(record, "invitedAt"),
+    enrollBy: requiredInteger(record, "enrollBy"),
+    ...(record.publicKey === undefined ? {} : { publicKey: requiredString(record, "publicKey") }),
+    ...optional("enrolledAt"),
+    ...optional("revokedAt"),
+    revision: requiredInteger(record, "revision"),
+  };
+}
+
+/**
+ * DynamoDB-backed remote devices, written with a revision condition. An invitation that is never
+ * enrolled expires with the table's TTL a day after its window; enrolled devices do not expire.
+ */
+export class DynamoRemoteDeviceStore implements RemoteDeviceStore {
+  readonly #client: DynamoDBClient;
+  readonly #tableName: string;
+
+  constructor(options: { readonly tableName: string; readonly client?: DynamoDBClient }) {
+    if (options.tableName.length === 0) throw new TypeError("DynamoDB table name is required");
+    this.#tableName = options.tableName;
+    this.#client = options.client ?? new DynamoDBClient({});
+  }
+
+  #key(accountId: string, installationId: InstallationId, deviceId: DeviceId) {
+    return { pk: { S: `device#${accountId}#${installationId}#${deviceId}` } };
+  }
+
+  async get(
+    accountId: string,
+    installationId: InstallationId,
+    deviceId: DeviceId,
+  ): Promise<Readonly<RemoteDeviceRecord> | undefined> {
+    const result = await this.#client.send(
+      new GetItemCommand({
+        TableName: this.#tableName,
+        Key: this.#key(accountId, installationId, deviceId),
+        ConsistentRead: true,
+      }),
+    );
+    const serialized = result.Item?.record?.S;
+    return serialized === undefined ? undefined : parseStoredDevice(serialized);
+  }
+
+  async put(record: RemoteDeviceRecord, expectedRevision: number): Promise<boolean> {
+    try {
+      await this.#client.send(
+        new PutItemCommand({
+          TableName: this.#tableName,
+          Item: {
+            ...this.#key(record.accountId, record.installationId, record.deviceId),
+            revision: { N: String(record.revision) },
+            record: { S: JSON.stringify(record) },
+            ...(record.publicKey === undefined
+              ? { expiresAtSeconds: { N: String(Math.ceil(record.enrollBy / 1000) + 86_400) } }
+              : {}),
+          },
+          ConditionExpression:
+            expectedRevision === 0 ? "attribute_not_exists(pk)" : "revision = :revision",
+          ...(expectedRevision === 0
+            ? {}
+            : { ExpressionAttributeValues: { ":revision": { N: String(expectedRevision) } } }),
+        }),
+      );
+      return true;
+    } catch (cause) {
+      if (cause instanceof ConditionalCheckFailedException) return false;
+      throw cause;
+    }
   }
 }
 

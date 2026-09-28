@@ -26,10 +26,22 @@ curl --fail --silent --show-error "$origin/healthz" | grep -q '"witness":true' |
 }
 
 AXL_TEST_ORIGIN="$origin" AXL_TEST_SECRET_JSON="$secret_json" node --input-type=module <<'NODE'
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 const origin = process.env.AXL_TEST_ORIGIN;
 const config = JSON.parse(process.env.AXL_TEST_SECRET_JSON);
+
+function uuid7() {
+  const bytes = randomBytes(16);
+  bytes.writeUIntBE(Date.now(), 0, 6);
+  bytes[6] = 0x70 | (bytes[6] & 0x0f);
+  bytes[8] = 0x80 | (bytes[8] & 0x3f);
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+// A throwaway device, enrolled the way a phone enrolls: its own non-extractable P-256 key.
+const deviceId = uuid7();
 
 async function post(path, body) {
   const response = await fetch(`${origin}${path}`, {
@@ -51,7 +63,7 @@ async function verifyPairingRendezvous() {
   const binding = {
     version: 1,
     installationId: config.installationId,
-    deviceId: config.deviceId,
+    deviceId,
     cryptoSessionId,
     claimHash,
   };
@@ -75,6 +87,33 @@ async function verifyPairingRendezvous() {
   await post("/v1/e2ee/pairing/welcomes/acknowledge", { ...binding, welcomeHash });
 }
 
+async function enrollDevice() {
+  const identity = { version: 1, installationId: config.installationId, deviceId };
+  const secret = randomBytes(32);
+  await post("/v1/devices/invitations", {
+    ...identity,
+    secretDigest: createHash("sha256").update(secret).digest("base64"),
+  });
+  const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, [
+    "sign",
+    "verify",
+  ]);
+  const publicKey = Buffer.from(await crypto.subtle.exportKey("spki", pair.publicKey));
+  await post("/v1/devices/enroll", {
+    ...identity,
+    secret: secret.toString("base64"),
+    publicKey: publicKey.toString("base64"),
+  });
+  return async (ticket, connectionNonce) =>
+    Buffer.from(
+      await crypto.subtle.sign(
+        { name: "ECDSA", hash: "SHA-256" },
+        pair.privateKey,
+        Buffer.from(`Axl relay possession v1\0${ticket}\0${connectionNonce}`, "utf8"),
+      ),
+    ).toString("base64");
+}
+
 async function issue(role) {
   const response = await fetch(`${origin}/v1/relay/tickets`, {
     method: "POST",
@@ -84,7 +123,7 @@ async function issue(role) {
     },
     body: JSON.stringify({
       installationId: config.installationId,
-      ...(role === "device" ? { deviceId: config.deviceId } : {}),
+      ...(role === "device" ? { deviceId } : {}),
       role,
     }),
   });
@@ -92,19 +131,20 @@ async function issue(role) {
   return response.json();
 }
 
-function connect(ticket) {
+function connect(ticket, prove) {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(ticket.relayUrl);
     socket.binaryType = "arraybuffer";
     const timer = setTimeout(() => reject(new Error("relay admission timed out")), 15_000);
-    socket.addEventListener("open", () => {
+    socket.addEventListener("open", async () => {
+      const connectionNonce = randomUUID();
       socket.send(
         new TextEncoder().encode(
           JSON.stringify({
             version: 1,
             ticket: ticket.ticket,
-            connectionNonce: randomUUID(),
-            possessionProof: config.possessionProof,
+            connectionNonce,
+            possessionProof: await prove(ticket.ticket, connectionNonce),
           }),
         ),
       );
@@ -124,10 +164,11 @@ function connect(ticket) {
 }
 
 await verifyPairingRendezvous();
+const deviceProof = await enrollDevice();
 const daemonTicket = await issue("daemon");
 const deviceTicket = await issue("device");
-const daemon = await connect(daemonTicket);
-const device = await connect(deviceTicket);
+const daemon = await connect(daemonTicket, async () => config.possessionProof);
+const device = await connect(deviceTicket, deviceProof);
 
 const daemonRoute = daemon.snapshot.sourceRoute.routeId;
 const payload = new TextEncoder().encode("opaque-smoke-test");
@@ -160,5 +201,5 @@ if (new TextDecoder().decode(delivered) !== "opaque-smoke-test") {
 }
 daemon.socket.close();
 device.socket.close();
-process.stdout.write(JSON.stringify({ region: "ap-south-2", controlPlane: "healthy", pairing: "passed", relay: "opaque-delivery-passed" }) + "\n");
+process.stdout.write(JSON.stringify({ region: "ap-south-2", controlPlane: "healthy", pairing: "passed", device: "enrolled", relay: "opaque-delivery-passed" }) + "\n");
 NODE

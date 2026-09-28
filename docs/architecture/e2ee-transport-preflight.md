@@ -67,7 +67,21 @@ Clients connect to `/v1/connect` with compression disabled. They do not put a ti
 }
 ```
 
-The relay adds its own instance ID and calls the control plane. Proof bytes and proof verification are fake and test-only in this checkpoint. No production proof construction is implied.
+The relay adds its own instance ID and calls the control plane. A device's proof is a signature by its own enrolled key, described below. The daemon's proof is still a static test value, and no production daemon proof construction is implied.
+
+## Device enrollment
+
+Every pairing gets a new device identity. The daemon mints a UUIDv7 device ID and a 32-byte enrollment secret, then invites the ID at `POST /v1/devices/invitations` with only `SHA-256(secret)`. The pairing link (version 2) carries the ID and the secret in its fragment, never in a query or a server log. The contract lives in `packages/protocol/src/remote-devices.ts`.
+
+The phone creates an ECDSA P-256 key with WebCrypto, non-extractable, and keeps it in IndexedDB. It enrolls the public half as a DER SubjectPublicKeyInfo at `POST /v1/devices/enroll` with the secret. Enrollment:
+
+- must happen within 10 minutes of the invitation;
+- binds exactly one key: a retry with the same key succeeds, and any other key gets `device_conflict`, so a copied link cannot enroll a second browser;
+- compares the secret's digest in constant time and accepts only P-256 keys.
+
+Until enrollment the control plane issues no ticket for the device ID. After it, a device admits each connection with `possessionProof` set to the 64-byte `r || s` ECDSA signature over `"Axl relay possession v1" || 0x00 || ticket || 0x00 || connectionNonce`. The signature binds one ticket and one nonce, so a relay that sees it cannot replay it on another connection.
+
+`POST /v1/devices/revoke` is terminal for a device ID: it stops new tickets and fails admission for tickets already issued. Pairing again revokes the previous pairing's device in the control plane and in the daemon's authority store, so the old phone loses access at once. A refused ticket (`forbidden_route`) surfaces as `route_forbidden` in the SDK and is not retried.
 
 After admission, the relay sends a `route_snapshot` control message with the connection's ephemeral source route and only opposite-role peers from the same installation. A device sees at most the current daemon route. The daemon sees authorized device routes and their opaque device IDs. `route_available` and `route_unavailable` messages update this view after reconnects. Devices never enumerate other devices.
 

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { AxlDaemon } from "@axl/daemon";
-import { parseDeviceId, parseInstallationId } from "@axl/protocol";
+import { parseInstallationId } from "@axl/protocol";
 
 import {
   type DeploymentTestRemoteConfig,
@@ -21,7 +21,6 @@ function config(directory: string): DeploymentTestRemoteConfig {
     pagePath: "/remote/",
     accountId: "0f0e0d0c-0b0a-4908-8706-050403020100",
     installationId: parseInstallationId("01890a5d-ac96-774b-bcce-b302099a8057"),
-    deviceId: parseDeviceId("01890a5d-ac96-774b-bcce-b302099a8058"),
     accessToken: "test-token",
     possessionProof: new Uint8Array(48),
     // No binding exists here, so restoring the paired session fails the way an outage would.
@@ -51,8 +50,9 @@ test("a paired session that cannot be restored is retried and reported", async (
   await writeFile(
     join(root, "host.json"),
     JSON.stringify({
-      version: 1,
+      version: 2,
       cryptoSessionId: "01890a5d-ac96-774b-bcce-b302099a8059",
+      deviceId: "01890a5d-ac96-774b-bcce-b302099a8058",
       phase: "paired",
     }),
   );

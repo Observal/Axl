@@ -8,7 +8,8 @@ This stack deploys the Axl control-plane and opaque relay containers to AWS Hyde
 `AXL_ENVIRONMENT=deployment-test`.
 
 This is not the production witness topology. It uses one DynamoDB-backed control-plane state table,
-one relay task, static test principals, and test-only possession proof. The stack does not enable
+one relay task, a static test account and installation, and a test-only daemon possession proof.
+Phones enroll their own keys through `/v1/devices/*` and sign each relay admission. The stack does not enable
 E2EE production constructors or change `productionStorageReady`.
 
 The deployment creates a dedicated VPC, two public subnets, an ALB reachable only from the AWS

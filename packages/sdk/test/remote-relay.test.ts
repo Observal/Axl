@@ -398,6 +398,48 @@ test("failed WebSocket startup can retry with a new ticket and socket", async ()
   connection.close();
 });
 
+test("a refused route surfaces as route_forbidden and is not retried", async () => {
+  const refusing = (status: number, code: string) =>
+    new HttpRelayTicketProvider({
+      controlPlaneOrigin: "https://control.example",
+      request: { installationId, deviceId: daemonId, role: "device" },
+      authenticationHeaders: async () => ({}),
+      proof: {
+        async create() {
+          return { connectionNonce: "nonce", possessionProof: Uint8Array.of(1) };
+        },
+      },
+      fetch: async () => ({
+        ok: false,
+        status,
+        async json() {
+          return { error: { code } };
+        },
+      }),
+    });
+  await assert.rejects(refusing(403, "forbidden_route").acquire(), { code: "route_forbidden" });
+  await assert.rejects(refusing(403, "other").acquire(), { code: "ticket_unavailable" });
+  await assert.rejects(refusing(503, "forbidden_route").acquire(), {
+    code: "ticket_unavailable",
+  });
+
+  let acquisitions = 0;
+  const connection = new RemoteRelayConnection({
+    tickets: {
+      async acquire() {
+        acquisitions += 1;
+        throw new RemoteRelayError("route_forbidden", "revoked");
+      },
+    },
+    sockets: new FakeSocketFactory(),
+    reconnect: { initialDelayMs: 1, maximumDelayMs: 1, jitterRatio: 0, maximumAttempts: 5 },
+    sleep: async () => undefined,
+  });
+  await assert.rejects(connection.start(), { code: "route_forbidden" });
+  assert.equal(acquisitions, 1);
+  assert.equal(connection.state, "disconnected");
+});
+
 test("close during retry backoff prevents another ticket acquisition", async () => {
   const factory = new FakeSocketFactory();
   const backoffStarted = deferred<void>();

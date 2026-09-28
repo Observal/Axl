@@ -15,11 +15,15 @@ import {
   parsePublishPairingClaimRequest,
   parsePublishPairingWelcomeRequest,
   parseReservePairingClaimRequest,
+  REMOTE_DEVICE_ENROLLMENT_PATH,
+  REMOTE_DEVICE_INVITATION_PATH,
+  REMOTE_DEVICE_REVOCATION_PATH,
   WITNESS_HTTP_CONTENT_TYPE,
   WITNESS_HTTP_PATH,
   WITNESS_REQUEST_MAX_BYTES,
 } from "@axl/protocol";
 
+import { RemoteDeviceError, type RemoteDeviceService } from "./devices.ts";
 import { PairingRendezvousError, type PairingRendezvousService } from "./pairing.ts";
 import { type AccountPrincipal, RelayTicketError, type RelayTicketService } from "./tickets.ts";
 import { type WitnessGateway, WitnessServiceError } from "./witness.ts";
@@ -40,6 +44,7 @@ export interface ControlPlaneHandlerOptions {
   readonly internalAuthentication: InternalRelayAuthenticator;
   readonly witness?: WitnessGateway;
   readonly pairing?: PairingRendezvousService;
+  readonly devices?: RemoteDeviceService;
 }
 
 class HttpRequestError extends Error {
@@ -95,6 +100,12 @@ function respond(response: ServerResponse, status: number, body: unknown): void 
 }
 
 function respondError(response: ServerResponse, error: unknown): void {
+  if (error instanceof RemoteDeviceError) {
+    respond(response, error.httpStatus, {
+      error: { code: error.code, message: error.message },
+    });
+    return;
+  }
   if (error instanceof PairingRendezvousError) {
     respond(response, error.httpStatus, {
       error: { code: error.code, message: error.message },
@@ -225,6 +236,27 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         );
         response.writeHead(204, { "cache-control": "no-store" });
         response.end();
+        return;
+      }
+      const devices = options.devices;
+      const deviceAction =
+        devices === undefined
+          ? undefined
+          : path === REMOTE_DEVICE_INVITATION_PATH
+            ? devices.invite.bind(devices)
+            : path === REMOTE_DEVICE_ENROLLMENT_PATH
+              ? devices.enroll.bind(devices)
+              : path === REMOTE_DEVICE_REVOCATION_PATH
+                ? devices.revoke.bind(devices)
+                : undefined;
+      if (deviceAction !== undefined) {
+        const principal = await options.publicAuthentication.authenticate(request);
+        if (principal === undefined) {
+          respond(response, 401, { error: { code: "unauthorized" } });
+          return;
+        }
+        await deviceAction(principal, parseJson(await readBody(request)));
+        respond(response, 200, { version: 1, accepted: true });
         return;
       }
       if (path === WITNESS_HTTP_PATH && options.witness !== undefined) {

@@ -5,10 +5,13 @@
  * Deployment-test phone page for remote access.
  *
  * `/remote` in the terminal prints a link to this page. The link fragment carries the daemon's
- * pairing invitation and the deployment-test stack credentials; the page stores it in this
- * browser's own storage, removes it from the address bar, pairs the browser binding's device
- * endpoint with the daemon, and then drives sessions through end-to-end encrypted requests over
- * the relay. Replica trust is pinned into the binding build, never taken from the link.
+ * pairing invitation, this pairing's fresh device ID with a one-time enrollment secret, and the
+ * deployment-test stack's access token; the page stores it in this browser's own storage and
+ * removes it from the address bar. It creates this device's own signing key (kept in IndexedDB,
+ * never exported), enrolls it, pairs the browser binding's device endpoint with the daemon, and
+ * then drives sessions through end-to-end encrypted requests over the relay. Every relay
+ * connection is admitted with a signature by that key. Replica trust is pinned into the binding
+ * build, never taken from the link.
  *
  * Phones suspend pages and drop sockets, so the page keeps its own connection honest: it probes
  * the relay on a heartbeat and whenever it becomes visible again, the session resends requests
@@ -22,14 +25,20 @@ import {
   type CanonicalEvent,
   ConversationProjector,
   type ConversationRecord,
+  createRemoteDeviceKeyPair,
   HostedPairingClient,
   HttpRelayTicketProvider,
   pairRemoteBrowserDevice,
   parseRemotePairingLink,
   type RemoteBrowserPairingStep,
   RemoteBrowserSession,
+  RemoteDeviceControlPlane,
+  type RemoteDeviceCryptoKeyPair,
+  type RemoteDeviceKey,
   type RemotePairingLink,
   RemoteRelayConnection,
+  remoteDeviceKeyFromPair,
+  remoteDevicePossession,
   type ServerMessage,
   type SessionSummary,
   uuidToBytes,
@@ -54,9 +63,12 @@ interface DeviceBinding {
 interface StoredPairing {
   readonly fragment: string;
   readonly paired: boolean;
+  /** This device's key is enrolled for the link's device ID. */
+  readonly enrolled?: boolean;
 }
 
 const STORAGE_KEY = "axl.remote.deployment-test";
+const KEY_DATABASE = "axl-remote-device-keys";
 const SEND_TIMEOUT_MS = 30 * 60_000;
 /** A prompt refused by a restarted daemon is sent again once, after reopening its session. */
 const SEND_REOPEN_ATTEMPTS = 2;
@@ -202,18 +214,67 @@ async function openExclusive(
   }
 }
 
-function relayFor(link: RemotePairingLink): RemoteRelayConnection {
+/** This device's key for `deviceId`, created on first use and kept in IndexedDB. */
+async function deviceKey(deviceId: string): Promise<RemoteDeviceKey> {
+  const database = await new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(KEY_DATABASE, 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("keys");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const run = <T>(mode: IDBTransactionMode, work: (store: IDBObjectStore) => IDBRequest<T>) =>
+    new Promise<T>((resolve, reject) => {
+      const transaction = database.transaction("keys", mode);
+      const request = work(transaction.objectStore("keys"));
+      transaction.oncomplete = () => resolve(request.result);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+  try {
+    const stored = () => run("readonly", (store) => store.get(deviceId)) as Promise<unknown>;
+    let pair = (await stored()) as RemoteDeviceCryptoKeyPair | undefined;
+    if (pair === undefined) {
+      // add() refuses to overwrite, so when two tabs race the first key stored wins for both.
+      const created = await createRemoteDeviceKeyPair();
+      await run("readwrite", (store) => store.add(created, deviceId)).catch(() => undefined);
+      pair = (await stored()) as RemoteDeviceCryptoKeyPair | undefined;
+      if (pair === undefined) throw new Error("This browser cannot keep a device key");
+    }
+    return await remoteDeviceKeyFromPair(pair);
+  } finally {
+    database.close();
+  }
+}
+
+/** Refusals that mean the enrollment itself is settled, so retrying cannot help. */
+const FINAL_ENROLLMENT = new Set([400, 401, 403, 404, 409, 410]);
+
+/** Enroll this device's key for the pairing's device ID once; a retry with the same key is fine. */
+async function enroll(link: RemotePairingLink, key: RemoteDeviceKey): Promise<void> {
+  const devices = new RemoteDeviceControlPlane({
+    controlPlaneOrigin: location.origin,
+    authenticationHeaders: async () => ({ authorization: `Bearer ${link.accessToken}` }),
+  });
+  for (let delay = 1_000; ; delay = Math.min(delay * 2, 15_000)) {
+    try {
+      await devices.enroll(link.installationId, link.deviceId, link.enrollmentSecret, key);
+      return;
+    } catch (cause) {
+      if (FINAL_ENROLLMENT.has((cause as { readonly status?: number }).status ?? 0)) throw cause;
+      trace(`enrollment failed, retrying: ${describe(cause)}`);
+      status("Registering this device (retrying)");
+      await sleep(delay);
+    }
+  }
+}
+
+function relayFor(link: RemotePairingLink, key: RemoteDeviceKey): RemoteRelayConnection {
   return new RemoteRelayConnection({
     tickets: new HttpRelayTicketProvider({
       controlPlaneOrigin: location.origin,
       request: { installationId: link.installationId, role: "device", deviceId: link.deviceId },
       authenticationHeaders: async () => ({ authorization: `Bearer ${link.accessToken}` }),
-      proof: {
-        create: async () => ({
-          connectionNonce: crypto.randomUUID(),
-          possessionProof: link.possessionProof.slice(),
-        }),
-      },
+      proof: remoteDevicePossession(key),
     }),
     destinationCryptoSessionId: link.cryptoSessionId,
     reconnect: { maximumAttempts: 1_000, maximumDelayMs: 15_000 },
@@ -227,6 +288,12 @@ const REFUSALS: Readonly<Record<string, string>> = {
     "this daemon runs with --unsafe, so the phone can watch sessions but not change them.",
   scope_forbidden: "this phone is not allowed to do that.",
   device_revoked: "this phone was removed. Run /remote again to pair it.",
+  route_forbidden:
+    "this phone is no longer paired, because the daemon was paired again. Run /remote to pair it.",
+  device_conflict:
+    "this pairing link was already used on another device. Run /remote again for a new one.",
+  enrollment_expired: "this pairing link expired. Run /remote again for a new one.",
+  enrollment_denied: "this pairing link is not valid. Run /remote again for a new one.",
   timeout: "the daemon did not answer in time.",
   lifecycle_busy:
     "this pairing is open in another tab or window that did not let go. Close it, then tap Retry.",
@@ -638,6 +705,14 @@ async function main(): Promise<void> {
     view.hint.textContent = "Run /remote in the Axl terminal again and open the new link.";
     return;
   }
+  // Enrollment comes first: a link already used on another device must be refused before this
+  // browser touches any E2EE or witness state for its device ID.
+  const key = await deviceKey(link.deviceId);
+  if (stored.enrolled !== true) {
+    status("Registering this device");
+    await enroll(link, key);
+    save({ ...stored, enrolled: true });
+  }
   status("Loading the encryption module");
   const binding = (await import(
     /* @vite-ignore */ new URL("./e2ee/loader/index.js", location.href).href
@@ -646,7 +721,7 @@ async function main(): Promise<void> {
   const channel = tabChannel();
   status("Opening this device's keys");
   const endpoint = traced(await openExclusive(binding, link, channel));
-  const relay = relayFor(link);
+  const relay = relayFor(link, key);
   const session = new RemoteBrowserSession({ endpoint, relay, ...link, trace });
 
   // A newer tab for the same pairing takes over; this one lets go of the endpoint and its lock.
@@ -728,7 +803,7 @@ async function main(): Promise<void> {
       },
       onStep: renderSteps,
     });
-    save({ fragment: stored.fragment, paired: true });
+    save({ fragment: stored.fragment, paired: true, enrolled: true });
   }
   const page = new RemotePage(session);
   await page.listSessions();
