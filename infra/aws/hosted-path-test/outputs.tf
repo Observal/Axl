@@ -38,6 +38,19 @@ output "phone_sign_in" {
   }) : ""
 }
 
+# What `axl remote login` needs to sign in; empty without sign-in.
+output "daemon_sign_in" {
+  value = local.phone_sign_in ? jsonencode({
+    authority = "https://${local.auth_host}"
+    clientId  = aws_cognito_user_pool_client.daemon[0].id
+    provider  = "Google"
+  }) : ""
+}
+
+output "user_pool_id" {
+  value = local.phone_sign_in ? aws_cognito_user_pool.phone[0].id : ""
+}
+
 output "remote_page_bucket" {
   value = aws_s3_bucket.remote_page.id
 }

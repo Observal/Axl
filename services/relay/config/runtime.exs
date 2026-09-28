@@ -11,17 +11,26 @@ if config_env() == :prod do
     end
   end
 
-  if required.("AXL_ENVIRONMENT") != "deployment-test" do
-    raise "The deployment-test relay cannot run as a production environment"
+  # The relay carries only opaque frames and holds only service credentials, so the same relay
+  # serves both control-plane modes; the deployment-test mode keeps its AXL_TEST_ setting names.
+  environment = required.("AXL_ENVIRONMENT")
+
+  unless environment in ["deployment-test", "production"] do
+    raise "AXL_ENVIRONMENT must be deployment-test or production"
   end
 
-  relay_token = required.("AXL_TEST_RELAY_TOKEN")
-  control_token = required.("AXL_TEST_CONTROL_TOKEN")
-  control_plane_origin = required.("AXL_TEST_CONTROL_PLANE_ORIGIN")
-  relay_instance_id = required.("AXL_TEST_RELAY_INSTANCE_ID")
+  setting = fn name ->
+    required.(if environment == "production", do: "AXL_" <> name, else: "AXL_TEST_" <> name)
+  end
+
+  relay_token = setting.("RELAY_TOKEN")
+  control_token = setting.("CONTROL_TOKEN")
+  control_plane_origin = setting.("CONTROL_PLANE_ORIGIN")
+  relay_instance_id = setting.("RELAY_INSTANCE_ID")
   port = String.to_integer(System.get_env("PORT", "4000"))
 
   config :axl_relay,
+    mode: environment,
     listener_options: [
       scheme: :http,
       ip: {0, 0, 0, 0},
@@ -36,7 +45,7 @@ if config_env() == :prod do
             String.starts_with?(control_plane_origin, "http://127.0.0.1")
         ]
       ],
-      internal_authenticator: AxlRelay.DeploymentTestAuthenticator,
+      internal_authenticator: AxlRelay.ServiceTokenAuthenticator,
       internal_authenticator_options: [token: control_token]
     ]
 end

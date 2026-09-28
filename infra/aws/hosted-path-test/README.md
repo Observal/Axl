@@ -59,6 +59,29 @@ device invitation and revocation, daemon relay tickets). `remote-page.sh` publis
 beside the page and `remote-config.sh` sets `phoneSignIn`, so pairing links leave out the account
 token.
 
+## Production mode
+
+`AXL_CONTROL_PLANE_MODE=production deploy.sh` switches the same stack to production mode
+(`control_plane_mode`, default `deployment-test`). The control plane then runs
+`production-runtime.js`, which holds no account credential and ignores the static test account,
+token, and possession proof:
+
+- People sign in through the user pool: the daemon with `axl remote login` (the `daemon` app
+  client, returning to `http://localhost:47813/callback`), the phone on its page. The account is
+  the pool's `sub`.
+- Remote access is opt-in. Only members of the pool's `remote` group are accepted; anyone else who
+  signs in is refused. After a person's first sign-in, add them with
+  `aws cognito-idp admin-add-user-to-group --user-pool-id "$(terraform output -raw user_pool_id)" --username <user> --group-name remote`.
+- Each daemon installation registers its own P-256 key at `/v1/installations/register`, and a
+  daemon relay ticket is admitted only with a signature by that key. Relay tickets of either role
+  are issued only for an installation registered to the caller's account.
+- The relay reads its service settings without the `AXL_TEST_` prefix. They stay service
+  credentials between the relay and the control plane; no client holds them.
+
+`remote-page.sh` also publishes `daemon-sign-in.json`, where `axl remote login` learns the
+authority and its client ID. The witness keeps its three in-process replicas, which are not
+independently administered; see `docs/architecture/remote-production-wsl.md`.
+
 Run the HTTPS and WebSocket opaque-delivery smoke test again:
 
 ```bash

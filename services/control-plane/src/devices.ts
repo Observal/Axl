@@ -53,6 +53,7 @@ export type RemoteDeviceErrorCode =
   | "device_revoked"
   | "enrollment_expired"
   | "enrollment_denied"
+  | "installation_conflict"
   | "invalid_device_key";
 
 const STATUS: Readonly<Record<RemoteDeviceErrorCode, number>> = {
@@ -61,6 +62,7 @@ const STATUS: Readonly<Record<RemoteDeviceErrorCode, number>> = {
   device_revoked: 403,
   enrollment_expired: 410,
   enrollment_denied: 403,
+  installation_conflict: 409,
   invalid_device_key: 400,
 };
 

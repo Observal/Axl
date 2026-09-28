@@ -26,6 +26,7 @@ terraform -chdir="$stack" init -reconfigure \
 bucket="$(terraform -chdir="$stack" output -raw remote_page_bucket)"
 page_url="$(terraform -chdir="$stack" output -raw remote_page_url)"
 sign_in="$(terraform -chdir="$stack" output -raw phone_sign_in)"
+daemon_sign_in="$(terraform -chdir="$stack" output -raw daemon_sign_in)"
 
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
@@ -44,6 +45,10 @@ cp -R "$browser/dist/deployment-test/." "$stage/e2ee/"
 # The page signs in only when this file says where; without it the link's token is used.
 if [ -n "$sign_in" ]; then
   printf '%s\n' "$sign_in" >"$stage/sign-in.json"
+fi
+# `axl remote login` reads where the daemon signs in from here.
+if [ -n "$daemon_sign_in" ]; then
+  printf '%s\n' "$daemon_sign_in" >"$stage/daemon-sign-in.json"
 fi
 
 content_type() {

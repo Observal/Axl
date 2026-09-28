@@ -56,3 +56,14 @@ variable "witness_secret_name" {
   type        = string
   default     = "axl/hosted-path/witness-keys"
 }
+
+variable "control_plane_mode" {
+  description = "deployment-test (the static test account and credentials) or production (Cognito accounts in the remote group, per-installation daemon keys). Production needs sign-in."
+  type        = string
+  default     = "deployment-test"
+
+  validation {
+    condition     = contains(["deployment-test", "production"], var.control_plane_mode)
+    error_message = "control_plane_mode must be deployment-test or production."
+  }
+}

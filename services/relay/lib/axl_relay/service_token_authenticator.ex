@@ -1,8 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Lokesh
 # SPDX-License-Identifier: Apache-2.0
 
-defmodule AxlRelay.DeploymentTestAuthenticator do
-  @moduledoc "Static bearer authentication restricted to explicit deployment-test environments."
+defmodule AxlRelay.ServiceTokenAuthenticator do
+  @moduledoc """
+  Bearer authentication of the control plane's calls into the relay, with a service token from
+  Secrets Manager. No client holds it.
+  """
 
   @behaviour AxlRelay.InternalAuthenticator
 
