@@ -12,7 +12,7 @@ import { parseInstallationId } from "@axl/protocol";
 
 import {
   type DeploymentTestRemoteConfig,
-  DeploymentTestRemoteHost,
+  openDeploymentTestRemoteHost,
 } from "../src/remote-deployment-test.ts";
 
 function config(directory: string): DeploymentTestRemoteConfig {
@@ -32,7 +32,7 @@ function config(directory: string): DeploymentTestRemoteConfig {
 test("an unpaired host reports its phase and log without touching the network", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "axl-remote-host-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
-  const host = await DeploymentTestRemoteHost.open(config(directory), directory);
+  const host = await openDeploymentTestRemoteHost(config(directory), directory);
   context.after(() => host.close());
   await host.attach({} as AxlDaemon);
   const status = host.status();
@@ -58,7 +58,7 @@ test("a paired session that cannot be restored is retried and reported", async (
     }),
   );
   const output: string[] = [];
-  const host = await DeploymentTestRemoteHost.open(config(directory), directory, (message) =>
+  const host = await openDeploymentTestRemoteHost(config(directory), directory, (message) =>
     output.push(message),
   );
   await host.attach({} as AxlDaemon);

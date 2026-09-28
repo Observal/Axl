@@ -908,10 +908,8 @@ export class AxlApp {
     return [
       ...TUI_COMMANDS.filter(
         (command) =>
-          (command.name !== "login" ||
-            this.client.connection.grantedCapabilities?.includes("provider.auth.login") !== true) &&
-          (command.name !== "remote" ||
-            this.client.connection.grantedCapabilities?.includes("remote.pairing.start") === true),
+          command.name !== "login" ||
+          this.client.connection.grantedCapabilities?.includes("provider.auth.login") !== true,
       ).map((command) => ({
         id: `tui.${command.name}`,
         name: command.name,
@@ -3059,6 +3057,13 @@ export class AxlApp {
         return;
       }
       case "remote": {
+        // A daemon without a remote host does not grant pairing; say how to set one up.
+        if (this.client.connection.grantedCapabilities?.includes("remote.pairing.start") !== true) {
+          this.notice = this.view.palette.error(
+            "✖ remote access is not set up: run axl remote login, then axl daemon restart",
+          );
+          return;
+        }
         if (argument === "status") {
           this.commitLines(this.remoteStatusLines(await this.client.remoteStatus()));
           return;

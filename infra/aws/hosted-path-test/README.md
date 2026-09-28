@@ -79,7 +79,22 @@ token, and possession proof:
   credentials between the relay and the control plane; no client holds them.
 
 `remote-page.sh` also publishes `daemon-sign-in.json`, where `axl remote login` learns the
-authority and its client ID. The witness keeps its three in-process replicas, which are not
+authority and its client ID.
+
+A daemon in WSL is set up for production remote access with, in its checkout:
+
+1. `packages/e2ee/helpers/dpapi/install-wsl.sh` builds `axl-dpapi-helper.exe` and installs it in
+   the Windows user's `%LOCALAPPDATA%\Axl\bin`. Windows DPAPI seals the daemon's keys and
+   account through it.
+2. `infra/aws/hosted-path-test/daemon-binding.sh` builds the hosted WSL Node binding pinned to
+   this stack's witness trust.
+3. `axl remote login` signs in with Google in the Windows browser, creates the installation and
+   its key, and registers it. Until the account is in the `remote` group it reports the account
+   ID to add.
+4. `axl daemon restart`, then `/remote` in the terminal. Sign in on the phone with the same Google
+   account.
+
+`axl remote logout` revokes the refresh token and forgets the account. The witness keeps its three in-process replicas, which are not
 independently administered; see `docs/architecture/remote-production-wsl.md`.
 
 Run the HTTPS and WebSocket opaque-delivery smoke test again:
