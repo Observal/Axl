@@ -112,8 +112,13 @@ const HANDOFF_WAIT_MS = 5_000;
 /** How long the pairing waits for the daemon to answer before resending its activation. */
 const CONFIRM_TIMEOUT_MS = 5_000;
 const TAB_CHANNEL = "axl-remote-tabs";
-/** Acknowledge a view's cursor once events pause this long, so a streaming reply is not slowed. */
-const ACK_DELAY_MS = 1_500;
+/**
+ * Acknowledge a view's cursor this long after new events arrive. Every acknowledgement is a full
+ * encrypted round trip through the phone's one witness queue, so it waits for any request the page
+ * has in flight. The cursor it confirms only bounds what a reconnect replays, and stays valid for
+ * minutes.
+ */
+const ACK_DELAY_MS = 10_000;
 /** A sent prompt the transcript never showed stops being drawn as pending after this long. */
 const PENDING_SETTLE_MS = 15_000;
 /** A burst of session changes refreshes the list once. */
@@ -453,6 +458,8 @@ class RemotePage {
   #pending: PendingPrompt[] = [];
   /** Redraws the running turn's elapsed time while one is running. */
   #ticker: ReturnType<typeof setInterval> | undefined;
+  /** Requests the page is waiting on (not prompts, which run a whole turn); acknowledgements wait. */
+  #inFlight = 0;
 
   constructor(session: RemoteBrowserSession) {
     this.#session = session;
@@ -506,7 +513,7 @@ class RemotePage {
       );
     }
     try {
-      const result = (await this.#session.request("session.list", {
+      const result = (await this.#request("session.list", {
         scope: "all_local",
         order: "recent",
         pageSize: 30,
@@ -567,9 +574,9 @@ class RemotePage {
     this.#projector = new ConversationProjector(summary.sessionId);
     this.#pending = [];
     if (previous !== undefined) {
-      void this.#session
-        .request("session.unsubscribe", { subscriptionId: previous })
-        .catch(() => undefined);
+      void this.#request("session.unsubscribe", { subscriptionId: previous }).catch(
+        () => undefined,
+      );
     }
     show("thread");
     view.title.textContent =
@@ -590,7 +597,7 @@ class RemotePage {
     this.#renderActivity();
     try {
       const subscribe = async () =>
-        (await this.#session.request("session.subscribe", {
+        (await this.#request("session.subscribe", {
           sessionId: summary.sessionId,
         })) as SessionSubscription;
       let subscribed: SessionSubscription;
@@ -601,12 +608,12 @@ class RemotePage {
         if ((cause as { readonly code?: unknown }).code !== "unknown_session") throw cause;
         // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
         // skips it and can still watch sessions that are open on the laptop.
-        await this.#session
-          .request("session.resume", { sessionId: summary.sessionId })
-          .catch((cause: unknown) => {
+        await this.#request("session.resume", { sessionId: summary.sessionId }).catch(
+          (cause: unknown) => {
             const code = (cause as { readonly code?: unknown }).code;
             if (code !== "unsafe_remote_forbidden" && code !== "scope_forbidden") throw cause;
-          });
+          },
+        );
         subscribed = await subscribe();
       }
       this.#subscriptionId = subscribed.subscriptionId;
@@ -616,7 +623,7 @@ class RemotePage {
         for (;;) {
           for (const event of page.events) this.#projector.applyEvent(event);
           if (page.complete || page.nextPageCursor === undefined) break;
-          const next = (await this.#session.request("session.history", {
+          const next = (await this.#request("session.history", {
             snapshotId: snapshot.snapshotId,
             pageCursor: page.nextPageCursor,
           })) as { readonly page: typeof page };
@@ -625,7 +632,7 @@ class RemotePage {
         this.#render();
         // The daemon streams live events only after the snapshot boundary is acknowledged.
         this.#lastCursor = snapshot.boundaryCursor;
-        await this.#session.request("session.ack", {
+        await this.#request("session.ack", {
           subscriptionId: subscribed.subscriptionId,
           cursor: snapshot.boundaryCursor,
         });
@@ -650,7 +657,7 @@ class RemotePage {
     // Switch at once; the unsubscribe is a full encrypted round trip.
     const listed = this.listSessions();
     if (subscriptionId !== undefined) {
-      await this.#session.request("session.unsubscribe", { subscriptionId }).catch(() => undefined);
+      await this.#request("session.unsubscribe", { subscriptionId }).catch(() => undefined);
     }
     await listed;
   }
@@ -685,10 +692,21 @@ class RemotePage {
     if (index >= 0) this.#pending = this.#pending.filter((_, position) => position !== index);
   }
 
+  #request(...args: Parameters<RemoteBrowserSession["request"]>): Promise<unknown> {
+    this.#inFlight += 1;
+    return this.#session.request(...args).finally(() => {
+      this.#inFlight -= 1;
+    });
+  }
+
   #scheduleAck(): void {
     if (this.#ackTimer !== undefined) return;
     this.#ackTimer = setTimeout(() => {
       this.#ackTimer = undefined;
+      if (this.#inFlight > 0) {
+        this.#scheduleAck();
+        return;
+      }
       const subscriptionId = this.#subscriptionId;
       const cursor = this.#lastCursor;
       if (subscriptionId === undefined || cursor === undefined) return;
@@ -724,22 +742,22 @@ class RemotePage {
     status("Catching up");
     try {
       if (after === undefined) throw new Error("No acknowledged cursor to resume from");
-      const resumed = (await this.#session.request("session.subscribe", {
+      const resumed = (await this.#request("session.subscribe", {
         sessionId: summary.sessionId,
         after,
       })) as { readonly subscriptionId: string };
       if (this.#subscriptionId !== previous) {
         // The view changed while resuming; drop the subscription nobody reads.
-        void this.#session
-          .request("session.unsubscribe", { subscriptionId: resumed.subscriptionId })
-          .catch(() => undefined);
+        void this.#request("session.unsubscribe", { subscriptionId: resumed.subscriptionId }).catch(
+          () => undefined,
+        );
         return;
       }
       this.#subscriptionId = resumed.subscriptionId;
       trace(`resumed ${summary.sessionId} after ${after}`);
-      void this.#session
-        .request("session.unsubscribe", { subscriptionId: previous })
-        .catch(() => undefined);
+      void this.#request("session.unsubscribe", { subscriptionId: previous }).catch(
+        () => undefined,
+      );
       status("Connected");
     } catch (cause) {
       trace(`resume from cursor failed: ${describe(cause)}`);
@@ -796,6 +814,7 @@ class RemotePage {
     try {
       for (let attempt = 1; ; attempt += 1) {
         try {
+          // A prompt stays unanswered until its turn ends, so it does not hold acknowledgements back.
           await this.#session.request("session.send", params, SEND_TIMEOUT_MS);
           break;
         } catch (cause) {
@@ -804,7 +823,7 @@ class RemotePage {
           const code = (cause as { readonly code?: unknown }).code;
           if (code !== "unknown_session" || attempt === SEND_REOPEN_ATTEMPTS) throw cause;
           trace("send refused by a restarted daemon; reopening the session");
-          await this.#session.request("session.resume", { sessionId });
+          await this.#request("session.resume", { sessionId });
         }
       }
       // The recorded prompt normally arrives first; never leave one drawn as pending for good.
@@ -846,7 +865,7 @@ class RemotePage {
     const sessionId = this.#sessionId;
     if (sessionId === undefined) return;
     try {
-      await this.#session.request("session.interrupt", { sessionId });
+      await this.#request("session.interrupt", { sessionId });
     } catch (cause) {
       status(`Stop failed: ${describe(cause)}`, "error");
     }

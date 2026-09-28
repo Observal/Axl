@@ -476,12 +476,15 @@ resource "aws_iam_role_policy" "control_plane_state" {
   })
 }
 
+# The control plane runs all three witness replicas in process, and every sealed remote message
+# costs each of them a signed step, so it gets a full vCPU. At 0.25 vCPU one phone opening sessions
+# held it near 100% and a witness call took about 650 ms at the median.
 resource "aws_ecs_task_definition" "control_plane" {
   family                   = "${local.name}-control-plane"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 256
-  memory                   = 512
+  cpu                      = 1024
+  memory                   = 2048
   execution_role_arn       = aws_iam_role.execution.arn
   task_role_arn            = aws_iam_role.control_plane_task.arn
 
