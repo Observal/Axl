@@ -5,13 +5,21 @@ import {
   type AcknowledgePairingWelcomeRequest,
   decodeBase64,
   encodeBase64,
+  encodePublishPairingLinkRequest,
   type FetchPairingWelcomeRequest,
+  PAIRING_LINK_FETCH_PATH,
+  PAIRING_LINK_ID_BYTES,
+  PAIRING_LINK_PUBLISH_PATH,
+  type PairingLinkPublication,
   type PairingReservation,
   type PairingWelcomePublication,
   type PublishPairingClaimRequest,
+  type PublishPairingLinkRequest,
   type PublishPairingWelcomeRequest,
   parseAcknowledgePairingWelcomeRequest,
+  parsePairingLinkPublication,
   parsePublishPairingClaimRequest,
+  parsePublishPairingLinkRequest,
   parsePublishPairingWelcomeRequest,
   parseReservePairingClaimRequest,
   type ReservePairingClaimRequest,
@@ -133,55 +141,18 @@ export class HostedPairingClient {
     });
   }
 
+  /** Park a sealed full link for its short link; see `sealRemotePairingLink`. */
+  async publishLink(request: PublishPairingLinkRequest): Promise<void> {
+    const value = parsePublishPairingLinkRequest(encodePublishPairingLinkRequest(request));
+    await this.#post(PAIRING_LINK_PUBLISH_PATH, encodePublishPairingLinkRequest(value));
+  }
+
   async #post(path: string, body: unknown): Promise<Record<string, unknown>> {
     const token = await this.#options.authorization();
     if (token.length === 0 || token.length > 16 * 1024) {
       throw new HostedPairingError("unauthorized", "Pairing authorization is unavailable");
     }
-    const response = await (this.#options.fetch ?? fetch)(
-      endpoint(this.#options.origin, path, this.#options.allowInsecureLoopbackForTests),
-      {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify(body),
-      },
-    );
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    if (bytes.byteLength > MAX_RESPONSE_BYTES) {
-      throw new HostedPairingError("invalid_response", "Pairing response exceeds its bound");
-    }
-    if (response.status === 204) return {};
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-    } catch {
-      throw new HostedPairingError(
-        "invalid_response",
-        "Pairing response is invalid",
-        response.status,
-      );
-    }
-    if (!response.ok) {
-      const code =
-        typeof decoded === "object" &&
-        decoded !== null &&
-        "error" in decoded &&
-        typeof decoded.error === "object" &&
-        decoded.error !== null &&
-        "code" in decoded.error &&
-        typeof decoded.error.code === "string"
-          ? decoded.error.code
-          : "service_unavailable";
-      throw new HostedPairingError(code, "Pairing request failed", response.status);
-    }
-    if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
-      throw new HostedPairingError(
-        "invalid_response",
-        "Pairing response is invalid",
-        response.status,
-      );
-    }
-    return decoded as Record<string, unknown>;
+    return postPairing(this.#options, path, body, token);
   }
 
   #welcome(value: Record<string, unknown>): PairingWelcomePublication {
@@ -205,5 +176,80 @@ export class HostedPairingClient {
       throw new HostedPairingError("invalid_response", `${path} is invalid`);
     }
     return value as number;
+  }
+}
+
+async function postPairing(
+  options: Pick<HostedPairingClientOptions, "origin" | "fetch" | "allowInsecureLoopbackForTests">,
+  path: string,
+  body: unknown,
+  token?: string,
+): Promise<Record<string, unknown>> {
+  const response = await (options.fetch ?? fetch)(
+    endpoint(options.origin, path, options.allowInsecureLoopbackForTests),
+    {
+      method: "POST",
+      headers: {
+        ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > MAX_RESPONSE_BYTES) {
+    throw new HostedPairingError("invalid_response", "Pairing response exceeds its bound");
+  }
+  if (response.status === 204) return {};
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  } catch {
+    throw new HostedPairingError(
+      "invalid_response",
+      "Pairing response is invalid",
+      response.status,
+    );
+  }
+  if (!response.ok) {
+    const code =
+      typeof decoded === "object" &&
+      decoded !== null &&
+      "error" in decoded &&
+      typeof decoded.error === "object" &&
+      decoded.error !== null &&
+      "code" in decoded.error &&
+      typeof decoded.error.code === "string"
+        ? decoded.error.code
+        : "service_unavailable";
+    throw new HostedPairingError(code, "Pairing request failed", response.status);
+  }
+  if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+    throw new HostedPairingError(
+      "invalid_response",
+      "Pairing response is invalid",
+      response.status,
+    );
+  }
+  return decoded as Record<string, unknown>;
+}
+
+/**
+ * Fetch the sealed full link a short link names. It needs no credential: the phone has none until
+ * it opens the link, and only the key in the short link's fragment can open what comes back.
+ */
+export async function fetchRemotePairingLink(
+  options: Pick<HostedPairingClientOptions, "origin" | "fetch" | "allowInsecureLoopbackForTests">,
+  linkId: Uint8Array,
+): Promise<PairingLinkPublication> {
+  if (linkId.byteLength !== PAIRING_LINK_ID_BYTES) throw new TypeError("Link ID is invalid");
+  const response = await postPairing(options, PAIRING_LINK_FETCH_PATH, {
+    version: 1,
+    linkId: encodeBase64(linkId),
+  });
+  try {
+    return parsePairingLinkPublication(response);
+  } catch {
+    throw new HostedPairingError("invalid_response", "Pairing link response is invalid");
   }
 }

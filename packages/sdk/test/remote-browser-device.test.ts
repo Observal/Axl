@@ -28,10 +28,13 @@ import type { HostedPairingClient } from "../src/remote-pairing.ts";
 import {
   encodeRemotePairingLink,
   encodeRemotePairingNotice,
+  openRemotePairingLink,
   parseRemotePairingLink,
   parseRemotePairingNotice,
+  parseShortRemotePairingFragment,
   REMOTE_PAIRING_NOTICE_BYTES,
   type RemotePairingLink,
+  sealRemotePairingLink,
 } from "../src/remote-pairing-link.ts";
 import type { RemoteRelayConnection, RemoteRelayConnectionState } from "../src/remote-relay.ts";
 import { HttpRelayTicketProvider } from "../src/remote-relay.ts";
@@ -67,6 +70,57 @@ test("pairing links round-trip through the fragment and never carry trust", () =
     () => parseRemotePairingLink(url.hash.replace(/&e=[^&]+/u, "&e=AAAA")),
     /enrollment secret/u,
   );
+});
+
+test("short pairing links seal the full link under a key only the short link carries", async () => {
+  const full = encodeRemotePairingLink("https://stack.example/remote/", link);
+  const sealed = await sealRemotePairingLink(full);
+  const url = new URL(sealed.shortLink);
+  assert.equal(url.origin + url.pathname, "https://stack.example/remote/");
+  assert.equal(url.search, "");
+  assert.ok(sealed.shortLink.length < 120, `short link is ${sealed.shortLink.length} characters`);
+  const short = parseShortRemotePairingFragment(url.hash);
+  assert.ok(short !== undefined);
+  assert.deepEqual(short.linkId, sealed.linkId);
+  // The ciphertext alone reveals nothing of the invitation or the credentials.
+  const text = Buffer.from(sealed.sealed).toString("latin1");
+  assert.equal(text.includes(link.accessToken), false);
+  assert.equal(sealed.shortLink.includes(link.accessToken), false);
+
+  const fragment = await openRemotePairingLink(sealed.sealed, short.linkId, short.key);
+  assert.equal(fragment, new URL(full).hash.slice(1));
+  assert.deepEqual(parseRemotePairingLink(fragment), link);
+
+  // A different ID, a different key, or a changed byte does not open it.
+  const otherId = short.linkId.slice();
+  otherId[0] = (otherId[0] ?? 0) ^ 1;
+  await assert.rejects(openRemotePairingLink(sealed.sealed, otherId, short.key), /does not open/u);
+  const otherKey = short.key.slice();
+  otherKey[0] = (otherKey[0] ?? 0) ^ 1;
+  await assert.rejects(
+    openRemotePairingLink(sealed.sealed, short.linkId, otherKey),
+    /does not open/u,
+  );
+  const tampered = sealed.sealed.slice();
+  tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 1;
+  await assert.rejects(openRemotePairingLink(tampered, short.linkId, short.key), /does not open/u);
+
+  // Two seals of one link never share an ID or ciphertext.
+  const again = await sealRemotePairingLink(full);
+  assert.notDeepEqual(again.linkId, sealed.linkId);
+  assert.notDeepEqual(again.sealed, sealed.sealed);
+});
+
+test("only a well-formed short fragment parses as one", () => {
+  assert.equal(parseShortRemotePairingFragment("v=2&i=AAAA"), undefined);
+  assert.equal(parseShortRemotePairingFragment(""), undefined);
+  const id = "A".repeat(22);
+  const key = "B".repeat(43);
+  assert.ok(parseShortRemotePairingFragment(`#p=${id}.${key}`) !== undefined);
+  assert.throws(() => parseShortRemotePairingFragment(`p=${id}`), /short link key/u);
+  assert.throws(() => parseShortRemotePairingFragment(`p=${id}.${key}.C`), /malformed/u);
+  assert.throws(() => parseShortRemotePairingFragment(`p=${id.slice(1)}.${key}`), /short link ID/u);
+  assert.throws(() => parseShortRemotePairingFragment(`p=${id}.${key}A`), /short link key/u);
 });
 
 test("pairing notices carry exactly one 48-byte claim hash", () => {

@@ -10,6 +10,8 @@ import {
 } from "@aws-sdk/client-dynamodb";
 import {
   type AccountPrincipal,
+  type PairingLinkRecord,
+  type PairingLinkStore,
   type PairingRendezvousRecord,
   type PairingRendezvousStore,
   type PairingRendezvousTransaction,
@@ -300,6 +302,61 @@ export class DynamoPairingRendezvousStore implements PairingRendezvousStore {
       }
     }
     throw new Error("Pairing rendezvous contention limit exceeded");
+  }
+}
+
+/** Short pairing links: one write-once item each, removed by the table's TTL after expiry. */
+export class DynamoPairingLinkStore implements PairingLinkStore {
+  readonly #client: DynamoDBClient;
+  readonly #tableName: string;
+
+  constructor(options: { readonly tableName: string; readonly client?: DynamoDBClient }) {
+    if (options.tableName.length === 0) throw new TypeError("DynamoDB table name is required");
+    this.#tableName = options.tableName;
+    this.#client = options.client ?? new DynamoDBClient({});
+  }
+
+  async create(record: PairingLinkRecord): Promise<PairingLinkRecord | undefined> {
+    try {
+      await this.#client.send(
+        new PutItemCommand({
+          TableName: this.#tableName,
+          Item: {
+            pk: { S: `pairing-link#${record.linkId}` },
+            accountId: { S: record.accountId },
+            sealed: { B: record.sealed },
+            expiresAtMs: { N: String(record.expiresAt) },
+            expiresAtSeconds: { N: String(Math.ceil(record.expiresAt / 1000)) },
+          },
+          ConditionExpression: "attribute_not_exists(pk)",
+        }),
+      );
+      return undefined;
+    } catch (cause) {
+      if (!(cause instanceof ConditionalCheckFailedException)) throw cause;
+    }
+    const existing = await this.get(record.linkId);
+    if (existing === undefined) throw new Error("Pairing link vanished while it was written");
+    return existing;
+  }
+
+  async get(linkId: string): Promise<PairingLinkRecord | undefined> {
+    const result = await this.#client.send(
+      new GetItemCommand({
+        TableName: this.#tableName,
+        Key: { pk: { S: `pairing-link#${linkId}` } },
+        ConsistentRead: true,
+      }),
+    );
+    const item = result.Item;
+    if (item === undefined) return undefined;
+    const accountId = item.accountId?.S;
+    const sealed = item.sealed?.B;
+    const expiresAt = Number(item.expiresAtMs?.N);
+    if (accountId === undefined || sealed === undefined || !Number.isSafeInteger(expiresAt)) {
+      throw new Error("Stored pairing link is invalid");
+    }
+    return { linkId, accountId, sealed: new Uint8Array(sealed), expiresAt };
   }
 }
 

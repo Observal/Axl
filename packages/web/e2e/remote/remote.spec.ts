@@ -88,6 +88,8 @@ test.afterAll(async () => {
 test("the phone pairs from the link and completes a turn", async () => {
   test.setTimeout(240_000);
   const link = await stack.pair();
+  // `/remote` shows a short link naming the sealed full link, so its QR code stays small.
+  expect(link).toMatch(/\/remote\/#p=[\w-]{22}\.[\w-]{43}$/u);
   const started = Date.now();
   await page.goto(link.replace("#", "?debug#"));
   await expect(page.locator(".remote-session")).toHaveCount(1, { timeout: 180_000 });

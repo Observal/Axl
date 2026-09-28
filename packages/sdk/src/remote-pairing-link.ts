@@ -60,7 +60,12 @@ function fromBase64Url(value: string | null, field: string, maximumBytes: number
     throw new TypeError(`Pairing link ${field} is missing or malformed`);
   }
   const padded = value.replaceAll("-", "+").replaceAll("_", "/");
-  const binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+  let binary: string;
+  try {
+    binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+  } catch {
+    throw new TypeError(`Pairing link ${field} is missing or malformed`);
+  }
   if (binary.length === 0 || binary.length > maximumBytes) {
     throw new TypeError(`Pairing link ${field} is outside its bound`);
   }
@@ -166,4 +171,105 @@ export function parseRemotePairingNotice(payload: Uint8Array): Uint8Array | unde
     return undefined;
   }
   return payload.slice(NOTICE_MAGIC.byteLength + 1);
+}
+
+/**
+ * A short pairing link: the full link's fragment sealed with AES-256-GCM under a fresh key, parked
+ * on the control plane under a random ID. The short link's fragment carries only the ID and the
+ * key, so a terminal QR code stays small and the control plane never sees what it stores.
+ */
+const SHORT_LINK_PREFIX = "p=";
+const SHORT_LINK_KEY_BYTES = 32;
+const SHORT_LINK_NONCE_BYTES = 12;
+const SHORT_LINK_ID_BYTES = 16;
+const SHORT_LINK_CONTEXT = new TextEncoder().encode("axl-pairing-link-v1");
+
+export interface SealedRemotePairingLink {
+  /** The link to show: the page URL with `#p=<id>.<key>`. */
+  readonly shortLink: string;
+  readonly linkId: Uint8Array;
+  readonly sealed: Uint8Array;
+}
+
+function shortLinkAad(linkId: Uint8Array): Uint8Array<ArrayBuffer> {
+  const aad = new Uint8Array(SHORT_LINK_CONTEXT.byteLength + linkId.byteLength);
+  aad.set(SHORT_LINK_CONTEXT);
+  aad.set(linkId, SHORT_LINK_CONTEXT.byteLength);
+  return aad;
+}
+
+async function shortLinkKey(bytes: Uint8Array, usage: "encrypt" | "decrypt") {
+  const raw = new Uint8Array(bytes);
+  try {
+    return await globalThis.crypto.subtle.importKey("raw", raw, "AES-GCM", false, [usage]);
+  } finally {
+    raw.fill(0);
+  }
+}
+
+/** Seal `link`, a full pairing link, into a short link and the ciphertext to publish. */
+export async function sealRemotePairingLink(link: string): Promise<SealedRemotePairingLink> {
+  const url = new URL(link);
+  const fragment = url.hash.slice(1);
+  parseRemotePairingLink(fragment);
+  const linkId = globalThis.crypto.getRandomValues(new Uint8Array(SHORT_LINK_ID_BYTES));
+  const key = globalThis.crypto.getRandomValues(new Uint8Array(SHORT_LINK_KEY_BYTES));
+  const nonce = globalThis.crypto.getRandomValues(new Uint8Array(SHORT_LINK_NONCE_BYTES));
+  const ciphertext = new Uint8Array(
+    await globalThis.crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce, additionalData: shortLinkAad(linkId) },
+      await shortLinkKey(key, "encrypt"),
+      new TextEncoder().encode(fragment),
+    ),
+  );
+  const sealed = new Uint8Array(nonce.byteLength + ciphertext.byteLength);
+  sealed.set(nonce);
+  sealed.set(ciphertext, nonce.byteLength);
+  url.hash = `${SHORT_LINK_PREFIX}${base64Url(linkId)}.${base64Url(key)}`;
+  key.fill(0);
+  return { shortLink: url.toString(), linkId, sealed };
+}
+
+/** The ID and key in a short link's fragment, or undefined for any other fragment. */
+export function parseShortRemotePairingFragment(
+  fragment: string,
+): { readonly linkId: Uint8Array; readonly key: Uint8Array } | undefined {
+  const value = fragment.startsWith("#") ? fragment.slice(1) : fragment;
+  if (!value.startsWith(SHORT_LINK_PREFIX)) return undefined;
+  const [id, key, ...rest] = value.slice(SHORT_LINK_PREFIX.length).split(".");
+  if (rest.length > 0) throw new TypeError("Short pairing link is malformed");
+  const linkId = fromBase64Url(id ?? null, "short link ID", SHORT_LINK_ID_BYTES);
+  const keyBytes = fromBase64Url(key ?? null, "short link key", SHORT_LINK_KEY_BYTES);
+  if (linkId.byteLength !== SHORT_LINK_ID_BYTES || keyBytes.byteLength !== SHORT_LINK_KEY_BYTES) {
+    throw new TypeError("Short pairing link is malformed");
+  }
+  return { linkId, key: keyBytes };
+}
+
+/** Open a sealed full link's fragment with the short link's key. */
+export async function openRemotePairingLink(
+  sealed: Uint8Array,
+  linkId: Uint8Array,
+  key: Uint8Array,
+): Promise<string> {
+  if (sealed.byteLength <= SHORT_LINK_NONCE_BYTES) {
+    throw new TypeError("Sealed pairing link is too short");
+  }
+  let plaintext: ArrayBuffer;
+  try {
+    plaintext = await globalThis.crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: sealed.slice(0, SHORT_LINK_NONCE_BYTES),
+        additionalData: shortLinkAad(linkId),
+      },
+      await shortLinkKey(key, "decrypt"),
+      sealed.slice(SHORT_LINK_NONCE_BYTES),
+    );
+  } catch {
+    throw new TypeError("Sealed pairing link does not open with this key");
+  }
+  const fragment = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
+  parseRemotePairingLink(fragment);
+  return fragment;
 }

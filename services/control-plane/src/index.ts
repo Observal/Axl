@@ -4,6 +4,7 @@
 
 export * from "./devices.ts";
 export * from "./pairing.ts";
+export * from "./pairing-links.ts";
 export * from "./revocations.ts";
 export * from "./server.ts";
 export * from "./tickets.ts";

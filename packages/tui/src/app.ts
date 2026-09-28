@@ -1339,19 +1339,65 @@ export class AxlApp {
   }
 
   /** The pairing link as a terminal QR code, or a hint when the terminal is too narrow for one. */
-  private pairingCode(link: string): string[] {
+  /**
+   * The pairing panel: the QR code framed beside what to do with it when the terminal is wide
+   * enough, otherwise the code under a heading. The link stays on a line of its own below, so it
+   * can be copied whole.
+   */
+  private pairingPanel(link: string, minutes: number): string[] {
+    const { accent, dim } = this.view.palette;
     const code = encodeQrCode(link, "L");
     const width = this.detectWidth();
+    const color = this.options.color !== false;
+    const text = [
+      accent("Pair a phone"),
+      "",
+      "Scan the code with the phone's",
+      "camera, or open the link below.",
+      "",
+      dim(`Expires in ${minutes} min · pairs one device`),
+      dim("Pairing again signs out the"),
+      dim("phone paired before."),
+      "",
+      `${accent("/remote status")}${dim(" checks on it")}`,
+    ];
+    const textWidth = Math.max(...text.map((line) => visibleWidth(line)));
+    const footer = ["", link, ""];
+    for (const quietZone of [QR_QUIET_ZONE, 2]) {
+      const codeWidth = qrTerminalWidth(code, quietZone);
+      const inner = codeWidth + 3 + textWidth;
+      if (inner + 4 > width) continue;
+      const rows = renderQrCode(code, { quietZone, color });
+      const offset = Math.max(0, Math.floor((rows.length - text.length) / 2));
+      const height = Math.max(rows.length, text.length);
+      const lines = [`${dim("╭─ ")}${accent("Remote")}${dim(` ${"─".repeat(inner - 7)}╮`)}`];
+      for (let row = 0; row < height; row += 1) {
+        const qr = rows[row] ?? " ".repeat(codeWidth);
+        const line = text[row - offset] ?? "";
+        const pad = " ".repeat(textWidth - visibleWidth(line));
+        lines.push(`${dim("│")} ${qr}   ${line}${pad} ${dim("│")}`);
+      }
+      lines.push(dim(`╰${"─".repeat(inner + 2)}╯`));
+      return [...lines, ...footer];
+    }
+    // Too narrow to frame: the heading, then the code alone if it fits at all.
+    const heading = [
+      accent("Pair a phone"),
+      dim(`  Scan the code or open the link on your phone within ${minutes} minutes.`),
+      dim("  It pairs one device; pairing again signs out the phone paired before."),
+      "",
+    ];
     const quietZone = [QR_QUIET_ZONE, 2].find((zone) => qrTerminalWidth(code, zone) <= width);
     if (quietZone === undefined) {
       return [
-        this.view.palette.dim(
+        ...heading,
+        dim(
           `  Widen the terminal to ${qrTerminalWidth(code, 2)} columns and run /remote again for a QR code.`,
         ),
-        "",
+        ...footer,
       ];
     }
-    return [...renderQrCode(code, { quietZone, color: this.options.color !== false }), ""];
+    return [...heading, ...renderQrCode(code, { quietZone, color }), ...footer];
   }
 
   private detectWidth(): number {
@@ -3022,19 +3068,8 @@ export class AxlApp {
           return;
         }
         const pairing = await this.client.startRemotePairing();
-        const { accent, dim } = this.view.palette;
         const minutes = Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60_000));
-        this.commitLines([
-          accent("Remote pairing"),
-          dim(`  Scan the code or open the link on your phone within ${minutes} minutes. It pairs`),
-          dim(
-            "  one device and carries deployment-test credentials, so share it only with yourself.",
-          ),
-          "",
-          ...this.pairingCode(pairing.link),
-          pairing.link,
-          "",
-        ]);
+        this.commitLines(this.pairingPanel(pairing.link, minutes));
         return;
       }
       case "hotkeys":
