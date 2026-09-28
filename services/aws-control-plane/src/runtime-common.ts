@@ -4,7 +4,7 @@
 /** Process wiring shared by the control plane's runtimes: settings, the witness, and serving. */
 
 import { timingSafeEqual } from "node:crypto";
-import { createServer, type RequestListener } from "node:http";
+import { createServer, type RequestListener, type ServerResponse } from "node:http";
 import type { WitnessGateway } from "@axl/control-plane";
 
 import {
@@ -88,7 +88,14 @@ export async function witnessFromEnvironment(options: {
   });
 }
 
-/** Serve `handler` on `PORT` (8080 by default) with a `/healthz` that reports the mode. */
+/**
+ * Serve `handler` on `PORT` (8080 by default) with a `/healthz` that reports the mode.
+ *
+ * On SIGTERM or SIGINT it drains: requests already received finish, each connection closes after
+ * its response instead of being kept alive for more, and the process exits once none is left. A
+ * witness step is written to three replicas, so a process killed while still taking requests could
+ * leave one replica a step behind the others, which recovery then refuses for good.
+ */
 export function serve(
   handler: RequestListener,
   mode: "deployment-test" | "production",
@@ -96,7 +103,12 @@ export function serve(
 ): void {
   const port = Number.parseInt(process.env.PORT ?? "8080", 10);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("PORT is invalid");
+  let draining = false;
+  const open = new Set<ServerResponse>();
   const server = createServer((request, response) => {
+    open.add(response);
+    response.on("close", () => open.delete(response));
+    if (draining) response.setHeader("connection", "close");
     if (request.method === "GET" && request.url === "/healthz") {
       response.writeHead(200, {
         "cache-control": "no-store",
@@ -111,6 +123,14 @@ export function serve(
     process.stdout.write(`Axl ${mode} control plane listening on ${port}\n`);
   });
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    process.on(signal, () => server.close(() => process.exit(0)));
+    process.on(signal, () => {
+      if (draining) return;
+      draining = true;
+      for (const response of open) {
+        if (!response.headersSent) response.setHeader("connection", "close");
+      }
+      server.close(() => process.exit(0));
+      server.closeIdleConnections();
+    });
   }
 }
