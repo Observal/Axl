@@ -14,6 +14,12 @@
  * consistent head read confirms the revision it was computed from. Ledger, response, and recovery
  * entries are write-once; only an operation's receipt fields may be filled in later.
  *
+ * A lineage's record grows with every message its endpoint seals, so nothing here copies or
+ * re-encodes the whole record per step. The cached record is frozen and handed to transactions and
+ * readers as is; the witness builds each next record from it without changing it, so an entry the
+ * step kept is the same object as before and keeps its stored form, and only new or replaced entries
+ * are encoded.
+ *
  * The high-water journal lives in its own table as one write-once item per sequence number, so the
  * record table's credentials cannot rewrite it. An append after the last sequence this process
  * wrote or read is one conditional put; anything else first reads what is stored. Both tables serve all three replicas of one
@@ -110,13 +116,24 @@ function entryKey(kind: EntryKind, index: number): string {
   return `${kind}#${String(index).padStart(INDEX_DIGITS, "0")}`;
 }
 
-function serializedEntries(record: WitnessReplicaRecord): Record<EntryKind, string[]> {
-  return {
-    ledger: record.ledger.map(encodeWitnessValue),
-    operations: record.operations.map(encodeWitnessValue),
-    retainedResponses: record.retainedResponses.map(encodeWitnessValue),
-    recoveryRequestHashes: (record.recoveryRequestHashes ?? []).map(encodeWitnessValue),
-  };
+function entryValues(
+  record: WitnessReplicaRecord | undefined,
+  kind: EntryKind,
+): readonly unknown[] {
+  if (record === undefined) return [];
+  return kind === "recoveryRequestHashes" ? (record.recoveryRequestHashes ?? []) : record[kind];
+}
+
+/**
+ * Freeze a record's objects and arrays, so a caller that tries to change the cached state it shares
+ * fails at once instead of corrupting it. Byte arrays cannot be frozen; the witness never writes
+ * into record bytes. Frozen entries are skipped, so freezing a step's record costs its new entries.
+ */
+function freeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || ArrayBuffer.isView(value)) return value;
+  if (Object.isFrozen(value)) return value;
+  for (const item of Object.values(value)) freeze(item);
+  return Object.freeze(value);
 }
 
 function isConflict(cause: unknown): boolean {
@@ -167,9 +184,7 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
         // after another writer moved the record.
         const cached = this.#cache.get(lineage);
         const loaded = cached ?? (await this.#load(lineage));
-        const outcome = transaction(
-          loaded.record === undefined ? undefined : structuredClone(loaded.record),
-        );
+        const outcome = transaction(loaded.record);
         if (outcome.next === undefined) {
           // Nothing is written, so nothing proves the record current: confirm its revision.
           if (cached !== undefined && (await this.#headRevision(lineage)) !== cached.revision) {
@@ -203,8 +218,7 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
   }
 
   async read(lineageHash: Uint8Array): Promise<WitnessReplicaRecord | undefined> {
-    const loaded = await this.#load(witnessBytesHex(lineageHash));
-    return loaded.record === undefined ? undefined : structuredClone(loaded.record);
+    return (await this.#load(witnessBytesHex(lineageHash))).record;
   }
 
   async #serialized<T>(lineage: string, work: () => Promise<T>): Promise<T> {
@@ -318,19 +332,25 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
         : { pendingJournalSequence: head.pendingJournalSequence }),
       ...(head.derivedHead === undefined ? {} : { derivedHead: head.derivedHead }),
     };
-    return { revision, record, entries };
+    return { revision, record: freeze(record), entries };
   }
 
   /** Write `next` over `loaded`; false when another writer moved the record first. */
   async #write(lineage: string, loaded: Loaded, next: WitnessReplicaRecord): Promise<boolean> {
     const revision = loaded.revision + 1;
     const partition = this.#partition(lineage);
-    const entries = serializedEntries(next);
+    const entries = {} as Record<EntryKind, string[]>;
     const items: TransactWriteItem[] = [];
     for (const kind of ENTRY_KINDS) {
       const before = loaded.entries[kind];
-      const after = entries[kind];
-      if (after.length < before.length) throw new Error(`Witness ${kind} cannot shrink`);
+      const previous = entryValues(loaded.record, kind);
+      const values = entryValues(next, kind);
+      if (values.length < before.length) throw new Error(`Witness ${kind} cannot shrink`);
+      // An entry the step kept is the cached object itself, so its stored form is reused as is.
+      const after = values.map((item, index) =>
+        item === previous[index] ? (before[index] as string) : encodeWitnessValue(item),
+      );
+      entries[kind] = after;
       after.forEach((value, index) => {
         const existing = before[index];
         if (existing === value) return;
@@ -406,7 +426,7 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
       if (isConflict(cause)) return false;
       throw cause;
     }
-    this.#cache.set(lineage, { revision, record: structuredClone(next), entries });
+    this.#cache.set(lineage, { revision, record: freeze(next), entries });
     return true;
   }
 

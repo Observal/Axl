@@ -8,9 +8,9 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import type { WitnessHighWaterEntry, WitnessReplicaRecord } from "@axl/control-plane";
 
 import {
-  decodeWitnessValue,
   DynamoWitnessHighWaterJournal,
   DynamoWitnessReplicaStorage,
+  decodeWitnessValue,
   encodeWitnessValue,
 } from "../src/witness-dynamo.ts";
 import { type FakeDynamoDb, startFakeDynamoDb } from "./support/fake-dynamodb.ts";
@@ -138,6 +138,77 @@ test("a record survives a new process and grows past one page", async (context) 
     .items("witness")
     .filter((item) => String((item.pk as { S?: string } | undefined)?.S).startsWith("record#"));
   assert.equal(items.length, 1 + 8 + 7);
+});
+
+/** One step as the witness takes it: the next record appends to the ledger it was handed. */
+function appended(current: WitnessReplicaRecord | undefined): WitnessReplicaRecord {
+  const base = current ?? record(0);
+  const sequence = BigInt(base.ledger.length + 1);
+  return {
+    ...base,
+    ledger: [
+      ...base.ledger,
+      {
+        sequence,
+        revocationGeneration: 0n,
+        kind: base.ledger.length === 0 ? ("registered" as const) : ("advanced" as const),
+        counter: sequence,
+        commitment: new Uint8Array(48).fill(Number(sequence)),
+      },
+    ],
+    retainedResponses: [
+      ...base.retainedResponses,
+      {
+        requestHash: new Uint8Array(48).fill(Number(sequence)),
+        requestBytes: new Uint8Array(900),
+        exactReceipt: new Uint8Array(300),
+      },
+    ],
+  };
+}
+
+test("a step encodes only what it changed, however long the record is", async (context) => {
+  const { client } = await fake(context);
+  const storage = new DynamoWitnessReplicaStorage({
+    tableName: "witness",
+    replicaId: replicaA,
+    client,
+  });
+  const stringify = context.mock.method(JSON, "stringify");
+  const encodings = async () => {
+    const before = stringify.mock.callCount();
+    await storage.transact(lineage, (current) => ({ value: undefined, next: appended(current) }));
+    return stringify.mock.callCount() - before;
+  };
+  for (let step = 0; step < 4; step += 1) await encodings();
+  const short = await encodings();
+  for (let step = 0; step < 60; step += 1) await encodings();
+  assert.equal(await encodings(), short);
+  assert.equal((await storage.read(lineage))?.ledger.length, 66);
+});
+
+test("a record handed out cannot change the cached state", async (context) => {
+  const { client } = await fake(context);
+  const storage = new DynamoWitnessReplicaStorage({
+    tableName: "witness",
+    replicaId: replicaA,
+    client,
+  });
+  await storage.transact(lineage, (current) => ({ value: undefined, next: appended(current) }));
+  await storage.transact(lineage, (current) => {
+    assert.ok(current !== undefined && Object.isFrozen(current));
+    assert.throws(() => (current.ledger as unknown[]).push(current.ledger[0]), TypeError);
+    return { value: undefined, next: appended(current) };
+  });
+  const read = await storage.read(lineage);
+  assert.ok(read !== undefined);
+  assert.throws(() => {
+    (read.retainedResponses[0] as { requestHash: Uint8Array }).requestHash = new Uint8Array(48);
+  }, TypeError);
+  assert.equal(read.ledger.length, 2);
+  // A value a step answers with is the caller's own copy.
+  const value = await storage.transact(lineage, (current) => ({ value: current?.ledger[0] }));
+  assert.ok(value !== undefined && !Object.isFrozen(value));
 });
 
 test("history is append-only; only operations may be completed in place", async (context) => {
