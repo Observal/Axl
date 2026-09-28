@@ -44,7 +44,7 @@ const link: RemotePairingLink = {
   deviceId: parseDeviceId("01890a5d-ac96-774b-bcce-b302099a8058"),
   cryptoSessionId: parseCryptoSessionId("01890a5d-ac96-774b-bcce-b302099a8059"),
   accessToken: "test-token_with.symbols+/=",
-  possessionProof: Uint8Array.from({ length: 48 }, (_, index) => index),
+  enrollmentSecret: Uint8Array.from({ length: 32 }, (_, index) => index),
 };
 const daemonRoute = parseRouteId("01890a5d-ac96-774b-bcce-b302099a8065");
 
@@ -61,7 +61,12 @@ test("pairing links round-trip through the fragment and never carry trust", () =
   assert.equal(url.hash.includes(link.deviceId), false);
   assert.throws(() => parseRemotePairingLink(url.hash.replace(/&d=[^&]+/u, "&d=AAAA")), /device/u);
   assert.throws(() => encodeRemotePairingLink("http://stack.example/remote/", link), /HTTPS/u);
-  assert.throws(() => parseRemotePairingLink(url.hash.replace("v=1", "v=2")), /version/u);
+  // A version 1 link carried a shared relay proof; it must not be accepted as a device link.
+  assert.throws(() => parseRemotePairingLink(url.hash.replace("v=2", "v=1")), /version/u);
+  assert.throws(
+    () => parseRemotePairingLink(url.hash.replace(/&e=[^&]+/u, "&e=AAAA")),
+    /enrollment secret/u,
+  );
 });
 
 test("pairing notices carry exactly one 48-byte claim hash", () => {

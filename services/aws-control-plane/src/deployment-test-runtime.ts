@@ -16,12 +16,18 @@ import {
   InMemoryPairingRendezvousStore,
   InMemoryRelayTicketStore,
   PairingRendezvousService,
+  InMemoryRemoteDeviceStore,
   type RelayTicketRecord,
   RelayTicketService,
+  RemoteDeviceService,
 } from "@axl/control-plane";
-import { type ConsumeRelayTicketRequest, parseDeviceId, parseInstallationId } from "@axl/protocol";
+import { type ConsumeRelayTicketRequest, parseInstallationId } from "@axl/protocol";
 
-import { DynamoPairingRendezvousStore, DynamoRelayTicketStore } from "./aws.ts";
+import {
+  DynamoPairingRendezvousStore,
+  DynamoRelayTicketStore,
+  DynamoRemoteDeviceStore,
+} from "./aws.ts";
 import {
   createDeploymentTestWitness,
   parseDeploymentTestWitnessKeys,
@@ -49,9 +55,9 @@ if (required("AXL_ENVIRONMENT") !== "deployment-test") {
 
 const accountId = required("AXL_TEST_ACCOUNT_ID");
 const installationId = parseInstallationId(required("AXL_TEST_INSTALLATION_ID"));
-const deviceId = parseDeviceId(required("AXL_TEST_DEVICE_ID"));
 const publicToken = required("AXL_TEST_PUBLIC_TOKEN");
 const relayToken = required("AXL_TEST_RELAY_TOKEN");
+// The daemon's relay possession proof. Devices never share it: each proves its own enrolled key.
 const possessionProof = Buffer.from(required("AXL_TEST_POSSESSION_PROOF"), "base64");
 if (possessionProof.byteLength < 32 || possessionProof.byteLength > 1024) {
   throw new Error("AXL_TEST_POSSESSION_PROOF must decode to 32 through 1024 bytes");
@@ -70,6 +76,12 @@ const pairing = new PairingRendezvousService({
       ? new InMemoryPairingRendezvousStore()
       : new DynamoPairingRendezvousStore({ tableName }),
 });
+const devices = new RemoteDeviceService({
+  store:
+    tableName === undefined
+      ? new InMemoryRemoteDeviceStore()
+      : new DynamoRemoteDeviceStore({ tableName }),
+});
 
 const tickets = new RelayTicketService({
   store: ticketStore,
@@ -79,11 +91,14 @@ const tickets = new RelayTicketService({
       if (principal.accountId !== accountId || request.installationId !== installationId)
         return undefined;
       if (request.role === "daemon") return request.deviceId === undefined ? 1 : undefined;
-      return request.deviceId === deviceId ? 1 : undefined;
+      return request.deviceId === undefined
+        ? undefined
+        : devices.generation(principal, request.installationId, request.deviceId);
     },
   },
   proofVerifier: {
-    async verify(_ticket: Readonly<RelayTicketRecord>, request: ConsumeRelayTicketRequest) {
+    async verify(ticket: Readonly<RelayTicketRecord>, request: ConsumeRelayTicketRequest) {
+      if (ticket.role === "device") return devices.verifyPossession(ticket, request);
       return (
         request.possessionProof.byteLength === possessionProof.byteLength &&
         timingSafeEqual(Buffer.from(request.possessionProof), possessionProof)
@@ -109,6 +124,7 @@ const witness =
 const handler = createControlPlaneHandler({
   tickets,
   pairing,
+  devices,
   ...(witness === undefined ? {} : { witness }),
   publicAuthentication: {
     async authenticate(request): Promise<AccountPrincipal | undefined> {

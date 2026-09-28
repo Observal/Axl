@@ -408,7 +408,6 @@ resource "aws_ecs_task_definition" "control_plane" {
     secrets = [
       { name = "AXL_TEST_ACCOUNT_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:accountId::" },
       { name = "AXL_TEST_INSTALLATION_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:installationId::" },
-      { name = "AXL_TEST_DEVICE_ID", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:deviceId::" },
       { name = "AXL_TEST_PUBLIC_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:publicToken::" },
       { name = "AXL_TEST_RELAY_TOKEN", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:relayToken::" },
       { name = "AXL_TEST_POSSESSION_PROOF", valueFrom = "${data.aws_secretsmanager_secret.runtime.arn}:possessionProof::" },

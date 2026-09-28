@@ -6,10 +6,11 @@
  *
  * A pairing link opens the hosted device page. Everything the device needs travels in the URL
  * fragment, which browsers never send to a server: the daemon's pairing invitation, the identities
- * it binds (as base64url bytes, so the link fits a terminal QR code), and the deployment-test
- * stack's shared access credentials. Those credentials are
- * test-only; production pairing must not put credentials in a link. Replica trust is never part of
- * a link: the device verifies witness certificates only against trust pinned into its build.
+ * it binds (as base64url bytes, so the link fits a terminal QR code), the one-time secret that
+ * enrolls this pairing's fresh device ID with a key the device creates, and the deployment-test
+ * stack's shared access token. That token is test-only; production pairing must not put
+ * credentials in a link. Replica trust is never part of a link: the device verifies witness
+ * certificates only against trust pinned into its build.
  *
  * Before the MLS group exists the device tells the daemon which claim it published with a pairing
  * notice: a fixed magic, a version, and the 48-byte claim hash, sent over the relay route. The
@@ -24,12 +25,13 @@ import {
   parseCryptoSessionId,
   parseDeviceId,
   parseInstallationId,
+  REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES,
 } from "@axl/protocol";
 
-export const REMOTE_PAIRING_LINK_VERSION = 1;
+/** Version 2 replaced the shared possession proof with a per-device enrollment secret. */
+export const REMOTE_PAIRING_LINK_VERSION = 2;
 const MAX_INVITATION_BYTES = 2_048;
 const MAX_TOKEN_CHARACTERS = 4_096;
-const MAX_PROOF_BYTES = 1_024;
 const NOTICE_MAGIC = Uint8Array.of(0x41, 0x58, 0x4c, 0x50);
 const NOTICE_VERSION = 1;
 const CLAIM_HASH_BYTES = 48;
@@ -43,8 +45,8 @@ export interface RemotePairingLink {
   readonly cryptoSessionId: CryptoSessionId;
   /** Deployment-test bearer token for the control plane, relay tickets, and witness. */
   readonly accessToken: string;
-  /** Deployment-test relay possession proof. */
-  readonly possessionProof: Uint8Array;
+  /** One-time secret that enrolls the device's own key for `deviceId`. */
+  readonly enrollmentSecret: Uint8Array;
 }
 
 function base64Url(bytes: Uint8Array): string {
@@ -88,6 +90,9 @@ export function encodeRemotePairingLink(pageUrl: string, link: RemotePairingLink
   if (link.invitation.byteLength === 0 || link.invitation.byteLength > MAX_INVITATION_BYTES) {
     throw new TypeError("The pairing invitation is outside its bound");
   }
+  if (link.enrollmentSecret.byteLength !== REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES) {
+    throw new TypeError("The enrollment secret has the wrong length");
+  }
   const values = new URLSearchParams({
     v: String(REMOTE_PAIRING_LINK_VERSION),
     i: base64Url(link.invitation),
@@ -96,7 +101,7 @@ export function encodeRemotePairingLink(pageUrl: string, link: RemotePairingLink
     d: base64Url(uuidToBytes(link.deviceId)),
     s: base64Url(uuidToBytes(link.cryptoSessionId)),
     t: link.accessToken,
-    p: base64Url(link.possessionProof),
+    e: base64Url(link.enrollmentSecret),
   });
   url.hash = values.toString();
   return url.toString();
@@ -119,8 +124,16 @@ export function parseRemotePairingLink(fragment: string): RemotePairingLink {
     deviceId: parseDeviceId(uuidField(values, "d", "device")),
     cryptoSessionId: parseCryptoSessionId(uuidField(values, "s", "session")),
     accessToken,
-    possessionProof: fromBase64Url(values.get("p"), "proof", MAX_PROOF_BYTES),
+    enrollmentSecret: enrollmentSecret(values),
   };
+}
+
+function enrollmentSecret(values: URLSearchParams): Uint8Array {
+  const secret = fromBase64Url(values.get("e"), "enrollment secret", 64);
+  if (secret.byteLength !== REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES) {
+    throw new TypeError("Pairing link enrollment secret is malformed");
+  }
+  return secret;
 }
 
 /** The 16 bytes of a canonical UUID string. */

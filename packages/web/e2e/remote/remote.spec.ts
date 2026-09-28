@@ -10,7 +10,14 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { type BrowserContext, devices, expect, type Page, test } from "@playwright/test";
+import {
+  type Browser,
+  type BrowserContext,
+  devices,
+  expect,
+  type Page,
+  test,
+} from "@playwright/test";
 
 import { type RemoteStack, startStack } from "./stack.ts";
 
@@ -46,20 +53,26 @@ async function through(name: string, target: Page, text: string, timeout = RECOV
   timings[name] = Date.now() - started;
 }
 
+/** A separate phone: its own storage, so its own device key. */
+async function phone(browser: Browser, name: string): Promise<BrowserContext> {
+  const created = await browser.newContext({ ...devices["Pixel 7"], ignoreHTTPSErrors: true });
+  // The page's debug trace, for diagnosing a failed run from the stack logs.
+  created.on("console", (message) =>
+    appendFileSync(
+      join(directory ?? ".", "logs/page.log"),
+      `${new Date().toISOString()} ${name} ${message.type()} ${message.text()}
+`,
+    ),
+  );
+  return created;
+}
+
 test.beforeAll(async ({ browser }) => {
   test.setTimeout(600_000);
   if (directory === undefined) throw new Error("Run through scripts/remote-e2e.ts");
   stack = await startStack(directory);
   await stack.createSession();
-  context = await browser.newContext({ ...devices["Pixel 7"], ignoreHTTPSErrors: true });
-  // The page's debug trace, for diagnosing a failed run from the stack logs.
-  context.on("console", (message) =>
-    appendFileSync(
-      join(directory, "logs/page.log"),
-      `${new Date().toISOString()} ${message.type()} ${message.text()}
-`,
-    ),
-  );
+  context = await phone(browser, "phone");
   page = await context.newPage();
 });
 
@@ -150,6 +163,38 @@ test("a second tab takes over and sees every reply exactly once", async () => {
     await expect(replies(second, prompt), prompt).toHaveCount(1);
   }
   await second.close();
+});
+
+test("pairing again moves the daemon to the new phone and locks the old one out", async ({
+  browser,
+}) => {
+  test.setTimeout(300_000);
+  const link = await stack.pair();
+  const next = await phone(browser, "new-phone");
+  const copy = await phone(browser, "copied-link");
+  try {
+    const nextPage = await next.newPage();
+    const started = Date.now();
+    await nextPage.goto(link.replace("#", "?debug#"));
+    await expect(nextPage.locator(".remote-session")).toHaveCount(1, { timeout: 180_000 });
+    timings["pairing again"] = Date.now() - started;
+    await nextPage.locator(".remote-session").click();
+    await through("new phone", nextPage, "p10 on the new phone", 120_000);
+
+    // The link enrolled the new phone's key, so a copy of it opened anywhere else enrolls nothing.
+    const copied = await copy.newPage();
+    await copied.goto(link.replace("#", "?debug#"));
+    await expect(copied.locator("#status")).toHaveText(/already used on another device/u, {
+      timeout: 60_000,
+    });
+
+    // The old phone's device was revoked, so the control plane will not let it reach the relay.
+    await page.reload();
+    await expect(page.locator("#status")).toHaveText(/no longer paired/u, { timeout: 60_000 });
+  } finally {
+    await copy.close();
+    await next.close();
+  }
 });
 
 test("every prompt reached the model exactly once", () => {

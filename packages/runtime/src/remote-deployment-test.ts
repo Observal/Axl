@@ -65,16 +65,19 @@ import {
   type RemoteStatusResult,
 } from "@axl/protocol";
 import {
+  createRemoteDeviceEnrollmentSecret,
   encodeRemotePairingLink,
   HostedPairingClient,
   HttpRelayTicketProvider,
   parseRemotePairingNotice,
+  RemoteDeviceControlPlane,
   RemoteRelayConnection,
   uuidToBytes,
 } from "@axl/sdk";
 
 const CONFIG_VERSION = 1;
-const STATE_VERSION = 1;
+/** Version 2 records the device ID minted for each pairing. */
+const STATE_VERSION = 2;
 const DEVICE_SCOPES: readonly RemoteDeviceScope[] = ["observe", "steer"];
 const HOSTED_GRANT_GENERATION = 1;
 /** Probe the relay this often, so a socket that died while the laptop slept is replaced. */
@@ -124,8 +127,8 @@ export interface DeploymentTestRemoteConfig {
   readonly pagePath: string;
   readonly accountId: string;
   readonly installationId: InstallationId;
-  readonly deviceId: DeviceId;
   readonly accessToken: string;
+  /** The daemon's relay possession proof. Each device proves its own key instead. */
   readonly possessionProof: Uint8Array;
   /** Path of the deployment-test Node binding loader (`dist/deployment-test/loader/index.js`). */
   readonly binding: string;
@@ -159,7 +162,6 @@ export async function loadDeploymentTestRemoteConfig(
     pagePath,
     accountId: text(value.accountId, "accountId", 36),
     installationId: parseInstallationId(value.installationId),
-    deviceId: parseDeviceId(value.deviceId),
     accessToken: text(value.accessToken, "accessToken"),
     possessionProof: new Uint8Array(
       Buffer.from(text(value.possessionProof, "possessionProof"), "base64"),
@@ -198,11 +200,14 @@ interface DeploymentTestBinding {
 interface HostState {
   readonly version: typeof STATE_VERSION;
   readonly cryptoSessionId: CryptoSessionId;
+  /** Minted for this pairing; no other pairing or browser ever uses it. */
+  readonly deviceId: DeviceId;
   readonly phase: "pairing" | "paired";
 }
 
 interface Session {
   readonly id: CryptoSessionId;
+  readonly deviceId: DeviceId;
   readonly endpoint: DeploymentTestDaemonEndpoint;
   readonly barrier: DaemonWitnessBarrier<DeploymentTestDaemonEndpoint>;
   readonly relay: RemoteRelayConnection;
@@ -241,6 +246,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
   readonly #authority: RemoteDeviceAuthorityStore;
   readonly #witness: HostedDaemonWitnessTransport;
   readonly #pairing: HostedPairingClient;
+  readonly #devices: RemoteDeviceControlPlane;
   readonly #output: (message: string) => void;
   readonly #logPath: string;
   #logWrites: Promise<void> = Promise.resolve();
@@ -273,6 +279,10 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       origin: config.origin,
       authorization: async () => config.accessToken,
     });
+    this.#devices = new RemoteDeviceControlPlane({
+      controlPlaneOrigin: config.origin,
+      authenticationHeaders: async () => this.#headers(),
+    });
   }
 
   static async open(
@@ -301,7 +311,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     const session = this.#session;
     const deviceOnline =
       session?.relay.routes.some(
-        (peer) => peer.role === "device" && peer.deviceId === this.#config.deviceId,
+        (peer) => peer.role === "device" && peer.deviceId === session.deviceId,
       ) ?? false;
     const witness = session?.bridge?.witnessStatus?.state;
     return {
@@ -313,9 +323,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
             : "pairing",
       relay: session?.relay.state ?? "disconnected",
       deviceOnline,
-      ...(session === undefined
-        ? {}
-        : { cryptoSessionId: session.id, deviceId: this.#config.deviceId }),
+      ...(session === undefined ? {} : { cryptoSessionId: session.id, deviceId: session.deviceId }),
       ...(witness === undefined ? {} : { witness }),
       ...(this.#lastError === undefined ? {} : { lastError: this.#lastError }),
       logPath: this.#logPath,
@@ -330,7 +338,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     if (state?.phase !== "paired") return;
     this.#restoring = true;
     try {
-      const session = await this.#openSession(state.cryptoSessionId);
+      const session = await this.#openSession(state.cryptoSessionId, state.deviceId);
       await session.endpoint.reopen();
       await this.#serve(session);
       this.#restoring = false;
@@ -402,10 +410,16 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     // `/remote` can arrive while the daemon is still restoring the previous pairing at startup.
     await this.#restoreRun;
     await this.#closeSession();
+    // One pairing at a time: the device of the pairing this one replaces loses access for good.
+    const previous = await this.#readState();
+    if (previous !== undefined) await this.#retire(previous.deviceId);
     const cryptoSessionId = parseCryptoSessionId(uuidV7());
+    const deviceId = parseDeviceId(uuidV7());
+    const enrollmentSecret = createRemoteDeviceEnrollmentSecret();
     await this.#prune(cryptoSessionId);
-    const session = await this.#openSession(cryptoSessionId);
+    const session = await this.#openSession(cryptoSessionId, deviceId);
     try {
+      await this.#devices.invite(this.#config.installationId, deviceId, enrollmentSecret);
       const issued = await session.barrier.complete(await session.endpoint.issue(operation()));
       const invitation = released<{ readonly bytes: Uint8Array; readonly expiresAtMs: bigint }>(
         issued,
@@ -413,7 +427,12 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       );
       // The first fresh read after registration moves an empty hosted witness out of bootstrap.
       await session.barrier.recover();
-      await this.#writeState({ version: STATE_VERSION, cryptoSessionId, phase: "pairing" });
+      await this.#writeState({
+        version: STATE_VERSION,
+        cryptoSessionId,
+        deviceId,
+        phase: "pairing",
+      });
       await session.relay.start();
       this.#log(`remote: pairing session ${cryptoSessionId} is waiting for a device`);
       return {
@@ -421,13 +440,13 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
           invitation: invitation.bytes,
           accountId: this.#config.accountId,
           installationId: this.#config.installationId,
-          deviceId: this.#config.deviceId,
+          deviceId,
           cryptoSessionId,
           accessToken: this.#config.accessToken,
-          possessionProof: this.#config.possessionProof,
+          enrollmentSecret,
         }),
         cryptoSessionId,
-        deviceId: this.#config.deviceId,
+        deviceId,
         expiresAt: Number(invitation.expiresAtMs),
       };
     } catch (cause) {
@@ -444,7 +463,25 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     return this.#binding;
   }
 
-  async #openSession(cryptoSessionId: CryptoSessionId): Promise<Session> {
+  /**
+   * Revoke a replaced pairing's device in the control plane (no more relay tickets) and in the
+   * daemon's authority store (no more requests). Failures are logged, not fatal: the device's
+   * session is already gone, and the control plane refuses a device it no longer knows.
+   */
+  async #retire(deviceId: DeviceId): Promise<void> {
+    await this.#devices.revoke(this.#config.installationId, deviceId).catch((cause: unknown) => {
+      if ((cause as { readonly code?: unknown }).code === "device_not_found") return;
+      this.#fail(`remote: could not revoke device ${deviceId}: ${describe(cause)}`);
+    });
+    if (this.#authority.snapshot(deviceId) !== undefined) {
+      await this.#authority.revokeLocalDevice(deviceId).catch((cause: unknown) => {
+        this.#fail(`remote: could not revoke device ${deviceId} locally: ${describe(cause)}`);
+      });
+    }
+    this.#log(`remote: device ${deviceId} revoked`);
+  }
+
+  async #openSession(cryptoSessionId: CryptoSessionId, deviceId: DeviceId): Promise<Session> {
     const binding = await this.#bindingModule();
     const endpoint = binding.deploymentTestDaemonEndpoint(
       join(this.#root, "sessions", cryptoSessionId),
@@ -467,6 +504,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     });
     const session: Session = {
       id: cryptoSessionId,
+      deviceId,
       endpoint,
       barrier: new DaemonWitnessBarrier(endpoint, this.#witness),
       relay,
@@ -532,9 +570,10 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     await this.#writeState({
       version: STATE_VERSION,
       cryptoSessionId: session.id,
+      deviceId: session.deviceId,
       phase: "paired",
     });
-    this.#log(`remote: device ${this.#config.deviceId} paired`);
+    this.#log(`remote: device ${session.deviceId} paired`);
     await this.#serve(session);
   }
 
@@ -550,7 +589,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     const binding = {
       version: 1 as const,
       installationId: this.#config.installationId,
-      deviceId: this.#config.deviceId,
+      deviceId: session.deviceId,
       cryptoSessionId: session.id,
       claimHash,
       reservationId,
@@ -571,9 +610,9 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       ),
       "welcome",
     );
-    await this.#authority.registerLocalDevice(this.#config.deviceId, DEVICE_SCOPES);
+    await this.#authority.registerLocalDevice(session.deviceId, DEVICE_SCOPES);
     await this.#authority.applyHostedGrant(
-      this.#config.deviceId,
+      session.deviceId,
       HOSTED_GRANT_GENERATION,
       DEVICE_SCOPES,
     );
@@ -592,7 +631,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
     if (daemon === undefined) throw new Error("The remote host is not attached");
     const bridge = new WindowsRemoteE2eeBridge({
       daemon,
-      deviceId: this.#config.deviceId,
+      deviceId: session.deviceId,
       authority: this.#authority,
       endpoint: session.endpoint,
       witness: this.#witness,
@@ -642,6 +681,7 @@ export class DeploymentTestRemoteHost implements RemotePairingService {
       return {
         version: STATE_VERSION,
         cryptoSessionId: parseCryptoSessionId(value.cryptoSessionId),
+        deviceId: parseDeviceId(value.deviceId),
         phase: value.phase === "paired" ? "paired" : "pairing",
       };
     } catch {

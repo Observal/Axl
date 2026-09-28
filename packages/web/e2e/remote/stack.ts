@@ -298,7 +298,6 @@ export async function startStack(directory) {
   const origin = `https://127.0.0.1:${originPort}`;
   const accountId = randomUUID();
   const installationId = uuidV7();
-  const deviceId = uuidV7();
   const accessToken = randomBytes(24).toString("base64url");
   const possessionProof = randomBytes(32).toString("base64");
   const keys = readFileSync(join(directory, "keys.json"), "utf8");
@@ -315,7 +314,6 @@ export async function startStack(directory) {
         AXL_TEST_IN_MEMORY: "1",
         AXL_TEST_ACCOUNT_ID: accountId,
         AXL_TEST_INSTALLATION_ID: installationId,
-        AXL_TEST_DEVICE_ID: deviceId,
         AXL_TEST_PUBLIC_TOKEN: accessToken,
         AXL_TEST_RELAY_TOKEN: RELAY_TOKEN,
         AXL_TEST_POSSESSION_PROOF: possessionProof,
@@ -392,7 +390,6 @@ export async function startStack(directory) {
       pagePath: "/remote/",
       accountId,
       installationId,
-      deviceId,
       accessToken,
       possessionProof,
       binding: join(

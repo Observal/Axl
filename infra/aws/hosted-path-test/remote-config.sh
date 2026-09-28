@@ -39,7 +39,6 @@ config = {
     "pagePath": "/remote/",
     "accountId": secret["accountId"],
     "installationId": secret["installationId"],
-    "deviceId": secret["deviceId"],
     "accessToken": secret["publicToken"],
     "possessionProof": secret["possessionProof"],
     "binding": os.environ["AXL_BINDING"],

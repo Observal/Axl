@@ -66,7 +66,7 @@ Retryable mutations enter the existing daemon command journal while the authorit
 
 ## Current wiring and non-capabilities
 
-The runtime wires this module in deployment-test mode only. When `AXL_REMOTE_DEPLOYMENT_TEST` names a deployment-test configuration, `packages/runtime/src/remote-deployment-test.ts` loads the deployment-test Node endpoint, pairs one phone browser through `/remote`, and dispatches that device's requests through this module. `--unsafe` daemons still grant only `observe` remotely, and `remote.pairing.start` and `remote.status` stay local-only. That mode uses shared test credentials and test-only key storage, so it is evidence for the hosted path, not a user-facing feature.
+The runtime wires this module in deployment-test mode only. When `AXL_REMOTE_DEPLOYMENT_TEST` names a deployment-test configuration, `packages/runtime/src/remote-deployment-test.ts` loads the deployment-test Node endpoint, pairs one phone browser at a time through `/remote`, and dispatches that device's requests through this module. Each pairing mints a new device ID, and the phone enrolls its own non-extractable key for relay admission (see [device enrollment](e2ee-transport-preflight.md#device-enrollment)). Pairing again revokes the previous device here and in the control plane. `--unsafe` daemons still grant only `observe` remotely, and `remote.pairing.start` and `remote.status` stay local-only. That mode uses a shared test account token and test-only key storage, so it is evidence for the hosted path, not a user-facing feature.
 
 Outside that mode and explicit local integration tests, this module does not:
 

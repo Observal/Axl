@@ -116,6 +116,17 @@ export class HttpRelayTicketProvider implements RelayTicketProvider {
       body: JSON.stringify(this.ticketRequest),
     });
     if (!response.ok) {
+      if (response.status === 403) {
+        const failure = (await response.json().catch(() => undefined)) as
+          | { readonly error?: { readonly code?: unknown } }
+          | undefined;
+        if (failure?.error?.code === "forbidden_route") {
+          throw new RemoteRelayError(
+            "route_forbidden",
+            "The control plane no longer grants this relay route",
+          );
+        }
+      }
       throw new RemoteRelayError(
         "ticket_unavailable",
         `Relay ticket request failed with HTTP ${response.status}`,
@@ -238,6 +249,8 @@ function randomUuid(): string {
 
 export type RemoteRelayErrorCode =
   | "ticket_unavailable"
+  /** The control plane refuses this route, for example for a revoked device. Not retried. */
+  | "route_forbidden"
   | "invalid_admission"
   | "connection_failed"
   | "connection_closed"
@@ -259,6 +272,10 @@ export class RemoteRelayError extends Error {
     this.name = "RemoteRelayError";
     this.code = code;
   }
+}
+
+function isRouteForbidden(error: unknown): error is RemoteRelayError {
+  return error instanceof RemoteRelayError && error.code === "route_forbidden";
 }
 
 function positiveInteger(value: number, name: string): number {
@@ -645,11 +662,14 @@ export class RemoteRelayConnection {
         latest = error;
         this.discardFailedSocket();
         if (!this.lifecycleIsActive(lifecycleGeneration)) return;
+        // A refused route stays refused: retrying cannot help, and the caller must learn why.
+        if (isRouteForbidden(error)) break;
       }
     }
     if (!this.lifecycleIsActive(lifecycleGeneration)) return;
     this.stopped = true;
     this.setState("disconnected");
+    if (isRouteForbidden(latest)) throw latest;
     throw new RemoteRelayError("connection_failed", "Relay reconnect attempts were exhausted", {
       cause: latest,
     });
