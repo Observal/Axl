@@ -151,4 +151,13 @@ aws ecs wait services-stable \
   --cluster "$cluster" \
   --services control-plane relay
 
-"$stack/smoke-test.sh"
+if [ "$control_plane_mode" = production ]; then
+  # Production holds no test credential to exercise a pairing with; check the mode it runs in.
+  health="$(curl -fsS "$(terraform -chdir="$stack" output -raw control_plane_url)/healthz")"
+  case "$health" in
+    *'"mode":"production"'*) echo "Production control plane is healthy: $health" ;;
+    *) echo "Control plane is not in production mode: $health" >&2; exit 1 ;;
+  esac
+else
+  "$stack/smoke-test.sh"
+fi
