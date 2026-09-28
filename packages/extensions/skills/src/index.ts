@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Dirent } from "node:fs";
-import { lstat, open, readFile, readdir, realpath, stat } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
+import { lstat, open, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import type { TerminalExtension } from "@axl/extension-api";
@@ -122,6 +122,16 @@ function optionalString(value: unknown, path: string, maximum?: number): string 
   return value;
 }
 
+/**
+ * `allowed-tools` as the spec writes it, one space-delimited string, or as the YAML list of tool
+ * patterns other agents also accept, joined into that string.
+ */
+function parseAllowedTools(value: unknown, path: string): string | undefined {
+  if (!Array.isArray(value)) return optionalString(value, path);
+  if (value.length === 0) throw new SkillValidationError(path, "must list at least one tool");
+  return value.map((item, index) => optionalString(item, `${path}[${index}]`) as string).join(" ");
+}
+
 function decodeUtf8(value: Uint8Array, path: string): string {
   if (value.includes(0)) throw new SkillValidationError(path, "must be text, not binary data");
   try {
@@ -177,7 +187,7 @@ function parseFrontmatter(source: string, skillPath: string): SkillFrontmatter {
   }
   const license = optionalString(fields.license, `${skillPath}:license`);
   const compatibility = optionalString(fields.compatibility, `${skillPath}:compatibility`, 500);
-  const allowedTools = optionalString(fields["allowed-tools"], `${skillPath}:allowed-tools`);
+  const allowedTools = parseAllowedTools(fields["allowed-tools"], `${skillPath}:allowed-tools`);
   return {
     name,
     description,
