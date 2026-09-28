@@ -13,6 +13,10 @@
  * connection is admitted with a signature by that key. Replica trust is pinned into the binding
  * build, never taken from the link.
  *
+ * An open conversation renders with the desktop client's transcript renderer, and the reply the
+ * model is producing streams in as it arrives. A prompt shows at once and settles when the daemon
+ * records it, since every encrypted round trip costs witness calls on both ends.
+ *
  * Phones suspend pages and drop sockets, so the page keeps its own connection honest: it probes
  * the relay on a heartbeat and whenever it becomes visible again, the session resends requests
  * the daemon has not answered, and an open conversation resumes from its last acknowledged cursor
@@ -24,7 +28,6 @@ import {
   type BrowserDeviceEndpoint,
   type CanonicalEvent,
   ConversationProjector,
-  type ConversationRecord,
   createRemoteDeviceKeyPair,
   HostedPairingClient,
   HttpRelayTicketProvider,
@@ -44,7 +47,14 @@ import {
   uuidToBytes,
 } from "@axl/sdk";
 
+import "@axl/ui/theme.css";
 import "./remote.css";
+
+import type { PendingPrompt, ThreadRenderer } from "./thread-view.tsx";
+import { elapsed, turnStage, turnStartedAt } from "./turn.ts";
+
+// The transcript renderer is most of the page's weight; fetch it while pairing and listing run.
+const threadView = import("./thread-view.tsx");
 
 interface DeviceBinding {
   authorizeWitness(authorization: string): Promise<null>;
@@ -79,6 +89,12 @@ const HANDOFF_WAIT_MS = 5_000;
 /** How long the pairing waits for the daemon to answer before resending its activation. */
 const CONFIRM_TIMEOUT_MS = 5_000;
 const TAB_CHANNEL = "axl-remote-tabs";
+/** Acknowledge a view's cursor once events pause this long, so a streaming reply is not slowed. */
+const ACK_DELAY_MS = 1_500;
+/** A sent prompt the transcript never showed stops being drawn as pending after this long. */
+const PENDING_SETTLE_MS = 15_000;
+/** A burst of session changes refreshes the list once. */
+const LIST_REFRESH_DELAY_MS = 400;
 const TAB_ID = crypto.randomUUID();
 const STEP_LABELS: Readonly<Record<RemoteBrowserPairingStep, string>> = {
   claim: "Create this device's pairing claim",
@@ -97,23 +113,40 @@ function element<T extends HTMLElement>(id: string): T {
 
 const view = {
   status: element<HTMLParagraphElement>("status"),
+  title: element<HTMLHeadingElement>("title"),
+  connection: element<HTMLSpanElement>("connection"),
+  back: element<HTMLButtonElement>("back"),
+  refresh: element<HTMLButtonElement>("refresh"),
+  retry: element<HTMLButtonElement>("retry"),
   pairing: element<HTMLElement>("pairing"),
   steps: element<HTMLOListElement>("steps"),
   hint: element<HTMLParagraphElement>("pairing-hint"),
-  retry: element<HTMLButtonElement>("retry"),
   sessions: element<HTMLElement>("sessions"),
   sessionList: element<HTMLUListElement>("session-list"),
-  refresh: element<HTMLButtonElement>("refresh"),
   thread: element<HTMLElement>("thread"),
-  back: element<HTMLButtonElement>("back"),
-  title: element<HTMLHeadingElement>("thread-title"),
-  records: element<HTMLOListElement>("records"),
+  transcript: element<HTMLDivElement>("transcript"),
+  threadView: element<HTMLDivElement>("thread-view"),
+  jump: element<HTMLButtonElement>("jump"),
   activity: element<HTMLParagraphElement>("activity"),
   composer: element<HTMLFormElement>("composer"),
   prompt: element<HTMLTextAreaElement>("prompt"),
   send: element<HTMLButtonElement>("send"),
   stop: element<HTMLButtonElement>("stop"),
 };
+
+/** The shared theme is dark unless told otherwise; follow the phone's setting. */
+function followColorScheme(): void {
+  const light = matchMedia("(prefers-color-scheme: light)");
+  const apply = () => {
+    document.documentElement.dataset.theme = light.matches ? "light" : "dark";
+  };
+  apply();
+  light.addEventListener("change", apply);
+}
+
+function connection(state: "online" | "connecting" | "offline"): void {
+  view.connection.dataset.state = state;
+}
 
 function status(text: string, tone: "normal" | "error" = "normal"): void {
   view.status.textContent = text;
@@ -124,6 +157,37 @@ function show(section: "pairing" | "sessions" | "thread"): void {
   view.pairing.hidden = section !== "pairing";
   view.sessions.hidden = section !== "sessions";
   view.thread.hidden = section !== "thread";
+  view.back.hidden = section !== "thread";
+  view.refresh.hidden = section !== "sessions";
+  if (section === "sessions") view.title.textContent = "Sessions";
+  else if (section === "pairing") view.title.textContent = "Axl Remote";
+}
+
+/** "now", "5m", "3h", "2d", or a date, for the session list. */
+function ago(timestamp: number): string {
+  const minutes = Math.floor((Date.now() - timestamp) / 60_000);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  return new Date(timestamp).toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+/** The last path segment of a working directory, which is what tells sessions apart. */
+function shortPath(cwd: string): string {
+  const parts = cwd.split(/[\\/]/u).filter((part) => part.length > 0);
+  return parts.length <= 2 ? cwd : `…/${parts.slice(-2).join("/")}`;
+}
+
+function contentText(
+  content: readonly { readonly type: string; readonly text?: string }[],
+): string {
+  return content
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
 }
 
 function load(): StoredPairing | undefined {
@@ -305,54 +369,9 @@ function describe(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function textOf(content: readonly { readonly type: string; readonly text?: string }[]): string {
-  return content
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text)
-    .join("");
-}
-
-function renderRecord(record: ConversationRecord): HTMLLIElement | undefined {
-  if (record.kind !== "event") return undefined;
-  const event: CanonicalEvent = record.event;
-  const item = document.createElement("li");
-  switch (event.type) {
-    case "user.message":
-      item.className = "record user";
-      item.textContent = textOf(event.payload.content);
-      return item;
-    case "assistant.message": {
-      const text = textOf(event.payload.content);
-      if (text.length === 0) {
-        if (event.payload.stopReason === "aborted") {
-          item.className = "record tool";
-          item.textContent = "Stopped";
-          return item;
-        }
-        if (event.payload.stopReason !== "error") return undefined;
-        item.className = "record error";
-        item.textContent = `The turn failed: ${event.payload.errorMessage ?? "unknown error"}`;
-        return item;
-      }
-      item.className = "record assistant";
-      item.textContent = text;
-      return item;
-    }
-    case "tool.call":
-      item.className = "record tool";
-      item.textContent = `Tool: ${event.payload.name}`;
-      return item;
-    case "session.error":
-      item.className = "record error";
-      item.textContent = event.payload.message;
-      return item;
-    default:
-      return undefined;
-  }
-}
-
 class RemotePage {
   readonly #session: RemoteBrowserSession;
+  #renderer: ThreadRenderer | undefined;
   #projector: ConversationProjector | undefined;
   #subscriptionId: string | undefined;
   #sessionId: string | undefined;
@@ -363,6 +382,11 @@ class RemotePage {
   #ackedCursor: string | undefined;
   /** The session list request in flight; refreshes and reconnects share it. */
   #listing: Promise<void> | undefined;
+  #listRefresh: ReturnType<typeof setTimeout> | undefined;
+  /** Prompts sent from this page that the transcript does not show yet. */
+  #pending: PendingPrompt[] = [];
+  /** Redraws the running turn's elapsed time while one is running. */
+  #ticker: ReturnType<typeof setInterval> | undefined;
 
   constructor(session: RemoteBrowserSession) {
     this.#session = session;
@@ -371,11 +395,29 @@ class RemotePage {
     session.onReconnect(() => void this.#resume());
     view.refresh.addEventListener("click", () => void this.listSessions());
     view.back.addEventListener("click", () => void this.leaveThread());
+    view.jump.addEventListener("click", () => this.#renderer?.jumpToLatest());
     view.composer.addEventListener("submit", (event) => {
       event.preventDefault();
       void this.#send();
     });
+    view.prompt.addEventListener("input", () => this.#fitComposer());
+    view.prompt.addEventListener("keydown", (event) => {
+      // A hardware keyboard sends with Enter; a touch keyboard's Enter adds a line.
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+      if (matchMedia("(pointer: coarse)").matches) return;
+      event.preventDefault();
+      view.composer.requestSubmit();
+    });
     view.stop.addEventListener("click", () => void this.#interrupt());
+    this.#fitComposer();
+  }
+
+  /** Grow the prompt with its text, and keep the jump button clear of the composer. */
+  #fitComposer(): void {
+    view.prompt.style.height = "auto";
+    view.prompt.style.height = `${view.prompt.scrollHeight + 2}px`;
+    view.send.disabled = view.prompt.value.trim().length === 0;
+    view.thread.style.setProperty("--composer-height", `${view.composer.offsetHeight}px`);
   }
 
   listSessions(): Promise<void> {
@@ -388,35 +430,64 @@ class RemotePage {
 
   async #listSessions(): Promise<void> {
     status("Loading sessions");
+    if (view.sessionList.childElementCount === 0) {
+      view.sessionList.replaceChildren(
+        ...[0, 1, 2].map(() => {
+          const item = document.createElement("li");
+          item.className = "remote-skeleton";
+          return item;
+        }),
+      );
+    }
     try {
       const result = (await this.#session.request("session.list", {
         scope: "all_local",
         order: "recent",
         pageSize: 30,
       })) as { readonly sessions: readonly SessionSummary[] };
-      view.sessionList.replaceChildren(
-        ...result.sessions.map((summary) => {
-          const item = document.createElement("li");
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "remote-session";
-          const title = document.createElement("span");
-          title.className = "remote-session-title";
-          title.textContent =
-            summary.title ?? summary.lastUserMessage ?? summary.firstUserMessage ?? "New session";
-          const detail = document.createElement("span");
-          detail.className = "remote-session-detail";
-          detail.textContent = `${summary.cwd} · ${new Date(summary.updatedAt).toLocaleString()}`;
-          button.append(title, detail);
-          button.addEventListener("click", () => void this.openThread(summary));
-          item.append(button);
-          return item;
-        }),
-      );
+      if (result.sessions.length === 0) {
+        const empty = document.createElement("li");
+        empty.className = "remote-empty";
+        empty.textContent = "No sessions yet. Start one in the Axl terminal.";
+        view.sessionList.replaceChildren(empty);
+      } else {
+        view.sessionList.replaceChildren(
+          ...result.sessions.map((summary) => {
+            const item = document.createElement("li");
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "remote-session";
+            const title = document.createElement("span");
+            title.className = "remote-session-title";
+            title.textContent =
+              summary.title ?? summary.lastUserMessage ?? summary.firstUserMessage ?? "New session";
+            const time = document.createElement("time");
+            time.className = "remote-session-time";
+            time.dateTime = new Date(summary.updatedAt).toISOString();
+            time.textContent = ago(summary.updatedAt);
+            const detail = document.createElement("span");
+            detail.className = "remote-session-detail";
+            detail.textContent = shortPath(summary.cwd);
+            button.append(title, time, detail);
+            button.addEventListener("click", () => void this.openThread(summary));
+            item.append(button);
+            return item;
+          }),
+        );
+      }
       status(result.sessions.length === 0 ? "No sessions yet" : "Connected");
     } catch (cause) {
       status(`Could not list sessions: ${describe(cause)}`, "error");
     }
+  }
+
+  /** Refresh a visible session list once a burst of changes settles. */
+  #scheduleListRefresh(): void {
+    if (view.sessions.hidden || this.#listRefresh !== undefined) return;
+    this.#listRefresh = setTimeout(() => {
+      this.#listRefresh = undefined;
+      if (!view.sessions.hidden) void this.listSessions();
+    }, LIST_REFRESH_DELAY_MS);
   }
 
   async openThread(summary: SessionSummary): Promise<void> {
@@ -428,15 +499,28 @@ class RemotePage {
     this.#summary = summary;
     this.#ackedCursor = undefined;
     this.#projector = new ConversationProjector(summary.sessionId);
+    this.#pending = [];
     if (previous !== undefined) {
       void this.#session
         .request("session.unsubscribe", { subscriptionId: previous })
         .catch(() => undefined);
     }
     show("thread");
-    view.title.textContent = summary.title ?? summary.cwd;
-    view.records.replaceChildren();
+    view.title.textContent =
+      summary.title ??
+      summary.lastUserMessage ??
+      summary.firstUserMessage ??
+      shortPath(summary.cwd);
     status("Opening session");
+    this.#renderer ??= new (await threadView).ThreadRenderer(
+      view.threadView,
+      view.transcript,
+      (following) => {
+        view.jump.hidden = following;
+      },
+    );
+    this.#renderer.clear();
+    this.#renderActivity();
     try {
       // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
       // skips it and can still watch sessions that are open on the laptop.
@@ -496,26 +580,44 @@ class RemotePage {
     this.#summary = undefined;
     this.#ackedCursor = undefined;
     this.#projector = undefined;
+    this.#pending = [];
+    this.#renderActivity();
+    // Switch at once; the unsubscribe is a full encrypted round trip.
+    const listed = this.listSessions();
     if (subscriptionId !== undefined) {
       await this.#session.request("session.unsubscribe", { subscriptionId }).catch(() => undefined);
     }
-    await this.listSessions();
+    await listed;
   }
 
   #onMessage(message: ServerMessage): void {
     trace(
       `server ${"kind" in message ? message.kind : "?"} ${"subscriptionId" in message ? (message.subscriptionId === this.#subscriptionId ? "current" : "other") : "-"} ${"event" in message ? message.event.type : ""}`,
     );
-    if (!("kind" in message) || this.#projector === undefined) return;
+    if (!("kind" in message)) return;
+    if (message.kind === "sessions_changed") {
+      this.#scheduleListRefresh();
+      return;
+    }
+    if (this.#projector === undefined) return;
     if (message.kind === "event" && message.subscriptionId === this.#subscriptionId) {
       this.#projector.applyEvent(message.event);
+      this.#settlePending(message.event);
       this.#lastCursor = message.cursor;
       this.#scheduleAck();
       this.#render();
     } else if (message.kind === "activity" && message.subscriptionId === this.#subscriptionId) {
       this.#projector.applyActivity(message.frame);
-      this.#renderActivity();
+      this.#render();
     }
+  }
+
+  /** A prompt the transcript now shows is no longer drawn as pending. */
+  #settlePending(event: CanonicalEvent): void {
+    if (event.type !== "user.message" && event.type !== "queue.enqueued") return;
+    const text = contentText(event.payload.content).trim();
+    const index = this.#pending.findIndex((prompt) => prompt.text === text);
+    if (index >= 0) this.#pending = this.#pending.filter((_, position) => position !== index);
   }
 
   #scheduleAck(): void {
@@ -531,7 +633,7 @@ class RemotePage {
           if (this.#subscriptionId === subscriptionId) this.#ackedCursor = cursor;
         })
         .catch(() => undefined);
-    }, 500);
+    }, ACK_DELAY_MS);
   }
 
   /**
@@ -583,24 +685,30 @@ class RemotePage {
   #render(): void {
     const state = this.#projector?.state;
     if (state === undefined) return;
-    view.records.replaceChildren(
-      ...state.records.flatMap((record) => {
-        const item = renderRecord(record);
-        return item === undefined ? [] : [item];
-      }),
-    );
+    this.#renderer?.render({ state, pending: this.#pending, now: Date.now() });
     this.#renderActivity();
-    view.records.lastElementChild?.scrollIntoView({ block: "end" });
   }
 
   #renderActivity(): void {
     const state = this.#projector?.state;
     const busy = state?.activeOperationId !== undefined;
     view.stop.hidden = !busy;
-    view.send.textContent = busy ? "Queue" : "Send";
-    const text = state?.activity?.text ?? "";
-    view.activity.hidden = !busy;
-    view.activity.textContent = text.length > 0 ? text : busy ? "Working" : "";
+    view.send.setAttribute("aria-label", busy ? "Queue" : "Send");
+    view.prompt.placeholder = busy ? "Queue a follow-up" : "Message Axl";
+    if (state === undefined || !busy) {
+      view.activity.hidden = true;
+      if (this.#ticker !== undefined) clearInterval(this.#ticker);
+      this.#ticker = undefined;
+      return;
+    }
+    const started = turnStartedAt(state);
+    const stage = turnStage(state) ?? "Working";
+    view.activity.hidden = false;
+    view.activity.textContent =
+      started === undefined ? stage : `${stage} · ${elapsed(Date.now() - started)}`;
+    // Keep the elapsed time moving between frames while the turn runs.
+    this.#ticker ??= setInterval(() => this.#render(), 1_000);
+    this.#fitComposer();
   }
 
   async #send(): Promise<void> {
@@ -609,6 +717,12 @@ class RemotePage {
     if (text.length === 0 || sessionId === undefined) return;
     const busy = this.#projector?.state.activeOperationId !== undefined;
     view.prompt.value = "";
+    this.#fitComposer();
+    // Show the prompt at once; the daemon's record of it replaces this.
+    const pending: PendingPrompt = { id: crypto.randomUUID(), text };
+    this.#pending = [...this.#pending, pending];
+    this.#renderer?.jumpToLatest();
+    this.#render();
     const params = {
       sessionId,
       content: [{ type: "text", text }],
@@ -618,7 +732,7 @@ class RemotePage {
       for (let attempt = 1; ; attempt += 1) {
         try {
           await this.#session.request("session.send", params, SEND_TIMEOUT_MS);
-          return;
+          break;
         } catch (cause) {
           // A daemon restart closes sessions, and a prompt resent before the thread reopens is
           // refused with unknown_session. Refused means it never ran, so reopen and send it again.
@@ -628,8 +742,19 @@ class RemotePage {
           await this.#session.request("session.resume", { sessionId });
         }
       }
+      // The recorded prompt normally arrives first; never leave one drawn as pending for good.
+      setTimeout(() => {
+        if (!this.#pending.some((prompt) => prompt.id === pending.id)) return;
+        this.#pending = this.#pending.filter((prompt) => prompt.id !== pending.id);
+        this.#render();
+      }, PENDING_SETTLE_MS);
     } catch (cause) {
-      status(`Send failed: ${describe(cause)}`, "error");
+      const reason = describe(cause);
+      this.#pending = this.#pending.map((prompt) =>
+        prompt.id === pending.id ? { ...prompt, failed: reason } : prompt,
+      );
+      this.#render();
+      status(`Send failed: ${reason}`, "error");
     }
   }
 
@@ -681,6 +806,7 @@ function traced(endpoint: BrowserDeviceEndpoint): BrowserDeviceEndpoint {
 }
 
 async function main(): Promise<void> {
+  followColorScheme();
   const stored = currentPairing();
   if (stored === undefined) {
     show("pairing");
@@ -759,6 +885,7 @@ async function main(): Promise<void> {
 
   relay.onState((state) => {
     trace(`relay ${state}`);
+    connection(state === "connected" ? "online" : "connecting");
     if (state === "reconnecting") status("Reconnecting to the relay");
     else if (state === "connected" && view.status.textContent === "Reconnecting to the relay") {
       status("Connected");
@@ -769,6 +896,7 @@ async function main(): Promise<void> {
   const DAEMON_OFFLINE = "The daemon is offline; waiting for it to come back";
   relay.onRoutes((peers) => {
     const online = peers.some((peer) => peer.role === "daemon");
+    if (relay.state === "connected") connection(online ? "online" : "offline");
     if (!online && relay.state === "connected") status(DAEMON_OFFLINE);
     else if (online && view.status.textContent === DAEMON_OFFLINE) status("Connected");
   });
@@ -814,6 +942,7 @@ addEventListener("hashchange", () => location.reload());
 view.retry.addEventListener("click", () => location.reload());
 
 main().catch((cause: unknown) => {
+  connection("offline");
   const code = (cause as { readonly code?: unknown }).code;
   const known = typeof code === "string" && REFUSALS[code] !== undefined;
   status(

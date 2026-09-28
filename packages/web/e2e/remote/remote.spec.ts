@@ -42,7 +42,7 @@ async function send(target: Page, text: string) {
 }
 
 function replies(target: Page, text: string) {
-  return target.locator("#records .record.assistant", { hasText: `Echo: ${text}` });
+  return target.locator("#records .message.assistant", { hasText: `Echo: ${text}` });
 }
 
 /** Send a prompt after a failure and record how long its reply took. */

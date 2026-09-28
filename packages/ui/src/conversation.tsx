@@ -23,6 +23,7 @@ import { editDiffRows } from "./diff.ts";
 import { InteractionCard, type InteractionResponder } from "./interaction.tsx";
 
 export { QuestionnaireForm, type QuestionnaireFormProps } from "./interaction.tsx";
+export { Markdown } from "./markdown.tsx";
 import { Markdown } from "./markdown.tsx";
 import { highlightLine, languageForPath } from "./syntax.ts";
 
