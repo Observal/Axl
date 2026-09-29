@@ -5,6 +5,8 @@
 
 Status: proposed for architecture and security review. It amends [Production E2EE storage and rollback](production-e2ee-storage-and-rollback.md) for one target and is enabled only through an explicit per-account opt-in. No public support claim follows from it.
 
+The phone's authority is narrowed to shared sessions, and the witness record bounded, by [Remote session sharing](remote-session-sharing.md) (proposed).
+
 ## Purpose
 
 Remote access today runs only in deployment-test mode: one shared account token, envelope keys in an owner-only file, and a witness whose three replicas share one process. This document describes the first production path, which replaces each of those, for the owner's own setup: an Axl daemon in WSL 2 on a Windows x64 machine, paired with a phone browser.
