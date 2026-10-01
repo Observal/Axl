@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
+// SPDX-FileCopyrightText: 2026 PranavD2905
 // SPDX-License-Identifier: Apache-2.0
 
 import { spawn } from "node:child_process";
@@ -118,6 +119,7 @@ import {
 } from "./media.ts";
 import { type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
+import { SessionPresence } from "./presence.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
 import { QuestionnaireOverlay } from "./questionnaire.ts";
 import {
@@ -714,6 +716,9 @@ export class AxlApp {
   private completionIndex = 0;
   private completionText = "";
   private unsubscribeDisconnect: () => void = () => undefined;
+  private unsubscribePresence: () => void = () => undefined;
+  /** Latest daemon presence snapshot; cleared whenever it may be stale. */
+  private readonly presence = new SessionPresence();
   private sessionSubscription: SessionSubscription | undefined;
   private readonly queued: Array<{
     readonly text: string;
@@ -933,9 +938,16 @@ export class AxlApp {
   private bindClient(client: AxlClient): void {
     const previous = this.client;
     this.unsubscribeDisconnect();
+    this.unsubscribePresence();
+    this.presence.clear();
     this.client = client;
     this.commandController = this.createCommandController(client);
+    this.unsubscribePresence = client.onPresence((delivery) => {
+      this.presence.update(delivery);
+      this.redraw();
+    });
     this.unsubscribeDisconnect = client.onDisconnect((error) => {
+      this.presence.clear();
       if (error instanceof AxlClientError && error.code === "daemon_stopping") {
         this.reconnectGeneration += 1;
         this.connectionState = "detached";
@@ -1223,6 +1235,8 @@ export class AxlApp {
     this.reconnectGeneration += 1;
     try {
       this.unsubscribeDisconnect();
+      this.unsubscribePresence();
+      this.presence.clear();
       this.sessionSubscription?.detach();
     } catch (error) {
       failures.push(error);
@@ -1507,7 +1521,7 @@ export class AxlApp {
       ...(editorMode ? { mode: editorMode } : {}),
       location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
         this.view.sandbox ? `  sandbox:${this.view.sandbox}` : ""
-      }${this.mcpFooter ? `  ${this.mcpFooter}` : ""}${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.extensionHost
+      }${this.mcpFooter ? `  ${this.mcpFooter}` : ""}${this.connectionState === "connected" ? "" : `  · ${this.connectionState}`}${this.presenceFooter()}${this.extensionHost
         .statuses()
         .map((line) => `  · ${this.styledExtensionLine(line)}`)
         .join("")}`,
@@ -3763,6 +3777,21 @@ export class AxlApp {
     ];
   }
 
+  /** Footer segment for other clients attached to this session, or empty when unknown. */
+  private presenceFooter(): string {
+    if (this.connectionState !== "connected" || !this.mcpCapabilityGranted("session.presence"))
+      return "";
+    let attachmentId: string;
+    try {
+      attachmentId = this.client.connection.attachmentId;
+    } catch {
+      // The SDK throws while a reconnect is replacing the connection.
+      return "";
+    }
+    const label = this.presence.label(this.sessionId, attachmentId);
+    return label === undefined ? "" : `  · ${label}`;
+  }
+
   private mcpCapabilityGranted(capability: string): boolean {
     try {
       return this.client.connection.grantedCapabilities?.includes(capability) === true;
@@ -5056,6 +5085,8 @@ export class AxlApp {
     client = this.client,
   ): Promise<void> {
     const branch = await readGitBranch(opened.cwd);
+    // Subscribing to the next session publishes a fresh presence snapshot; drop the old one first.
+    this.presence.clear();
     const projectionEvents: CanonicalEvent[] = [];
     const projection = new ConversationProjector(opened.sessionId);
     let activated = false;

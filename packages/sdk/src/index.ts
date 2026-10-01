@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 PranavD2905
 // SPDX-License-Identifier: Apache-2.0
 
 export * from "@axl/protocol";
@@ -12,6 +13,7 @@ export * from "./host.ts";
 export * from "./mcp.ts";
 export * from "./models.ts";
 export * from "./new-session.ts";
+export * from "./presence.ts";
 export * from "./presentation.ts";
 export * from "./projector.ts";
 export * from "./subscription.ts";
