@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 PranavD2905
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -252,6 +253,9 @@ function client(
     onDisconnect() {
       return () => undefined;
     },
+    onPresence() {
+      return () => undefined;
+    },
     onReconnect() {
       return () => undefined;
     },
@@ -309,6 +313,10 @@ class ReconnectClient {
     return () => {
       this.disconnectListeners.delete(listener);
     };
+  }
+
+  onPresence(): () => void {
+    return () => undefined;
   }
 
   onReconnect(listener: () => void | Promise<void>): () => void {

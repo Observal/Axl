@@ -35,6 +35,7 @@ import {
   type SessionConfigurationState,
   type SessionId,
   type SessionOpenResult,
+  sessionPeers,
   type SessionSubscription,
   type SessionSummary,
   type ThinkingLevel,
@@ -85,7 +86,7 @@ import {
   webToolConfiguration,
   type WebToolField,
 } from "./web-tools.ts";
-import { presenceDescription, sessionPeers } from "./presence.ts";
+import { presenceDescription } from "./presence.ts";
 import { RequeueDialog } from "./requeue-dialog.tsx";
 import { pausedQueueItems } from "./requeue.ts";
 import { PanePicker } from "./pane-picker.tsx";

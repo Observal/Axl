@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
+// SPDX-FileCopyrightText: 2026 PranavD2905
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -749,6 +750,48 @@ test("an unenforced session keeps a persistent unsafe warning", async (context) 
   await until(() => text().includes("the answer"), "unsafe assistant reply");
   assert.match(text(), new RegExp(warning));
   app.stop();
+});
+
+test("the footer counts other clients attached to the active session", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+  });
+  context.after(() => app.stop());
+  const screen = () => {
+    const terminal = new VirtualTerminal(100, 24);
+    terminal.write(text());
+    return terminal.rows().slice(-24).join("\n");
+  };
+  const sourceSessionId = app.sessionId;
+  const idle = await connectUnixClient(socketPath);
+  context.after(() => idle.close());
+  const observer = await connectUnixClient(socketPath);
+  const subscription = await subscribeSession(observer, sourceSessionId);
+  context.after(async () => {
+    await subscription.close().catch(() => undefined);
+    observer.close();
+  });
+
+  await until(() => screen().includes("· 1 other client"), "peer joins");
+  assert.doesNotMatch(screen(), new RegExp(observer.connection.attachmentId));
+
+  await subscription.close();
+  await until(() => !screen().includes("other client"), "peer leaves");
+
+  const rejoined = await subscribeSession(observer, sourceSessionId);
+  context.after(() => rejoined.close().catch(() => undefined));
+  await until(() => screen().includes("· 1 other client"), "peer rejoins");
+
+  input.write("/clone\r");
+  await until(() => app.sessionId !== sourceSessionId, "clone switch");
+  await until(() => !screen().includes("other client"), "indicator cleared on session change");
 });
 
 test("fork, clone, and resume switch sessions through the daemon", async (context) => {

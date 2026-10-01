@@ -3,8 +3,8 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type AttachmentPresence, parseSessionId } from "@axl/sdk";
-import { presenceDescription, sessionPeers } from "../src/presence.ts";
+import { type AttachmentPresence, parseSessionId, sessionPeers } from "@axl/sdk";
+import { presenceDescription } from "../src/presence.ts";
 
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
 const otherSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174001");
