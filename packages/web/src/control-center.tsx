@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
+// SPDX-FileCopyrightText: 2026 PranavD2905
 // SPDX-License-Identifier: Apache-2.0
 
 import { useEffect, useRef, useState, type JSX } from "react";
@@ -22,11 +23,10 @@ import {
 } from "@axl/sdk";
 import { QuestionnaireForm } from "@axl/ui/react";
 import type { WebTheme } from "./commands.ts";
+import { controlCenterSections, type ControlCenterTab } from "./control-center-sections.ts";
 import { trapDialogFocus } from "./dialog-focus.ts";
 import { DOCK_WIDTH_RANGE, SIDEBAR_WIDTH_RANGE, type WebPreferences } from "./environment.ts";
 import { PANE_IDS, PANE_LABELS } from "./panes.ts";
-
-export type ControlCenterTab = "settings" | "providers" | "mcp";
 
 function authLabel(provider: ProviderInventoryGroup): string {
   if (!provider.enabled) return "disabled";
@@ -134,7 +134,7 @@ export function ControlCenter({
 
   return <div className="control-scrim" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <section className="control-center" ref={dialog} role="dialog" aria-modal="true" aria-label="Web controls" onKeyDown={trapFocus}>
-      <header><nav aria-label="Web controls"><button className={tab === "settings" ? "active" : ""} onClick={() => onTab("settings")}>Settings</button><button className={tab === "providers" ? "active" : ""} onClick={() => onTab("providers")}>Providers</button><button className={tab === "mcp" ? "active" : ""} onClick={() => onTab("mcp")}>MCP</button></nav><button className="control-close" aria-label="Close" onClick={onClose}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" /></svg></button></header>
+      <header><nav aria-label="Web controls">{controlCenterSections(tab).map((section) => <button key={section.tab} className={section.selected ? "active" : ""} aria-pressed={section.selected} onClick={() => onTab(section.tab)}>{section.label}</button>)}</nav><button className="control-close" aria-label="Close" onClick={onClose}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" /></svg></button></header>
       {tab === "settings" ? <div className="settings-pane">
         <div className="setting-row"><span><strong>Session rail</strong><small>Keep the session list visible on desktop</small></span><button className={preferences.sidebarCollapsed ? "setting-switch" : "setting-switch active"} role="switch" aria-checked={!preferences.sidebarCollapsed} onClick={() => onPreferences({ ...preferences, sidebarCollapsed: !preferences.sidebarCollapsed })}><i /></button></div>
         <div className="setting-row"><span><strong>Default changes view</strong><small>Choose how workspace changes open</small></span><div className="setting-segments"><button className={preferences.changesView === "files" ? "active" : ""} onClick={() => onPreferences({ ...preferences, changesView: "files" })}>Files</button><button className={preferences.changesView === "all" ? "active" : ""} onClick={() => onPreferences({ ...preferences, changesView: "all" })}>All</button></div></div>
