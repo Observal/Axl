@@ -57,7 +57,7 @@ import {
   webPresentationCommands,
   workspaceReviewScope,
 } from "./commands.ts";
-import type { ControlCenterTab } from "./control-center.tsx";
+import type { ControlCenterTab } from "./control-center-sections.ts";
 import { Dock } from "./dock.tsx";
 import { WebExtensionHost, webShortcutKey } from "./extension-host.ts";
 import { extensionManagement } from "./extension-management.ts";
