@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "axl-wasm-bindgen-driver"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[dependencies]
+wasm-bindgen-cli-support = { version = "=0.2.128", default-features = false }

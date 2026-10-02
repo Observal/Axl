@@ -23,6 +23,8 @@ import { editDiffRows } from "./diff.ts";
 import { InteractionCard, type InteractionResponder } from "./interaction.tsx";
 
 export { QuestionnaireForm, type QuestionnaireFormProps } from "./interaction.tsx";
+export { Markdown } from "./markdown.tsx";
+export type { InteractionResponder } from "./interaction.tsx";
 import { Markdown } from "./markdown.tsx";
 import { highlightLine, languageForPath } from "./syntax.ts";
 
@@ -342,7 +344,7 @@ function EventRow({ item, tool, queue, interruption, interaction, attribution, r
   }
 }
 
-export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput, renderTool, renderMessage, renderEntry, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction }: { readonly conversation: ConversationState; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly renderTool?: ((tool: ProjectedToolCall) => string | undefined) | undefined; readonly renderMessage?: ((extensionId: string, source: string, event: unknown) => string | undefined) | undefined; readonly renderEntry?: ((extensionId: string, channel: string, event: unknown) => string | undefined) | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined }): React.JSX.Element {
+export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput, renderTool, renderMessage, renderEntry, searchQuery, onCopyMessage, onForkMessage, onRespondInteraction, canRespondInteraction }: { readonly conversation: ConversationState; readonly resolveBlobUrl?: ((blob: BlobReference) => string | undefined) | undefined; readonly loadFullToolOutput?: ToolOutputLoader | undefined; readonly renderTool?: ((tool: ProjectedToolCall) => string | undefined) | undefined; readonly renderMessage?: ((extensionId: string, source: string, event: unknown) => string | undefined) | undefined; readonly renderEntry?: ((extensionId: string, channel: string, event: unknown) => string | undefined) | undefined; readonly searchQuery?: string | undefined; readonly onCopyMessage?: ((text: string) => void) | undefined; readonly onForkMessage?: ((eventId: EventId) => void) | undefined; readonly onRespondInteraction?: InteractionResponder | undefined; readonly canRespondInteraction?: ((interaction: ProjectedInteraction) => boolean) | undefined }): React.JSX.Element {
   const compacted = useMemo(() => new Set(conversation.compactedEventIds), [conversation.compactedEventIds]);
   const tools = useMemo(() => new Map(conversation.tools.map((tool) => [tool.callEventId, tool])), [conversation.tools]);
   const queue = useMemo(() => new Map(conversation.queue.map((entry) => [entry.queueItemId, entry])), [conversation.queue]);
@@ -367,9 +369,11 @@ export function Conversation({ conversation, resolveBlobUrl, loadFullToolOutput,
     }
     return result;
   }, [conversation.records]);
+  // An interaction this client may not answer renders read-only.
+  const respondable = (interaction: ProjectedInteraction | undefined) => interaction === undefined || canRespondInteraction === undefined || canRespondInteraction(interaction);
   return <>{conversation.records.map((record) => {
     if (record.kind === "unknown_event") return <EventRow key={record.event.id} item={presentUnknownEvent(record.event)} />;
     if (compacted.has(record.event.id)) return null;
-    return <EventRow key={record.event.id} item={presentCanonicalEvent(record.event)} tool={record.event.type === "tool.call" ? tools.get(record.event.id) : undefined} queue={queue.get(record.event.id)} interruption={interruptions.get(record.event.id)} interaction={interactions.get(record.event.id)} attribution={attributions.get(record.event.id)} resolveBlobUrl={resolveBlobUrl} loadFullToolOutput={loadFullToolOutput} renderTool={renderTool} renderMessage={renderMessage} renderEntry={renderEntry} searchQuery={searchQuery} onCopyMessage={onCopyMessage} onForkMessage={onForkMessage} onRespondInteraction={onRespondInteraction} />;
+    return <EventRow key={record.event.id} item={presentCanonicalEvent(record.event)} tool={record.event.type === "tool.call" ? tools.get(record.event.id) : undefined} queue={queue.get(record.event.id)} interruption={interruptions.get(record.event.id)} interaction={interactions.get(record.event.id)} attribution={attributions.get(record.event.id)} resolveBlobUrl={resolveBlobUrl} loadFullToolOutput={loadFullToolOutput} renderTool={renderTool} renderMessage={renderMessage} renderEntry={renderEntry} searchQuery={searchQuery} onCopyMessage={onCopyMessage} onForkMessage={onForkMessage} onRespondInteraction={respondable(interactions.get(record.event.id)) ? onRespondInteraction : undefined} />;
   })}</>;
 }

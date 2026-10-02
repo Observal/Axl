@@ -1625,6 +1625,8 @@ test("every TUI command has an explicit owner", async (context) => {
       "logout",
       "refresh",
       "reload",
+      // Pairing runs in the daemon; without a remote host it only explains how to set one up.
+      "remote",
       "rename",
     ],
     "sdk-workflow": [
@@ -1947,6 +1949,10 @@ test("editing and /quit recover from a stale shutdown status", async (context) =
 
   input.write("helXX\x7f\x7flo\r"); // backspace editing before submit
   await until(() => text().includes("│ hello"), "edited send");
+  // A turn still settling changes the daemon's status revision, which would make shutdown retry
+  // for a second reason; wait for it so only the injected stale status is exercised.
+  await until(() => text().includes("the answer"), "reply");
+  while ((await host.status()).busy) await new Promise((resolve) => setTimeout(resolve, 5));
 
   input.write("/quit\r");
   await until(() => exited, "quit");
@@ -2015,6 +2021,15 @@ test("pending steering and follow-ups display their actual injection order above
 
   input.write("one\r");
   await until(() => calls === 1, "first model call");
+  // The daemon reaches the model before the TUI projects the active operation;
+  // input typed in that gap is queued as prompts instead of steered.
+  const projected = app as unknown as {
+    sessionSubscription?: { projector: { overview: { activeOperationId?: string } } };
+  };
+  await until(
+    () => projected.sessionSubscription?.projector.overview.activeOperationId !== undefined,
+    "TUI to own the active operation",
+  );
   input.write("follow A\x1b[13;3usteer A\rfollow B\x1b[13;3usteer B\r");
   await until(() => text().includes("4. Follow-up: follow B"), "ordered queue");
   const queuedTerminal = new VirtualTerminal(100, 24);

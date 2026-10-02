@@ -27,9 +27,7 @@
     "@axl/kernel": "workspace:*",
     "@axl/protocol": "workspace:*",
     "@axl/sandbox": "workspace:*",
-    "@axl/extension-mcp": "workspace:*"
-  },
-  "devDependencies": {
+    "@axl/extension-mcp": "workspace:*",
     "@axl/sdk": "workspace:*"
   }
 }

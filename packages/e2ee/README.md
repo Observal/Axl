@@ -1,0 +1,121 @@
+<!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
+<!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
+# Axl endpoint E2EE core
+
+This package is the transport-independent OpenMLS core and native durable adapter for revision 1
+of Axl's private `axl-e2ee-mls-pq-v1` profile.
+
+It provides:
+
+- one daemon and one device per group;
+- canonical revision 1 pairing invitation and claim encoding, signatures, comparison values, and
+  durable encrypted pending-invitation and device pre-join state;
+- fixed-lifetime KeyPackage reservation, independently expiring Welcome creation and recovery, and
+  activation with a durable daemon-acceptance barrier;
+- canonical Axl credential and AAD validation;
+- bidirectional private application messages;
+- phone-owned self-Update proposals, daemon-only update and removal commits, authenticated
+  epoch-ready completion with a durable device acknowledgement barrier, terminal reset and
+  revocation state, and enforced fresh-identifier and fresh-KeyPackage re-pair operations;
+- immutable prepared envelopes and a platform-neutral transaction contract;
+- a native redb adapter with per-pair databases, immediate-durability two-phase commits, exact-byte
+  outbox recovery, durable acknowledgement and bounded retry retention, accepted-message-before-
+  plaintext behavior, authenticated metadata manifests, restart-stable previous-epoch windows, and
+  deterministic fault injection;
+- injected active-only envelope-key interfaces with crash reconciliation for prepared keys;
+- canonical signed rollback-witness register, read, and advance requests, bounded per-replica
+  overlap keysets, strict unanimous 3-of-3 certificate verification, append-ordered fork and
+  revocation decisions, complete endpoint reconciliation and quarantine, and an output-gating state
+  machine;
+- an acyclic sealed-inner and sealed-outer format that encrypts and authenticates the exact result
+  inside the committed successor, then binds its SHA-384 state commitment to the exact signed
+  request while keeping request construction and state material below the public API;
+- one native witness transaction runner used by every state-changing mutation: at most one OpenMLS
+  transition per operation, atomic successor and pending-request commit, successor-key activation
+  before request exposure, and exact-result release only after a unanimous certificate and
+  obsolete-key erasure, with restart recovery from the redb pending row;
+- fail-closed creation recovery serialized across threads and processes by an OS-backed per-session
+  lifecycle claim; cleanup requires proof that no cryptographic state committed, while open finishes
+  publication of authenticated state and removes only a stale `.initializing` marker.
+
+The public native facade exposes typed endpoint operations and immutable artifacts. Outbox fields
+are read-only, and replacement commits and removals accept only those typed artifacts. Mutable
+OpenMLS state, transaction handles, providers, signers, private key material, DEKs, rollback
+counters, relay routes, and authorization decisions remain internal. The package does not provide
+transport, relay routing, accounts, authorization, completed platform bindings, browser persistence,
+or presentation behavior. The durable API reloads committed OpenMLS
+and signer state inside every native transaction, so rolled-back state and prepared handles cannot
+be reused. See [`STORAGE.md`](STORAGE.md) for the schema, transaction order, migrations, rollback
+detection, erasure boundary, and explicit exclusions. Session 50's approved platform boundary is in
+[`../../docs/architecture/e2ee-platform-bindings.md`](../../docs/architecture/e2ee-platform-bindings.md).
+Browser transaction evidence remains required. The approved hosted witness protocol supplies the
+independent rollback anchor, but browser pairing stays disabled until its production persistence,
+witness integration, artifact isolation, and runtime evidence pass. Target-gated macOS and Linux
+`EnvelopeKeyStore` implementations now use the data-protection Keychain and an encrypted desktop
+Secret Service session respectively, but neither is wired into Node or any production endpoint
+constructor and neither has an enabled support row. Linux requires an unlocked graphical login
+session and a selected GNOME Keyring or KWallet 6 service; unknown and headless environments fail
+closed. A target-gated Windows store uses nested machine- then user-scope DPAPI and SID-restricted
+files, and the native persistence helpers reject reparse paths and replace prior no-op ACL and
+directory-flush behavior. It remains unwired and unsupported. Android Keystore, generated mobile
+SDKs, and mobile applications remain later work.
+
+Revision 1 uses OpenMLS 0.9.0 and `openmls_libcrux_crypto` 0.4.0 with suite value `0x004e` and the
+upstream `XWingDraft06` KEM implementation. It has no classical-only fallback. Axl does not claim
+IETF draft-06 interoperability.
+
+## Checks
+
+```sh
+cargo test --locked
+cargo test --locked persistence_tests
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo audit --deny warnings
+cargo deny check
+node scripts/check-fault-coverage.mjs
+```
+
+`scripts/check-fault-coverage.mjs` sweeps the crash and recovery matrix: every native `FaultPoint`,
+every reconciliation and quarantine outcome, every browser test-worker fault, and every browser
+operation kind must be exercised by a test. `scripts/artifact-policy.mjs` is the shared production
+isolation policy consumed by both bindings' `check:abi` and `pack:local` scripts. It derives the
+test-only identifiers from the feature-gated Rust sources, so a new test constructor, fixture,
+fault control, or deterministic signer is rejected from production artifacts automatically, and it
+pins the allowed integrity-manifest keys, forbids fixture bytes and diagnostics hooks in production
+bytes, and names the capabilities (signing, counters, commitments, nonces, key selection,
+activation, erasure, finalization, raw decryption, generic certificate verification) that never
+become public members.
+
+The private Node-API binding lives in [`bindings/node`](bindings/node). Its native boundary owns a
+typed pending-witness continuation that exposes only the operation ID, exact request bytes, request
+hash, and bounded status. It copies and bounds certificates, enforces matching operation identity,
+verifies unanimous certificates in Rust, and releases only the exact committed output. Test-only
+recovery construction and storage are compiled into a separate local fixture artifact and excluded
+from production packaging. Production endpoint constructors remain unwired and fail closed until a
+selected target has complete secure-store, pinned production replica trust, hosted transport, and
+runtime evidence.
+
+The private browser binding lives in [`bindings/browser`](bindings/browser). It runs single-threaded
+WASM in a dedicated same-origin module worker, requires `crypto.getRandomValues()`, and packages no
+browser executable. Its separately built test artifact executes a fresh KeyPackage, Welcome,
+activation, bidirectional application, update, commit, and epoch-ready lifecycle in each browser.
+It also executes negative OpenMLS cases for replay, duplicate ciphertext, mutation, AAD and identity
+mismatch, profile mismatch, and competing commits.
+
+The production worker contains a private persistence foundation with lifetime Web Lock ownership,
+strict IndexedDB generation commits, a non-extractable AES-KW wrapping key, wrapped AES-GCM state
+keys, distinct envelopes, exact witness-request recovery, and certificate continuation. The separate
+test artifact retains broader fault and OpenMLS lifecycle evidence. Production artifacts contain no
+test persistence constructor or test anchor. Production endpoint creation and opening continue to
+fail with `rollback_anchor_unavailable` pending private WASM finalization, pinned production trust,
+hosted transport, and the full runtime matrix; remote-web wiring remains out of scope. See
+[`BROWSER_STORAGE.md`](BROWSER_STORAGE.md) for the schema, sequencing, failure policy, evidence, and
+explicit browser security non-claims.
+
+The exact toolchain is in `rust-toolchain.toml`. The implementation dependency and maintenance
+exception record is in `DEPENDENCIES.md`. The implementation and unavailable-runtime matrix is in
+[`PRODUCTION_STORAGE_EVIDENCE.md`](PRODUCTION_STORAGE_EVIDENCE.md).

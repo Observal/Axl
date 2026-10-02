@@ -16,6 +16,7 @@
     { "path": "../extensions/host/tsconfig.build.json" },
     { "path": "../extensions/skills/tsconfig.build.json" },
     { "path": "../extensions/mcp/tsconfig.build.json" },
-    { "path": "../sandbox/tsconfig.build.json" }
+    { "path": "../sandbox/tsconfig.build.json" },
+    { "path": "../sdk/tsconfig.build.json" }
   ]
 }

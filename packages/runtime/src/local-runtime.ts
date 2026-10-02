@@ -377,8 +377,27 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
       if (assemblyPromise !== undefined) await (await assemblyPromise).providers.dispose();
     },
   } satisfies import("@axl/daemon").ProviderManagementService;
+  // Remote access: the deployment-test stack when AXL_REMOTE_DEPLOYMENT_TEST names its
+  // configuration, otherwise the account `axl remote login` stored on this machine, if any.
+  const remoteLog = (message: string) =>
+    process.stderr.write(`${message}
+`);
+  const remoteConfig = process.env.AXL_REMOTE_DEPLOYMENT_TEST;
+  const remote =
+    remoteConfig === undefined || remoteConfig === ""
+      ? await import("./remote-production.ts").then((module) =>
+          module.openStoredRemoteHost(axlHome, stateDirectory, remoteLog),
+        )
+      : await import("./remote-deployment-test.ts").then(async (module) =>
+          module.openDeploymentTestRemoteHost(
+            await module.loadDeploymentTestRemoteConfig(remoteConfig),
+            stateDirectory,
+            remoteLog,
+          ),
+        );
   let daemon: AxlDaemon;
   daemon = new AxlDaemon({
+    ...(remote === undefined ? {} : { remoteAuthority: remote.authority, remotePairing: remote }),
     ...(options.buildVersion === undefined ? {} : { buildVersion: options.buildVersion }),
     ...(options.onStopped === undefined ? {} : { onStopped: options.onStopped }),
     ...(options.forceTerminate === undefined ? {} : { forceTerminate: options.forceTerminate }),
@@ -758,5 +777,6 @@ export async function startLocalDaemon(options: LocalDaemonOptions): Promise<Axl
     },
   });
   await daemon.start();
+  await remote?.attach(daemon);
   return daemon;
 }

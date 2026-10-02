@@ -1,5 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 Lokesh -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Foundation decisions
@@ -55,6 +56,48 @@ Native, OCI, and unsafe daemons retain separate state and execution authority. T
 The standard model-visible tools are `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search`. Historical `shell` events remain valid and are projected to the renamed `bash` tool when resumed. Web tools start enabled and may be removed independently from a session through startup flags or terminal settings. Their effective state is recorded as `config.tools`, and changing it creates a tool-dialect boundary.
 
 The built-in web transport uses pinned public DNS results, rejects private and reserved addresses across redirects, forwards no ambient credentials, and bounds request time and response size. Keyless search uses DuckDuckGo Instant Answers. A configured `BRAVE_SEARCH_API_KEY` selects Brave Search and is included in write-boundary redaction. Full egress policy and credential brokering remain later work.
+
+## Remote endpoint E2EE direction
+
+Decision from 2026-09-14: replace the prior PQXDH plus Triple Ratchet plan with the versioned pairwise OpenMLS direction in [`remote-e2ee-openmls.md`](remote-e2ee-openmls.md). Revision 1 of the Axl-private profile `axl-e2ee-mls-pq-v1` binds OpenMLS 0.9.0 at tag `openmls-v0.9.0`, commit `3a3e35de3feeca8f6605143c464d5452ae584d43`, `openmls_libcrux_crypto` 0.4.0, suite value `0x004e`, `XWingDraft06`, and the named hybrid suite. It makes no IETF draft-06 interoperability claim.
+
+The decision approves the exact OpenMLS/libcrux candidates to enter Session 40 after the RFC and dependency decision receive human approval and merge into `RC`. Session 40 must pin the toolchain and lockfile and preserve the owned transactional persistence boundary. Browser/WASM remains mandatory work for Session 50. Remote access and production release stay disabled until their browser, native, interoperability, packaging, recovery, and independent-review gates pass.
+
+## Remote endpoint witness status
+
+Decision from 2026-09-18: the witness lifecycle of a remote device endpoint (`recovering`, `ready`,
+`quarantined` with a typed reason, `revoked`) is device-global daemon state, not session state. It
+is therefore recorded as a durable, sequenced audit event in the remote authority store
+(`remote-authority.json`, codes `endpoint_recovering`, `endpoint_ready`, `endpoint_quarantined`,
+`endpoint_revoked`) rather than as a canonical session event in a JSONL log, which belongs to one
+session and would not survive a device with no open session. The daemon reports the last
+transition per device in `daemon.info.remoteEndpoints` and invalidates clients with the
+capability-free `remote_endpoints_changed` delivery; the transient delivery carries no status and
+grants no authority. The status write happens before the state takes effect and a failed write
+blocks the bridge, so the durable record is never behind the state a daemon acts on. If the daemon
+gains a daemon-level canonical log later, these transitions move there without changing their
+shape.
+
+## Remote authority audit eviction
+
+Decision from 2026-09-25: the remote authority audit sequence stays bounded, but a full log evicts
+records instead of failing closed. Failing closed made a device unrevocable once denials filled the
+log, and any paired device could fill it by sending forbidden requests. Eviction removes the oldest
+`authorization_denied` record first, so security-relevant lifecycle history survives, and falls
+back to the oldest record when no denial remains. Sequence numbers stay strictly increasing and
+gaps are allowed, so readers can see that history was dropped.
+
+## Relay connection lease and frame budget
+
+Decision from 2026-09-25: a relay ticket and the connection it admits have separate lifetimes. The
+ticket stays single-use and valid for 60 seconds; consuming it starts a 30-minute connection lease.
+A lease equal to the ticket expiry closed every connection after one minute, and the reconnect bought
+no authority check the daemon does not already make on each request. The frame budget moves from a
+relay constant into the admission limits, 100 frames per 10 seconds for a device and 1,000 for the
+daemon, because the daemon fans out session activity to every subscribed device. The daemon also
+batches and fragments its messages, and the SDK paces sends below the budget, so ordinary streaming
+never costs a `rate_limited` close. See
+[E2EE transport preflight](e2ee-transport-preflight.md#connection-lease-and-frame-budget).
 
 ## Generated files
 

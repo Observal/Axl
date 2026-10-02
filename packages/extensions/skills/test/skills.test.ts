@@ -58,6 +58,45 @@ Follow [details](references/details.md).
   assert.match(skill.instructions, /Release check/);
 });
 
+test("allowed-tools may be a YAML list of tool patterns", async (context) => {
+  const directory = await fixture(
+    "listed-tools",
+    `---
+name: listed-tools
+description: Uses listed tools.
+allowed-tools:
+  - Bash(npx impeccable *)
+  - Read
+---
+Use it.
+`,
+  );
+  context.after(() => rm(join(directory, ".."), { recursive: true, force: true }));
+  assert.equal((await loadSkill(directory)).allowedTools, "Bash(npx impeccable *) Read");
+
+  const invalid = {
+    "empty-tools": "allowed-tools: []",
+    "blank-tool": `allowed-tools:
+  - ""`,
+    "nested-tool": `allowed-tools:
+  - [Read]`,
+  };
+  for (const [name, value] of Object.entries(invalid)) {
+    const skill = await fixture(
+      name,
+      `---
+name: ${name}
+description: Invalid.
+${value}
+---
+Use it.
+`,
+    );
+    context.after(() => rm(join(skill, ".."), { recursive: true, force: true }));
+    await assert.rejects(loadSkill(skill), /allowed-tools/u);
+  }
+});
+
 test("frontmatter discovery tolerates a UTF-8 character split at the probe boundary", async (context) => {
   const prefix = "---\nname: boundary\ndescription: boundary\n---\n";
   const source = `${prefix}${"a".repeat(65_535 - Buffer.byteLength(prefix))}😀\n`;

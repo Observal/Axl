@@ -3,7 +3,7 @@
   "files": {
     "includes": [
       "**/*.{ts,json}",
-      "!**/{dist,node_modules}",
+      "!**/{dist,node_modules,target}",
       "!.release",
       "!.reference",
       "!packages/ai/src/catalog.generated.ts",

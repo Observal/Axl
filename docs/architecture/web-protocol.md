@@ -1,6 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 VishnuM449 -->
 <!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
+<!-- SPDX-FileCopyrightText: 2026 VishnuM049 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Web client protocol and SDK specification
@@ -13,9 +14,9 @@ This document specifies typed RPC, negotiation, errors, package ownership, and t
 
 ## Current baseline
 
-Wire version 30 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, session-catalog invalidation, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool and user-question selection, manual compaction, steering, follow-ups, durable queue restoration, atomic interrupt-and-deliver, canonical model-retry attempts, provider management, model-request configuration, bounded command and capability discovery, loaded context-resource snapshots, dynamic tools, and daemon-owned MCP configuration with projected discovery status and probing.
+Wire version 32 uses newline-delimited JSON over a Unix socket. It includes typed request and result envelopes, initialization, capability negotiation, structured errors, idempotency keys, subscription identities, paged snapshots, acknowledged opaque cursors, presence, session-catalog invalidation, daemon security reporting, direct shell events, transient activity, session-bound blobs, workspace review, session profiles, web-tool and user-question selection, manual compaction, steering, follow-ups, durable queue restoration, atomic interrupt-and-deliver, canonical model-retry attempts, provider management, model-request configuration, bounded command and capability discovery, loaded context-resource snapshots, dynamic tools, daemon-owned MCP configuration with projected discovery status and probing, durable session rename and deletion, remote endpoint witness status, and remote host status.
 
-The TUI and web client consume these contracts through `packages/sdk`. The two former branch tips both used version 11 for incompatible additions: provider management on the feature branch and daemon-owned request settings on `main`. Version 12 combines both surfaces. Version 13 adds atomic interrupt-and-deliver. Version 14 adds the capability-filtered `command.list` catalog. Version 15 adds canonical session titles, typed rename and permanent deletion, and session-catalog invalidation notifications. Version 16 adds atomic queue restoration with optional interruption. Version 17 adds daemon-owned user questionnaires and durable session eligibility for them. Version 18 adds canonical compaction configuration and lifecycle events plus queued manual compaction. Version 19 adds canonical loaded context-resource snapshots. Version 21 adds progressive capability discovery and dynamic tool activation. Version 22 adds daemon-owned MCP configuration. Version 23 projects per-server discovery status and tools through `mcp.config.list` and adds `mcp.config.probe`. Version 24 adds the `command_blocked` error for built-in commands refused by a daemon extension. Version 25 adds the `extension_failed` error for actionable extension loading and lifecycle failures. Version 26 adds atomic MCP batch upserts. Version 27 adds daemon extension discovery, trust, package management, and lifecycle controls. Version 28 adds installable terminal entries to extension inventory. Version 29 adds built-in terminal entries to the same inventory. Version 30 advertises browser-safe extension entry paths in that inventory. Host-control version 1 remains separate from session wire negotiation and is available only to trusted process hosts.
+The TUI and web client consume these contracts through `packages/sdk`. The two former branch tips both used version 11 for incompatible additions: provider management on the feature branch and daemon-owned request settings on `main`. Version 12 combines both surfaces. Version 13 adds atomic interrupt-and-deliver. Version 14 adds the capability-filtered `command.list` catalog. Version 15 adds canonical session titles, typed rename and permanent deletion, and session-catalog invalidation notifications. Version 16 adds atomic queue restoration with optional interruption. Version 17 adds daemon-owned user questionnaires and durable session eligibility for them. Version 18 adds canonical compaction configuration and lifecycle events plus queued manual compaction. Version 19 adds canonical loaded context-resource snapshots. Version 21 adds progressive capability discovery and dynamic tool activation. Version 22 adds daemon-owned MCP configuration. Version 23 projects per-server discovery status and tools through `mcp.config.list` and adds `mcp.config.probe`. Version 24 adds the `command_blocked` error for built-in commands refused by a daemon extension. Version 25 adds the `extension_failed` error for actionable extension loading and lifecycle failures. Version 26 adds atomic MCP batch upserts. Version 27 adds daemon extension discovery, trust, package management, and lifecycle controls. Version 28 adds installable terminal entries to extension inventory. Version 29 adds built-in terminal entries to the same inventory. Version 30 advertises browser-safe extension entry paths in that inventory. Version 31 adds remote endpoint witness status to `daemon.info` and the `remote_endpoints_changed` notification. Version 32 adds `remote.status`, which reports the local remote host's pairing phase, relay connection, device presence, and last failure to local clients only. Host-control version 1 remains separate from session wire negotiation and is available only to trusted process hosts.
 
 ## Versioning
 
@@ -147,6 +148,16 @@ Before initialization, only `daemon.info`, `connection.initialize`, and `connect
 ```ts
 interface DaemonInfoResult {
   readonly securityMode: "sandboxed" | "unsafe";
+  readonly sandboxProvider: string;
+  readonly sandboxImage?: string;
+  readonly remoteEndpoints: readonly RemoteEndpointWitnessStatus[];
+}
+
+interface RemoteEndpointWitnessStatus {
+  readonly deviceId: DeviceId;
+  readonly state: "recovering" | "ready" | "quarantined" | "revoked";
+  readonly reason?: RemoteEndpointQuarantineReason; // present exactly when quarantined
+  readonly changedAt: number;
 }
 
 interface RpcMethodMap {
@@ -536,6 +547,8 @@ interface SessionUnsubscribeResult {
 There is no `session.end` alias. The user-facing End action invokes `session.dispose` and explains that the active runtime stops while durable history remains. Permanent Delete invokes `session.delete` only after explicit confirmation.
 
 A daemon sends `{ kind: "sessions_changed", generation }` to initialized attachments granted `session.list` whenever list-visible metadata or runtime state changes. The generation increases monotonically for that daemon process. Clients treat it as invalidation, coalesce refreshes, and fetch a fresh typed `session.list`; the notification does not contain session metadata or grant authority.
+
+Version 17 adds `{ kind: "remote_endpoints_changed", generation }`, sent to every initialized attachment when a remote device endpoint enters `recovering`, `ready`, `quarantined`, or `revoked`. It requires no capability and carries no status; clients read `daemon.info`, whose `remoteEndpoints` lists the last durable transition per device with a typed, non-sensitive quarantine reason. Retries while recovering send nothing. `quarantined` and `revoked` are terminal until the device is paired again.
 
 Unsubscribe, detach, gateway stop, interrupt, session disposal, permanent deletion, and daemon stop are distinct. Closing a tab only detaches that attachment.
 

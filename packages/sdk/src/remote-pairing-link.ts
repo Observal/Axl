@@ -1,0 +1,275 @@
+// SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The deployment-test pairing contract shared by the daemon host and the browser device.
+ *
+ * A pairing link opens the hosted device page. Everything the device needs travels in the URL
+ * fragment, which browsers never send to a server: the daemon's pairing invitation, the identities
+ * it binds (as base64url bytes, so the link fits a terminal QR code), the one-time secret that
+ * enrolls this pairing's fresh device ID with a key the device creates, and the deployment-test
+ * stack's shared access token. That token is test-only; production pairing must not put
+ * credentials in a link. Replica trust is never part of a link: the device verifies witness
+ * certificates only against trust pinned into its build.
+ *
+ * Before the MLS group exists the device tells the daemon which claim it published with a pairing
+ * notice: a fixed magic, a version, and the 48-byte claim hash, sent over the relay route. The
+ * notice is unauthenticated; the daemon uses it only to reserve that claim from the control plane
+ * and then verifies the claim itself, so a forged notice cannot pair anything.
+ */
+
+import {
+  type CryptoSessionId,
+  type DeviceId,
+  type InstallationId,
+  parseCryptoSessionId,
+  parseDeviceId,
+  parseInstallationId,
+  REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES,
+} from "@axl/protocol";
+
+/** Version 2 replaced the shared possession proof with a per-device enrollment secret. */
+export const REMOTE_PAIRING_LINK_VERSION = 2;
+const MAX_INVITATION_BYTES = 2_048;
+const MAX_TOKEN_CHARACTERS = 4_096;
+const NOTICE_MAGIC = Uint8Array.of(0x41, 0x58, 0x4c, 0x50);
+const NOTICE_VERSION = 1;
+const CLAIM_HASH_BYTES = 48;
+export const REMOTE_PAIRING_NOTICE_BYTES = NOTICE_MAGIC.byteLength + 1 + CLAIM_HASH_BYTES;
+
+export interface RemotePairingLink {
+  readonly invitation: Uint8Array;
+  readonly accountId: string;
+  readonly installationId: InstallationId;
+  readonly deviceId: DeviceId;
+  readonly cryptoSessionId: CryptoSessionId;
+  /**
+   * Deployment-test bearer token for the control plane, relay tickets, and witness. Absent when
+   * the phone signs in instead, so the link carries no account credential.
+   */
+  readonly accessToken?: string;
+  /** One-time secret that enrolls the device's own key for `deviceId`. */
+  readonly enrollmentSecret: Uint8Array;
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+}
+
+function fromBase64Url(value: string | null, field: string, maximumBytes: number): Uint8Array {
+  if (value === null || !/^[A-Za-z0-9_-]+$/u.test(value)) {
+    throw new TypeError(`Pairing link ${field} is missing or malformed`);
+  }
+  const padded = value.replaceAll("-", "+").replaceAll("_", "/");
+  let binary: string;
+  try {
+    binary = atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+  } catch {
+    throw new TypeError(`Pairing link ${field} is missing or malformed`);
+  }
+  if (binary.length === 0 || binary.length > maximumBytes) {
+    throw new TypeError(`Pairing link ${field} is outside its bound`);
+  }
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+/** A UUID carried as its 16 bytes in base64url. */
+function uuidField(values: URLSearchParams, name: string, field: string): string {
+  const bytes = fromBase64Url(values.get(name), field, 16);
+  if (bytes.byteLength !== 16) throw new TypeError(`Pairing link ${field} is malformed`);
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Build the pairing link for the hosted device page at `pageUrl` (an HTTPS URL, no fragment). */
+export function encodeRemotePairingLink(pageUrl: string, link: RemotePairingLink): string {
+  const url = new URL(pageUrl);
+  if (url.protocol !== "https:" || url.hash !== "" || url.username !== "" || url.password !== "") {
+    throw new TypeError("The pairing page must be an HTTPS URL without a fragment or credentials");
+  }
+  if (link.invitation.byteLength === 0 || link.invitation.byteLength > MAX_INVITATION_BYTES) {
+    throw new TypeError("The pairing invitation is outside its bound");
+  }
+  if (link.enrollmentSecret.byteLength !== REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES) {
+    throw new TypeError("The enrollment secret has the wrong length");
+  }
+  const values = new URLSearchParams({
+    v: String(REMOTE_PAIRING_LINK_VERSION),
+    i: base64Url(link.invitation),
+    a: base64Url(uuidToBytes(link.accountId)),
+    n: base64Url(uuidToBytes(link.installationId)),
+    d: base64Url(uuidToBytes(link.deviceId)),
+    s: base64Url(uuidToBytes(link.cryptoSessionId)),
+    ...(link.accessToken === undefined ? {} : { t: link.accessToken }),
+    e: base64Url(link.enrollmentSecret),
+  });
+  url.hash = values.toString();
+  return url.toString();
+}
+
+/** Parse the fragment of a pairing link (with or without its leading `#`). */
+export function parseRemotePairingLink(fragment: string): RemotePairingLink {
+  const values = new URLSearchParams(fragment.startsWith("#") ? fragment.slice(1) : fragment);
+  if (values.get("v") !== String(REMOTE_PAIRING_LINK_VERSION)) {
+    throw new TypeError("Pairing link version is unsupported");
+  }
+  const accessToken = values.get("t") ?? undefined;
+  if (
+    accessToken !== undefined &&
+    (accessToken.length === 0 || accessToken.length > MAX_TOKEN_CHARACTERS)
+  ) {
+    throw new TypeError("Pairing link token is outside its bound");
+  }
+  return {
+    invitation: fromBase64Url(values.get("i"), "invitation", MAX_INVITATION_BYTES),
+    accountId: uuidField(values, "a", "account"),
+    installationId: parseInstallationId(uuidField(values, "n", "installation")),
+    deviceId: parseDeviceId(uuidField(values, "d", "device")),
+    cryptoSessionId: parseCryptoSessionId(uuidField(values, "s", "session")),
+    ...(accessToken === undefined ? {} : { accessToken }),
+    enrollmentSecret: enrollmentSecret(values),
+  };
+}
+
+function enrollmentSecret(values: URLSearchParams): Uint8Array {
+  const secret = fromBase64Url(values.get("e"), "enrollment secret", 64);
+  if (secret.byteLength !== REMOTE_DEVICE_ENROLLMENT_SECRET_BYTES) {
+    throw new TypeError("Pairing link enrollment secret is malformed");
+  }
+  return secret;
+}
+
+/** The 16 bytes of a canonical UUID string. */
+export function uuidToBytes(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-f]{32}$/u.test(hex)) throw new TypeError("Invalid UUID");
+  return Uint8Array.from({ length: 16 }, (_, index) =>
+    Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
+  );
+}
+
+export function encodeRemotePairingNotice(claimHash: Uint8Array): Uint8Array {
+  if (claimHash.byteLength !== CLAIM_HASH_BYTES) {
+    throw new TypeError("A pairing notice carries a 48-byte claim hash");
+  }
+  const output = new Uint8Array(REMOTE_PAIRING_NOTICE_BYTES);
+  output.set(NOTICE_MAGIC, 0);
+  output[NOTICE_MAGIC.byteLength] = NOTICE_VERSION;
+  output.set(claimHash, NOTICE_MAGIC.byteLength + 1);
+  return output;
+}
+
+/** The claim hash of a pairing notice, or undefined when the payload is not one. */
+export function parseRemotePairingNotice(payload: Uint8Array): Uint8Array | undefined {
+  if (
+    payload.byteLength !== REMOTE_PAIRING_NOTICE_BYTES ||
+    !NOTICE_MAGIC.every((byte, index) => payload[index] === byte) ||
+    payload[NOTICE_MAGIC.byteLength] !== NOTICE_VERSION
+  ) {
+    return undefined;
+  }
+  return payload.slice(NOTICE_MAGIC.byteLength + 1);
+}
+
+/**
+ * A short pairing link: the full link's fragment sealed with AES-256-GCM under a fresh key, parked
+ * on the control plane under a random ID. The short link's fragment carries only the ID and the
+ * key, so a terminal QR code stays small and the control plane never sees what it stores.
+ */
+const SHORT_LINK_PREFIX = "p=";
+const SHORT_LINK_KEY_BYTES = 32;
+const SHORT_LINK_NONCE_BYTES = 12;
+const SHORT_LINK_ID_BYTES = 16;
+const SHORT_LINK_CONTEXT = new TextEncoder().encode("axl-pairing-link-v1");
+
+export interface SealedRemotePairingLink {
+  /** The link to show: the page URL with `#p=<id>.<key>`. */
+  readonly shortLink: string;
+  readonly linkId: Uint8Array;
+  readonly sealed: Uint8Array;
+}
+
+function shortLinkAad(linkId: Uint8Array): Uint8Array<ArrayBuffer> {
+  const aad = new Uint8Array(SHORT_LINK_CONTEXT.byteLength + linkId.byteLength);
+  aad.set(SHORT_LINK_CONTEXT);
+  aad.set(linkId, SHORT_LINK_CONTEXT.byteLength);
+  return aad;
+}
+
+async function shortLinkKey(bytes: Uint8Array, usage: "encrypt" | "decrypt") {
+  const raw = new Uint8Array(bytes);
+  try {
+    return await globalThis.crypto.subtle.importKey("raw", raw, "AES-GCM", false, [usage]);
+  } finally {
+    raw.fill(0);
+  }
+}
+
+/** Seal `link`, a full pairing link, into a short link and the ciphertext to publish. */
+export async function sealRemotePairingLink(link: string): Promise<SealedRemotePairingLink> {
+  const url = new URL(link);
+  const fragment = url.hash.slice(1);
+  parseRemotePairingLink(fragment);
+  const linkId = globalThis.crypto.getRandomValues(new Uint8Array(SHORT_LINK_ID_BYTES));
+  const key = globalThis.crypto.getRandomValues(new Uint8Array(SHORT_LINK_KEY_BYTES));
+  const nonce = globalThis.crypto.getRandomValues(new Uint8Array(SHORT_LINK_NONCE_BYTES));
+  const ciphertext = new Uint8Array(
+    await globalThis.crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce, additionalData: shortLinkAad(linkId) },
+      await shortLinkKey(key, "encrypt"),
+      new TextEncoder().encode(fragment),
+    ),
+  );
+  const sealed = new Uint8Array(nonce.byteLength + ciphertext.byteLength);
+  sealed.set(nonce);
+  sealed.set(ciphertext, nonce.byteLength);
+  url.hash = `${SHORT_LINK_PREFIX}${base64Url(linkId)}.${base64Url(key)}`;
+  key.fill(0);
+  return { shortLink: url.toString(), linkId, sealed };
+}
+
+/** The ID and key in a short link's fragment, or undefined for any other fragment. */
+export function parseShortRemotePairingFragment(
+  fragment: string,
+): { readonly linkId: Uint8Array; readonly key: Uint8Array } | undefined {
+  const value = fragment.startsWith("#") ? fragment.slice(1) : fragment;
+  if (!value.startsWith(SHORT_LINK_PREFIX)) return undefined;
+  const [id, key, ...rest] = value.slice(SHORT_LINK_PREFIX.length).split(".");
+  if (rest.length > 0) throw new TypeError("Short pairing link is malformed");
+  const linkId = fromBase64Url(id ?? null, "short link ID", SHORT_LINK_ID_BYTES);
+  const keyBytes = fromBase64Url(key ?? null, "short link key", SHORT_LINK_KEY_BYTES);
+  if (linkId.byteLength !== SHORT_LINK_ID_BYTES || keyBytes.byteLength !== SHORT_LINK_KEY_BYTES) {
+    throw new TypeError("Short pairing link is malformed");
+  }
+  return { linkId, key: keyBytes };
+}
+
+/** Open a sealed full link's fragment with the short link's key. */
+export async function openRemotePairingLink(
+  sealed: Uint8Array,
+  linkId: Uint8Array,
+  key: Uint8Array,
+): Promise<string> {
+  if (sealed.byteLength <= SHORT_LINK_NONCE_BYTES) {
+    throw new TypeError("Sealed pairing link is too short");
+  }
+  let plaintext: ArrayBuffer;
+  try {
+    plaintext = await globalThis.crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: sealed.slice(0, SHORT_LINK_NONCE_BYTES),
+        additionalData: shortLinkAad(linkId),
+      },
+      await shortLinkKey(key, "decrypt"),
+      sealed.slice(SHORT_LINK_NONCE_BYTES),
+    );
+  } catch {
+    throw new TypeError("Sealed pairing link does not open with this key");
+  }
+  const fragment = new TextDecoder("utf-8", { fatal: true }).decode(plaintext);
+  parseRemotePairingLink(fragment);
+  return fragment;
+}

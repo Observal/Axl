@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Lokesh
+# SPDX-License-Identifier: Apache-2.0
+
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+**/target
+**/_build
+**/deps
+**/.elixir_ls
+**/.terraform
+*.tfstate
+*.tfstate.*
+*.md
+!package.json
+!pnpm-workspace.yaml

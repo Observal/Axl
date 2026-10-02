@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 VishnuM449
+# SPDX-License-Identifier: Apache-2.0
+
+[advisories]
+# RUSTSEC-2026-0173 reports maintenance status, not a vulnerability. The exception is limited to
+# proc-macro-error2 2.0.1 with checksum
+# 11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802 through:
+# proc-macro-error2 -> hax-lib-macros -> hax-lib -> libcrux-sha3 -> hpke-rs
+# -> openmls_libcrux_crypto. It expires 2026-12-15. Vulnerabilities remain denied.
+ignore = ["RUSTSEC-2026-0173"]

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-FileCopyrightText: 2026 Shaan Narendran
+// SPDX-FileCopyrightText: 2026 VishnuM049
 // SPDX-License-Identifier: Apache-2.0
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -21,6 +22,7 @@ import {
   parseEventId,
   parseOperationId,
   parseServerMessage,
+  parseDeviceId,
   parseSessionId,
   parseWireRequest,
   RPC_ERROR_CODES,
@@ -300,6 +302,8 @@ const params = {
     name: "docs",
     definition: { url: "https://mcp.example.com/mcp", headers: { Authorization: "DOCS_TOKEN" } },
   },
+  "remote.pairing.start": {},
+  "remote.status": {},
   "session.create": {
     cwd: "/workspace",
     providerId: "provider-1",
@@ -388,7 +392,18 @@ const extensionCommands = [
 ];
 
 const results = {
-  "daemon.info": { securityMode: "sandboxed", sandboxProvider: "bubblewrap" },
+  "daemon.info": {
+    securityMode: "sandboxed",
+    sandboxProvider: "bubblewrap",
+    remoteEndpoints: [
+      {
+        deviceId: parseDeviceId("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+        state: "quarantined",
+        reason: "commitment_conflict",
+        changedAt: 1_700_000_000_000,
+      },
+    ],
+  },
   "connection.initialize": {
     attachmentId: "attachment-1",
     daemonInstanceId: "daemon-1",
@@ -610,6 +625,22 @@ const results = {
     protocolVersion: "2025-11-25",
     tools: [],
     authorization: "required",
+  },
+  "remote.pairing.start": {
+    link: "https://axl.example/remote/#v=1",
+    cryptoSessionId: "01900000-0000-7000-8000-000000000001",
+    deviceId: "01900000-0000-7000-8000-000000000002",
+    expiresAt: 1_900_000_000_000,
+  },
+  "remote.status": {
+    phase: "paired",
+    relay: "connected",
+    deviceOnline: true,
+    cryptoSessionId: "01900000-0000-7000-8000-000000000001",
+    deviceId: "01900000-0000-7000-8000-000000000002",
+    witness: "ready",
+    lastError: { message: "remote: relay failure", at: 1_900_000_000_000 },
+    logPath: "/home/user/.axl/remote-deployment-test/remote.log",
   },
   "session.create": opened,
   "session.resume": opened,
@@ -843,6 +874,7 @@ const serverMessages = [
     frame: { operationId, sequence: 1, type: "text_delta", text: "working" },
   },
   { kind: "sessions_changed", generation: 1 },
+  { kind: "remote_endpoints_changed", generation: 1 },
   {
     kind: "presence",
     attachments: [

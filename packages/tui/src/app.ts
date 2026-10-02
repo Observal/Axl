@@ -31,6 +31,7 @@ import type {
   ProviderInventoryGroup,
   ProviderLoginMethod,
   ProviderTextModel,
+  RemoteStatusResult,
   SessionId,
   SessionOpenResult,
   SessionProfile,
@@ -119,6 +120,7 @@ import {
 import { type Overlay, OverlayStack } from "./overlay.ts";
 import { PickerOverlay } from "./picker.ts";
 import { ProviderLoginOverlay, type ProviderLoginPresentation } from "./provider-login.ts";
+import { encodeQrCode, QR_QUIET_ZONE, qrTerminalWidth, renderQrCode } from "./qr-code.ts";
 import { QuestionnaireOverlay } from "./questionnaire.ts";
 import {
   AUTOWRAP_OFF,
@@ -405,6 +407,7 @@ const TUI_COMMANDS: readonly { readonly name: string; readonly description: stri
   { name: "history", description: "search prompt history" },
   { name: "edit", description: "open the prompt in VISUAL or EDITOR" },
   { name: "web", description: "open this session in the browser" },
+  { name: "remote", description: "pair a phone browser, or /remote status to check it" },
   { name: "hotkeys", description: "browse and search keyboard shortcuts" },
   { name: "help", description: "show commands and keys" },
   { name: "detach", description: "leave the session running in the daemon" },
@@ -1296,6 +1299,103 @@ export class AxlApp {
     this.view.setWidth(width);
     if (widthChanged) this.rebuildTranscript(false);
     return true;
+  }
+
+  /** `/remote status`: the phone pairing, the daemon's relay connection, and the latest failure. */
+  private remoteStatusLines(status: RemoteStatusResult): string[] {
+    const { accent, dim, error } = this.view.palette;
+    const good = this.view.palette.success ?? ((text: string) => text);
+    const warn = this.view.palette.warning ?? ((text: string) => text);
+    const row = (label: string, value: string) => `  ${dim(label.padEnd(9))}${value}`;
+    const phase = {
+      unpaired: warn("not paired; run /remote to pair a phone"),
+      pairing: warn("waiting for a phone to open the pairing link"),
+      paired: good("paired"),
+    }[status.phase];
+    const relay = status.relay === "connected" ? good("connected") : warn(status.relay);
+    const lines = [accent("Remote status"), row("Pairing", phase), row("Relay", relay)];
+    if (status.phase === "paired") {
+      lines.push(
+        row(
+          "Phone",
+          status.deviceOnline ? good("online") : dim("offline (the page is closed or asleep)"),
+        ),
+      );
+    }
+    if (status.witness !== undefined) {
+      lines.push(row("Witness", status.witness === "ready" ? good("ready") : warn(status.witness)));
+    }
+    if (status.lastError !== undefined) {
+      const at = new Date(status.lastError.at).toLocaleTimeString();
+      lines.push(
+        row("Last error", error(`${at} ${sanitizeTerminalText(status.lastError.message)}`)),
+      );
+    }
+    if (status.logPath !== undefined) lines.push(row("Log", sanitizeTerminalText(status.logPath)));
+    lines.push("");
+    return lines;
+  }
+
+  /** The pairing link as a terminal QR code, or a hint when the terminal is too narrow for one. */
+  /**
+   * The pairing panel: the QR code framed beside what to do with it when the terminal is wide
+   * enough, otherwise the code under a heading. The link stays on a line of its own below, so it
+   * can be copied whole.
+   */
+  private pairingPanel(link: string, minutes: number): string[] {
+    const { accent, dim } = this.view.palette;
+    const code = encodeQrCode(link, "L");
+    const width = this.detectWidth();
+    const color = this.options.color !== false;
+    const text = [
+      accent("Pair a phone"),
+      "",
+      "Scan the code with the phone's",
+      "camera, or open the link below.",
+      "",
+      dim(`Expires in ${minutes} min · pairs one device`),
+      dim("Pairing again signs out the"),
+      dim("phone paired before."),
+      "",
+      `${accent("/remote status")}${dim(" checks on it")}`,
+    ];
+    const textWidth = Math.max(...text.map((line) => visibleWidth(line)));
+    const footer = ["", link, ""];
+    for (const quietZone of [QR_QUIET_ZONE, 2]) {
+      const codeWidth = qrTerminalWidth(code, quietZone);
+      const inner = codeWidth + 3 + textWidth;
+      if (inner + 4 > width) continue;
+      const rows = renderQrCode(code, { quietZone, color });
+      const offset = Math.max(0, Math.floor((rows.length - text.length) / 2));
+      const height = Math.max(rows.length, text.length);
+      const lines = [`${dim("╭─ ")}${accent("Remote")}${dim(` ${"─".repeat(inner - 7)}╮`)}`];
+      for (let row = 0; row < height; row += 1) {
+        const qr = rows[row] ?? " ".repeat(codeWidth);
+        const line = text[row - offset] ?? "";
+        const pad = " ".repeat(textWidth - visibleWidth(line));
+        lines.push(`${dim("│")} ${qr}   ${line}${pad} ${dim("│")}`);
+      }
+      lines.push(dim(`╰${"─".repeat(inner + 2)}╯`));
+      return [...lines, ...footer];
+    }
+    // Too narrow to frame: the heading, then the code alone if it fits at all.
+    const heading = [
+      accent("Pair a phone"),
+      dim(`  Scan the code or open the link on your phone within ${minutes} minutes.`),
+      dim("  It pairs one device; pairing again signs out the phone paired before."),
+      "",
+    ];
+    const quietZone = [QR_QUIET_ZONE, 2].find((zone) => qrTerminalWidth(code, zone) <= width);
+    if (quietZone === undefined) {
+      return [
+        ...heading,
+        dim(
+          `  Widen the terminal to ${qrTerminalWidth(code, 2)} columns and run /remote again for a QR code.`,
+        ),
+        ...footer,
+      ];
+    }
+    return [...heading, ...renderQrCode(code, { quietZone, color }), ...footer];
   }
 
   private detectWidth(): number {
@@ -2954,6 +3054,27 @@ export class AxlApp {
             this.loginProviderFromWeb(request.providerId, request.method, options?.signal),
         });
         this.notice = this.view.palette.dim(`· opened ${origin}`);
+        return;
+      }
+      case "remote": {
+        // A daemon without a remote host does not grant pairing; say how to set one up.
+        if (this.client.connection.grantedCapabilities?.includes("remote.pairing.start") !== true) {
+          this.notice = this.view.palette.error(
+            "✖ remote access is not set up: run axl remote login, then axl daemon restart",
+          );
+          return;
+        }
+        if (argument === "status") {
+          this.commitLines(this.remoteStatusLines(await this.client.remoteStatus()));
+          return;
+        }
+        if (argument) {
+          this.notice = this.view.palette.error("✖ use /remote or /remote status");
+          return;
+        }
+        const pairing = await this.client.startRemotePairing();
+        const minutes = Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60_000));
+        this.commitLines(this.pairingPanel(pairing.link, minutes));
         return;
       }
       case "hotkeys":
