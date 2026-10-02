@@ -3,7 +3,7 @@
 
 # Remote session sharing
 
-Status: proposed for architecture and security review. It amends [Production remote access from a WSL daemon](remote-production-wsl.md) and [Remote daemon authority](remote-daemon-authority.md). Nothing here is implemented yet.
+Status: accepted by the owner for implementation; the security review still applies. It amends [Production remote access from a WSL daemon](remote-production-wsl.md) and [Remote daemon authority](remote-daemon-authority.md).
 
 ## Purpose
 
@@ -16,9 +16,9 @@ This amendment separates two things that are currently one:
 
 The phone can reach only sessions that are shared at that moment. Running `/remote` in a session shares it, and the session opens on the phone without a new QR code.
 
-It also bounds the witness's per-pairing storage, which grows with every message today, and adds an optional push notification so a share can reach a phone whose page is closed.
+It also bounds the witness's per-pairing storage and its journal, which both grow with every message today. Push notifications, so a share can reach a phone whose page is closed, are designed here and deferred to a later slice.
 
-Out of scope: packaging the daemon artifacts into releases, folding `axl remote login` into `/remote`, other daemon platforms, and more than one phone. Those are separate work.
+Out of scope: packaging the daemon artifacts into releases, folding `axl remote login` into `/remote`, macOS and Linux desktop daemons (separate amendments), and more than one phone.
 
 ## User experience
 
@@ -86,13 +86,14 @@ A share ends when:
 - `/remote stop` runs in that session;
 - the session is deleted;
 - the phone is unpaired or replaced, or its device generation is revoked; or
-- the daemon's account signs out (`axl remote logout`).
+- the daemon's account signs out (`axl remote logout`); or
+- 24 hours pass with no activity in the shared session.
+
+Activity is any remote request for the session, any input to it from the terminal, and any event the session itself records, so a turn that runs for hours never idles out. The share entry keeps the time of its last activity, written at most once a minute, and the daemon checks it once a minute and at startup. A share that idled out while the daemon was stopped ends when the daemon starts.
 
 When a share ends, the daemon removes it from the share set, closes the device's subscriptions to that session, drops their snapshots and cursors, and sends a new notice. A request already in flight for that session is refused when it is dispatched, not answered.
 
 A daemon restart does not end a share. Sessions close when the daemon restarts; the phone may reopen a shared session with `session.resume`, which is a `steer` request like before, and only for a session in the share set. Quitting the terminal does not end a share either: the daemon keeps running the session, and watching a long task from the phone after walking away is the main use.
-
-Whether a share should also end after a long idle period is an open decision below.
 
 ## Witness compaction
 
@@ -113,9 +114,9 @@ The witness keeps one record per lineage (one lineage per endpoint and pairing).
 Keep a bounded window of recent history and a checkpoint for everything before it:
 
 - **Checkpoint:** the record carries a checkpoint of the head (sequence, revocation generation, counter, commitment, and predecessor commitment) at the start of the window. The ledger holds only the events after it. Rebuild starts from the checkpoint instead of from the zero head.
-- **Window:** the most recent K successors, accepted operations, and retained responses are kept in full. The proposed K is 32; the endpoint barrier retries only its current operation, so a window of one would serve correct endpoints, and 32 leaves room for slow retries.
+- **Window:** the most recent K successors, accepted operations, and retained responses are kept in full, with K = 32. A step is one message sealed or opened by one endpoint, so a window of 32 covers seconds to minutes of activity, not 32 prompts. The endpoint barrier retries only its current operation, so a window of one would serve correct endpoints, and 32 leaves room for slow retries.
 - **Recovery hashes:** kept as 48-byte hashes until the recovery request they block can no longer be valid. If recovery requests carry no validity bound, all of them are kept: they are small and rare.
-- **Journal:** superseded journal entries are removed by a separate delete-only principal that never deletes a lineage's newest entry. The record table's credentials still cannot rewrite the journal.
+- **Journal:** superseded journal entries are pruned. A separate principal, holding only `Query` and `DeleteItem` on the journal table, runs on a schedule and removes every entry older than a lineage's newest, never the newest itself. The witness service keeps no delete permission on the journal, so neither the record table's credentials nor the journal's writer can rewrite or remove the entry a restart checks against. On the owner's stack the journal held 2,367 entries (1.3 MB, about 535 bytes each) after four days; pruned, it holds one entry per lineage and replica.
 - **Terminal lineages:** a revoked or forked lineage is reduced to its checkpoint and terminal event, because nothing can advance it again.
 
 A compaction step is an ordinary conditional write: the checkpoint and the removal of the entries it covers commit in one transaction on the record's revision, so a concurrent step either sees the old record or the compacted one.
@@ -134,6 +135,8 @@ The rollback protection itself is unchanged: a rolled-back endpoint cannot advan
 An operation ID older than the window could be reused with a different request and be accepted if it is a valid successor of the current head. Operation IDs exist for idempotency, not for authorization, so this grants nothing; the review should confirm that reading.
 
 ## Push notifications
+
+Deferred: push is not in the first slice. A share reaches the phone over the relay whenever the page is connected, and is there the next time the page opens. This section records the design for the later slice.
 
 ### Design
 
@@ -187,11 +190,19 @@ Recorded in `docs/evidence/`, in addition to the WSL amendment's list:
 - **Sharing:** share, stop, unpair, delete, and account sign-out, each checked against every remote method for the shared session, another session, and an unknown session.
 - **Lifetime:** daemon restart with a share, then phone resume; terminal quit with a share; a share ending while the phone has a request in flight.
 - **Compaction:** lineages crossing the window, crash between compaction steps, a replay of an operation older than the window, rollback of an endpoint to before the window, and restart recovery on a compacted record.
-- **Push:** Android Chrome and an iOS Home Screen web app, permission refused, subscription expired, and unpair removing the subscription.
+- **Idle end:** a share idling out while the daemon runs and while it is stopped, and a long turn that keeps a share alive.
+- **Journal pruning:** pruning racing appends, the newest entry surviving every run, and restart recovery after pruning.
+- **Push (later slice):** Android Chrome and an iOS Home Screen web app, permission refused, subscription expired, and unpair removing the subscription.
 
-## Open decisions
+## Decisions
 
-1. **Idle end:** should a share also end after a period with no activity from the terminal or the phone (for example 24 hours), or last until it is stopped?
-2. **Compaction window:** is K = 32 the right size? Does the review accept losing fork records older than the window?
-3. **Journal pruning:** should superseded journal entries be deleted by a separate principal as proposed, or kept, since each is small?
-4. **Push timing:** ship push with the first slice, or follow it once sharing is in use?
+Made by the owner:
+
+1. **Pairing:** once per phone, with one phone per installation.
+2. **Sharing:** every later `/remote` shares the current session; the phone reaches only shared sessions.
+3. **Lifetime:** a share survives daemon restarts and terminal exits, and ends when stopped, when its session is deleted, on unpair or sign-out, or after 24 hours without activity.
+4. **Compaction:** a checkpoint plus a window of K = 32 steps.
+5. **Journal:** pruned by a separate delete-only principal, keeping each lineage's newest entry.
+6. **Push:** deferred to a later slice.
+
+For the security review: losing fork records older than the window, as described in [What the review must accept](#what-the-review-must-accept).
