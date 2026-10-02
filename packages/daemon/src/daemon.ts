@@ -100,7 +100,20 @@ export interface DaemonOptions extends SessionManagerOptions {
   readonly remotePairing?: RemotePairingService;
 }
 
+/**
+ * A failed `/remote` whose message is safe to show the local terminal: a short reason such as an
+ * unreachable stack or an expired sign-in, never internal detail. `remote.pairing.start` is local
+ * only, so no remote device ever sees it.
+ */
+export class RemotePairingStartError extends Error {
+  constructor(reason: string, options?: { readonly cause?: unknown }) {
+    super(reason, options);
+    this.name = "RemotePairingStartError";
+  }
+}
+
 export interface RemotePairingService {
+  /** Rejects with `RemotePairingStartError` when it has a reason the terminal can show. */
   start(): Promise<RemotePairingStartResult>;
   /** What `/remote status` shows: pairing phase, relay connection, and the latest failure. */
   status(): RemoteStatusResult;
@@ -1329,8 +1342,12 @@ export class AxlDaemon {
         try {
           return await this.remotePairing.start();
         } catch (cause) {
-          // The remote host logs its own cause; the client learns only that pairing is unavailable.
-          throw new DaemonError("remote_unavailable", "Remote pairing could not start", { cause });
+          // The remote host logs its own cause; the terminal learns only the reason it chose to give.
+          const reason =
+            cause instanceof RemotePairingStartError
+              ? cause.message
+              : "Remote pairing could not start";
+          throw new DaemonError("remote_unavailable", reason, { cause });
         }
       }
       case "remote.status":

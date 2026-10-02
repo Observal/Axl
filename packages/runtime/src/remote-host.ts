@@ -16,7 +16,8 @@
  * and accepts the device's MLS-protected activation. Only then does the ordinary E2EE bridge take
  * over the endpoint and serve the device's requests. Starting a new pairing replaces the previous
  * session; a completed pairing survives daemon restarts, and a restore that fails (the network or
- * the witness is briefly unreachable) is retried with backoff.
+ * the witness is briefly unreachable) is retried with backoff. A `/remote` that fails before it
+ * replaces anything goes back to restoring the pairing it interrupted, and tells the terminal why.
  *
  * The host writes its log to an owner-only `remote.log` beside its state, because a daemon started
  * by the terminal discards its output, and reports its phase, relay connection, and latest failure
@@ -47,6 +48,7 @@ import {
   type NativeDaemonE2eeEndpoint,
   RemoteDeviceAuthorityStore,
   type RemotePairingService,
+  RemotePairingStartError,
   WindowsRemoteE2eeBridge,
 } from "@axl/daemon";
 import {
@@ -97,6 +99,52 @@ function isActivation(payload: Uint8Array): boolean {
   } catch {
     return false;
   }
+}
+
+/** Error codes of a connection that never reached the stack. */
+const NETWORK_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** Whether `cause`, or an error it wraps, is a request that never reached the stack. */
+function unreachable(cause: unknown): boolean {
+  let current = cause;
+  for (let depth = 0; depth < 4 && typeof current === "object" && current !== null; depth += 1) {
+    const { code, name, message } = current as {
+      readonly code?: unknown;
+      readonly name?: unknown;
+      readonly message?: unknown;
+    };
+    if (typeof code === "string" && NETWORK_CODES.has(code)) return true;
+    if (name === "TimeoutError" || (name === "TypeError" && message === "fetch failed"))
+      return true;
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return false;
+}
+
+/** What the terminal shows for a failed `/remote`: a reason and what to do, nothing internal. */
+function startFailure(cause: unknown, origin: string, logPath: string): RemotePairingStartError {
+  const code = (cause as { readonly code?: unknown } | undefined)?.code;
+  const reason = unreachable(cause)
+    ? `Could not reach ${new URL(origin).host}. Check the network, then run /remote again.`
+    : code === "sign_in_required" || code === "sign_in_failed" || code === "invalid_account"
+      ? "Remote sign-in is no longer valid. Run axl remote login, then /remote again."
+      : code === "not_enabled"
+        ? "Remote access is not enabled for this account."
+        : code === "helper_unavailable"
+          ? `The key helper is not available. Details are in ${logPath}.`
+          : `Remote pairing could not start. Details are in ${logPath}.`;
+  return new RemotePairingStartError(reason, { cause });
 }
 
 /** An error for the log, with the code and HTTP status that `String()` would drop. */
@@ -247,6 +295,8 @@ export class HostedRemoteHost implements RemotePairingService {
   /** The restore in progress; a new pairing waits for it so it cannot revive a replaced session. */
   #restoreRun: Promise<void> = Promise.resolve();
   #restoring = false;
+  /** A failed `/remote` interrupted a pairing it never replaced; restore it once the start settles. */
+  #restoreAfterStart = false;
 
   private constructor(
     config: HostedRemoteSettings,
@@ -378,6 +428,10 @@ export class HostedRemoteHost implements RemotePairingService {
   start(): Promise<RemotePairingStartResult> {
     this.#starting ??= this.#start().finally(() => {
       this.#starting = undefined;
+      if (this.#restoreAfterStart) {
+        this.#restoreAfterStart = false;
+        this.#restoreRun = this.#restore(0);
+      }
     });
     return this.#starting;
   }
@@ -404,7 +458,9 @@ export class HostedRemoteHost implements RemotePairingService {
       await this.#config.prepare?.();
     } catch (cause) {
       this.#fail(`remote: pairing could not start: ${describe(cause)}`);
-      throw cause;
+      // Nothing about the current pairing has changed yet, so go back to serving it.
+      this.#restoreAfterStart = true;
+      throw startFailure(cause, this.#config.origin, this.#logPath);
     }
     const previous = await this.#readState();
     if (previous !== undefined) await this.#retire(previous.deviceId);
@@ -450,7 +506,7 @@ export class HostedRemoteHost implements RemotePairingService {
     } catch (cause) {
       this.#fail(`remote: pairing could not start: ${describe(cause)}`);
       await this.#closeSession();
-      throw cause;
+      throw startFailure(cause, this.#config.origin, this.#logPath);
     }
   }
 
