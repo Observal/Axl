@@ -132,6 +132,7 @@ test("language-neutral fixtures validate every non-success server message shape"
     "hello",
     "presence",
     "remote_endpoints_changed",
+    "remote_shares",
     "sessions_changed",
   ]);
   for (const message of messages) {

@@ -10,12 +10,15 @@ import { randomUUID } from "node:crypto";
 import {
   isRemoteEndpointQuarantineReason,
   isRemoteEndpointWitnessState,
+  MAX_REMOTE_SHARES,
   parseDeviceId,
   parseInstallationId,
   parseRemoteDeviceScopes,
+  parseSessionId,
   type DeviceId,
   type InstallationId,
   type RemoteDeviceScope,
+  type SessionId,
   type RemoteEndpointQuarantineReason,
   type RemoteEndpointWitnessState,
   type RemoteEndpointWitnessStatus,
@@ -26,6 +29,8 @@ const AUTHORITY_FILE_NAME = "remote-authority.json";
 const MAX_REMOTE_AUTHORITY_BYTES = 1024 * 1024;
 const MAX_REMOTE_DEVICES = 256;
 const MAX_AUTHORITY_AUDIT_EVENTS = 4_096;
+/** A share's last activity is written at most this often. */
+const SHARE_ACTIVITY_RESOLUTION_MS = 60_000;
 
 interface GrantState {
   readonly generation: number;
@@ -40,12 +45,28 @@ interface WitnessRecordState {
   readonly changedAt: number;
 }
 
+/** A session shared with a device. The device reaches only the sessions shared with it. */
+export interface RemoteShareRecord {
+  readonly sessionId: SessionId;
+  readonly sharedAt: number;
+  /** The latest remote request for the session, kept to within a minute. */
+  readonly lastActivityAt: number;
+  /** The device's local grant generation when the session was shared. */
+  readonly localGeneration: number;
+}
+
+/** Why a share ended. Revoking the device ends its shares with the revocation itself. */
+export type RemoteShareEndReason = "stopped" | "deleted" | "idle";
+
+const SHARE_END_REASONS: readonly RemoteShareEndReason[] = ["stopped", "deleted", "idle"];
+
 interface DeviceAuthorityRecord {
   readonly deviceId: DeviceId;
   readonly createdAt: number;
   readonly local: GrantState;
   readonly hosted?: GrantState;
   readonly witness?: WitnessRecordState;
+  readonly shares?: readonly RemoteShareRecord[];
 }
 
 export type RemoteAuthorityAuditCode =
@@ -58,7 +79,9 @@ export type RemoteAuthorityAuditCode =
   | "endpoint_recovering"
   | "endpoint_ready"
   | "endpoint_quarantined"
-  | "endpoint_revoked";
+  | "endpoint_revoked"
+  | "session_shared"
+  | "session_unshared";
 
 const WITNESS_AUDIT_CODES: Readonly<Record<RemoteEndpointWitnessState, RemoteAuthorityAuditCode>> =
   Object.freeze({
@@ -81,6 +104,10 @@ export interface RemoteAuthorityAuditEvent {
   readonly reason?: RemoteAuthorityErrorCode;
   /** Present exactly on `endpoint_quarantined`. */
   readonly quarantineReason?: RemoteEndpointQuarantineReason;
+  /** Present exactly on `session_shared` and `session_unshared`. */
+  readonly sessionId?: SessionId;
+  /** Present exactly on `session_unshared`. */
+  readonly shareEnd?: RemoteShareEndReason;
 }
 
 interface PersistedAuthorityState {
@@ -128,7 +155,9 @@ export type RemoteAuthorityErrorCode =
   | "device_limit_reached"
   | "device_identity_mismatch"
   | "remote_method_forbidden"
-  | "unsafe_remote_forbidden";
+  | "unsafe_remote_forbidden"
+  | "session_not_shared"
+  | "share_limit_reached";
 
 const REMOTE_AUTHORITY_ERROR_CODES: readonly RemoteAuthorityErrorCode[] = [
   "unknown_device",
@@ -141,6 +170,8 @@ const REMOTE_AUTHORITY_ERROR_CODES: readonly RemoteAuthorityErrorCode[] = [
   "device_identity_mismatch",
   "remote_method_forbidden",
   "unsafe_remote_forbidden",
+  "session_not_shared",
+  "share_limit_reached",
 ];
 
 export class RemoteAuthorityError extends Error {
@@ -226,6 +257,27 @@ function parseWitnessState(value: unknown, path: string): WitnessRecordState {
   };
 }
 
+function parseShares(value: unknown, path: string): readonly RemoteShareRecord[] {
+  if (!Array.isArray(value) || value.length > MAX_REMOTE_SHARES) {
+    throw new Error(`${path} must contain at most ${MAX_REMOTE_SHARES} shares`);
+  }
+  const seen = new Set<string>();
+  return value.map((entry, index): RemoteShareRecord => {
+    const sharePath = `${path}[${index}]`;
+    const share = object(entry, sharePath);
+    exact(share, sharePath, ["sessionId", "sharedAt", "lastActivityAt", "localGeneration"]);
+    const sessionId = parseSessionId(share.sessionId, `${sharePath}.sessionId`);
+    if (seen.has(sessionId)) throw new Error(`${sharePath}.sessionId is duplicated`);
+    seen.add(sessionId);
+    return {
+      sessionId,
+      sharedAt: nonNegativeInteger(share.sharedAt, `${sharePath}.sharedAt`),
+      lastActivityAt: nonNegativeInteger(share.lastActivityAt, `${sharePath}.lastActivityAt`),
+      localGeneration: positiveInteger(share.localGeneration, `${sharePath}.localGeneration`),
+    };
+  });
+}
+
 function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEvent {
   const path = `remote authority.audit[${index}]`;
   const event = object(value, path);
@@ -233,7 +285,15 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
     event,
     path,
     ["sequence", "occurredAt", "code", "actorDeviceId"],
-    ["localGeneration", "hostedGeneration", "scope", "reason", "quarantineReason"],
+    [
+      "localGeneration",
+      "hostedGeneration",
+      "scope",
+      "reason",
+      "quarantineReason",
+      "sessionId",
+      "shareEnd",
+    ],
   );
   const codes: readonly RemoteAuthorityAuditCode[] = [
     "device_registered",
@@ -246,6 +306,8 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
     "endpoint_ready",
     "endpoint_quarantined",
     "endpoint_revoked",
+    "session_shared",
+    "session_unshared",
   ];
   if (typeof event.code !== "string" || !codes.includes(event.code as RemoteAuthorityAuditCode)) {
     throw new Error(`${path}.code is invalid`);
@@ -269,6 +331,17 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
   } else if (event.quarantineReason !== undefined) {
     throw new Error(`${path}.quarantineReason is only allowed on endpoint_quarantined`);
   }
+  const sharing = event.code === "session_shared" || event.code === "session_unshared";
+  if (sharing !== (event.sessionId !== undefined)) {
+    throw new Error(`${path}.sessionId is required exactly on share events`);
+  }
+  if (event.code === "session_unshared") {
+    if (!SHARE_END_REASONS.includes(event.shareEnd as RemoteShareEndReason)) {
+      throw new Error(`${path}.shareEnd must name why the share ended`);
+    }
+  } else if (event.shareEnd !== undefined) {
+    throw new Error(`${path}.shareEnd is only allowed on session_unshared`);
+  }
   return {
     sequence: positiveInteger(event.sequence, `${path}.sequence`),
     occurredAt: nonNegativeInteger(event.occurredAt, `${path}.occurredAt`),
@@ -289,6 +362,10 @@ function parseAuditEvent(value: unknown, index: number): RemoteAuthorityAuditEve
     ...(event.quarantineReason === undefined
       ? {}
       : { quarantineReason: event.quarantineReason as RemoteEndpointQuarantineReason }),
+    ...(event.sessionId === undefined
+      ? {}
+      : { sessionId: parseSessionId(event.sessionId, `${path}.sessionId`) }),
+    ...(event.shareEnd === undefined ? {} : { shareEnd: event.shareEnd as RemoteShareEndReason }),
   };
 }
 
@@ -311,7 +388,7 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
   const devices = state.devices.map((value, index): DeviceAuthorityRecord => {
     const path = `remote authority.devices[${index}]`;
     const device = object(value, path);
-    exact(device, path, ["deviceId", "createdAt", "local"], ["hosted", "witness"]);
+    exact(device, path, ["deviceId", "createdAt", "local"], ["hosted", "witness", "shares"]);
     const deviceId = parseDeviceId(device.deviceId, `${path}.deviceId`);
     if (seen.has(deviceId)) throw new Error(`${path}.deviceId is duplicated`);
     seen.add(deviceId);
@@ -325,6 +402,9 @@ function parseAuthorityState(value: unknown): PersistedAuthorityState {
       ...(device.witness === undefined
         ? {}
         : { witness: parseWitnessState(device.witness, `${path}.witness`) }),
+      ...(device.shares === undefined
+        ? {}
+        : { shares: parseShares(device.shares, `${path}.shares`) }),
     };
   });
   const audit = state.audit.map(parseAuditEvent);
@@ -380,6 +460,22 @@ function sameScopes(
   right: readonly RemoteDeviceScope[],
 ): boolean {
   return left.length === right.length && left.every((scope, index) => scope === right[index]);
+}
+
+function revoked(record: DeviceAuthorityRecord): boolean {
+  return record.local.revokedAt !== undefined || record.hosted?.revokedAt !== undefined;
+}
+
+/** The record without the shares in `ended`, or the same record when none of them is shared. */
+function withoutShares(
+  record: DeviceAuthorityRecord,
+  ended: (share: RemoteShareRecord) => boolean,
+): DeviceAuthorityRecord {
+  const shares = record.shares ?? [];
+  const kept = shares.filter((share) => !ended(share));
+  if (kept.length === shares.length) return record;
+  const { shares: _ended, ...rest } = record;
+  return kept.length === 0 ? rest : { ...rest, shares: kept };
 }
 
 function effectiveScopes(record: DeviceAuthorityRecord): readonly RemoteDeviceScope[] {
@@ -453,6 +549,9 @@ export class RemoteDeviceAuthorityStore {
   private readonly revocationListeners = new Set<(deviceId: DeviceId) => void>();
   private readonly grantListeners = new Set<(deviceId: DeviceId) => void>();
   private readonly witnessListeners = new Set<(deviceId: DeviceId) => void>();
+  private readonly shareListeners = new Set<(deviceId: DeviceId) => void>();
+  /** Increases with every change to any device's shares; starts at the clock so it outlives restarts. */
+  #sharesGeneration = Date.now();
   private tail: Promise<void> = Promise.resolve();
 
   private constructor(path: string, state: PersistedAuthorityState) {
@@ -742,7 +841,7 @@ export class RemoteDeviceAuthorityStore {
           return devices;
         }
         devices.set(deviceId, {
-          ...record,
+          ...(normalizedRevokedAt === undefined ? record : withoutShares(record, () => true)),
           hosted: {
             generation: normalizedGeneration,
             scopes: normalizedScopes,
@@ -768,7 +867,10 @@ export class RemoteDeviceAuthorityStore {
       },
     ).then(() => {
       const snapshot = this.requiredSnapshot(deviceId);
-      if (snapshot.hostedRevoked) this.publishRevocation(deviceId);
+      if (snapshot.hostedRevoked) {
+        this.publishRevocation(deviceId);
+        this.publishShareChange(deviceId);
+      }
       this.publishGrantChange(deviceId);
       return snapshot;
     });
@@ -783,8 +885,9 @@ export class RemoteDeviceAuthorityStore {
           throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
         }
         if (record.local.revokedAt !== undefined) return devices;
+        // A revoked device keeps no shares; revocation is what ends them.
         devices.set(deviceId, {
-          ...record,
+          ...withoutShares(record, () => true),
           local: {
             generation: nextGeneration(record.local.generation),
             scopes: record.local.scopes,
@@ -809,11 +912,20 @@ export class RemoteDeviceAuthorityStore {
       const snapshot = this.requiredSnapshot(deviceId);
       this.publishRevocation(deviceId);
       this.publishGrantChange(deviceId);
+      this.publishShareChange(deviceId);
       return snapshot;
     });
   }
 
-  authorize(deviceId: DeviceId, requiredScope: RemoteDeviceScope): RemoteAuthorizationContext {
+  /**
+   * Authorize one request. A request that names a session also needs that session shared with the
+   * device; any other session is refused exactly like one that does not exist.
+   */
+  authorize(
+    deviceId: DeviceId,
+    requiredScope: RemoteDeviceScope,
+    sessionId?: SessionId,
+  ): RemoteAuthorizationContext {
     const record = this.devices.get(deviceId);
     if (record === undefined) {
       throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
@@ -828,6 +940,15 @@ export class RemoteDeviceAuthorityStore {
     if (!scopes.includes(requiredScope)) {
       throw new RemoteAuthorityError("scope_forbidden", "Device does not hold the required scope");
     }
+    if (
+      sessionId !== undefined &&
+      !(record.shares ?? []).some((share) => share.sessionId === sessionId)
+    ) {
+      throw new RemoteAuthorityError(
+        "session_not_shared",
+        "Session is not shared with this device",
+      );
+    }
     return {
       installationId: this.installationId,
       deviceId,
@@ -840,10 +961,11 @@ export class RemoteDeviceAuthorityStore {
   authorizeAudited(
     deviceId: DeviceId,
     requiredScope: RemoteDeviceScope,
+    sessionId?: SessionId,
   ): Promise<RemoteAuthorizationContext> {
     return this.serialize(async () => {
       try {
-        return this.authorize(deviceId, requiredScope);
+        return this.authorize(deviceId, requiredScope, sessionId);
       } catch (cause) {
         if (cause instanceof RemoteAuthorityError) {
           await this.appendAuditLocked({
@@ -864,11 +986,12 @@ export class RemoteDeviceAuthorityStore {
     requiredScope: RemoteDeviceScope,
     start: (context: RemoteAuthorizationContext) => StartedAuthorizedOperation<Result>,
     onAccepted?: () => void,
+    sessionId?: SessionId,
   ): Promise<Result> {
     const admitted = this.serialize(async () => {
       let context: RemoteAuthorizationContext;
       try {
-        context = this.authorize(deviceId, requiredScope);
+        context = this.authorize(deviceId, requiredScope, sessionId);
       } catch (cause) {
         if (cause instanceof RemoteAuthorityError) {
           await this.appendAuditLocked({
@@ -890,6 +1013,192 @@ export class RemoteDeviceAuthorityStore {
       onAccepted?.();
       return completion;
     });
+  }
+
+  get sharesGeneration(): number {
+    return this.#sharesGeneration;
+  }
+
+  /** The sessions shared with `deviceId`, oldest share first; none for a revoked device. */
+  shares(deviceId: DeviceId): readonly RemoteShareRecord[] {
+    const record = this.devices.get(deviceId);
+    if (record === undefined || revoked(record)) return [];
+    return (record.shares ?? []).map((share) => ({ ...share }));
+  }
+
+  /** Every device with at least one shared session. */
+  sharingDevices(): readonly DeviceId[] {
+    return [...this.devices.values()]
+      .filter((record) => !revoked(record) && (record.shares?.length ?? 0) > 0)
+      .map((record) => record.deviceId);
+  }
+
+  /** Notified after any durable change to a device's shared sessions, including revocation. */
+  onSharesChanged(listener: (deviceId: DeviceId) => void): () => void {
+    this.shareListeners.add(listener);
+    return () => this.shareListeners.delete(listener);
+  }
+
+  /** Share a session with a paired device. Sharing a shared session counts as activity. */
+  shareSession(deviceId: DeviceId, sessionId: SessionId, now = Date.now()): Promise<void> {
+    const occurredAt = nonNegativeInteger(now, "now");
+    let added = false;
+    return this.mutate(
+      (devices) => {
+        const record = devices.get(deviceId);
+        if (record === undefined) {
+          throw new RemoteAuthorityError("unknown_device", "Device is not locally paired");
+        }
+        if (revoked(record)) throw new RemoteAuthorityError("device_revoked", "Device is revoked");
+        const shares = record.shares ?? [];
+        const existing = shares.find((share) => share.sessionId === sessionId);
+        if (existing === undefined && shares.length >= MAX_REMOTE_SHARES) {
+          throw new RemoteAuthorityError(
+            "share_limit_reached",
+            `A device can hold at most ${MAX_REMOTE_SHARES} shared sessions`,
+          );
+        }
+        added = existing === undefined;
+        devices.set(deviceId, {
+          ...record,
+          shares:
+            existing === undefined
+              ? [
+                  ...shares,
+                  {
+                    sessionId,
+                    sharedAt: occurredAt,
+                    lastActivityAt: occurredAt,
+                    localGeneration: record.local.generation,
+                  },
+                ]
+              : shares.map((share) =>
+                  share === existing ? { ...share, lastActivityAt: occurredAt } : share,
+                ),
+        });
+        return devices;
+      },
+      () =>
+        added
+          ? { occurredAt, code: "session_shared", actorDeviceId: deviceId, sessionId }
+          : undefined,
+    ).then(() => {
+      if (added) this.publishShareChange(deviceId);
+    });
+  }
+
+  /** End one device's share of a session. Resolves false when it was not shared. */
+  endShare(
+    deviceId: DeviceId,
+    sessionId: SessionId,
+    reason: RemoteShareEndReason,
+    now = Date.now(),
+  ): Promise<boolean> {
+    return this.endShares(
+      (candidate, share) => candidate === deviceId && share.sessionId === sessionId,
+      reason,
+      now,
+    ).then((ended) => ended.length > 0);
+  }
+
+  /** End every device's share of a session, for a deleted session. */
+  endSessionShares(
+    sessionId: SessionId,
+    reason: RemoteShareEndReason,
+    now = Date.now(),
+  ): Promise<void> {
+    return this.endShares((_, share) => share.sessionId === sessionId, reason, now).then(
+      () => undefined,
+    );
+  }
+
+  /**
+   * End every share whose session `idle` reports as idle since its recorded activity. `idle` sees
+   * the share and its recorded activity, and decides with what it knows about the session.
+   */
+  endIdleShares(
+    idle: (deviceId: DeviceId, share: RemoteShareRecord) => boolean,
+    now = Date.now(),
+  ): Promise<void> {
+    return this.endShares(idle, "idle", now).then(() => undefined);
+  }
+
+  /**
+   * Record activity in a shared session. The record keeps it to within a minute, so most calls
+   * change nothing and write nothing.
+   */
+  touchShare(deviceId: DeviceId, sessionId: SessionId, now = Date.now()): Promise<void> {
+    const at = nonNegativeInteger(now, "now");
+    const current = this.devices
+      .get(deviceId)
+      ?.shares?.find((share) => share.sessionId === sessionId);
+    if (current === undefined || at - current.lastActivityAt < SHARE_ACTIVITY_RESOLUTION_MS) {
+      return Promise.resolve();
+    }
+    return this.mutate((devices) => {
+      const record = devices.get(deviceId);
+      if (record?.shares === undefined) return devices;
+      devices.set(deviceId, {
+        ...record,
+        shares: record.shares.map((share) =>
+          share.sessionId === sessionId && share.lastActivityAt < at
+            ? { ...share, lastActivityAt: at }
+            : share,
+        ),
+      });
+      return devices;
+    });
+  }
+
+  private endShares(
+    ended: (deviceId: DeviceId, share: RemoteShareRecord) => boolean,
+    reason: RemoteShareEndReason,
+    now: number,
+  ): Promise<readonly { readonly deviceId: DeviceId; readonly sessionId: SessionId }[]> {
+    const occurredAt = nonNegativeInteger(now, "now");
+    const removed: { readonly deviceId: DeviceId; readonly sessionId: SessionId }[] = [];
+    return this.serialize(async () => {
+      const next = new Map(this.devices);
+      let audit = this.audit;
+      for (const [deviceId, record] of this.devices) {
+        const updated = withoutShares(record, (share) => ended(deviceId, share));
+        if (updated === record) continue;
+        next.set(deviceId, updated);
+        for (const share of record.shares ?? []) {
+          if (!ended(deviceId, share)) continue;
+          removed.push({ deviceId, sessionId: share.sessionId });
+          audit = appendAudit(audit, {
+            occurredAt,
+            code: "session_unshared",
+            actorDeviceId: deviceId,
+            sessionId: share.sessionId,
+            shareEnd: reason,
+          });
+        }
+      }
+      if (removed.length === 0) return removed;
+      await writeAtomic(this.path, {
+        version: AUTHORITY_FORMAT_VERSION,
+        installationId: this.installationId,
+        devices: [...next.values()].sort((left, right) =>
+          left.deviceId.localeCompare(right.deviceId),
+        ),
+        audit,
+      });
+      this.devices = next;
+      this.audit = audit;
+      return removed;
+    }).then((result) => {
+      for (const deviceId of new Set(result.map((entry) => entry.deviceId))) {
+        this.publishShareChange(deviceId);
+      }
+      return result;
+    });
+  }
+
+  private publishShareChange(deviceId: DeviceId): void {
+    this.#sharesGeneration += 1;
+    for (const listener of this.shareListeners) listener(deviceId);
   }
 
   private publishRevocation(deviceId: DeviceId): void {

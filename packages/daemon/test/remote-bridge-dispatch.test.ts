@@ -593,6 +593,7 @@ async function startDaemon(context: TestContext) {
 test("the daemon reports journal acceptance before the remote result", async (context) => {
   const { daemon, authority, cwd } = await startDaemon(context);
   const sessionId = parseSessionId((await daemon.sessions.create(cwd)).sessionId);
+  await authority.shareSession(deviceId, sessionId);
   const attachment = daemon.attachAuthenticatedRemoteDevice({ deviceId, authority, send() {} });
   context.after(() => attachment.close());
   const order: string[] = [];
@@ -617,6 +618,7 @@ test("the daemon reports journal acceptance before the remote result", async (co
 test("losing observe ends a remote device's subscriptions", async (context) => {
   const { daemon, authority, cwd } = await startDaemon(context);
   const sessionId = parseSessionId((await daemon.sessions.create(cwd)).sessionId);
+  await authority.shareSession(deviceId, sessionId);
   const deliveries: ServerMessage[] = [];
   const attachment = daemon.attachAuthenticatedRemoteDevice({
     deviceId,
@@ -658,4 +660,199 @@ test("losing observe ends a remote device's subscriptions", async (context) => {
     }),
     (error) => error instanceof RemoteAuthorityError && error.code === "scope_forbidden",
   );
+});
+
+const code = (expected: string) => (error: unknown) =>
+  (error as { readonly code?: unknown }).code === expected;
+
+test("a remote device reaches only the sessions shared with it", async (context) => {
+  const { daemon, authority, cwd } = await startDaemon(context);
+  const shared = parseSessionId((await daemon.sessions.create(cwd)).sessionId);
+  const other = parseSessionId((await daemon.sessions.create(cwd)).sessionId);
+  const unknown = parseSessionId("99999999-9999-4999-8999-999999999999");
+  await authority.shareSession(deviceId, shared);
+  const attachment = daemon.attachAuthenticatedRemoteDevice({ deviceId, authority, send() {} });
+  context.after(() => attachment.close());
+  let next = 0;
+  const request = (method: string, params: Record<string, unknown>) =>
+    attachment.request({
+      deviceId,
+      requestId: `90000000-aaaa-4aaa-8aaa-${(next++).toString(16).padStart(12, "0")}`,
+      method,
+      params,
+      ...(method === "session.send" || method === "session.interrupt"
+        ? { idempotencyKey: `90000000-bbbb-4bbb-8bbb-${next.toString(16).padStart(12, "0")}` }
+        : {}),
+    });
+
+  // An unshared session and one that does not exist are refused the same way.
+  for (const sessionId of [other, unknown]) {
+    await assert.rejects(request("session.subscribe", { sessionId }), code("session_not_shared"));
+    await assert.rejects(
+      request("session.send", {
+        sessionId,
+        content: [{ type: "text", text: "hello" }],
+        delivery: "prompt",
+      }),
+      code("session_not_shared"),
+    );
+    await assert.rejects(request("session.interrupt", { sessionId }), code("session_not_shared"));
+  }
+  await assert.rejects(
+    request("session.list", { scope: "all_local", order: "recent", pageSize: 10 }),
+    code("remote_method_forbidden"),
+  );
+  const listed = await request("remote.shares", {});
+  const shares = (listed.result as { shares: { sessionId: string }[] }).shares;
+  assert.deepEqual(
+    shares.map((share) => share.sessionId),
+    [shared],
+  );
+  const subscribed = await request("session.subscribe", { sessionId: shared });
+  assert.equal(typeof (subscribed.result as { subscriptionId: unknown }).subscriptionId, "string");
+  assert.ok(
+    authority
+      .auditEntries()
+      .some(
+        (event) => event.code === "authorization_denied" && event.reason === "session_not_shared",
+      ),
+  );
+});
+
+test("ending a share closes the device's subscriptions and sends the new set", async (context) => {
+  const { daemon, authority, cwd } = await startDaemon(context);
+  const sessionId = parseSessionId((await daemon.sessions.create(cwd)).sessionId);
+  await authority.shareSession(deviceId, sessionId);
+  const deliveries: ServerMessage[] = [];
+  const attachment = daemon.attachAuthenticatedRemoteDevice({
+    deviceId,
+    authority,
+    send: (message) => deliveries.push(message),
+  });
+  context.after(() => attachment.close());
+  const subscribed = await attachment.request({
+    deviceId,
+    requestId: "a0000000-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    method: "session.subscribe",
+    params: { sessionId },
+  });
+  const { subscriptionId, snapshot } = subscribed.result as {
+    subscriptionId: string;
+    snapshot: { boundaryCursor: string };
+  };
+  await attachment.request({
+    deviceId,
+    requestId: "a0000001-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    method: "session.ack",
+    params: { subscriptionId, cursor: snapshot.boundaryCursor },
+  });
+  await daemon.sessions.send(sessionId, [{ type: "text", text: "first" }]);
+  await waitFor("live events while shared", () =>
+    deliveries.some((message) => "kind" in message && message.kind === "event"),
+  );
+
+  const generation = authority.sharesGeneration;
+  assert.equal(await authority.endShare(deviceId, sessionId, "stopped"), true);
+  await waitFor("the share notice", () =>
+    deliveries.some((message) => "kind" in message && message.kind === "remote_shares"),
+  );
+  const notice = deliveries.find(
+    (message) => "kind" in message && message.kind === "remote_shares",
+  );
+  assert.ok(notice !== undefined && "kind" in notice && notice.kind === "remote_shares");
+  assert.deepEqual(notice.shares, []);
+  assert.ok(notice.generation > generation);
+
+  const before = deliveries.length;
+  await daemon.sessions.send(sessionId, [{ type: "text", text: "second" }]);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(deliveries.length, before, "no event reaches a device after its share ends");
+  await assert.rejects(
+    attachment.request({
+      deviceId,
+      requestId: "a0000002-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      method: "session.subscribe",
+      params: { sessionId, after: snapshot.boundaryCursor },
+    }),
+    code("session_not_shared"),
+  );
+  await assert.rejects(
+    attachment.request({
+      deviceId,
+      requestId: "a0000003-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      method: "session.ack",
+      params: { subscriptionId, cursor: snapshot.boundaryCursor },
+    }),
+    code("unknown_subscription"),
+  );
+  const ended = authority.auditEntries().find((event) => event.code === "session_unshared");
+  assert.equal(ended?.sessionId, sessionId);
+  assert.equal(ended?.shareEnd, "stopped");
+});
+
+test("deleting a session ends its share", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-bridge-share-delete-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const dataDirectory = join(root, "data");
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.registerLocalDevice(deviceId, ["observe", "steer"]);
+  await authority.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
+  const daemon = new AxlDaemon({
+    socketPath: join(root, "daemon.sock"),
+    dataDirectory,
+    securityMode: "sandboxed",
+    sandboxProvider: "fixture",
+    remoteAuthority: authority,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry(), system: "test" }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  const sessionId = parseSessionId((await daemon.sessions.create(await realpath(root))).sessionId);
+  await authority.shareSession(deviceId, sessionId);
+  // Share a session that no longer exists, as if it was deleted while the daemon was stopped.
+  const missing = parseSessionId("88888888-8888-4888-8888-888888888888");
+  await authority.shareSession(deviceId, missing, Date.now() - 25 * 60 * 60_000);
+
+  await daemon.sessions.delete(sessionId);
+  await authority.endSessionShares(sessionId, "deleted");
+  assert.deepEqual(
+    authority.shares(deviceId).map((share) => share.sessionId),
+    [missing],
+  );
+  await daemon.stop();
+});
+
+test("the daemon ends a day-old share of a missing session when it starts", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-bridge-share-sweep-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const dataDirectory = join(root, "data");
+  const authority = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  await authority.registerLocalDevice(deviceId, ["observe", "steer"]);
+  await authority.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
+  const day = 24 * 60 * 60_000;
+  const missing = parseSessionId("88888888-8888-4888-8888-888888888888");
+  const recent = parseSessionId("77777777-7777-4777-8777-777777777777");
+  await authority.shareSession(deviceId, missing, Date.now() - day - 60_000);
+  // A share with recent activity stays, whatever its session's log says.
+  await authority.shareSession(deviceId, recent, Date.now() - 60_000);
+  const daemon = new AxlDaemon({
+    socketPath: join(root, "daemon.sock"),
+    dataDirectory,
+    securityMode: "sandboxed",
+    sandboxProvider: "fixture",
+    remoteAuthority: authority,
+    runtime: () => ({ model: replyPort(), tools: new ToolRegistry(), system: "test" }),
+  });
+  await daemon.start();
+  context.after(() => daemon.stop());
+  await waitFor("the startup sweep", () =>
+    authority.shares(deviceId).every((share) => share.sessionId !== missing),
+  );
+  assert.deepEqual(
+    authority.shares(deviceId).map((share) => share.sessionId),
+    [recent],
+  );
+  const ended = authority.auditEntries().find((event) => event.code === "session_unshared");
+  assert.equal(ended?.sessionId, missing);
+  assert.equal(ended?.shareEnd, "deleted");
 });

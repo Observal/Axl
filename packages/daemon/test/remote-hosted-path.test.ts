@@ -325,6 +325,8 @@ test(
     await authority.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
     const created = await daemon.sessions.create(cwd);
     const sessionId = parseSessionId(created.sessionId);
+    // The device reaches only shared sessions.
+    await authority.shareSession(deviceId, sessionId);
     let attachment: AuthenticatedRemoteAttachment = daemon.attachAuthenticatedRemoteDevice({
       deviceId,
       authority,

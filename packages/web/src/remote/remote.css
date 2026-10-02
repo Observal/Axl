@@ -233,6 +233,26 @@ svg {
   display: none;
 }
 
+/* A session shared while another conversation is open. */
+.remote-banner {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 8px max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left));
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--panel);
+  font-size: 14px;
+}
+
+.remote-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .remote-list {
   display: grid;
   gap: 8px;

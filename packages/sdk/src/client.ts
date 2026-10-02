@@ -267,11 +267,45 @@ export class AxlClient {
     return this.request("daemon.info", {}, options);
   }
 
-  /** Start pairing a remote device; resolves with the one-time pairing link. Local clients only. */
+  /**
+   * Start pairing a remote device; resolves with the one-time pairing link.  is
+   * shared with the device once it pairs. Local clients only.
+   */
   startRemotePairing(
+    params: RpcParams<"remote.pairing.start"> = {},
     options: Omit<RequestOptions, "idempotencyKey"> = {},
   ): Promise<RpcResult<"remote.pairing.start">> {
-    return this.request("remote.pairing.start", {}, options);
+    return this.request("remote.pairing.start", params, options);
+  }
+
+  /** Share a session with the paired device; resolves with every shared session. Local only. */
+  shareRemoteSession(
+    sessionId: SessionId,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.share">> {
+    return this.request("remote.share", { sessionId }, options);
+  }
+
+  /** Stop sharing a session with the paired device. Local clients only. */
+  unshareRemoteSession(
+    sessionId: SessionId,
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.unshare">> {
+    return this.request("remote.unshare", { sessionId }, options);
+  }
+
+  /** The sessions shared with the paired device. */
+  remoteShares(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.shares">> {
+    return this.request("remote.shares", {}, options);
+  }
+
+  /** Remove the paired device, which ends every share. Local clients only. */
+  unpairRemote(
+    options: Omit<RequestOptions, "idempotencyKey"> = {},
+  ): Promise<RpcResult<"remote.unpair">> {
+    return this.request("remote.unpair", {}, options);
   }
 
   /** Report the local remote host: pairing phase, relay, device presence. Local clients only. */

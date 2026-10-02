@@ -15,6 +15,10 @@
  * connection is admitted with a signature by that key. Replica trust is pinned into the binding
  * build, never taken from the link.
  *
+ * The phone reaches only the sessions the terminal shares with it (`/remote` in a session). The
+ * daemon sends the whole shared set whenever it changes: a new share opens at once, or shows a
+ * banner while another conversation is open, and a conversation whose share ended closes.
+ *
  * An open conversation renders with the desktop client's transcript renderer, and the reply the
  * model is producing streams in as it arrives. A prompt shows at once and settles when the daemon
  * records it, since every encrypted round trip costs witness calls on both ends.
@@ -47,10 +51,11 @@ import {
   type RemoteDeviceKey,
   type RemotePairingLink,
   RemoteRelayConnection,
+  type RemoteShare,
+  type RemoteSharesResult,
   remoteDeviceKeyFromPair,
   remoteDevicePossession,
   type ServerMessage,
-  type SessionSummary,
   uuidToBytes,
 } from "@axl/sdk";
 
@@ -121,8 +126,6 @@ const TAB_CHANNEL = "axl-remote-tabs";
 const ACK_DELAY_MS = 10_000;
 /** A sent prompt the transcript never showed stops being drawn as pending after this long. */
 const PENDING_SETTLE_MS = 15_000;
-/** A burst of session changes refreshes the list once. */
-const LIST_REFRESH_DELAY_MS = 400;
 const TAB_ID = crypto.randomUUID();
 const STEP_LABELS: Readonly<Record<RemoteBrowserPairingStep, string>> = {
   claim: "Create this device's pairing claim",
@@ -152,6 +155,10 @@ const view = {
   pairing: element<HTMLElement>("pairing"),
   steps: element<HTMLOListElement>("steps"),
   hint: element<HTMLParagraphElement>("pairing-hint"),
+  banner: element<HTMLDivElement>("share-banner"),
+  bannerText: element<HTMLSpanElement>("share-banner-text"),
+  bannerOpen: element<HTMLButtonElement>("share-banner-open"),
+  bannerClose: element<HTMLButtonElement>("share-banner-close"),
   sessions: element<HTMLElement>("sessions"),
   sessionList: element<HTMLUListElement>("session-list"),
   thread: element<HTMLElement>("thread"),
@@ -191,7 +198,7 @@ function show(section: "sign-in" | "pairing" | "sessions" | "thread"): void {
   view.thread.hidden = section !== "thread";
   view.back.hidden = section !== "thread";
   view.refresh.hidden = section !== "sessions";
-  if (section === "sessions") view.title.textContent = "Sessions";
+  if (section === "sessions") view.title.textContent = "Shared sessions";
   else if (section === "pairing") view.title.textContent = "Axl Remote";
 }
 
@@ -211,6 +218,11 @@ function ago(timestamp: number): string {
 function shortPath(cwd: string): string {
   const parts = cwd.split(/[\\/]/u).filter((part) => part.length > 0);
   return parts.length <= 2 ? cwd : `…/${parts.slice(-2).join("/")}`;
+}
+
+/** What the list and the header call a shared session. */
+function shareLabel(share: RemoteShare): string {
+  return share.title ?? share.preview ?? shortPath(share.cwd);
 }
 
 function contentText(
@@ -430,6 +442,7 @@ const REFUSALS: Readonly<Record<string, string>> = {
   enrollment_expired: "this pairing link expired. Run /remote again for a new one.",
   enrollment_denied: "this pairing link is not valid. Run /remote again for a new one.",
   timeout: "the daemon did not answer in time.",
+  session_not_shared: "this session is no longer shared. Run /remote in it to share it again.",
   lifecycle_busy:
     "this pairing is open in another tab or window that did not let go. Close it, then tap Retry.",
 };
@@ -446,14 +459,20 @@ class RemotePage {
   #projector: ConversationProjector | undefined;
   #subscriptionId: string | undefined;
   #sessionId: string | undefined;
-  #summary: SessionSummary | undefined;
+  #share: RemoteShare | undefined;
   #ackTimer: ReturnType<typeof setTimeout> | undefined;
   #lastCursor: string | undefined;
   /** The newest cursor the daemon confirmed; only an acknowledged cursor can resume a view. */
   #ackedCursor: string | undefined;
-  /** The session list request in flight; refreshes and reconnects share it. */
+  /** The share list request in flight; refreshes and reconnects share it. */
   #listing: Promise<void> | undefined;
-  #listRefresh: ReturnType<typeof setTimeout> | undefined;
+  /** The shared sessions, newest share first, from the newest set the daemon sent. */
+  #shares: readonly RemoteShare[] = [];
+  #generation = -1;
+  /** Sessions the page has seen shared; unset until the first set arrives. */
+  #seen: Set<string> | undefined;
+  /** A share announced while another conversation is open. */
+  #banner: RemoteShare | undefined;
   /** Prompts sent from this page that the transcript does not show yet. */
   #pending: PendingPrompt[] = [];
   /** Redraws the running turn's elapsed time while one is running. */
@@ -468,6 +487,12 @@ class RemotePage {
     session.onReconnect(() => void this.#resume());
     view.refresh.addEventListener("click", () => void this.listSessions());
     view.back.addEventListener("click", () => void this.leaveThread());
+    view.bannerOpen.addEventListener("click", () => {
+      const share = this.#banner;
+      this.#hideBanner();
+      if (share !== undefined) void this.openThread(share);
+    });
+    view.bannerClose.addEventListener("click", () => this.#hideBanner());
     view.jump.addEventListener("click", () => this.#renderer?.jumpToLatest());
     view.composer.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -493,16 +518,17 @@ class RemotePage {
     view.thread.style.setProperty("--composer-height", `${view.composer.offsetHeight}px`);
   }
 
+  /** Show the shared sessions, reading the current set from the daemon. */
   listSessions(): Promise<void> {
     show("sessions");
-    this.#listing ??= this.#listSessions().finally(() => {
+    this.#listing ??= this.#loadShares().finally(() => {
       this.#listing = undefined;
     });
     return this.#listing;
   }
 
-  async #listSessions(): Promise<void> {
-    status("Loading sessions");
+  async #loadShares(): Promise<void> {
+    status("Loading shared sessions");
     if (view.sessionList.childElementCount === 0) {
       view.sessionList.replaceChildren(
         ...[0, 1, 2].map(() => {
@@ -513,65 +539,107 @@ class RemotePage {
       );
     }
     try {
-      const result = (await this.#request("session.list", {
-        scope: "all_local",
-        order: "recent",
-        pageSize: 30,
-      })) as { readonly sessions: readonly SessionSummary[] };
-      if (result.sessions.length === 0) {
-        const empty = document.createElement("li");
-        empty.className = "remote-empty";
-        empty.textContent = "No sessions yet. Start one in the Axl terminal.";
-        view.sessionList.replaceChildren(empty);
-      } else {
-        view.sessionList.replaceChildren(
-          ...result.sessions.map((summary) => {
-            const item = document.createElement("li");
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "remote-session";
-            const title = document.createElement("span");
-            title.className = "remote-session-title";
-            title.textContent =
-              summary.title ?? summary.lastUserMessage ?? summary.firstUserMessage ?? "New session";
-            const time = document.createElement("time");
-            time.className = "remote-session-time";
-            time.dateTime = new Date(summary.updatedAt).toISOString();
-            time.textContent = ago(summary.updatedAt);
-            const detail = document.createElement("span");
-            detail.className = "remote-session-detail";
-            detail.textContent = shortPath(summary.cwd);
-            button.append(title, time, detail);
-            button.addEventListener("click", () => void this.openThread(summary));
-            item.append(button);
-            return item;
-          }),
-        );
-      }
-      status(result.sessions.length === 0 ? "No sessions yet" : "Connected");
+      await this.#fetchShares();
+      status(this.#shares.length === 0 ? "Nothing shared yet" : "Connected");
     } catch (cause) {
-      status(`Could not list sessions: ${describe(cause)}`, "error");
+      status(`Could not load shared sessions: ${describe(cause)}`, "error");
     }
   }
 
-  /** Refresh a visible session list once a burst of changes settles. */
-  #scheduleListRefresh(): void {
-    if (view.sessions.hidden || this.#listRefresh !== undefined) return;
-    this.#listRefresh = setTimeout(() => {
-      this.#listRefresh = undefined;
-      if (!view.sessions.hidden) void this.listSessions();
-    }, LIST_REFRESH_DELAY_MS);
+  async #fetchShares(): Promise<void> {
+    this.#applyShares((await this.#request("remote.shares", {})) as RemoteSharesResult);
   }
 
-  async openThread(summary: SessionSummary): Promise<void> {
+  /**
+   * Take a shared set, from a reply or a notice; one older than the page has is ignored. A session
+   * shared since the last set opens at once, or shows a banner while another conversation is open.
+   * On the first set, the newest share opens. A conversation whose share ended closes.
+   */
+  #applyShares(result: RemoteSharesResult): void {
+    if (result.generation < this.#generation) return;
+    this.#generation = result.generation;
+    const seen = this.#seen;
+    this.#shares = [...result.shares].sort((left, right) => right.sharedAt - left.sharedAt);
+    const shared = new Set<string>(this.#shares.map((share) => share.sessionId));
+    this.#seen = new Set([...(seen ?? []), ...shared]);
+    this.#renderShares();
+    if (this.#banner !== undefined && !shared.has(this.#banner.sessionId)) this.#hideBanner();
+    const current = this.#sessionId;
+    if (current !== undefined && !shared.has(current)) {
+      this.#closeThread("That session is no longer shared");
+    }
+    const fresh = this.#shares.find((share) => seen === undefined || !seen.has(share.sessionId));
+    if (fresh === undefined) return;
+    if (this.#sessionId === undefined) void this.openThread(fresh);
+    else if (fresh.sessionId !== this.#sessionId) this.#showBanner(fresh);
+  }
+
+  #renderShares(): void {
+    if (this.#shares.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "remote-empty";
+      empty.textContent = "Run /remote in a session to open it here.";
+      view.sessionList.replaceChildren(empty);
+      return;
+    }
+    view.sessionList.replaceChildren(
+      ...this.#shares.map((share) => {
+        const item = document.createElement("li");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "remote-session";
+        const title = document.createElement("span");
+        title.className = "remote-session-title";
+        title.textContent = shareLabel(share);
+        const time = document.createElement("time");
+        time.className = "remote-session-time";
+        time.dateTime = new Date(share.updatedAt).toISOString();
+        time.textContent = ago(share.updatedAt);
+        const detail = document.createElement("span");
+        detail.className = "remote-session-detail";
+        detail.textContent = shortPath(share.cwd);
+        button.append(title, time, detail);
+        button.addEventListener("click", () => void this.openThread(share));
+        item.append(button);
+        return item;
+      }),
+    );
+  }
+
+  #showBanner(share: RemoteShare): void {
+    this.#banner = share;
+    view.bannerText.textContent = `Shared from your computer: ${shareLabel(share)}`;
+    view.banner.hidden = false;
+  }
+
+  #hideBanner(): void {
+    this.#banner = undefined;
+    view.banner.hidden = true;
+  }
+
+  /** Leave a conversation the daemon no longer shares; its subscription already ended there. */
+  #closeThread(reason: string): void {
+    this.#subscriptionId = undefined;
+    this.#sessionId = undefined;
+    this.#share = undefined;
+    this.#ackedCursor = undefined;
+    this.#projector = undefined;
+    this.#pending = [];
+    this.#renderActivity();
+    show("sessions");
+    status(reason);
+  }
+
+  async openThread(share: RemoteShare): Promise<void> {
     // Take over the view before any round trip, so a prompt sent while the thread reopens after a
     // reconnect goes to this session instead of being dropped.
     const previous = this.#subscriptionId;
     this.#subscriptionId = undefined;
-    this.#sessionId = summary.sessionId;
-    this.#summary = summary;
+    this.#sessionId = share.sessionId;
+    this.#share = share;
+    if (this.#banner?.sessionId === share.sessionId) this.#hideBanner();
     this.#ackedCursor = undefined;
-    this.#projector = new ConversationProjector(summary.sessionId);
+    this.#projector = new ConversationProjector(share.sessionId);
     this.#pending = [];
     if (previous !== undefined) {
       void this.#request("session.unsubscribe", { subscriptionId: previous }).catch(
@@ -579,11 +647,7 @@ class RemotePage {
       );
     }
     show("thread");
-    view.title.textContent =
-      summary.title ??
-      summary.lastUserMessage ??
-      summary.firstUserMessage ??
-      shortPath(summary.cwd);
+    view.title.textContent = shareLabel(share);
     status("Opening session");
     this.#renderer ??= new (await threadView).ThreadRenderer(
       view.threadView,
@@ -598,7 +662,7 @@ class RemotePage {
     try {
       const subscribe = async () =>
         (await this.#request("session.subscribe", {
-          sessionId: summary.sessionId,
+          sessionId: share.sessionId,
         })) as SessionSubscription;
       let subscribed: SessionSubscription;
       try {
@@ -608,7 +672,7 @@ class RemotePage {
         if ((cause as { readonly code?: unknown }).code !== "unknown_session") throw cause;
         // Sessions close when the daemon restarts; reopening needs steer, so an observe-only phone
         // skips it and can still watch sessions that are open on the laptop.
-        await this.#request("session.resume", { sessionId: summary.sessionId }).catch(
+        await this.#request("session.resume", { sessionId: share.sessionId }).catch(
           (cause: unknown) => {
             const code = (cause as { readonly code?: unknown }).code;
             if (code !== "unsafe_remote_forbidden" && code !== "scope_forbidden") throw cause;
@@ -641,6 +705,12 @@ class RemotePage {
       this.#render();
       status("Connected");
     } catch (cause) {
+      if (this.#sessionId !== share.sessionId) return;
+      if ((cause as { readonly code?: unknown }).code === "session_not_shared") {
+        this.#closeThread("That session is no longer shared");
+        void this.#fetchShares().catch(() => undefined);
+        return;
+      }
       status(`Could not open the session: ${describe(cause)}`, "error");
     }
   }
@@ -649,7 +719,7 @@ class RemotePage {
     const subscriptionId = this.#subscriptionId;
     this.#subscriptionId = undefined;
     this.#sessionId = undefined;
-    this.#summary = undefined;
+    this.#share = undefined;
     this.#ackedCursor = undefined;
     this.#projector = undefined;
     this.#pending = [];
@@ -667,8 +737,8 @@ class RemotePage {
       `server ${"kind" in message ? message.kind : "?"} ${"subscriptionId" in message ? (message.subscriptionId === this.#subscriptionId ? "current" : "other") : "-"} ${"event" in message ? message.event.type : ""}`,
     );
     if (!("kind" in message)) return;
-    if (message.kind === "sessions_changed") {
-      this.#scheduleListRefresh();
+    if (message.kind === "remote_shares") {
+      this.#applyShares(message);
       return;
     }
     if (this.#projector === undefined) return;
@@ -730,20 +800,22 @@ class RemotePage {
       await this.listSessions();
       return;
     }
-    const summary = this.#summary;
+    // A notice sent while the page was away is lost; read the set again behind the conversation.
+    void this.#fetchShares().catch(() => undefined);
+    const share = this.#share;
     const previous = this.#subscriptionId;
     const after = this.#ackedCursor;
-    if (summary === undefined) return;
+    if (share === undefined) return;
     if (previous === undefined) {
       // Opening the session failed while the daemon was away; try again now that it is back.
-      await this.openThread(summary);
+      await this.openThread(share);
       return;
     }
     status("Catching up");
     try {
       if (after === undefined) throw new Error("No acknowledged cursor to resume from");
       const resumed = (await this.#request("session.subscribe", {
-        sessionId: summary.sessionId,
+        sessionId: share.sessionId,
         after,
       })) as { readonly subscriptionId: string };
       if (this.#subscriptionId !== previous) {
@@ -754,14 +826,14 @@ class RemotePage {
         return;
       }
       this.#subscriptionId = resumed.subscriptionId;
-      trace(`resumed ${summary.sessionId} after ${after}`);
+      trace(`resumed ${share.sessionId} after ${after}`);
       void this.#request("session.unsubscribe", { subscriptionId: previous }).catch(
         () => undefined,
       );
       status("Connected");
     } catch (cause) {
       trace(`resume from cursor failed: ${describe(cause)}`);
-      if (this.#subscriptionId === previous) await this.openThread(summary);
+      if (this.#subscriptionId === previous) await this.openThread(share);
     }
   }
 
@@ -1139,11 +1211,7 @@ async function main(): Promise<void> {
       relay,
       // Any answered request proves the daemon accepted the activation.
       confirm: async () => {
-        await session.request(
-          "session.list",
-          { scope: "all_local", order: "recent", pageSize: 1 },
-          CONFIRM_TIMEOUT_MS,
-        );
+        await session.request("remote.shares", {}, CONFIRM_TIMEOUT_MS);
       },
       onStep: renderSteps,
     });

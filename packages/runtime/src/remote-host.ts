@@ -19,6 +19,10 @@
  * the witness is briefly unreachable) is retried with backoff. A `/remote` that fails before it
  * replaces anything goes back to restoring the pairing it interrupted, and tells the terminal why.
  *
+ * The device reaches only the sessions shared with it. `/remote` from a session pairs a device and
+ * shares that session once the device activates; later shares and unpairing go through the daemon
+ * and its authority store.
+ *
  * The host writes its log to an owner-only `remote.log` beside its state, because a daemon started
  * by the terminal discards its output, and reports its phase, relay connection, and latest failure
  * through `remote.status`.
@@ -65,6 +69,7 @@ import {
   type RemoteDeviceScope,
   type RemotePairingStartResult,
   type RemoteStatusResult,
+  type SessionId,
 } from "@axl/protocol";
 import {
   createRemoteDeviceEnrollmentSecret,
@@ -252,6 +257,8 @@ interface Session {
   tail: Promise<void>;
   claimHash?: string;
   bridge?: WindowsRemoteE2eeBridge;
+  /** Shared with the device as soon as it activates this pairing. */
+  shareOnPair?: SessionId;
 }
 
 /** A fresh UUIDv7: 48-bit millisecond time, version 7, variant 10, random remainder. */
@@ -277,6 +284,21 @@ function released<T>(result: DaemonWitnessResult, name: string): T {
   return value as T;
 }
 
+async function readHostState(root: string): Promise<HostState | undefined> {
+  try {
+    const value = JSON.parse(await readFile(join(root, "host.json"), "utf8")) as HostState;
+    if (value.version !== STATE_VERSION) return undefined;
+    return {
+      version: STATE_VERSION,
+      cryptoSessionId: parseCryptoSessionId(value.cryptoSessionId),
+      deviceId: parseDeviceId(value.deviceId),
+      phase: value.phase === "paired" ? "paired" : "pairing",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export class HostedRemoteHost implements RemotePairingService {
   readonly #config: HostedRemoteSettings;
   readonly #root: string;
@@ -297,6 +319,8 @@ export class HostedRemoteHost implements RemotePairingService {
   #restoring = false;
   /** A failed `/remote` interrupted a pairing it never replaced; restore it once the start settles. */
   #restoreAfterStart = false;
+  /** The device of the completed pairing, whether or not its session is being served yet. */
+  #paired: DeviceId | undefined;
 
   private constructor(
     config: HostedRemoteSettings,
@@ -341,6 +365,8 @@ export class HostedRemoteHost implements RemotePairingService {
   /** Attach the running daemon and restore a completed pairing, if one exists. */
   async attach(daemon: AxlDaemon): Promise<void> {
     this.#daemon = daemon;
+    const state = await this.#readState();
+    if (state?.phase === "paired") this.#paired = state.deviceId;
     this.#restoreRun = this.#restore(0);
     await this.#restoreRun;
   }
@@ -425,8 +451,8 @@ export class HostedRemoteHost implements RemotePairingService {
       .catch(() => undefined);
   }
 
-  start(): Promise<RemotePairingStartResult> {
-    this.#starting ??= this.#start().finally(() => {
+  start(options: { readonly shareSessionId?: SessionId } = {}): Promise<RemotePairingStartResult> {
+    this.#starting ??= this.#start(options.shareSessionId).finally(() => {
       this.#starting = undefined;
       if (this.#restoreAfterStart) {
         this.#restoreAfterStart = false;
@@ -434,6 +460,30 @@ export class HostedRemoteHost implements RemotePairingService {
       }
     });
     return this.#starting;
+  }
+
+  pairedDevice(): DeviceId | undefined {
+    return this.#paired;
+  }
+
+  /**
+   * Remove the paired device: revoke it in the control plane and the authority store, which ends
+   * its shares, and forget the pairing so it is not restored. A pairing still waiting for its
+   * device is abandoned too.
+   */
+  async unpair(): Promise<boolean> {
+    await this.#starting?.catch(() => undefined);
+    this.#cancelRestore();
+    await this.#restoreRun;
+    await this.#closeSession();
+    const state = await this.#readState();
+    this.#paired = undefined;
+    if (state === undefined) return false;
+    await this.#retire(state.deviceId);
+    await rm(join(this.#root, "host.json"), { force: true });
+    await this.#prune();
+    this.#log(`remote: device ${state.deviceId} unpaired`);
+    return state.phase === "paired";
   }
 
   /** Stop retrying and close the current session. */
@@ -447,7 +497,7 @@ export class HostedRemoteHost implements RemotePairingService {
     return { authorization: `Bearer ${await this.#config.accessToken()}` };
   }
 
-  async #start(): Promise<RemotePairingStartResult> {
+  async #start(shareOnPair: SessionId | undefined): Promise<RemotePairingStartResult> {
     if (this.#daemon === undefined) throw new Error("The remote host is not attached");
     this.#cancelRestore();
     // `/remote` can arrive while the daemon is still restoring the previous pairing at startup.
@@ -463,12 +513,16 @@ export class HostedRemoteHost implements RemotePairingService {
       throw startFailure(cause, this.#config.origin, this.#logPath);
     }
     const previous = await this.#readState();
-    if (previous !== undefined) await this.#retire(previous.deviceId);
+    if (previous !== undefined) {
+      this.#paired = undefined;
+      await this.#retire(previous.deviceId);
+    }
     const cryptoSessionId = parseCryptoSessionId(uuidV7());
     const deviceId = parseDeviceId(uuidV7());
     const enrollmentSecret = createRemoteDeviceEnrollmentSecret();
     await this.#prune(cryptoSessionId);
     const session = await this.#openSession(cryptoSessionId, deviceId);
+    if (shareOnPair !== undefined) session.shareOnPair = shareOnPair;
     try {
       await this.#devices.invite(this.#config.installationId, deviceId, enrollmentSecret);
       const issued = await session.barrier.complete(await session.endpoint.issue(operation()));
@@ -664,7 +718,16 @@ export class HostedRemoteHost implements RemotePairingService {
       deviceId: session.deviceId,
       phase: "paired",
     });
+    this.#paired = session.deviceId;
     this.#log(`remote: device ${session.deviceId} paired`);
+    // Shared before the bridge serves the device, so its first request already sees the session.
+    if (session.shareOnPair !== undefined) {
+      await this.#authority
+        .shareSession(session.deviceId, session.shareOnPair)
+        .catch((cause: unknown) =>
+          this.#fail(`remote: could not share the session with the new device: ${describe(cause)}`),
+        );
+    }
     await this.#serve(session);
   }
 
@@ -760,7 +823,7 @@ export class HostedRemoteHost implements RemotePairingService {
   }
 
   /** Forget every session directory except `keep`. */
-  async #prune(keep: CryptoSessionId): Promise<void> {
+  async #prune(keep?: CryptoSessionId): Promise<void> {
     const sessions = join(this.#root, "sessions");
     for (const entry of await readdir(sessions).catch(() => [] as string[])) {
       if (entry !== keep) await rm(join(sessions, entry), { recursive: true, force: true });
@@ -768,18 +831,24 @@ export class HostedRemoteHost implements RemotePairingService {
   }
 
   async #readState(): Promise<HostState | undefined> {
-    try {
-      const value = JSON.parse(await readFile(join(this.#root, "host.json"), "utf8")) as HostState;
-      if (value.version !== STATE_VERSION) return undefined;
-      return {
-        version: STATE_VERSION,
-        cryptoSessionId: parseCryptoSessionId(value.cryptoSessionId),
-        deviceId: parseDeviceId(value.deviceId),
-        phase: value.phase === "paired" ? "paired" : "pairing",
-      };
-    } catch {
-      return undefined;
+    return readHostState(this.#root);
+  }
+
+  /**
+   * Forget the pairing stored in `root` while no daemon serves it: revoke its device in the
+   * authority store, which ends its shares, and remove the pairing so it is never restored.
+   * Resolves whether a device had paired.
+   */
+  static async forget(root: string, installationId: InstallationId): Promise<boolean> {
+    const state = await readHostState(root);
+    if (state === undefined) return false;
+    const authority = await RemoteDeviceAuthorityStore.open(root, installationId);
+    if (authority.snapshot(state.deviceId) !== undefined) {
+      await authority.revokeLocalDevice(state.deviceId);
     }
+    await rm(join(root, "host.json"), { force: true });
+    await rm(join(root, "sessions"), { recursive: true, force: true });
+    return state.phase === "paired";
   }
 
   async #writeState(state: HostState): Promise<void> {

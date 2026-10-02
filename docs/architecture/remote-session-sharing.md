@@ -28,10 +28,13 @@ In the terminal:
 - **Every later `/remote`:** no QR code. The session is shared, and the terminal says so: `Shared with your phone. /remote stop to stop sharing.`
 - **`/remote stop`:** stops sharing the current session.
 - **`/remote unpair`:** removes the phone. Every share ends with it.
+- **`/remote pair`:** shows a new QR code even with a phone paired, to replace that phone.
+- **`/remote status`:** also says how many sessions are shared and whether the current one is.
 
 On the phone:
 
 - An open page receives the share at once and opens that session. If the phone is already showing a conversation, it shows a banner for the new share instead of switching away.
+- A page that opens with sessions already shared opens the newest share.
 - The page lists only the sessions that are currently shared. With none, it says: `Run /remote in a session to open it here.`
 - When a share ends, the page closes that conversation and says it is no longer shared.
 - A closed page learns about a share through a push notification, if the person turned those on (see [Push notifications](#push-notifications)). Otherwise the share is there the next time the page opens.
@@ -71,13 +74,13 @@ Enforcement lives only in the daemon, the trusted endpoint. The relay and contro
 
 ### Share notices
 
-A new daemon-to-device message, `remote.shares`, carries the whole current share set: for each session its ID, title, working directory, and when it was shared. It is sent:
+The device reads the whole current share set with `remote.shares`, an `observe` request, and the daemon sends the same set as a `remote_shares` notice whenever it changes. For each session the set carries its ID, title, latest prompt shortened to one line (for a session without a title), working directory, when it was shared, and when it last changed. The page asks:
 
-- whenever the share set changes;
-- whenever the phone's relay route appears, so a phone that reconnects learns the current set; and
-- in reply to the device's first request after it connects.
+- when it opens;
+- whenever its relay connection comes back, so a notice sent while it was away is not lost; and
+- as the pairing's confirmation, the first request after the device activates.
 
-A notice is always the full set, never a delta, so a lost notice is repaired by the next one.
+A set is always the full set, never a delta, and carries a generation that increases with every change, so the page ignores a set older than one it has and a lost notice is repaired by the next one.
 
 ### When a share ends
 
@@ -86,7 +89,7 @@ A share ends when:
 - `/remote stop` runs in that session;
 - the session is deleted;
 - the phone is unpaired or replaced, or its device generation is revoked; or
-- the daemon's account signs out (`axl remote logout`); or
+- the daemon's account signs out (`axl remote logout`), which removes the phone through the running daemon, or on disk when no daemon serves the pairing; or
 - 24 hours pass with no activity in the shared session.
 
 Activity is any remote request for the session, any input to it from the terminal, and any event the session itself records, so a turn that runs for hours never idles out. The share entry keeps the time of its last activity, written at most once a minute, and the daemon checks it once a minute and at startup. A share that idled out while the daemon was stopped ends when the daemon starts.

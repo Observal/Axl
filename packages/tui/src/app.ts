@@ -31,6 +31,7 @@ import type {
   ProviderInventoryGroup,
   ProviderLoginMethod,
   ProviderTextModel,
+  RemoteSharesResult,
   RemoteStatusResult,
   SessionId,
   SessionOpenResult,
@@ -407,7 +408,10 @@ const TUI_COMMANDS: readonly { readonly name: string; readonly description: stri
   { name: "history", description: "search prompt history" },
   { name: "edit", description: "open the prompt in VISUAL or EDITOR" },
   { name: "web", description: "open this session in the browser" },
-  { name: "remote", description: "pair a phone browser, or /remote status to check it" },
+  {
+    name: "remote",
+    description: "open this session on your phone; /remote stop, unpair, pair, or status",
+  },
   { name: "hotkeys", description: "browse and search keyboard shortcuts" },
   { name: "help", description: "show commands and keys" },
   { name: "detach", description: "leave the session running in the daemon" },
@@ -1301,8 +1305,11 @@ export class AxlApp {
     return true;
   }
 
-  /** `/remote status`: the phone pairing, the daemon's relay connection, and the latest failure. */
-  private remoteStatusLines(status: RemoteStatusResult): string[] {
+  /**
+   * `/remote status`: the phone pairing, the daemon's relay connection, what is shared, and the
+   * latest failure.
+   */
+  private remoteStatusLines(status: RemoteStatusResult, shares?: RemoteSharesResult): string[] {
     const { accent, dim, error } = this.view.palette;
     const good = this.view.palette.success ?? ((text: string) => text);
     const warn = this.view.palette.warning ?? ((text: string) => text);
@@ -1319,6 +1326,18 @@ export class AxlApp {
         row(
           "Phone",
           status.deviceOnline ? good("online") : dim("offline (the page is closed or asleep)"),
+        ),
+      );
+    }
+    if (shares !== undefined && status.phase === "paired") {
+      const here = shares.shares.some((share) => share.sessionId === this.sessionId);
+      const count = shares.shares.length;
+      lines.push(
+        row(
+          "Shared",
+          count === 0
+            ? dim("nothing; run /remote in a session to open it on the phone")
+            : `${count} ${count === 1 ? "session" : "sessions"}${here ? good(", including this one") : ""}`,
         ),
       );
     }
@@ -1354,8 +1373,9 @@ export class AxlApp {
       "camera, or open the link below.",
       "",
       dim(`Expires in ${minutes} min · pairs one device`),
-      dim("Pairing again signs out the"),
-      dim("phone paired before."),
+      dim("This session opens on the phone"),
+      dim("once it pairs. Pairing again"),
+      dim("signs out the phone before."),
       "",
       `${accent("/remote status")}${dim(" checks on it")}`,
     ];
@@ -3065,14 +3085,49 @@ export class AxlApp {
           return;
         }
         if (argument === "status") {
-          this.commitLines(this.remoteStatusLines(await this.client.remoteStatus()));
+          const status = await this.client.remoteStatus();
+          const shares = status.phase === "paired" ? await this.client.remoteShares() : undefined;
+          this.commitLines(this.remoteStatusLines(status, shares));
           return;
         }
-        if (argument) {
-          this.notice = this.view.palette.error("✖ use /remote or /remote status");
+        if (argument === "stop") {
+          const before = await this.client.remoteShares();
+          if (!before.shares.some((share) => share.sessionId === this.sessionId)) {
+            this.notice = this.view.palette.dim("· this session is not shared");
+            return;
+          }
+          await this.client.unshareRemoteSession(this.sessionId);
+          this.notice = this.view.palette.dim("· stopped sharing this session with your phone");
           return;
         }
-        const pairing = await this.client.startRemotePairing();
+        if (argument === "unpair") {
+          const { unpaired } = await this.client.unpairRemote();
+          this.notice = this.view.palette.dim(
+            unpaired ? "· phone removed; every share ended" : "· no phone is paired",
+          );
+          return;
+        }
+        if (argument && argument !== "pair") {
+          this.notice = this.view.palette.error(
+            "✖ use /remote, /remote stop, /remote unpair, /remote pair, or /remote status",
+          );
+          return;
+        }
+        // A paired phone gets this session at once; pairing is needed only the first time, or to
+        // replace the phone with /remote pair.
+        if (argument !== "pair") {
+          try {
+            await this.client.shareRemoteSession(this.sessionId);
+            this.notice = this.view.palette.dim(
+              "· shared with your phone; /remote stop to stop sharing",
+            );
+            return;
+          } catch (error) {
+            if (!(error instanceof AxlClientError) || error.code !== "remote_not_paired")
+              throw error;
+          }
+        }
+        const pairing = await this.client.startRemotePairing({ shareSessionId: this.sessionId });
         const minutes = Math.max(1, Math.round((pairing.expiresAt - Date.now()) / 60_000));
         this.commitLines(this.pairingPanel(pairing.link, minutes));
         return;
