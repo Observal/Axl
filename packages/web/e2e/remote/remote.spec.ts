@@ -19,6 +19,8 @@ import {
   test,
 } from "@playwright/test";
 
+import type { SessionId } from "@axl/sdk";
+
 import { type RemoteStack, startStack } from "./stack.ts";
 
 const directory = process.env.AXL_REMOTE_E2E_DIRECTORY;
@@ -32,6 +34,8 @@ test.describe.configure({ mode: "serial" });
 let stack: RemoteStack;
 let context: BrowserContext;
 let page: Page;
+/** The session `/remote` runs in; pairing shares it with the phone. */
+let sessionId: SessionId;
 const prompts: string[] = [];
 const timings: Record<string, number> = {};
 
@@ -83,7 +87,7 @@ test.beforeAll(async ({ browser }) => {
   test.setTimeout(600_000);
   if (directory === undefined) throw new Error("Run through scripts/remote-e2e.ts");
   stack = await startStack(directory);
-  await stack.createSession();
+  sessionId = await stack.createSession();
   context = await phone(browser, "phone");
   page = await context.newPage();
 });
@@ -99,17 +103,16 @@ test.afterAll(async () => {
 
 test("the phone pairs from the link and completes a turn", async () => {
   test.setTimeout(240_000);
-  const link = await stack.pair();
+  const link = await stack.pair(sessionId);
   // `/remote` shows a short link naming the sealed full link, so its QR code stays small.
   expect(link).toMatch(/\/remote\/#p=[\w-]{22}\.[\w-]{43}$/u);
   const started = Date.now();
   await openLink(page, link);
-  await expect(page.locator(".remote-session")).toHaveCount(1, { timeout: 180_000 });
+  // The session `/remote` ran in opens by itself once the phone pairs.
+  await expect(page.locator("#thread")).toBeVisible({ timeout: 180_000 });
   timings.pairing = Date.now() - started;
   // The link carried no account token: the phone signed in and used the pool's tokens.
   assert.equal(stack.signIns(), 1);
-  await page.locator(".remote-session").click();
-  await expect(page.locator("#thread")).toBeVisible();
   await through("first turn", page, "p1 first turn", 120_000);
   const status = await stack.remoteStatus();
   assert.equal(status.phase, "paired");
@@ -193,13 +196,36 @@ test("the phone answers the agent's question and the turn finishes", async () =>
   assert.equal(stack.model.prompts.get("ask: the sky"), 1, "the question's prompt ran once");
 });
 
+test("a session shared later pops up, and stopping the share closes it", async () => {
+  test.setTimeout(120_000);
+  const other = await stack.createSession();
+  const started = Date.now();
+  await stack.share(other);
+  // The open conversation stays; a banner offers the new share.
+  const banner = page.locator("#share-banner");
+  await expect(banner).toBeVisible({ timeout: 30_000 });
+  timings["share notice"] = Date.now() - started;
+  await expect(page.locator("#thread")).toBeVisible();
+  await page.locator("#share-banner-open").click();
+  await expect(banner).toBeHidden();
+  await expect(page.locator("#status")).toHaveText("Connected", { timeout: 30_000 });
+
+  await stack.unshare(other);
+  await expect(page.locator("#status")).toHaveText(/no longer shared/u, { timeout: 30_000 });
+  await expect(page.locator("#sessions")).toBeVisible();
+  await expect(page.locator(".remote-session")).toHaveCount(1);
+  await page.locator(".remote-session").click();
+  await expect(page.locator("#thread")).toBeVisible();
+  await expect(page.locator("#status")).toHaveText("Connected", { timeout: 30_000 });
+});
+
 test("a second tab takes over and sees every reply exactly once", async () => {
   test.setTimeout(120_000);
   const second = await context.newPage();
   await second.goto(`${stack.origin}/remote/?debug`);
   await expect(page.locator("#status")).toHaveText(/moved to another tab/u, { timeout: 30_000 });
-  await expect(second.locator(".remote-session")).toHaveCount(1, { timeout: 60_000 });
-  await second.locator(".remote-session").click();
+  // A page that opens with something shared opens the newest share.
+  await expect(second.locator("#thread")).toBeVisible({ timeout: 60_000 });
   await through("second tab", second, "p9 in the second tab", 60_000);
   for (const prompt of prompts) {
     await expect(replies(second, prompt), prompt).toHaveCount(1);
@@ -211,16 +237,15 @@ test("pairing again moves the daemon to the new phone and locks the old one out"
   browser,
 }) => {
   test.setTimeout(300_000);
-  const link = await stack.pair();
+  const link = await stack.pair(sessionId);
   const next = await phone(browser, "new-phone");
   const copy = await phone(browser, "copied-link");
   try {
     const nextPage = await next.newPage();
     const started = Date.now();
     await openLink(nextPage, link);
-    await expect(nextPage.locator(".remote-session")).toHaveCount(1, { timeout: 180_000 });
+    await expect(nextPage.locator("#thread")).toBeVisible({ timeout: 180_000 });
     timings["pairing again"] = Date.now() - started;
-    await nextPage.locator(".remote-session").click();
     await through("new phone", nextPage, "p10 on the new phone", 120_000);
 
     // The link enrolled the new phone's key, so a copy of it opened anywhere else enrolls nothing.

@@ -8,8 +8,9 @@ import { join } from "node:path";
 import { PassThrough as NodePassThrough } from "node:stream";
 import test, { type TestContext } from "node:test";
 
-import { AxlDaemon } from "@axl/daemon";
+import { AxlDaemon, RemoteDeviceAuthorityStore } from "@axl/daemon";
 import { type ModelPort, ToolRegistry } from "@axl/kernel";
+import { type DeviceId, parseDeviceId, parseInstallationId } from "@axl/protocol";
 import { connectUnixClient } from "@axl/sdk/unix";
 
 import { AxlApp, stripAnsi } from "../src/index.ts";
@@ -43,16 +44,43 @@ const LINK = `https://stack.example/remote/#v=1&i=${"A".repeat(401)}&a=${"B".rep
 // A short link, as `/remote` prints once the control plane parks the full one.
 const SHORT_LINK = `https://remote.example/remote/#p=${"H".repeat(22)}.${"I".repeat(43)}`;
 
-async function openApp(context: TestContext, columns: number, link = LINK, remote = true) {
+const DEVICE = parseDeviceId("01890a5d-ac96-774b-bcce-b302099a8058");
+
+async function openApp(
+  context: TestContext,
+  columns: number,
+  link = LINK,
+  remote = true,
+  paired = false,
+) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "axl-tui-remote-")));
   const socketPath = join(directory, "axl.sock");
+  const dataDirectory = join(directory, "data");
+  const authority = await RemoteDeviceAuthorityStore.open(
+    dataDirectory,
+    parseInstallationId("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+  );
+  let device: DeviceId | undefined;
+  if (paired) {
+    await authority.registerLocalDevice(DEVICE, ["observe", "steer"]);
+    await authority.applyHostedGrant(DEVICE, 1, ["observe", "steer"]);
+    device = DEVICE;
+  }
   const daemon = new AxlDaemon({
     socketPath,
-    dataDirectory: join(directory, "data"),
+    dataDirectory,
     // Without a remote host the daemon does not grant pairing.
     ...(remote
       ? {
+          remoteAuthority: authority,
           remotePairing: {
+            pairedDevice: () => device,
+            unpair: async () => {
+              if (device === undefined) return false;
+              await authority.revokeLocalDevice(device);
+              device = undefined;
+              return true;
+            },
             start: async () => ({
               link,
               cryptoSessionId: "01890a5d-ac96-774b-bcce-b302099a8059",
@@ -92,7 +120,7 @@ async function openApp(context: TestContext, columns: number, link = LINK, remot
     color: false,
   });
   context.after(() => app.stop());
-  return { input, text: () => stripAnsi(written) };
+  return { input, authority, text: () => stripAnsi(written) };
 }
 
 async function until(predicate: () => boolean, label: string): Promise<void> {
@@ -156,4 +184,33 @@ test("/remote on a daemon without remote access says how to set it up", async (c
   const { input, text } = await openApp(context, 100, LINK, false);
   input.write("/remote\r");
   await until(() => text().includes("axl remote login"), "setup hint");
+});
+
+test("/remote shares the session with a paired phone without a new code", async (context) => {
+  const { input, authority, text } = await openApp(context, 100, SHORT_LINK, true, true);
+  input.write("/remote\r");
+  await until(() => text().includes("shared with your phone"), "share notice");
+  assert.doesNotMatch(text(), /Pair a phone/u, "a paired phone needs no new code");
+  assert.equal(authority.shares(DEVICE).length, 1);
+
+  input.write("/remote status\r");
+  await until(() => text().includes("including this one"), "shared row");
+
+  input.write("/remote stop\r");
+  await until(() => text().includes("stopped sharing this session"), "stop notice");
+  assert.deepEqual(authority.shares(DEVICE), []);
+  input.write("/remote stop\r");
+  await until(() => text().includes("this session is not shared"), "nothing to stop");
+
+  input.write("/remote\r");
+  await until(() => authority.shares(DEVICE).length === 1, "shared again");
+  input.write("/remote unpair\r");
+  await until(() => text().includes("phone removed"), "unpair notice");
+  assert.deepEqual(authority.shares(DEVICE), []);
+});
+
+test("/remote pair shows a new code even with a paired phone", async (context) => {
+  const { input, text } = await openApp(context, 100, SHORT_LINK, true, true);
+  input.write("/remote pair\r");
+  await until(() => text().includes("Pair a phone"), "pairing");
 });

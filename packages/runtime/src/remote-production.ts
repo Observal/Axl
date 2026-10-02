@@ -68,9 +68,25 @@ export function openProductionRemoteHost(
       },
     },
     // Per account and installation, so signing in as someone else never reuses a pairing.
-    join(stateDirectory, "remote", `${account.accountId}.${account.installationId}`),
+    remoteRoot(stateDirectory, account),
     log,
   );
+}
+
+/** Where the production host for `account` keeps its pairing under one daemon state directory. */
+function remoteRoot(stateDirectory: string, account: RemoteAccountFile): string {
+  return join(stateDirectory, "remote", `${account.accountId}.${account.installationId}`);
+}
+
+/**
+ * Forget the account's pairing under a daemon state directory whose daemon is not serving it,
+ * which ends every share. Resolves whether a phone had paired there.
+ */
+export function forgetProductionRemotePairing(
+  stateDirectory: string,
+  account: RemoteAccountFile,
+): Promise<boolean> {
+  return HostedRemoteHost.forget(remoteRoot(stateDirectory, account), account.installationId);
 }
 
 /** The production host when this machine has a stored account; undefined otherwise. */

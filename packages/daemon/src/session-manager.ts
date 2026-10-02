@@ -1143,6 +1143,25 @@ export class SessionManager {
     return summaries.sort((left, right) => right.updatedAt - left.updatedAt);
   }
 
+  /** One stored session's summary, or undefined when no such session exists. */
+  async summary(sessionId: SessionId): Promise<StoredSessionSummary | undefined> {
+    if (this.incompleteMigrations.has(sessionId)) return undefined;
+    const active = this.sessions.get(sessionId);
+    if (active !== undefined) {
+      return active.events.length === 0 ? undefined : summarizeSession(active.events);
+    }
+    const path = this.logPath(sessionId);
+    try {
+      await stat(path);
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw cause;
+    }
+    this.assertNotQuarantined(sessionId);
+    const { events } = await JsonlEventLog.open(path, sessionId);
+    return events.length === 0 ? undefined : summarizeSession(events);
+  }
+
   runtimeState(sessionId: SessionId): SessionOpenResult["runtime"] {
     const managed = this.sessions.get(sessionId);
     if (managed === undefined) return { state: "inactive" };

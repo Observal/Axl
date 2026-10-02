@@ -37,6 +37,19 @@ import {
 
 const sessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174000");
 const otherSessionId = parseSessionId("123e4567-e89b-42d3-a456-426614174001");
+const remoteShares = {
+  generation: 1,
+  shares: [
+    {
+      sessionId,
+      cwd: "/workspace",
+      title: "Fix the parser",
+      preview: "Why does the parser reject this input?",
+      sharedAt: 1_900_000_000_000,
+      updatedAt: 1_900_000_060_000,
+    },
+  ],
+};
 const eventId = parseEventId("00000000-0000-4000-8000-000000000001");
 const queueItemId = parseEventId("00000000-0000-4000-8000-000000000005");
 const otherEventId = parseEventId("00000000-0000-4000-8000-000000000002");
@@ -302,8 +315,12 @@ const params = {
     name: "docs",
     definition: { url: "https://mcp.example.com/mcp", headers: { Authorization: "DOCS_TOKEN" } },
   },
-  "remote.pairing.start": {},
+  "remote.pairing.start": { shareSessionId: sessionId },
   "remote.status": {},
+  "remote.share": { sessionId },
+  "remote.unshare": { sessionId },
+  "remote.shares": {},
+  "remote.unpair": {},
   "session.create": {
     cwd: "/workspace",
     providerId: "provider-1",
@@ -642,6 +659,10 @@ const results = {
     lastError: { message: "remote: relay failure", at: 1_900_000_000_000 },
     logPath: "/home/user/.axl/remote-deployment-test/remote.log",
   },
+  "remote.share": remoteShares,
+  "remote.unshare": { generation: 2, shares: [] },
+  "remote.shares": remoteShares,
+  "remote.unpair": { unpaired: true },
   "session.create": opened,
   "session.resume": opened,
   "session.list": {
@@ -875,6 +896,7 @@ const serverMessages = [
   },
   { kind: "sessions_changed", generation: 1 },
   { kind: "remote_endpoints_changed", generation: 1 },
+  { kind: "remote_shares", ...remoteShares },
   {
     kind: "presence",
     attachments: [

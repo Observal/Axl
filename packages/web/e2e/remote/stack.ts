@@ -32,6 +32,7 @@ import { connect, createServer as createNetServer } from "node:net";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
+import type { SessionId } from "@axl/sdk";
 import { connectUnixClient } from "@axl/sdk/unix";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
@@ -761,18 +762,29 @@ export async function startStack(directory) {
     logs,
     /** How many times a phone signed in with the fake user pool. */
     signIns: () => authority.signIns,
-    /** A fresh pairing link, as `/remote` prints it. */
-    pair: () => client(async (connected) => (await connected.startRemotePairing()).link),
-    remoteStatus: () => client((connected) => connected.remoteStatus()),
-    createSession: () =>
-      client((connected) =>
-        connected.request(
-          "session.create",
-          // The agent may ask the user questions, which the phone answers.
-          { cwd: workspace, userQuestions: true },
-          { idempotencyKey: randomUUID() },
-        ),
+    /** A fresh pairing link, as `/remote` prints it in `sessionId`, which the phone gets once paired. */
+    pair: (sessionId: SessionId) =>
+      client(
+        async (connected) =>
+          (await connected.startRemotePairing({ shareSessionId: sessionId })).link,
       ),
+    remoteStatus: () => client((connected) => connected.remoteStatus()),
+    /** `/remote` in a session once a phone is paired. */
+    share: (sessionId: SessionId) => client((connected) => connected.shareRemoteSession(sessionId)),
+    /** `/remote stop` in a session. */
+    unshare: (sessionId: SessionId) =>
+      client((connected) => connected.unshareRemoteSession(sessionId)),
+    createSession: async (): Promise<SessionId> =>
+      (
+        await client((connected) =>
+          connected.request(
+            "session.create",
+            // The agent may ask the user questions, which the phone answers.
+            { cwd: workspace, userQuestions: true },
+            { idempotencyKey: randomUUID() },
+          ),
+        )
+      ).sessionId,
     dropConnections: (side = "all") => originServer.drop(side),
     stallConnections: (side = "all") => originServer.stall(side),
     async restartDaemon() {

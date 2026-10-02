@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -29,6 +29,7 @@ import { AxlDaemon } from "../src/daemon.ts";
 import { RemoteAuthorityError, RemoteDeviceAuthorityStore } from "../src/remote-authority.ts";
 import { type NativeDaemonE2eeEndpoint, WindowsRemoteE2eeBridge } from "../src/remote-e2ee.ts";
 import {
+  remoteRequestTarget,
   remoteRespondableInteraction,
   remoteRpcMethods,
   requiredRemoteScope,
@@ -159,7 +160,136 @@ test("remote RPC scope mapping is explicit and excludes dangerous surfaces", () 
     assert.equal(remoteRespondableInteraction(kind), false, kind);
   }
   assert.equal(requiredRemoteScope("provider.auth.login"), undefined);
+  // A device lists only what is shared with it, never every session.
+  assert.equal(requiredRemoteScope("session.list"), undefined);
+  assert.equal(requiredRemoteScope("remote.shares"), "observe");
+  for (const method of ["remote.share", "remote.unshare", "remote.unpair"] as const) {
+    assert.equal(requiredRemoteScope(method), undefined, method);
+  }
   assert.ok(remoteRpcMethods().length > 0);
+});
+
+test("every remote method names what it reaches, so none skips the share check", () => {
+  const sessionId = parseSessionId("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  const unscoped = new Set(["daemon.info", "remote.shares"]);
+  const viaSubscription = new Set(["session.ack", "session.unsubscribe"]);
+  for (const method of remoteRpcMethods()) {
+    const target = remoteRequestTarget({
+      kind: "request",
+      id: 0,
+      method,
+      params: { sessionId, subscriptionId: "subscription-1", snapshotId: "snapshot-1" },
+    } as never);
+    const expected = unscoped.has(method)
+      ? "none"
+      : viaSubscription.has(method)
+        ? "subscription"
+        : method === "session.history"
+          ? "snapshot"
+          : "session";
+    assert.equal(target.kind, expected, method);
+  }
+  assert.throws(
+    () =>
+      remoteRequestTarget({ kind: "request", id: 0, method: "session.send", params: {} } as never),
+    /names no session/u,
+  );
+});
+
+test("shares persist, narrow authorization, and end with the device", async () => {
+  const dataDirectory = await directory();
+  const store = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  const shared = parseSessionId("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  const other = parseSessionId("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+  await store.registerLocalDevice(deviceId, ["observe", "steer"]);
+  await store.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
+  const changes: string[] = [];
+  store.onSharesChanged((changed) => changes.push(changed));
+
+  const sharedAt = 1_900_000_000_000;
+  await store.shareSession(deviceId, shared, sharedAt);
+  assert.deepEqual(changes, [deviceId]);
+  assert.equal(store.authorize(deviceId, "steer", shared).deviceId, deviceId);
+  assert.equal(store.authorize(deviceId, "steer").deviceId, deviceId);
+  assert.throws(
+    () => store.authorize(deviceId, "observe", other),
+    (error) => error instanceof RemoteAuthorityError && error.code === "session_not_shared",
+  );
+  // A share never adds a scope.
+  await store.narrowLocalGrant(deviceId, ["observe"]);
+  assert.throws(
+    () => store.authorize(deviceId, "steer", shared),
+    (error) => error instanceof RemoteAuthorityError && error.code === "scope_forbidden",
+  );
+
+  // Activity is kept to within a minute, so most requests write nothing.
+  await store.touchShare(deviceId, shared, sharedAt + 30_000);
+  assert.equal(store.shares(deviceId)[0]?.lastActivityAt, sharedAt);
+  await store.touchShare(deviceId, shared, sharedAt + 61_000);
+  assert.equal(store.shares(deviceId)[0]?.lastActivityAt, sharedAt + 61_000);
+
+  const reopened = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  assert.deepEqual(reopened.shares(deviceId), [
+    { sessionId: shared, sharedAt, lastActivityAt: sharedAt + 61_000, localGeneration: 1 },
+  ]);
+  assert.ok(
+    reopened
+      .auditEntries()
+      .some((event) => event.code === "session_shared" && event.sessionId === shared),
+  );
+
+  await store.revokeLocalDevice(deviceId);
+  assert.deepEqual(store.shares(deviceId), []);
+  assert.deepEqual(store.sharingDevices(), []);
+  assert.equal(changes.length, 2);
+  await assert.rejects(
+    store.shareSession(deviceId, shared),
+    (error) => error instanceof RemoteAuthorityError && error.code === "device_revoked",
+  );
+  const afterRevocation = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  assert.deepEqual(afterRevocation.shares(deviceId), []);
+});
+
+test("idle shares end only when they are still idle", async () => {
+  const dataDirectory = await directory();
+  const store = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  const idle = parseSessionId("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  const active = parseSessionId("cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+  await store.registerLocalDevice(deviceId, ["observe", "steer"]);
+  await store.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
+  await store.shareSession(deviceId, idle, 1_000);
+  await store.shareSession(deviceId, active, 1_000);
+  await store.touchShare(deviceId, active, 100_000);
+  await store.endIdleShares((_, share) => share.lastActivityAt < 50_000, 200_000);
+  assert.deepEqual(
+    store.shares(deviceId).map((share) => share.sessionId),
+    [active],
+  );
+  const ended = store.auditEntries().at(-1);
+  assert.equal(ended?.code, "session_unshared");
+  assert.equal(ended?.sessionId, idle);
+  assert.equal(ended?.shareEnd, "idle");
+  assert.equal(await store.endShare(deviceId, idle, "stopped"), false);
+});
+
+test("a malformed share record fails closed", async () => {
+  const dataDirectory = await directory();
+  const store = await RemoteDeviceAuthorityStore.open(dataDirectory, installationId);
+  const sessionId = parseSessionId("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  await store.registerLocalDevice(deviceId, ["observe"]);
+  await store.shareSession(deviceId, sessionId, 1_000);
+  const path = join(dataDirectory, "remote-authority.json");
+  const state = JSON.parse(await readFile(path, "utf8")) as {
+    devices: { shares: unknown[] }[];
+  };
+  const device = state.devices[0];
+  assert.ok(device !== undefined);
+  device.shares = [...device.shares, ...device.shares];
+  await writeFile(path, JSON.stringify(state));
+  await assert.rejects(
+    RemoteDeviceAuthorityStore.open(dataDirectory, installationId),
+    /Corrupt remote authority store/u,
+  );
 });
 
 test("the Windows E2EE bridge authenticates before daemon authorization and seals responses", async (context) => {

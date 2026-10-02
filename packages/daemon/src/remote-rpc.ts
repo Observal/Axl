@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
-import type { InteractionKind, RemoteDeviceScope, RpcMethod } from "@axl/protocol";
+import type {
+  InteractionKind,
+  RemoteDeviceScope,
+  RpcMethod,
+  SessionId,
+  WireRequest,
+} from "@axl/protocol";
 
+// The device lists no sessions: it reaches only the sessions shared with it, which
+// `remote.shares` and the `remote_shares` notice name.
 const REMOTE_RPC_SCOPES = Object.freeze({
   "daemon.info": "observe",
-  "session.list": "observe",
+  "remote.shares": "observe",
   "session.history": "observe",
   "session.ack": "observe",
   "session.unsubscribe": "observe",
@@ -46,4 +54,35 @@ export function remoteRespondableInteraction(kind: InteractionKind): boolean {
 
 export function remoteRpcMethods(): readonly RemoteRpcMethod[] {
   return Object.keys(REMOTE_RPC_SCOPES) as RemoteRpcMethod[];
+}
+
+/** What a remote request reaches, which decides the share it needs. */
+export type RemoteRequestTarget =
+  | { readonly kind: "none" }
+  | { readonly kind: "session"; readonly sessionId: SessionId }
+  | { readonly kind: "subscription"; readonly subscriptionId: string }
+  | { readonly kind: "snapshot"; readonly snapshotId: string };
+
+/**
+ * The session, subscription, or snapshot a remote request reaches. Every other allowed method names
+ * a session; one that names nothing fails here rather than skipping the share check.
+ */
+export function remoteRequestTarget(request: WireRequest): RemoteRequestTarget {
+  switch (request.method) {
+    case "daemon.info":
+    case "remote.shares":
+      return { kind: "none" };
+    case "session.history":
+      return { kind: "snapshot", snapshotId: request.params.snapshotId };
+    case "session.ack":
+    case "session.unsubscribe":
+      return { kind: "subscription", subscriptionId: request.params.subscriptionId };
+    default: {
+      const { sessionId } = request.params as { readonly sessionId?: SessionId };
+      if (sessionId === undefined) {
+        throw new Error(`Remote method ${request.method} names no session`);
+      }
+      return { kind: "session", sessionId };
+    }
+  }
 }

@@ -8,20 +8,25 @@
  * is enabled for the account yet.
  */
 
-import { access, constants } from "node:fs/promises";
+import { access, constants, readdir } from "node:fs/promises";
+import { join } from "node:path";
 
 import {
   DEFAULT_REMOTE_ORIGIN,
   defaultDpapiHelper,
   defaultHostedBinding,
+  forgetProductionRemotePairing,
   loadDaemonSignInConfig,
   loadRemoteAccount,
   RemoteAccountError,
+  type RemoteAccountFile,
   RemoteAccountSession,
   removeRemoteAccount,
   saveRemoteAccount,
   startRemoteSignIn,
 } from "@axl/runtime";
+import { AxlClientError } from "@axl/sdk";
+import { connectUnixClient } from "@axl/sdk/unix";
 
 import { launchBrowser } from "./browser-launch.ts";
 
@@ -31,7 +36,7 @@ export const REMOTE_HELP = `Usage: axl remote login [--origin <url>] [--helper <
        axl remote logout
 
 login   Sign this machine in to remote access with Google and register it.
-logout  Forget the signed-in account on this machine.
+logout  Remove the paired phone, which ends every share, and forget the signed-in account.
 
   --origin <url>    The remote stack (default ${DEFAULT_REMOTE_ORIGIN})
   --helper <path>   axl-dpapi-helper.exe (default %LOCALAPPDATA%\\Axl\\bin in Windows)
@@ -131,9 +136,56 @@ async function login(axlHome: string, options: RemoteOptions, write: (text: stri
   );
 }
 
+/**
+ * Remove the account's paired phone under every daemon state directory: through the daemon that
+ * serves it, or on disk when no daemon does. Signing out ends every share this way.
+ */
+async function unpairEverywhere(
+  axlHome: string,
+  account: RemoteAccountFile,
+  write: (text: string) => void,
+): Promise<void> {
+  const directories = [
+    axlHome,
+    ...(await readdir(axlHome, { withFileTypes: true }).catch(() => []))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(axlHome, entry.name)),
+  ];
+  for (const stateDirectory of directories) {
+    const root = join(stateDirectory, "remote", `${account.accountId}.${account.installationId}`);
+    const paired = await access(root).then(
+      () => true,
+      () => false,
+    );
+    if (!paired) continue;
+    const client = await connectUnixClient(join(stateDirectory, "axl.sock")).catch(() => undefined);
+    if (client !== undefined) {
+      try {
+        const { unpaired } = await client.unpairRemote();
+        if (unpaired) write("Removed the paired phone.\n");
+        continue;
+      } catch (cause) {
+        // A daemon started before sign-in has no remote host and holds none of its state.
+        if (!(cause instanceof AxlClientError) || cause.code !== "unsupported_capability") {
+          write(
+            `Could not remove the paired phone: ${cause instanceof Error ? cause.message : String(cause)}. Run /remote unpair, then sign out again.\n`,
+          );
+          throw cause;
+        }
+      } finally {
+        client.close();
+      }
+    }
+    if (await forgetProductionRemotePairing(stateDirectory, account)) {
+      write("Removed the paired phone.\n");
+    }
+  }
+}
+
 async function logout(axlHome: string, write: (text: string) => void) {
   const account = await loadRemoteAccount(axlHome).catch(() => undefined);
   if (account !== undefined) {
+    await unpairEverywhere(axlHome, account, write);
     // Revoke the refresh token too, so a copy of it could not be used; best effort.
     await RemoteAccountSession.open(axlHome, account)
       .then((session) => session.revoke())

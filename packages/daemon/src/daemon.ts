@@ -44,6 +44,8 @@ import {
   parseWireRequest,
   type RemoteDeviceScope,
   type RemotePairingStartResult,
+  type RemoteShare,
+  type RemoteSharesResult,
   type RemoteStatusResult,
   type RequestId,
   type RetryableMutationMethod,
@@ -67,7 +69,11 @@ import { type ExtensionManagementService, findExtension } from "./extension-mana
 import type { McpConfigurationService } from "./mcp-configuration.ts";
 import type { ProviderManagementService } from "./provider-management.ts";
 import { RemoteAuthorityError, type RemoteDeviceAuthorityStore } from "./remote-authority.ts";
-import { remoteRespondableInteraction, requiredRemoteScope } from "./remote-rpc.ts";
+import {
+  remoteRequestTarget,
+  remoteRespondableInteraction,
+  requiredRemoteScope,
+} from "./remote-rpc.ts";
 import { DaemonError, SessionManager, type SessionManagerOptions } from "./session-manager.ts";
 
 export type DaemonSecurityMode = "sandboxed" | "unsafe";
@@ -113,10 +119,17 @@ export class RemotePairingStartError extends Error {
 }
 
 export interface RemotePairingService {
-  /** Rejects with `RemotePairingStartError` when it has a reason the terminal can show. */
-  start(): Promise<RemotePairingStartResult>;
+  /**
+   * Pair a new device, replacing the current one. `shareSessionId` is shared once it pairs.
+   * Rejects with `RemotePairingStartError` when it has a reason the terminal can show.
+   */
+  start(options?: { readonly shareSessionId?: SessionId }): Promise<RemotePairingStartResult>;
   /** What `/remote status` shows: pairing phase, relay connection, and the latest failure. */
   status(): RemoteStatusResult;
+  /** The paired device, once a device has activated its pairing. */
+  pairedDevice(): DeviceId | undefined;
+  /** Revoke the paired device, which ends every share. Resolves false when none was paired. */
+  unpair(): Promise<boolean>;
 }
 
 export interface AuthenticatedRemoteAttachmentOptions {
@@ -150,6 +163,8 @@ interface RemoteExecutionAuthority {
   readonly store: RemoteDeviceAuthorityStore;
   readonly deviceId: DeviceId;
   readonly scope: RemoteDeviceScope;
+  /** The session the request reaches; it must be shared with the device when the request runs. */
+  readonly sessionId?: SessionId;
   readonly onAccepted?: () => void;
 }
 
@@ -165,6 +180,20 @@ const PRESENCE_TIMEOUT_MS = 60_000;
 const SOCKET_PROBE_TIMEOUT_MS = 500;
 const MAX_DIAGNOSTIC_LOG_BYTES = 1024 * 1024;
 const MAX_DIAGNOSTIC_ENTRY_CHARS = 4_096;
+/** A share ends after this long without activity in its session. */
+const REMOTE_SHARE_IDLE_MS = 24 * 60 * 60_000;
+const REMOTE_SHARE_SWEEP_MS = 60_000;
+const REMOTE_SHARE_PREVIEW_CHARS = 120;
+
+/** The latest prompt as one short line, for a shared session without a title. */
+function sharePreview(text: string | undefined): string | undefined {
+  const line = text?.replace(/\s+/gu, " ").trim();
+  if (line === undefined || line.length === 0) return undefined;
+  const characters = [...line];
+  return characters.length <= REMOTE_SHARE_PREVIEW_CHARS
+    ? line
+    : `${characters.slice(0, REMOTE_SHARE_PREVIEW_CHARS - 1).join("")}…`;
+}
 
 /** Describe an internal failure for the private daemon log, following a short cause chain. */
 function describeInternalError(error: unknown): string {
@@ -247,6 +276,11 @@ interface ConnectionState {
   readonly sessionListPages: Map<string, SessionListPage>;
   readonly subscriptions: Map<string, ConnectionSubscription>;
   readonly send: (message: ServerMessage) => void;
+  /** Set on an authenticated remote device's attachment. */
+  readonly remote?: {
+    readonly deviceId: DeviceId;
+    readonly authority: RemoteDeviceAuthorityStore;
+  };
 }
 
 type SocketIdentity = { readonly dev: number; readonly ino: number };
@@ -317,6 +351,8 @@ export class AxlDaemon {
   private readonly remoteAuthority: RemoteDeviceAuthorityStore | undefined;
   private readonly remotePairing: RemotePairingService | undefined;
   private releaseRemoteAuthorityListener: (() => void) | undefined;
+  private remoteShareSweep: ReturnType<typeof setInterval> | undefined;
+  private remoteShareSweeping: Promise<void> | undefined;
   private remoteEndpointsGeneration = 0;
   private readonly capabilities: readonly string[];
   private readonly hostOptions: Pick<
@@ -441,6 +477,12 @@ export class AxlDaemon {
       const stats = await lstat(this.socketPath);
       this.socketIdentity = { dev: stats.dev, ino: stats.ino };
       await chmod(this.socketPath, 0o600);
+      if (this.remoteAuthority !== undefined) {
+        // A share that idled out while the daemon was stopped ends now.
+        this.sweepRemoteShares();
+        this.remoteShareSweep = setInterval(() => this.sweepRemoteShares(), REMOTE_SHARE_SWEEP_MS);
+        this.remoteShareSweep.unref();
+      }
     } catch (error) {
       if (this.server?.listening) {
         await new Promise<void>((resolve) => this.server?.close(() => resolve()));
@@ -498,6 +540,7 @@ export class AxlDaemon {
       send: (message) => {
         if (!closed) options.send(message);
       },
+      remote: { deviceId: options.deviceId, authority: options.authority },
     };
     this.remoteConnectionStates.add(state);
     // An ordinary close keeps the acknowledged cursor so the device can resume; losing authority
@@ -519,6 +562,19 @@ export class AxlDaemon {
         releaseSubscriptions(false);
       }
     };
+    // A share that ended takes the device's subscriptions to that session with it, and nothing
+    // can resume them.
+    const enforceShares = (): void => {
+      const shared = new Set(
+        options.authority.shares(options.deviceId).map((share) => share.sessionId),
+      );
+      for (const [subscriptionId, subscription] of state.subscriptions) {
+        if (shared.has(subscription.sessionId)) continue;
+        this.releaseSubscriptionCursors(subscription, false);
+        subscription.unsubscribe();
+        state.subscriptions.delete(subscriptionId);
+      }
+    };
     const close = (revoked = false): void => {
       if (closed) return;
       closed = true;
@@ -529,12 +585,22 @@ export class AxlDaemon {
       this.remoteAttachmentClosers.delete(close);
       removeRevocationListener();
       removeGrantListener();
+      removeShareListener();
     };
     const removeRevocationListener = options.authority.onDeviceRevoked((deviceId) => {
       if (deviceId === options.deviceId) close(true);
     });
     const removeGrantListener = options.authority.onDeviceGrantChanged((deviceId) => {
       if (deviceId === options.deviceId && !closed) enforceObserveGrant();
+    });
+    // Every change to the device's shares reaches it as the whole new set.
+    const removeShareListener = options.authority.onSharesChanged((deviceId) => {
+      if (deviceId !== options.deviceId || closed) return;
+      enforceShares();
+      void this.remoteShares(options.authority, options.deviceId).then(
+        (shares) => state.send({ kind: "remote_shares", ...shares }),
+        (cause: unknown) => this.recordInternalError("remote_shares", cause),
+      );
     });
     this.remoteAttachmentClosers.add(close);
 
@@ -577,6 +643,23 @@ export class AxlDaemon {
               "Remote mutation is unavailable for unsafe sessions",
             );
           }
+          // A subscription or snapshot reaches the session it was opened for.
+          const target = remoteRequestTarget(wireRequest);
+          const sessionId =
+            target.kind === "session"
+              ? target.sessionId
+              : target.kind === "subscription"
+                ? state.subscriptions.get(target.subscriptionId)?.sessionId
+                : target.kind === "snapshot"
+                  ? [...state.subscriptions.values()].find(
+                      (subscription) => subscription.snapshotId === target.snapshotId,
+                    )?.sessionId
+                  : undefined;
+          // Refuse an unshared session before anything looks it up, so the refusal is the same
+          // whether or not it exists. The check repeats atomically when the request is admitted.
+          if (sessionId !== undefined) {
+            await options.authority.authorizeAudited(options.deviceId, scope, sessionId);
+          }
 
           state.pendingRequests += 1;
           state.lastSeenAt = Date.now();
@@ -587,6 +670,7 @@ export class AxlDaemon {
               store: options.authority,
               deviceId: options.deviceId,
               scope,
+              ...(sessionId === undefined ? {} : { sessionId }),
               ...(observer?.accepted === undefined
                 ? {}
                 : { onAccepted: () => observer.accepted?.() }),
@@ -598,9 +682,18 @@ export class AxlDaemon {
               result: validated,
             };
             observer?.completed?.(completed);
-            // A grant narrowed while this request ran must not leave a new subscription live.
+            // A grant narrowed or a share ended while this request ran must not leave a new
+            // subscription live.
             enforceObserveGrant();
+            enforceShares();
             this.activateReadySubscriptions(state, state.send);
+            if (sessionId !== undefined) {
+              void options.authority
+                .touchShare(options.deviceId, sessionId)
+                .catch((cause: unknown) =>
+                  this.recordInternalError("remote_share_activity", cause),
+                );
+            }
             return completed;
           } finally {
             this.admitted.delete(admissionId);
@@ -620,6 +713,9 @@ export class AxlDaemon {
   }
 
   private async finishShutdown(): Promise<void> {
+    if (this.remoteShareSweep !== undefined) clearInterval(this.remoteShareSweep);
+    this.remoteShareSweep = undefined;
+    await this.remoteShareSweeping;
     // Every request admitted before the gate must finish its journal outcome first.
     await Promise.all([...this.pending]);
     await this.sessions.disposeAll();
@@ -1239,6 +1335,7 @@ export class AxlDaemon {
         await remoteAuthority.store.authorizeAudited(
           remoteAuthority.deviceId,
           remoteAuthority.scope,
+          remoteAuthority.sessionId,
         );
       }
       return this.dispatch(normalized, send, state, undefined, signal);
@@ -1308,6 +1405,7 @@ export class AxlDaemon {
           remoteAuthority.scope,
           () => journal.start(journalInput, effect),
           remoteAuthority.onAccepted,
+          remoteAuthority.sessionId,
         );
       }
       return await journal.execute(journalInput, effect);
@@ -1336,11 +1434,11 @@ export class AxlDaemon {
           remoteEndpoints: this.remoteAuthority?.endpointWitnessStatuses() ?? [],
         };
       case "remote.pairing.start": {
-        if (this.remotePairing === undefined) {
-          throw new DaemonError("remote_unavailable", "This daemon has no remote host");
-        }
+        const pairing = this.remotePairingService();
+        const shareSessionId = request.params.shareSessionId;
+        if (shareSessionId !== undefined) await this.requireStoredSession(shareSessionId);
         try {
-          return await this.remotePairing.start();
+          return await pairing.start(shareSessionId === undefined ? {} : { shareSessionId });
         } catch (cause) {
           // The remote host logs its own cause; the terminal learns only the reason it chose to give.
           const reason =
@@ -1351,10 +1449,49 @@ export class AxlDaemon {
         }
       }
       case "remote.status":
-        if (this.remotePairing === undefined) {
-          throw new DaemonError("remote_unavailable", "This daemon has no remote host");
+        return this.remotePairingService().status();
+      case "remote.share": {
+        const authority = this.remoteAuthorityStore();
+        const deviceId = this.remotePairingService().pairedDevice();
+        if (deviceId === undefined) {
+          throw new DaemonError("remote_not_paired", "No phone is paired; run /remote to pair one");
         }
-        return this.remotePairing.status();
+        await this.requireStoredSession(request.params.sessionId);
+        try {
+          await authority.shareSession(deviceId, request.params.sessionId);
+        } catch (cause) {
+          if (!(cause instanceof RemoteAuthorityError)) throw cause;
+          // The paired device was revoked under the share, or holds the most shares it can.
+          throw new DaemonError(
+            cause.code === "share_limit_reached" ? "remote_unavailable" : "remote_not_paired",
+            cause.message,
+            { cause },
+          );
+        }
+        return this.remoteShares(authority, deviceId);
+      }
+      case "remote.unshare": {
+        const authority = this.remoteAuthorityStore();
+        const deviceId = this.remotePairingService().pairedDevice();
+        if (deviceId === undefined) {
+          return { generation: authority.sharesGeneration, shares: [] };
+        }
+        await authority.endShare(deviceId, request.params.sessionId, "stopped");
+        return this.remoteShares(authority, deviceId);
+      }
+      case "remote.shares": {
+        // A remote device reads its own shares; the terminal reads the paired device's.
+        if (state.remote !== undefined) {
+          return this.remoteShares(state.remote.authority, state.remote.deviceId);
+        }
+        const authority = this.remoteAuthorityStore();
+        const deviceId = this.remotePairingService().pairedDevice();
+        return deviceId === undefined
+          ? { generation: authority.sharesGeneration, shares: [] }
+          : this.remoteShares(authority, deviceId);
+      }
+      case "remote.unpair":
+        return { unpaired: await this.remotePairingService().unpair() };
       case "connection.initialize": {
         return {
           attachmentId: state.attachmentId,
@@ -1507,6 +1644,7 @@ export class AxlDaemon {
         );
       case "session.delete":
         await this.sessions.delete(request.params.sessionId);
+        await this.remoteAuthority?.endSessionShares(request.params.sessionId, "deleted");
         return { deleted: true, historyPreserved: false };
       case "session.export":
         return this.sessions.exportArtifact(
@@ -2082,6 +2220,96 @@ export class AxlDaemon {
     subscription.pageResults.set(pageCursor, page);
     if (page.complete) subscription.finalPageServed = true;
     return { snapshotId, page };
+  }
+
+  private remotePairingService(): RemotePairingService {
+    if (this.remotePairing === undefined) {
+      throw new DaemonError("remote_unavailable", "This daemon has no remote host");
+    }
+    return this.remotePairing;
+  }
+
+  private remoteAuthorityStore(): RemoteDeviceAuthorityStore {
+    if (this.remoteAuthority === undefined) {
+      throw new DaemonError("remote_unavailable", "This daemon has no remote host");
+    }
+    return this.remoteAuthority;
+  }
+
+  private async requireStoredSession(sessionId: SessionId): Promise<void> {
+    if ((await this.sessions.summary(sessionId)) === undefined) {
+      throw new DaemonError("unknown_session", "Session does not exist");
+    }
+  }
+
+  /** The device's shares as it sees them. A share whose session is gone waits for the sweep. */
+  private async remoteShares(
+    authority: RemoteDeviceAuthorityStore,
+    deviceId: DeviceId,
+  ): Promise<RemoteSharesResult> {
+    const generation = authority.sharesGeneration;
+    const shares: RemoteShare[] = [];
+    for (const share of authority.shares(deviceId)) {
+      const summary = await this.sessions.summary(share.sessionId);
+      if (summary === undefined) continue;
+      const preview = sharePreview(summary.lastUserMessage);
+      shares.push({
+        sessionId: share.sessionId,
+        cwd: summary.cwd,
+        ...(summary.title === undefined ? {} : { title: summary.title }),
+        ...(preview === undefined ? {} : { preview }),
+        sharedAt: share.sharedAt,
+        updatedAt: summary.updatedAt,
+      });
+    }
+    return { generation, shares };
+  }
+
+  /**
+   * End shares that saw no activity for a day. Remote requests record their activity in the share;
+   * terminal input and the session's own events show in its log, so a share is checked against the
+   * log only once its own record is a day old, and a running turn keeps it alive.
+   */
+  private sweepRemoteShares(): void {
+    if (this.remoteShareSweeping !== undefined) return;
+    this.remoteShareSweeping = this.sweepRemoteSharesOnce()
+      .catch((cause: unknown) => this.recordInternalError("remote_share_sweep", cause))
+      .finally(() => {
+        this.remoteShareSweeping = undefined;
+      });
+  }
+
+  private async sweepRemoteSharesOnce(now = Date.now()): Promise<void> {
+    const authority = this.remoteAuthority;
+    if (authority === undefined) return;
+    const idle = new Set<string>();
+    const deleted = new Set<SessionId>();
+    for (const deviceId of authority.sharingDevices()) {
+      for (const share of authority.shares(deviceId)) {
+        if (now - share.lastActivityAt < REMOTE_SHARE_IDLE_MS) continue;
+        if (this.sessions.activeOperationId(share.sessionId) !== undefined) {
+          await authority.touchShare(deviceId, share.sessionId, now);
+          continue;
+        }
+        const summary = await this.sessions.summary(share.sessionId);
+        if (summary === undefined) {
+          deleted.add(share.sessionId);
+        } else if (now - summary.updatedAt < REMOTE_SHARE_IDLE_MS) {
+          await authority.touchShare(deviceId, share.sessionId, summary.updatedAt);
+        } else {
+          idle.add(`${deviceId} ${share.sessionId}`);
+        }
+      }
+    }
+    for (const sessionId of deleted) await authority.endSessionShares(sessionId, "deleted", now);
+    if (idle.size === 0) return;
+    // Activity recorded since the scan keeps a share.
+    await authority.endIdleShares(
+      (deviceId, share) =>
+        idle.has(`${deviceId} ${share.sessionId}`) &&
+        now - share.lastActivityAt >= REMOTE_SHARE_IDLE_MS,
+      now,
+    );
   }
 
   /**

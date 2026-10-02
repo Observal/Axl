@@ -737,6 +737,10 @@ export const WIRE_CAPABILITIES = [
   "mcp.config.probe",
   "remote.pairing.start",
   "remote.status",
+  "remote.share",
+  "remote.unshare",
+  "remote.shares",
+  "remote.unpair",
 ] as const satisfies readonly CapabilityId[];
 
 export interface ClientIdentity {
@@ -817,6 +821,31 @@ export interface RemotePairingStartResult {
   readonly cryptoSessionId: string;
   readonly deviceId: string;
   readonly expiresAt: number;
+}
+
+/** Most sessions one paired device can hold shared at once. */
+export const MAX_REMOTE_SHARES = 64;
+
+/** A session the daemon shares with its paired device. */
+export interface RemoteShare {
+  readonly sessionId: SessionId;
+  readonly cwd: string;
+  readonly title?: string;
+  /** The latest prompt, shortened to one line, for a session without a title. */
+  readonly preview?: string;
+  readonly sharedAt: number;
+  readonly updatedAt: number;
+}
+
+/** Every session shared with the paired device. Each change increases `generation`. */
+export interface RemoteSharesResult {
+  readonly generation: number;
+  readonly shares: readonly RemoteShare[];
+}
+
+export interface RemoteUnpairResult {
+  /** False when no device was paired. */
+  readonly unpaired: boolean;
 }
 
 export const REMOTE_STATUS_PHASES = ["unpaired", "pairing", "paired"] as const;
@@ -946,12 +975,29 @@ export interface RpcMethodMap {
     readonly result: McpConfigProbeResult;
   };
   readonly "remote.pairing.start": {
-    readonly params: Record<string, never>;
+    /** Shared with the device as soon as it pairs. */
+    readonly params: { readonly shareSessionId?: SessionId };
     readonly result: RemotePairingStartResult;
   };
   readonly "remote.status": {
     readonly params: Record<string, never>;
     readonly result: RemoteStatusResult;
+  };
+  readonly "remote.share": {
+    readonly params: { readonly sessionId: SessionId };
+    readonly result: RemoteSharesResult;
+  };
+  readonly "remote.unshare": {
+    readonly params: { readonly sessionId: SessionId };
+    readonly result: RemoteSharesResult;
+  };
+  readonly "remote.shares": {
+    readonly params: Record<string, never>;
+    readonly result: RemoteSharesResult;
+  };
+  readonly "remote.unpair": {
+    readonly params: Record<string, never>;
+    readonly result: RemoteUnpairResult;
   };
   readonly "session.create": {
     readonly params: { readonly cwd: string } & SessionConfiguration;
@@ -1319,6 +1365,7 @@ export const RPC_ERROR_CODES = [
   "model_not_found",
   "model_unavailable",
   "remote_unavailable",
+  "remote_not_paired",
   "authentication_required",
   "authentication_failed",
   "authentication_unavailable",
@@ -1383,6 +1430,11 @@ export interface SessionsChangedDelivery {
   readonly generation: number;
 }
 
+/** The sessions shared with a remote device changed; the delivery carries the whole set. */
+export interface RemoteSharesDelivery extends RemoteSharesResult {
+  readonly kind: "remote_shares";
+}
+
 /** A remote endpoint changed witness state; clients re-read `daemon.info` for the statuses. */
 export interface RemoteEndpointsChangedDelivery {
   readonly kind: "remote_endpoints_changed";
@@ -1412,6 +1464,7 @@ export type ServerMessage =
   | PresenceDelivery
   | SessionsChangedDelivery
   | RemoteEndpointsChangedDelivery
+  | RemoteSharesDelivery
   | WireHello;
 
 export interface SessionForkResult extends SessionOpenResult {
@@ -1609,6 +1662,37 @@ function parseRemoteStatusResult(value: unknown, path: string): RemoteStatusResu
     ...(result.logPath === undefined
       ? {}
       : { logPath: boundedString(result.logPath, `${path}.logPath`, 4_096) }),
+  };
+}
+
+function parseRemoteSharesResult(value: unknown, path: string): RemoteSharesResult {
+  const result = object(value, path);
+  exact(result, path, ["generation", "shares"]);
+  if (!Array.isArray(result.shares) || result.shares.length > MAX_REMOTE_SHARES) {
+    throw new ProtocolValidationError(
+      `${path}.shares`,
+      `must contain at most ${MAX_REMOTE_SHARES} shares`,
+    );
+  }
+  return {
+    generation: nonNegativeInteger(result.generation, `${path}.generation`),
+    shares: result.shares.map((entry, index): RemoteShare => {
+      const sharePath = `${path}.shares[${index}]`;
+      const share = object(entry, sharePath);
+      exact(share, sharePath, ["sessionId", "cwd", "title", "preview", "sharedAt", "updatedAt"]);
+      return {
+        sessionId: parseSessionId(share.sessionId, `${sharePath}.sessionId`),
+        cwd: boundedString(share.cwd, `${sharePath}.cwd`, 4_096),
+        ...(share.title === undefined
+          ? {}
+          : { title: sessionTitle(share.title, `${sharePath}.title`) }),
+        ...(share.preview === undefined
+          ? {}
+          : { preview: boundedString(share.preview, `${sharePath}.preview`, 512) }),
+        sharedAt: nonNegativeInteger(share.sharedAt, `${sharePath}.sharedAt`),
+        updatedAt: nonNegativeInteger(share.updatedAt, `${sharePath}.updatedAt`),
+      };
+    }),
   };
 }
 
@@ -1896,11 +1980,36 @@ export function parseWireRequest(value: unknown): WireRequest {
   if (
     method === "daemon.info" ||
     method === "connection.ping" ||
-    method === "remote.pairing.start" ||
-    method === "remote.status"
+    method === "remote.status" ||
+    method === "remote.shares" ||
+    method === "remote.unpair"
   ) {
     exact(params, "request.params", []);
     return { ...base, method, params: {} };
+  }
+  if (method === "remote.pairing.start") {
+    exact(params, "request.params", ["shareSessionId"]);
+    return {
+      ...base,
+      method,
+      params:
+        params.shareSessionId === undefined
+          ? {}
+          : {
+              shareSessionId: parseSessionId(
+                params.shareSessionId,
+                "request.params.shareSessionId",
+              ),
+            },
+    };
+  }
+  if (method === "remote.share" || method === "remote.unshare") {
+    exact(params, "request.params", ["sessionId"]);
+    return {
+      ...base,
+      method,
+      params: { sessionId: parseSessionId(params.sessionId, "request.params.sessionId") },
+    };
   }
   if (method === "request.cancel") {
     exact(params, "request.params", ["requestId"]);
@@ -2939,6 +3048,19 @@ export function parseRpcResult<Method extends RpcMethod>(
     };
   } else if (method === "remote.status") {
     parsed = parseRemoteStatusResult(value, path);
+  } else if (
+    method === "remote.share" ||
+    method === "remote.unshare" ||
+    method === "remote.shares"
+  ) {
+    parsed = parseRemoteSharesResult(value, path);
+  } else if (method === "remote.unpair") {
+    const result = object(value, path);
+    exact(result, path, ["unpaired"]);
+    if (typeof result.unpaired !== "boolean") {
+      throw new ProtocolValidationError(`${path}.unpaired`, "must be a boolean");
+    }
+    parsed = { unpaired: result.unpaired };
   } else if (method === "session.create" || method === "session.resume") {
     parsed = parseSessionOpenResult(value, path);
   } else if (method === "session.list") {
@@ -3358,6 +3480,10 @@ export const RPC_METHODS = [
   "mcp.config.probe",
   "remote.pairing.start",
   "remote.status",
+  "remote.share",
+  "remote.unshare",
+  "remote.shares",
+  "remote.unpair",
   "session.create",
   "session.resume",
   "session.list",
@@ -3493,8 +3619,12 @@ export const RPC_METHOD_ERROR_CODES = {
   "mcp.config.batch": [],
   "mcp.config.remove": [],
   "mcp.config.probe": ["mcp_probe_failed"],
-  "remote.pairing.start": ["remote_unavailable"],
+  "remote.pairing.start": ["remote_unavailable", "unknown_session"],
   "remote.status": ["remote_unavailable"],
+  "remote.share": ["remote_unavailable", "remote_not_paired", "unknown_session"],
+  "remote.unshare": ["remote_unavailable"],
+  "remote.shares": ["remote_unavailable"],
+  "remote.unpair": ["remote_unavailable"],
   "session.create": [
     "invalid_cwd",
     ...MUTATION_ERRORS,
@@ -3911,6 +4041,11 @@ export function parseServerMessage(value: unknown): ServerMessage {
             : { details: parseJsonObject(error.details, "message.error.details") }),
       },
     };
+  }
+  if (kind === "remote_shares") {
+    exact(message, "message", ["kind", "generation", "shares"]);
+    const { generation, shares } = message;
+    return { kind, ...parseRemoteSharesResult({ generation, shares }, "message") };
   }
   if (kind === "sessions_changed" || kind === "remote_endpoints_changed") {
     exact(message, "message", ["kind", "generation"]);

@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { type AxlDaemon, RemotePairingStartError } from "@axl/daemon";
-import { parseInstallationId } from "@axl/protocol";
+import { type AxlDaemon, RemoteDeviceAuthorityStore, RemotePairingStartError } from "@axl/daemon";
+import { parseDeviceId, parseInstallationId, parseSessionId } from "@axl/protocol";
 
 import { HostedRemoteHost, type HostedRemoteSettings } from "../src/remote-host.ts";
 
@@ -96,4 +96,51 @@ test("a /remote refused for the account names the reason", async (context) => {
     name: "RemotePairingStartError",
     message: "Remote access is not enabled for this account.",
   });
+});
+
+test("unpairing forgets the paired device and ends its shares", async (context) => {
+  const offline = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+  const { root, host, output } = await pairedHost(context, offline);
+  const deviceId = parseDeviceId("01890a5d-ac96-774b-bcce-b302099a8058");
+  assert.equal(
+    host.pairedDevice(),
+    deviceId,
+    "a stored pairing names its device before it is served",
+  );
+  await host.authority.registerLocalDevice(deviceId, ["observe", "steer"]);
+  await host.authority.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
+  await host.authority.shareSession(
+    deviceId,
+    parseSessionId("dddddddd-dddd-4ddd-8ddd-dddddddddddd"),
+  );
+
+  assert.equal(await host.unpair(), true);
+  assert.equal(host.pairedDevice(), undefined);
+  assert.deepEqual(host.authority.shares(deviceId), []);
+  assert.equal(host.authority.snapshot(deviceId)?.locallyRevoked, true);
+  await assert.rejects(access(join(root, "host.json")), "the pairing is not restored again");
+  assert.ok(output.some((line) => line.includes("unpaired")));
+  const restoresBefore = restores(output);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(restores(output), restoresBefore, "an unpaired host stops retrying its restore");
+  assert.equal(await host.unpair(), false);
+});
+
+test("a pairing no daemon serves is forgotten on disk, ending its shares", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-remote-forget-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const installationId = parseInstallationId("01890a5d-ac96-774b-bcce-b302099a8057");
+  const deviceId = parseDeviceId("01890a5d-ac96-774b-bcce-b302099a8058");
+  await writeFile(join(root, "host.json"), PAIRED);
+  const before = await RemoteDeviceAuthorityStore.open(root, installationId);
+  await before.registerLocalDevice(deviceId, ["observe", "steer"]);
+  await before.applyHostedGrant(deviceId, 1, ["observe", "steer"]);
+  await before.shareSession(deviceId, parseSessionId("dddddddd-dddd-4ddd-8ddd-dddddddddddd"));
+
+  assert.equal(await HostedRemoteHost.forget(root, installationId), true);
+  const after = await RemoteDeviceAuthorityStore.open(root, installationId);
+  assert.deepEqual(after.shares(deviceId), []);
+  assert.equal(after.snapshot(deviceId)?.locallyRevoked, true);
+  await assert.rejects(access(join(root, "host.json")));
+  assert.equal(await HostedRemoteHost.forget(root, installationId), false);
 });
