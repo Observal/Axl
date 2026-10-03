@@ -805,7 +805,6 @@ export class AxlApp {
   private mascotPending: string | null = null;
   /** What the terminal said about sixel, once asked; undefined until it answers. */
   private terminalSixel: boolean | undefined;
-  private terminalCell: { readonly width: number; readonly height: number } | undefined;
   private terminalAsked = false;
   private completionIndex = 0;
   private completionText = "";
@@ -1056,6 +1055,7 @@ export class AxlApp {
       },
       onCellSize: (size) => {
         this.terminalCellSize = size;
+        this.useSixelWhenKnown();
         if (!this.stopped && !this.hydrating) this.redraw(true);
       },
       ...(options.suspendProcess === undefined ? {} : { suspendProcess: options.suspendProcess }),
@@ -1815,12 +1815,12 @@ export class AxlApp {
   private mascotAboveDialog(
     rowsBelow: number,
     frameHeight: number,
-  ): { above: string[]; clear: string[] } {
+  ): { above: string[]; clear: string } {
     const mascot = this.mascot;
-    if (mascot === null) return { above: [], clear: [] };
+    if (mascot === null) return { above: [], clear: "" };
     if (rowsBelow + mascot.height <= frameHeight)
-      return { above: mascot.render(this.width), clear: [] };
-    return { above: [], clear: mascot.usesImages ? [mascot.clearImage()] : [] };
+      return { above: mascot.render(this.width), clear: "" };
+    return { above: [], clear: mascot.usesImages ? mascot.clearImage() : "" };
   }
 
   private liveFrame(
@@ -1852,7 +1852,8 @@ export class AxlApp {
       const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
       const dialog = this.attentionOverlay.render(this.width);
       const { above, clear } = this.mascotAboveDialog(prefix.length + dialog.length, frameHeight);
-      const lines = [...clear, ...prefix, ...above, ...dialog];
+      const lines = [...prefix, ...above, ...dialog];
+      if (lines.length > 0) lines[0] = `${clear}${lines[0]}`;
       const cursor = this.attentionOverlay.cursorPlacement();
       const top = prefix.length + above.length;
       return clipFrame(
@@ -1870,7 +1871,10 @@ export class AxlApp {
         prefix.length + overlay.length,
         frameHeight,
       );
-      const lines = [...clearMascot, ...prefix, ...above, ...overlay];
+      const lines = [...prefix, ...above, ...overlay];
+      // The clear is not a row: a separate element would shift the cursor and
+      // the clipping by one.
+      if (lines.length > 0) lines[0] = `${clearMascot}${lines[0]}`;
       const cursor = this.overlays.cursorPlacement();
       const top = prefix.length + above.length;
       return clipFrame(
@@ -2402,7 +2406,7 @@ export class AxlApp {
       // height, or it would be drawn over the composer.
       const sixelCell =
         !wantsImages && this.tuiMode === "regular" && this.terminalSixel === true
-          ? this.terminalCell
+          ? this.terminalCellSize
           : undefined;
       // The pack and the atlas are the same art, so rows measured from the
       // pack tell the image path where each state sits without decoding a PNG.
@@ -2540,7 +2544,7 @@ export class AxlApp {
         this.terminalSixel = decoded.key.features.includes(4);
         changed = true;
       } else if (decoded.key.kind === "cell-size") {
-        this.terminalCell = { width: decoded.key.width, height: decoded.key.height };
+        this.terminalCellSize = { width: decoded.key.width, height: decoded.key.height };
         changed = true;
       } else {
         rest += data.slice(index, decoded.next);
@@ -2582,7 +2586,7 @@ export class AxlApp {
   private async terminalAnswers(timeoutMs: number): Promise<void> {
     const settled = () =>
       this.terminalSixel === false ||
-      (this.terminalSixel === true && this.terminalCell !== undefined);
+      (this.terminalSixel === true && this.terminalCellSize !== undefined);
     for (let waited = 0; !settled() && this.terminalAsked && waited < timeoutMs; waited += 25) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -2592,7 +2596,7 @@ export class AxlApp {
   private useSixelWhenKnown(): void {
     if (
       this.terminalSixel === true &&
-      this.terminalCell !== undefined &&
+      this.terminalCellSize !== undefined &&
       this.mascotPlayer !== null &&
       this.mascot !== null &&
       !this.mascot.drawsSixel &&

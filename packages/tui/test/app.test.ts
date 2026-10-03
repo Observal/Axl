@@ -2843,6 +2843,32 @@ test("the composer's border is painted the terminal's background plus one level 
   assert.equal(text().includes("\x1b[48;2;1;0;0m"), false);
 });
 
+test("the mascot is drawn in sixel once the terminal reports sixel and its cell size", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+    mascot: true,
+  });
+  context.after(() => app.stop());
+  const mascot = () => (app as unknown as { mascot: { drawsSixel: boolean } | null }).mascot;
+
+  await until(() => mascot() !== null, "the mascot in glyphs");
+  assert.equal(mascot()?.drawsSixel, false);
+  // The terminal session takes both replies out of the input and reports them.
+  input.write("\x1b[?62;4c");
+  input.write("\x1b[6;20;10t");
+  await until(() => mascot()?.drawsSixel === true, "the mascot rebuilt as sixel");
+  await until(() => text().includes("\x1bP"), "a sixel frame");
+});
+
 test("a second /mascot while the first is still setting up turns it off", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();
@@ -2882,7 +2908,7 @@ test("a paste and a focus report are not read as the terminal's reports or as ty
   });
   context.after(() => app.stop());
   const inner = app as unknown as {
-    terminalCell: unknown;
+    terminalCellSize: unknown;
     mascotPlayer: { state: string | null } | null;
   };
   input.write("/mascot\r");
@@ -2895,7 +2921,7 @@ test("a paste and a focus report are not read as the terminal's reports or as ty
   // A pasted cell-size reply is the user's text, not the terminal's answer.
   input.write("\x1b[200~a\x1b[6;20;10tb\x1b[201~");
   await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(inner.terminalCell, undefined);
+  assert.equal(inner.terminalCellSize, undefined);
 });
 
 test("MCP interactions block the operation until the user responds", async (context) => {

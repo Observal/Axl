@@ -143,13 +143,20 @@ export function Mascot({
       };
 
       let steppedAt = Date.now();
+      let drawnState: string | null = null;
       timer = setInterval(() => {
         const now = Date.now();
         const elapsed = now - steppedAt;
         steppedAt = now;
         let changed = player.tick(now);
         if (director.tick(now)) changed = true;
-        if (!reduced) {
+        if (reduced) {
+          // Reduced motion: the player keeps running so a state still hands
+          // off to the next one, but a new frame is drawn only when the state
+          // changes, so each state shows as one still pose and does not move.
+          changed = player.state !== drawnState;
+          drawnState = player.state;
+        } else {
           const moved = actor.step(elapsed, {
             state: player.state,
             segment: player.segment,

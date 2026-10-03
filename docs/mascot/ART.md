@@ -215,7 +215,7 @@ Behaviour:
 
 - `split` (subagents) and `clear` are drawn but never triggered: there is no spawn event and no `/clear` command. Streaming a reply has no state of its own, since `typing` belongs to the user. See [ART_NEXT.md](ART_NEXT.md).
 - It cannot show progress, which kind of work is running, or how many subagents there are.
-- It is off in every new session; `/mascot` and the chosen colour are not remembered.
-- Only the terminal client has it. The web client does not.
+- It is on by default in both clients. `/mascot` and the chosen colour are remembered: the terminal keeps them in `settings.json` and the web client in the host's web preferences.
+- The web client draws one atlas, in Pink, recoloured in the browser, and does not use the sixel or glyph drawings. With reduced motion it shows one still pose per state.
 - Between poses, motion inside the creature is procedural: the gills, tail and body move, while arms and legs only change where a state has a pose for it.
 
