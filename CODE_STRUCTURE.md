@@ -47,6 +47,7 @@ axl/
     sandbox/           # operating-system providers and OCI runtime (roadmap §10, 11)
     cli/               # axl executable, process startup, and client selection
     tui/               # terminal event projection and interaction UI
+      assets/          # presentation assets, such as the mascot sprite atlases and packs
     web/               # web client
     ui/                # shared presentation tokens and React renderers
     sdk/               # shared TypeScript client SDK when multiple clients need it

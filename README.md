@@ -284,6 +284,7 @@ The TUI supports:
 - session resume, fork, clone, compact, reload, review, and status flows
 - MCP approval, browser authorization, and structured-input dialogs
 - optional Vim editing, prompt stash, model favorites, attention bell, and developer panel
+- an optional pixel-art mascot above the composer that reflects session state, drawn as an inline image where the terminal supports one and as glyphs otherwise
 
 Run `/commands` for available actions and `/hotkeys` for keyboard controls.
 
@@ -401,7 +402,7 @@ Restart the daemon or run `/reload` after editing the file manually. MCP tools s
 | `packages/runtime` | Provider, tool, extension, and sandbox assembly for the daemon process |
 | `packages/sandbox` | Native and OCI operating-system confinement |
 | `packages/cli` | Process startup, placement selection, provider setup, and client launch |
-| `packages/tui` | Interactive terminal presentation over the public SDK |
+| `packages/tui` | Interactive terminal presentation over the public SDK, including the mascot assets under `assets/` |
 | `packages/extensions/prompts` | Prompt template discovery and editor expansion |
 | `packages/extensions/skills` | Agent Skills integration |
 | `packages/extensions/mcp` | MCP integration |

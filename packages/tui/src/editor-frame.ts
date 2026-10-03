@@ -11,6 +11,14 @@ import type { SessionView } from "./transcript.ts";
 const COMPACT_WIDTH = 50;
 
 export interface EditorFrameState {
+  /** Blank row above the frame. The mascot occupies it when one is drawn. */
+  readonly gapAbove?: boolean;
+  /**
+   * Paints the top border's background explicitly. A terminal only re-draws
+   * backgrounds over a below-background image for cells whose colour differs
+   * from its default, so this is what hides an overlapping mascot.
+   */
+  readonly opaqueBorder?: boolean;
   readonly notice?: string;
   readonly location: string;
   readonly completion?: readonly string[];
@@ -66,8 +74,9 @@ export class EditorFrameComponent implements Component {
         ? `${truncateToWidth(this.state.location, locationWidth, "")}${separator}${model}`
         : truncateToWidth(model, width, ""),
     );
+    const gap = this.state.gapAbove === false ? [] : [""];
     const lines = [
-      "",
+      ...gap,
       ...(this.state.notice === undefined ? [] : [truncateToWidth(this.state.notice, width, "")]),
       ...rendered.lines.map(
         (line, row) => `${row === 0 ? prefix : " ".repeat(visibleWidth(prefix))}${line}`,
@@ -75,7 +84,7 @@ export class EditorFrameComponent implements Component {
       footer,
       ...(this.state.completion ?? []).map((line) => truncateToWidth(line, width, "")),
     ];
-    const editorStart = 1 + (this.state.notice === undefined ? 0 : 1);
+    const editorStart = gap.length + (this.state.notice === undefined ? 0 : 1);
     this.cursor = {
       row: editorStart + rendered.cursorRow,
       column: visibleWidth(prefix) + rendered.cursorColumn,
@@ -95,15 +104,18 @@ export class EditorFrameComponent implements Component {
     const topLeft = [view.working ? "running" : view.usageLabel(), this.state.mode]
       .filter(Boolean)
       .join(" · ");
+    const gap = this.state.gapAbove === false ? [] : [""];
     const lines = [
-      "",
+      ...gap,
       ...(this.state.notice === undefined ? [] : [truncateToWidth(this.state.notice, width, "")]),
-      this.borderLine(width, topLeft, view.modelLabel(), "╭", "╮"),
+      this.state.opaqueBorder === true
+        ? `\x1b[48;2;1;0;0m${this.borderLine(width, topLeft, view.modelLabel(), "╭", "╮")}\x1b[49m`
+        : this.borderLine(width, topLeft, view.modelLabel(), "╭", "╮"),
       ...body,
       this.borderLine(width, this.state.location, view.tpsLabel(), "╰", "╯"),
       ...(this.state.completion ?? []).map((line) => truncateToWidth(line, width, "")),
     ];
-    const editorStart = 1 + (this.state.notice === undefined ? 0 : 1) + 1;
+    const editorStart = gap.length + (this.state.notice === undefined ? 0 : 1) + 1;
     this.cursor = {
       row: editorStart + rendered.cursorRow,
       column: 2 + visibleWidth(prefix) + rendered.cursorColumn,

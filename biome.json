@@ -10,7 +10,8 @@
       "!packages/ai/src/catalog.generated",
       "!packages/extensions/lounge/src/chess-puzzles.generated.ts",
       "!packages/extensions/lounge/src/honeycomb-data.generated.ts",
-      "!packages/extensions/lounge/src/nonogram-fixtures.generated.ts"
+      "!packages/extensions/lounge/src/nonogram-fixtures.generated.ts",
+      "!packages/tui/assets"
     ]
   },
   "formatter": {

@@ -193,6 +193,27 @@ test("uses modifyOtherKeys when device attributes arrive without Kitty support",
   assert.equal((state.output.writes.at(-1) ?? "").includes("\x1b[>4;0m"), true);
 });
 
+test("passes the reported device attributes on, still out of the input", () => {
+  const reported: (readonly number[])[] = [];
+  const input = new FakeInput();
+  const terminal = new TerminalSession({
+    input,
+    output: new FakeOutput(),
+    onInput: () => assert.fail("a device attributes reply is not input"),
+    onInputError: (error) => assert.fail(error),
+    onResize: () => undefined,
+    onDeviceAttributes: (features) => reported.push(features),
+  });
+  terminal.start();
+  input.emit("data", "\x1b[?61;4;6;7;14;21;22c");
+  assert.deepEqual(
+    reported,
+    [[61, 4, 6, 7, 14, 21, 22]],
+    "4 among them: this terminal draws sixel",
+  );
+  terminal.stop();
+});
+
 test("reports fallback activation failures without leaking them from input dispatch", () => {
   const state = session();
   state.terminal.start();

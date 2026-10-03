@@ -19,6 +19,28 @@ Environment overrides:
 
 Fullscreen suppresses inline image escape sequences and shows bounded metadata. This prevents an image placement from escaping or corrupting the application-owned viewport. Regular mode may use bounded inline images. Images larger than 2 MiB remain metadata-only. Attachments larger than 20 MiB are rejected before upload.
 
+## Mascot
+
+The mascot (`/mascot`, off by default) picks the best drawing the terminal offers, in this order:
+
+1. **Kitty graphics**, where Kitty graphics are detected or requested with `AXL_IMAGE_PROTOCOL=kitty`: real pixels, placed above the text, one placement per frame.
+2. **Sixel**, where the terminal reports sixel in its device attributes (the `4` in its answer to `CSI c`, which the terminal session already asks for) and answers `CSI 16 t` with its cell size. The mascot asks for the cell size only when it is turned on, and waits up to 400 ms for the answers before drawing. The image is written into the text grid, four rows tall at the reported cell size, and each frame clears the strip and redraws it in one write.
+3. **Text**, everywhere else: the half-block pack, 12 rows tall. It uses only `▀` and `▄`, which every monospace font has, with the colours set per character. Where the terminal has 24-bit colour (`COLORTERM=truecolor` or `24bit`, a `TERM` ending in `direct`, or Windows Terminal, Kitty, WezTerm, Ghostty, iTerm2 or VS Code recognised from their environment variables) the pack is drawn as built. Otherwise each colour is swapped once, at load, for the nearest of the 256 xterm colours, so terminals such as Apple Terminal draw it in colours they have instead of guessing.
+
+Fullscreen always uses the text pack, because the application scrolls the transcript itself and an image cannot follow it. `AXL_IMAGE_PROTOCOL=none` turns the images off, so the mascot uses the text pack.
+
+The text pack is 12 rows tall where the images are 4, cannot face the other way, and in 256 colours loses some shading. Those and the other known gaps, including the Windows Terminal leftover below, are listed under Limitations in `docs/mascot/ART.md`.
+
+| Terminal | Mascot drawing | Verified |
+| --- | --- | --- |
+| Kitty | Kitty graphics | Kitty 0.32 under WSLg, every state |
+| Ghostty, WezTerm | Kitty graphics | Not yet |
+| Windows Terminal 1.22 or newer | Sixel | Windows Terminal 1.24 under WSL: draws and animates every state. Known issue: after the screen scrolls, a slice of an older frame can remain above the mascot |
+| foot, Konsole, mlterm, Contour, xterm as a VT340 (`-ti vt340`) | Sixel, when the terminal reports it | Not yet |
+| iTerm2 | Sixel if it reports it, otherwise text | Not yet |
+| Windows Terminal before 1.22, VS Code, JetBrains, tmux, others | Text | Text pack in Windows Terminal 1.24 |
+| Apple Terminal | Text in 256 colours | Recorded with a pseudo-terminal that answers like Apple Terminal, not on a Mac |
+
 ## Automated coverage
 
 | Surface | Automated evidence |

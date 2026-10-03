@@ -84,7 +84,7 @@ export function publicManifest(
     bin: { axl: "dist/axl.js" },
     exports: { "./extension-api": { types: "./dist/extension-api.d.ts" } },
     engines: { node: "^22.19.0 || >=24.0.0" },
-    files: ["dist", "LICENSE", "LICENSES", "NOTICE", "README.md"],
+    files: ["dist", "assets", "LICENSE", "LICENSES", "NOTICE", "README.md"],
     license: "Apache-2.0",
     repository: source.repository as Record<string, string>,
     bugs: source.bugs as Record<string, string>,
@@ -153,6 +153,9 @@ export function buildReleasePackage(versionOverride?: string): ReleasePackageRes
   });
 
   writeFileSync(join(STAGE, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  // The bundle resolves presentation assets relative to dist/axl.js, so they
+  // ship beside it.
+  cpSync(join(ROOT, "packages", "tui", "assets"), join(STAGE, "assets"), { recursive: true });
   copyFileSync(join(ROOT, "distribution", "npm", "README.md"), join(STAGE, "README.md"));
   copyFileSync(join(ROOT, "LICENSE"), join(STAGE, "LICENSE"));
   cpSync(join(ROOT, "LICENSES"), join(STAGE, "LICENSES"), { recursive: true });

@@ -16,7 +16,11 @@ export type EditorKey =
   | { readonly kind: "tab" | "shift-tab" | "escape" }
   | { readonly kind: "paste-start" | "paste-end" }
   | { readonly kind: "ctrl" | "alt"; readonly char: string }
-  | { readonly kind: "unknown" };
+  | { readonly kind: "unknown" }
+  /** The terminal's answer to `CSI c`: the features it reports, 4 being sixel. */
+  | { readonly kind: "device-attributes"; readonly features: readonly number[] }
+  /** The terminal's answer to `CSI 16 t`: one cell's size in pixels. */
+  | { readonly kind: "cell-size"; readonly height: number; readonly width: number };
 
 function kittyKey(code: number, modifier = 1): EditorKey {
   const bits = modifier - 1;
@@ -78,6 +82,17 @@ export function decodeOneKey(data: string, index: number): { key: EditorKey; nex
       };
     }
     // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal protocol parsing requires ESC
+    const attributes = /^\x1b\[\?([0-9;]*)c/.exec(rest);
+    if (attributes) {
+      return {
+        key: {
+          kind: "device-attributes",
+          features: (attributes[1] as string).split(";").map(Number),
+        },
+        next: index + attributes[0].length,
+      };
+    }
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: terminal protocol parsing requires ESC
     const csi = /^\x1b\[([0-9;]*)([A-Za-z~])/.exec(rest);
     if (csi) {
       const [sequence, argument, final] = csi as unknown as [string, string, string];
@@ -117,6 +132,13 @@ export function decodeOneKey(data: string, index: number): { key: EditorKey; nex
         return { key: { kind: "end" }, next };
       }
       if (final === "Z") return { key: { kind: "shift-tab" }, next };
+      const cellSize = final === "t" ? /^6;(\d+);(\d+)$/.exec(argument) : null;
+      if (cellSize) {
+        return {
+          key: { kind: "cell-size", height: Number(cellSize[1]), width: Number(cellSize[2]) },
+          next,
+        };
+      }
       if (final === "~" && argument === "13;2") return { key: { kind: "newline" }, next };
       if (final === "~" && argument === "3") return { key: { kind: "delete" }, next };
       if (final === "~" && argument === "200") return { key: { kind: "paste-start" }, next };

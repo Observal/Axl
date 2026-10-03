@@ -61,6 +61,12 @@ export interface TerminalSessionOptions {
   readonly input: TerminalInput;
   readonly output: TerminalOutput;
   readonly onInput: (sequence: string) => void;
+  /**
+   * The features the terminal reports in its device attributes (4 is sixel).
+   * The session asks at start to negotiate the keyboard and keeps the reply
+   * out of the input, so this is how the rest of the client hears it.
+   */
+  readonly onDeviceAttributes?: (features: readonly number[]) => void;
   readonly onInputError: (error: Error) => void;
   readonly onResize: () => void;
   readonly onCellSize?: (size: TerminalCellSize | undefined) => void;
@@ -256,6 +262,8 @@ export class TerminalSession {
     }
     if (isDeviceAttributes(sequence)) {
       if (this.keyboardMode === "negotiating") this.enableModifyOtherKeys();
+      const features = sequence.slice(3, -1).split(";").filter(Boolean).map(Number);
+      this.options.onDeviceAttributes?.(features);
       return;
     }
     this.options.onInput(sequence);

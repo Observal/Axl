@@ -28,6 +28,30 @@ const MAX_RENDER_BYTES = 2 * 1024 * 1024;
 const READ_CHUNK_BYTES = 384 * 1024;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
 
+/**
+ * Whether the terminal draws 24-bit colour. COLORTERM is the terminals' own
+ * signal; the rest are terminals known to support it that do not always set
+ * it. Anything else, Apple Terminal among them, is treated as 256 colours.
+ */
+export function detectTruecolour(env: NodeJS.ProcessEnv = process.env): boolean {
+  const colorterm = env.COLORTERM?.toLowerCase();
+  if (colorterm === "truecolor" || colorterm === "24bit") return true;
+  const term = env.TERM?.toLowerCase() ?? "";
+  if (term.includes("direct") || term.includes("truecolor")) return true;
+  const program = env.TERM_PROGRAM?.toLowerCase();
+  return Boolean(
+    env.WT_SESSION ||
+      env.KITTY_WINDOW_ID ||
+      env.WEZTERM_PANE ||
+      env.GHOSTTY_RESOURCES_DIR ||
+      program === "iterm.app" ||
+      program === "wezterm" ||
+      program === "ghostty" ||
+      program === "kitty" ||
+      program === "vscode",
+  );
+}
+
 export function detectTerminalMedia(
   env: NodeJS.ProcessEnv = process.env,
 ): TerminalMediaCapabilities {

@@ -2219,6 +2219,7 @@ test("every TUI command has an explicit owner", async (context) => {
       "hotkeys",
       "lounge",
       "play",
+      "mascot",
       "regular",
       "reload-tui",
       "settings",
@@ -2720,6 +2721,126 @@ test("ask_user_question blocks and resumes through the TUI", async (context) => 
   await until(() => text().includes("Review answers"), "answer review");
   input.write("\r");
   await until(() => text().includes("selected runtime"), "question continuation");
+});
+
+test("the mascot stays above a question dialog, so ask can be seen", async (context) => {
+  let call = 0;
+  const model: ModelPort = {
+    stream() {
+      call += 1;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          yield {
+            type: "tool_call",
+            callId: "question",
+            name: "ask_user_question",
+            input: {
+              questions: [
+                {
+                  header: "Runtime",
+                  question: "Which runtime?",
+                  options: [
+                    { label: "Node", description: "Use Node.js" },
+                    { label: "Bun", description: "Use Bun" },
+                  ],
+                },
+              ],
+            },
+          };
+          yield { type: "completed", stopReason: "tool_use", usage };
+        } else {
+          yield { type: "text_delta", text: "selected runtime" };
+          yield { type: "completed", stopReason: "stop", usage };
+        }
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, (interact) => {
+    const tools = new ToolRegistry();
+    tools.register(makeAskUserQuestionTool(interact));
+    return tools;
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  // room for the 12-row text pack above the dialog
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+  });
+  context.after(() => app.stop());
+  const drawsMascot = (from: number) => /[▀▄]/.test(text().slice(from));
+
+  input.write("/mascot\r");
+  await until(() => drawsMascot(0), "the mascot");
+  input.write("ask me\r");
+  await until(() => text().includes("Which runtime?"), "question prompt");
+  // The dialog is up; the mascot has to keep being drawn while it waits.
+  const opened = text().length;
+  await until(() => drawsMascot(opened), "the mascot above the dialog");
+  input.write("\r");
+  await until(() => text().includes("Review answers"), "answer review");
+  input.write("\r");
+  await until(() => text().includes("selected runtime"), "question continuation");
+});
+
+test("a second /mascot while the first is still setting up turns it off", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+  });
+  context.after(() => app.stop());
+  const mascot = () => (app as unknown as { mascot: unknown }).mascot;
+
+  // The first setup waits up to 400 ms for the terminal's answers.
+  input.write("/mascot\r");
+  input.write("/mascot\r");
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(mascot(), null, "the second /mascot won");
+  assert.doesNotMatch(text(), /[▀▄]/);
+});
+
+test("a paste and a focus report are not read as the terminal's reports or as typing", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+  });
+  context.after(() => app.stop());
+  const inner = app as unknown as {
+    terminalCell: unknown;
+    mascotPlayer: { state: string | null } | null;
+  };
+  input.write("/mascot\r");
+  await until(() => /[▀▄]/.test(text()), "the mascot");
+
+  input.write("\x1b[I");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.notEqual(inner.mascotPlayer?.state, "typing", "focusing the window is not typing");
+
+  // A pasted cell-size reply is the user's text, not the terminal's answer.
+  input.write("\x1b[200~a\x1b[6;20;10tb\x1b[201~");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(inner.terminalCell, undefined);
 });
 
 test("MCP interactions block the operation until the user responds", async (context) => {
