@@ -9,7 +9,9 @@
  * by the same platform store that keeps the E2EE envelope keys, so a copy of the file opened by
  * another user or on another machine cannot use them:
  *
- * - in WSL, Windows DPAPI for the signed-in Windows user, through `axl-dpapi-helper.exe`; and
+ * - in WSL, Windows DPAPI for the signed-in Windows user, through `axl-dpapi-helper.exe`;
+ * - on macOS, AES-256-GCM under a key in the data-protection Keychain, through the signed
+ *   `axl-keychain-helper`; and
  * - on a Linux desktop, AES-256-GCM under a key kept in the session's Secret Service (GNOME Keyring
  *   or KWallet 6), which the hosted Linux binding creates and reads.
  *
@@ -34,7 +36,7 @@ import {
   sign,
 } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { release } from "node:os";
+import { homedir, release } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
@@ -48,7 +50,6 @@ import {
 } from "@axl/protocol";
 
 const ACCOUNT_VERSION = 1;
-const HELPER_PROTOCOL = "axl-dpapi-helper-v1";
 const HELPER_MAX_PAYLOAD = 64 * 1024;
 const SEAL_DOMAIN = "axl-remote-account-v1";
 /** Refresh this long before the access token expires, so no request carries a stale one. */
@@ -86,39 +87,61 @@ export function isWsl(): boolean {
   return process.platform === "linux" && /microsoft/iu.test(release());
 }
 
-/** The hosted Node binding this machine's daemon uses: WSL 2 or a Linux desktop. */
-export function hostedBindingKind(): "hosted-wsl" | "hosted-linux" | undefined {
+/** The hosted Node binding this machine's daemon uses: WSL 2, macOS, or a Linux desktop. */
+export function hostedBindingKind(): "hosted-wsl" | "hosted-linux" | "hosted-macos" | undefined {
+  if (process.platform === "darwin") return "hosted-macos";
   if (process.platform !== "linux") return undefined;
   return isWsl() ? "hosted-wsl" : "hosted-linux";
 }
 
-/** The hosted Node binding built beside this checkout (`build.mjs hosted-wsl|hosted-linux`). */
+/** The hosted Node binding built beside this checkout (`build.mjs hosted-wsl|-linux|-macos`). */
 export function defaultHostedBinding(kind = hostedBindingKind() ?? "hosted-wsl"): string {
   return fileURLToPath(
     new URL(`../../e2ee/bindings/node/dist/${kind}/loader/index.js`, import.meta.url),
   );
 }
 
-// ---- DPAPI helper -------------------------------------------------------------------------------
+// ---- Sealing helpers ----------------------------------------------------------------------------
 
 const STATUS_OK = 0;
 const STATUS_DENIED = 2;
 const OP_HELLO = 0;
+const OP_IDENTITY = 1;
 const OP_PROTECT = 2;
 const OP_UNPROTECT = 3;
 
+/** The two helpers that speak the sealing protocol, and how to name their refusals. */
+const HELPERS = {
+  dpapi: {
+    protocol: "axl-dpapi-helper-v1",
+    name: "The DPAPI helper",
+    refused: "Windows refused to unseal the remote account for this user",
+  },
+  keychain: {
+    protocol: "axl-keychain-helper-v1",
+    name: "The Keychain helper",
+    refused:
+      "The Keychain refused the remote account's key; remote access on macOS needs the signed axl-keychain-helper",
+  },
+} as const;
+
+export type SealingHelperKind = keyof typeof HELPERS;
+
 /**
- * One helper process, spoken to with its framed protocol: `op u8 | length u32 | payload` in and
+ * One helper process, `axl-dpapi-helper.exe` in WSL or `axl-keychain-helper` on macOS, spoken to
+ * with their shared framed protocol: `op u8 | length u32 | payload` in and
  * `status u8 | length u32 | payload` out.
  */
-export class DpapiHelper implements AccountSealer {
+export class HelperSealer implements AccountSealer {
+  readonly #helper: (typeof HELPERS)[SealingHelperKind];
   readonly #child: ChildProcessWithoutNullStreams;
   #buffer = Buffer.alloc(0);
   #waiting: ((frame: { status: number; payload: Buffer } | Error) => void) | undefined;
   #tail: Promise<unknown> = Promise.resolve();
   #failed: Error | undefined;
 
-  private constructor(path: string) {
+  private constructor(path: string, kind: SealingHelperKind) {
+    this.#helper = HELPERS[kind];
     this.#child = spawn(path, [], { stdio: ["pipe", "pipe", "pipe"] });
     this.#child.stderr.resume();
     this.#child.stdout.on("data", (chunk: Buffer) => {
@@ -133,21 +156,23 @@ export class DpapiHelper implements AccountSealer {
     };
     this.#child.on("error", fail);
     this.#child.on("exit", () =>
-      fail(new RemoteAccountError("helper_unavailable", "The DPAPI helper stopped")),
+      fail(new RemoteAccountError("helper_unavailable", `${this.#helper.name} stopped`)),
     );
   }
 
-  /** Start the helper at `path` and check that it speaks this protocol. */
-  static async open(path: string): Promise<DpapiHelper> {
-    const helper = new DpapiHelper(path);
+  /** Start the `kind` helper at `path` and check that it speaks its protocol. */
+  static async open(path: string, kind: SealingHelperKind): Promise<HelperSealer> {
+    const helper = new HelperSealer(path, kind);
     try {
       const hello = await helper.#request(OP_HELLO, Buffer.alloc(0));
-      if (hello.toString("utf8") !== HELPER_PROTOCOL) throw new Error("unexpected protocol");
+      if (hello.toString("utf8") !== helper.#helper.protocol) {
+        throw new Error("unexpected protocol");
+      }
     } catch (cause) {
       helper.close();
       throw new RemoteAccountError(
         "helper_unavailable",
-        `The DPAPI helper at ${path} is not available: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `${helper.#helper.name} at ${path} is not available: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
     return helper;
@@ -180,17 +205,12 @@ export class DpapiHelper implements AccountSealer {
             if (frame instanceof Error) reject(frame);
             else if (frame.status === STATUS_OK) resolve(frame.payload);
             else if (frame.status === STATUS_DENIED) {
-              reject(
-                new RemoteAccountError(
-                  "sign_in_required",
-                  "Windows refused to unseal the remote account for this user",
-                ),
-              );
+              reject(new RemoteAccountError("sign_in_required", this.#helper.refused));
             } else {
               reject(
                 new RemoteAccountError(
                   "helper_unavailable",
-                  `The DPAPI helper answered status ${frame.status}`,
+                  `${this.#helper.name} answered status ${frame.status}`,
                 ),
               );
             }
@@ -204,6 +224,11 @@ export class DpapiHelper implements AccountSealer {
     );
     this.#tail = run.catch(() => undefined);
     return run;
+  }
+
+  /** Who the helper seals for; asking it first shows whether the platform will seal at all. */
+  async identity(): Promise<string> {
+    return (await this.#request(OP_IDENTITY, Buffer.alloc(0))).toString("utf8");
   }
 
   protect(value: Buffer): Promise<Buffer> {
@@ -326,10 +351,12 @@ export type SecretServiceImplementation = "gnome-keyring" | "kwallet6";
 
 /**
  * Where an account's secrets are sealed: through the Windows user's `axl-dpapi-helper.exe` (a WSL
- * path), or under a key in the Linux desktop session's Secret Service.
+ * path), through the macOS user's `axl-keychain-helper`, or under a key in the Linux desktop
+ * session's Secret Service.
  */
 export type RemoteAccountSealer =
   | { readonly kind: "dpapi"; readonly helper: string }
+  | { readonly kind: "keychain"; readonly helper: string }
   | { readonly kind: "secret-service"; readonly implementation: SecretServiceImplementation };
 
 function parseImplementation(value: unknown): SecretServiceImplementation {
@@ -343,7 +370,7 @@ export async function openAccountSealer(
   binding: string,
   options: { readonly create?: boolean } = {},
 ): Promise<AccountSealer> {
-  if (sealer.kind === "dpapi") return DpapiHelper.open(sealer.helper);
+  if (sealer.kind !== "secret-service") return HelperSealer.open(sealer.helper, sealer.kind);
   const module = await hostedLinuxBinding(binding);
   let key: Uint8Array;
   try {
@@ -357,9 +384,10 @@ export async function openAccountSealer(
 }
 
 function sameSealer(left: RemoteAccountSealer, right: RemoteAccountSealer): boolean {
-  return left.kind === "dpapi"
-    ? right.kind === "dpapi" && left.helper === right.helper
-    : right.kind === "secret-service" && left.implementation === right.implementation;
+  if (left.kind === "secret-service") {
+    return right.kind === "secret-service" && left.implementation === right.implementation;
+  }
+  return right.kind === left.kind && right.helper === left.helper;
 }
 
 type SealPurpose = "refresh-token" | "installation-key";
@@ -420,6 +448,24 @@ export async function defaultDpapiHelper(): Promise<string | undefined> {
   }
 }
 
+/**
+ * Where the macOS helper is installed for this user: the signed app bundle that carries its Keychain
+ * entitlement, under `~/Library/Application Support/Axl`. Undefined on other platforms.
+ */
+export function defaultKeychainHelper(): string | undefined {
+  if (process.platform !== "darwin") return undefined;
+  return join(
+    homedir(),
+    "Library",
+    "Application Support",
+    "Axl",
+    "AxlKeychainHelper.app",
+    "Contents",
+    "MacOS",
+    "axl-keychain-helper",
+  );
+}
+
 // ---- Account file -------------------------------------------------------------------------------
 
 export interface RemoteAccountFile {
@@ -454,6 +500,9 @@ function parseSealer(record: Record<string, unknown>): RemoteAccountSealer {
   ) as Record<string, unknown>;
   if (sealer.kind === "secret-service" && record.helper === undefined) {
     return { kind: "secret-service", implementation: parseImplementation(sealer.implementation) };
+  }
+  if (sealer.kind === "keychain" && record.helper === undefined) {
+    return { kind: "keychain", helper: text(sealer.helper, "helper") };
   }
   throw new RemoteAccountError("invalid_account", "Remote account sealer is invalid");
 }

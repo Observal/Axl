@@ -97,6 +97,15 @@ A daemon in WSL is set up for production remote access with, in its checkout:
 4. `axl daemon restart`, then `/remote` in the terminal. Sign in on the phone with the same Google
    account.
 
+A daemon on a Linux desktop, in a graphical session with an unlocked GNOME Keyring or KWallet 6,
+needs only steps 2 to 4: `daemon-binding.sh` builds the hosted Linux binding, and login records the
+keyring that serves the session.
+
+A daemon on macOS first needs `packages/e2ee/helpers/keychain/install-macos.sh`, which builds
+`axl-keychain-helper` into `~/Library/Application Support/Axl/AxlKeychainHelper.app`, and then
+steps 2 to 4. The Keychain answers only the Developer ID signed helper, so until it is signed,
+login stops before the browser sign-in and the daemon fails closed.
+
 `axl remote logout` revokes the refresh token and forgets the account. The witness keeps its three in-process replicas, which are not
 independently administered; see `docs/architecture/remote-production-wsl.md`.
 

@@ -83,3 +83,14 @@ exports to the production binding:
   file, kept as one reserved record in the same store.
 
 See `docs/architecture/remote-production-desktop.md`.
+
+## Hosted macOS artifact
+
+`node scripts/build.mjs hosted-macos` (on macOS, with `AXL_E2EE_HOSTED_TRUST_FILE`) builds
+`dist/hosted-macos` for a production daemon on a Mac. It adds exactly one export to the production
+binding, `hostedMacosDaemonEndpoint(root, helper, accountId, installationId, cryptoSessionId)`,
+whose envelope keys rest in owner-only files under `root` sealed under a key in the data-protection
+Keychain through `helper`, the user's signed `axl-keychain-helper`, and whose endpoint verifies
+certificates against the replica trust pinned at build time. Until that helper carries Axl's
+Developer ID signature and Keychain entitlement, the Keychain refuses it and the endpoint fails
+closed with `secure_store_access_denied`. See `docs/architecture/remote-production-desktop.md`.

@@ -163,6 +163,10 @@ jobs:
         run: echo "No E2EE changes detected; required check reports success."
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         if: needs.changes.outputs.e2ee == 'true'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: 24.13.1
       - name: Run target-gated Keychain model and local runtime checks
         if: needs.changes.outputs.e2ee == 'true'
         working-directory: packages/e2ee
@@ -172,6 +176,35 @@ jobs:
           sw_vers
           uname -m
           cargo test --locked -p axl-e2ee macos_keychain -- --nocapture
+          cargo test --locked -p axl-e2ee sealed_file
+          cargo test --locked -p axl-keychain-helper -- --nocapture
+          cargo clippy --locked -p axl-e2ee -p axl-keychain-helper --all-targets -- -D warnings
+          cargo clippy --locked -p axl-e2ee-node --all-targets --features hosted-macos -- -D warnings
+      - name: Install pinned pnpm and Node dependencies
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          npm install --global pnpm@11.25.0 --ignore-scripts
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @axl/protocol build
+      - name: An unsigned Keychain helper fails closed in the store, the binding, and account sealing
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          (cd packages/e2ee && cargo build --locked --release -p axl-keychain-helper)
+          helper="$PWD/packages/e2ee/target/release/axl-keychain-helper"
+          (cd packages/e2ee && AXL_KEYCHAIN_HELPER="$helper" \
+            cargo test --locked -p axl-e2ee an_unsigned_keychain_helper_fails_closed -- --ignored --nocapture)
+          AXL_LIVE_KEYCHAIN_HELPER="$helper" node --test packages/runtime/test/remote-account.test.ts
+
+          : > "$RUNNER_TEMP/empty-trust.bin"
+          AXL_E2EE_HOSTED_TRUST_FILE="$RUNNER_TEMP/empty-trust.bin" \
+            node packages/e2ee/bindings/node/scripts/build.mjs hosted-macos
+          binding="$PWD/packages/e2ee/bindings/node/dist/hosted-macos/loader/index.js"
+          node --input-type=module -e "
+            const binding = await import('$binding');
+            const id = Buffer.alloc(16);
+            try { binding.hostedMacosDaemonEndpoint('$RUNNER_TEMP/axl-remote', '$helper', id, id, id); process.exit(1); }
+            catch (error) { console.log(error.code); process.exit(error.code === 'secure_store_access_denied' ? 0 : 1); }
+          "
 
   e2ee-linux-secret-service:
     name: E2EE Linux Secret Service
@@ -513,6 +546,12 @@ jobs:
           : > "$RUNNER_TEMP/empty-trust.bin"
           AXL_E2EE_HOSTED_TRUST_FILE="$RUNNER_TEMP/empty-trust.bin" \
             node packages/e2ee/bindings/node/scripts/build.mjs hosted-linux
+      - name: Build the hosted macOS artifact for the ABI check
+        if: needs.changes.outputs.e2ee == 'true' && startsWith(matrix.target, 'darwin-') && matrix.node == '24.13.1'
+        run: |
+          : > "$RUNNER_TEMP/empty-trust.bin"
+          AXL_E2EE_HOSTED_TRUST_FILE="$RUNNER_TEMP/empty-trust.bin" \
+            node packages/e2ee/bindings/node/scripts/build.mjs hosted-macos
       - name: Build, test, verify, and package the Node binding
         if: needs.changes.outputs.e2ee == 'true'
         env:

@@ -165,6 +165,8 @@ for (const forbidden of [
   "hosted_linux_daemon_endpoint",
   "hostedLinuxAccountKey",
   "hostedLinuxSecretService",
+  "hostedMacosDaemonEndpoint",
+  "hosted_macos_daemon_endpoint",
 ]) {
   assert(!nativeBytes.includes(Buffer.from(forbidden)), `production binary contains ${forbidden}`);
   assert(!loaderText.includes(forbidden), `production loader contains ${forbidden}`);
@@ -217,6 +219,7 @@ if (existsSync(join(deploymentRoot, "integrity.json"))) {
 const HOSTED = {
   "hosted-wsl": ["hostedWslDaemonEndpoint"],
   "hosted-linux": ["hostedLinuxDaemonEndpoint", "hostedLinuxSecretService", "hostedLinuxAccountKey"],
+  "hosted-macos": ["hostedMacosDaemonEndpoint"],
 };
 for (const [kind, exports] of Object.entries(HOSTED)) {
   const hostedRoot = join(root, `dist/${kind}`);

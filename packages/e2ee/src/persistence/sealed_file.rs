@@ -1,20 +1,24 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-License-Identifier: Apache-2.0
 
-//! Envelope keys for a daemon running in WSL, wrapped by Windows DPAPI.
+//! Envelope keys in owner-only files, each sealed by a platform helper process.
 //!
-//! WSL is a headless Linux host, which the production storage RFC leaves without a v1 store. This
-//! store keeps the same record model as the native Windows store: one record file per key and
+//! The store keeps the same record model as the native Windows store: one record file per key and
 //! lifecycle state, written to a temporary file, synced, and renamed into place. Each record is
-//! sealed with nested machine-scope then user-scope DPAPI by `axl-dpapi-helper.exe`, a stateless
-//! Windows process started through WSL interop as the signed-in Windows user. The helper sees one
-//! bounded value per request and never a file, path, or record identity, so every lifecycle and
-//! crash-ordering decision stays here. See `docs/architecture/remote-production-wsl.md`.
+//! sealed by a stateless helper that sees one bounded value per request and never a file, path, or
+//! record identity, so every lifecycle and crash-ordering decision stays here. Two profiles use it:
 //!
-//! Records bind the Windows user SID the helper reports and the Linux user that owns the store.
-//! A copy of the WSL disk opens only for that Windows user on that machine. Processes running as
-//! the same Linux user can ask the helper to unwrap, the same explicit non-claim the RFC makes for
-//! Secret Service against malicious same-user processes.
+//! - [`WSL_DPAPI`]: a daemon in WSL, whose records `axl-dpapi-helper.exe` seals with nested
+//!   machine-scope then user-scope DPAPI, started through WSL interop as the signed-in Windows
+//!   user. See `docs/architecture/remote-production-wsl.md`.
+//! - [`MACOS_KEYCHAIN`]: a daemon on macOS, whose records `axl-keychain-helper` seals with
+//!   AES-256-GCM under a key it keeps in the data-protection Keychain. See
+//!   `docs/architecture/remote-production-desktop.md`.
+//!
+//! Records bind the identity the helper reports (the Windows user SID, or the Keychain key's
+//! identifier) and the user that owns the store, so a record opens only under the same sealing
+//! identity. Processes running as the same user can ask the helper to unwrap, the same explicit
+//! non-claim the RFC makes for Secret Service against malicious same-user processes.
 
 use std::{
     collections::BTreeSet,
@@ -32,12 +36,9 @@ use super::{EnvelopeKeyStore, PersistenceError};
 use crate::{CoreProvider, Id, SUITE};
 
 const FORMAT_VERSION: u16 = 1;
-const PLATFORM_WSL_DPAPI: u8 = 4;
 const RECORD_BYTES: usize = 2 + 1 + 48 + 16 + 16 + 48 + 1 + 32;
 const FILE_PREFIX: &str = "axl-e2ee-key-v1-";
-const FILE_SUFFIX: &str = ".wsldpapi";
 const MAX_RECORD_BYTES: usize = 64 * 1024;
-const HELPER_PROTOCOL: &[u8] = b"axl-dpapi-helper-v1";
 
 const OP_HELLO: u8 = 0;
 const OP_IDENTITY: u8 = 1;
@@ -47,8 +48,45 @@ const STATUS_OK: u8 = 0;
 const STATUS_UNAVAILABLE: u8 = 1;
 const STATUS_DENIED: u8 = 2;
 
-/// The Windows side: who DPAPI binds to, and nested protection of one value.
-pub(crate) trait DpapiWrapper: Send + Sync {
+/// What distinguishes one sealing platform's records from another's. Records written under one
+/// profile are never read under another: the file names, the platform byte inside the sealed
+/// record, and the identity domain all differ.
+pub(crate) struct SealProfile {
+    platform: u8,
+    file_suffix: &'static str,
+    identity_domain: &'static str,
+    protocol: &'static [u8],
+    valid_identity: fn(&str) -> bool,
+}
+
+/// WSL with Windows DPAPI. These values are the original WSL store's and must not change.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const WSL_DPAPI: SealProfile = SealProfile {
+    platform: 4,
+    file_suffix: ".wsldpapi",
+    identity_domain: "axl-wsl-dpapi-v1",
+    protocol: b"axl-dpapi-helper-v1",
+    valid_identity: |sid| sid.starts_with("S-1-") && sid.len() <= 184,
+};
+
+/// macOS with a key in the data-protection Keychain. The helper's identity is the key's 16-byte
+/// identifier in lowercase hex, so records sealed under a replaced key are refused.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const MACOS_KEYCHAIN: SealProfile = SealProfile {
+    platform: 5,
+    file_suffix: ".keychainseal",
+    identity_domain: "axl-macos-keychain-seal-v1",
+    protocol: b"axl-keychain-helper-v1",
+    valid_identity: |id| {
+        id.len() == 32
+            && id
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    },
+};
+
+/// The helper side: the identity its seal binds to, and protection of one value.
+pub(crate) trait Sealer: Send + Sync {
     fn identity(&self) -> Result<String, PersistenceError>;
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, PersistenceError>;
     fn unprotect(&self, protected: &[u8]) -> Result<Vec<u8>, PersistenceError>;
@@ -106,15 +144,20 @@ impl Drop for Running {
     }
 }
 
-/// `axl-dpapi-helper.exe`, started through WSL interop on first use and kept running. A helper
-/// that stopped answering is replaced once per request.
+/// The profile's helper (`axl-dpapi-helper.exe` through WSL interop, or `axl-keychain-helper`),
+/// started on first use and kept running. A helper that stopped answering is replaced once per
+/// request.
 pub(crate) struct HelperProcess {
     path: PathBuf,
+    profile: &'static SealProfile,
     running: Mutex<Option<Running>>,
 }
 
 impl HelperProcess {
-    pub(crate) fn new(path: &Path) -> Result<Self, PersistenceError> {
+    pub(crate) fn new(
+        path: &Path,
+        profile: &'static SealProfile,
+    ) -> Result<Self, PersistenceError> {
         if !path.is_absolute() {
             return Err(PersistenceError::SecureStoreUnavailable);
         }
@@ -124,6 +167,7 @@ impl HelperProcess {
         }
         Ok(Self {
             path: path.to_path_buf(),
+            profile,
             running: Mutex::new(None),
         })
     }
@@ -145,7 +189,7 @@ impl HelperProcess {
             output,
         };
         let hello = exchange(&mut running.input, &mut running.output, OP_HELLO, &[])?;
-        if hello != HELPER_PROTOCOL {
+        if hello != self.profile.protocol {
             return Err(PersistenceError::SecureStoreUnavailable);
         }
         Ok(running)
@@ -164,7 +208,7 @@ impl HelperProcess {
                 .as_mut()
                 .ok_or(PersistenceError::SecureStoreUnavailable)?;
             match exchange(&mut running.input, &mut running.output, op, payload) {
-                // Only a broken stream is worth a new helper; DPAPI's own answers are final.
+                // Only a broken stream is worth a new helper; the platform's own answers are final.
                 Err(PersistenceError::SecureStoreUnavailable) if attempt == 0 => *guard = None,
                 result => return result,
             }
@@ -173,14 +217,15 @@ impl HelperProcess {
     }
 }
 
-impl DpapiWrapper for HelperProcess {
+impl Sealer for HelperProcess {
     fn identity(&self) -> Result<String, PersistenceError> {
-        let sid = self.call(OP_IDENTITY, &[])?;
-        let sid = String::from_utf8(sid).map_err(|_| PersistenceError::SecureStoreUnavailable)?;
-        if !sid.starts_with("S-1-") || sid.len() > 184 {
+        let identity = self.call(OP_IDENTITY, &[])?;
+        let identity =
+            String::from_utf8(identity).map_err(|_| PersistenceError::SecureStoreUnavailable)?;
+        if !(self.profile.valid_identity)(&identity) {
             return Err(PersistenceError::SecureStoreUnavailable);
         }
-        Ok(sid)
+        Ok(identity)
     }
 
     fn protect(&self, plaintext: &[u8]) -> Result<Vec<u8>, PersistenceError> {
@@ -231,7 +276,7 @@ impl std::fmt::Debug for KeyRecord {
         formatter
             .debug_struct("KeyRecord")
             .field("format_version", &FORMAT_VERSION)
-            .field("platform", &"wsl-dpapi")
+            .field("platform", &"sealed-file")
             .field("lifecycle", &self.lifecycle)
             .field("data_key", &"[redacted]")
             .finish_non_exhaustive()
@@ -245,10 +290,10 @@ impl Drop for KeyRecord {
 }
 
 impl KeyRecord {
-    fn encode(&self) -> Vec<u8> {
+    fn encode(&self, platform: u8) -> Vec<u8> {
         let mut out = Vec::with_capacity(RECORD_BYTES);
         out.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
-        out.push(PLATFORM_WSL_DPAPI);
+        out.push(platform);
         out.extend_from_slice(&self.identity_hash);
         out.extend_from_slice(&self.session);
         out.extend_from_slice(&self.key_id);
@@ -266,10 +311,10 @@ impl KeyRecord {
             && self.data_key == other.data_key
     }
 
-    fn decode(bytes: &[u8]) -> Result<Self, PersistenceError> {
+    fn decode(bytes: &[u8], platform: u8) -> Result<Self, PersistenceError> {
         if bytes.len() != RECORD_BYTES
             || u16::from_be_bytes([bytes[0], bytes[1]]) != FORMAT_VERSION
-            || bytes[2] != PLATFORM_WSL_DPAPI
+            || bytes[2] != platform
         {
             return Err(PersistenceError::Corrupt);
         }
@@ -296,12 +341,20 @@ impl KeyRecord {
     }
 }
 
-/// The effective user of this process, as the owner of its `/proc/self` directory.
-fn current_uid() -> Result<u32, PersistenceError> {
-    fs::metadata("/proc/self")
-        .map(|metadata| metadata.uid())
-        .map_err(|_| PersistenceError::SecureStoreUnavailable)
+/// The effective user of this process.
+fn current_uid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid takes no arguments, cannot fail, and has no memory-safety preconditions.
+    unsafe { geteuid() }
 }
+
+/// Refuses to follow a symbolic link at the final path component.
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400_000;
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x100;
 
 /// A store directory must belong to this user and admit nobody else.
 fn validate_directory(root: &Path, uid: u32) -> Result<(), PersistenceError> {
@@ -326,17 +379,22 @@ fn sync_directory(root: &Path) -> Result<(), PersistenceError> {
         .map_err(|_| PersistenceError::Io)
 }
 
-pub(crate) struct WslDpapiEnvelopeKeyStore<W: DpapiWrapper> {
+pub(crate) struct SealedFileEnvelopeKeyStore<W: Sealer> {
     root: PathBuf,
     uid: u32,
     wrapper: W,
+    profile: &'static SealProfile,
     identity_hash: [u8; 48],
     operation_lock: Mutex<()>,
 }
 
-impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
-    pub(crate) fn new(root: &Path, wrapper: W) -> Result<Self, PersistenceError> {
-        let uid = current_uid()?;
+impl<W: Sealer> SealedFileEnvelopeKeyStore<W> {
+    pub(crate) fn new(
+        root: &Path,
+        wrapper: W,
+        profile: &'static SealProfile,
+    ) -> Result<Self, PersistenceError> {
+        let uid = current_uid();
         if uid == 0 {
             return Err(PersistenceError::SecureStoreAccessDenied);
         }
@@ -349,19 +407,28 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
         }
         validate_directory(root, uid)?;
         let root = root.canonicalize().map_err(|_| PersistenceError::Io)?;
-        let identity_hash = Self::identity_hash(&wrapper, uid)?;
+        let identity_hash = Self::identity_hash(&wrapper, profile, uid)?;
         Ok(Self {
             root,
             uid,
             wrapper,
+            profile,
             identity_hash,
             operation_lock: Mutex::new(()),
         })
     }
 
-    fn identity_hash(wrapper: &W, uid: u32) -> Result<[u8; 48], PersistenceError> {
-        let sid = wrapper.identity()?;
-        hash(format!("axl-wsl-dpapi-v1\0{sid}\0{uid}").as_bytes())
+    fn identity_hash(
+        wrapper: &W,
+        profile: &SealProfile,
+        uid: u32,
+    ) -> Result<[u8; 48], PersistenceError> {
+        let identity = wrapper.identity()?;
+        if !(profile.valid_identity)(&identity) {
+            return Err(PersistenceError::SecureStoreUnavailable);
+        }
+        let domain = profile.identity_domain;
+        hash(format!("{domain}\0{identity}\0{uid}").as_bytes())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, ()>, PersistenceError> {
@@ -372,10 +439,11 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
 
     fn path(&self, session: Id, key_id: Id, lifecycle: Lifecycle) -> PathBuf {
         self.root.join(format!(
-            "{FILE_PREFIX}{}-{}-{}{FILE_SUFFIX}",
+            "{FILE_PREFIX}{}-{}-{}{}",
             hex(session),
             hex(key_id),
-            lifecycle.name()
+            lifecycle.name(),
+            self.profile.file_suffix
         ))
     }
 
@@ -403,7 +471,7 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
         let plaintext = self.wrapper.unprotect(&protected);
         protected.fill(0);
         let mut plaintext = plaintext?;
-        let decoded = KeyRecord::decode(&plaintext);
+        let decoded = KeyRecord::decode(&plaintext, self.profile.platform);
         plaintext.fill(0);
         let record = decoded?;
         if record.identity_hash != self.identity_hash
@@ -436,7 +504,7 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
         if fs::symlink_metadata(&temporary).is_ok() {
             return Err(PersistenceError::SecureStoreAmbiguous);
         }
-        let mut plaintext = record.encode();
+        let mut plaintext = record.encode(self.profile.platform);
         let protected = self.wrapper.protect(&plaintext);
         plaintext.fill(0);
         let mut protected = protected?;
@@ -444,7 +512,7 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .custom_flags(0o400_000) // O_NOFOLLOW
+            .custom_flags(O_NOFOLLOW)
             .open(&temporary)
             .and_then(|mut file| {
                 file.write_all(&protected)?;
@@ -522,7 +590,9 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&self.root).map_err(|_| PersistenceError::Io)? {
             let entry = entry.map_err(|_| PersistenceError::Io)?;
-            if let Some((session, key_id, lifecycle)) = parse_filename(&entry.file_name()) {
+            if let Some((session, key_id, lifecycle)) =
+                parse_filename(&entry.file_name(), self.profile.file_suffix)
+            {
                 entries.push((entry.path(), session, key_id, lifecycle));
             }
         }
@@ -530,10 +600,10 @@ impl<W: DpapiWrapper> WslDpapiEnvelopeKeyStore<W> {
     }
 }
 
-impl<W: DpapiWrapper> EnvelopeKeyStore for WslDpapiEnvelopeKeyStore<W> {
+impl<W: Sealer> EnvelopeKeyStore for SealedFileEnvelopeKeyStore<W> {
     fn available(&self) -> bool {
         validate_directory(&self.root, self.uid).is_ok()
-            && Self::identity_hash(&self.wrapper, self.uid)
+            && Self::identity_hash(&self.wrapper, self.profile, self.uid)
                 .is_ok_and(|hash| hash == self.identity_hash)
     }
 
@@ -641,9 +711,9 @@ fn hash(bytes: &[u8]) -> Result<[u8; 48], PersistenceError> {
         .map_err(|_| PersistenceError::SecureStoreUnavailable)
 }
 
-fn parse_filename(value: &std::ffi::OsStr) -> Option<(Id, Id, Lifecycle)> {
+fn parse_filename(value: &std::ffi::OsStr, suffix: &str) -> Option<(Id, Id, Lifecycle)> {
     let value = value.to_str()?;
-    let value = value.strip_prefix(FILE_PREFIX)?.strip_suffix(FILE_SUFFIX)?;
+    let value = value.strip_prefix(FILE_PREFIX)?.strip_suffix(suffix)?;
     let mut parts = value.split('-');
     let session = decode_hex(parts.next()?).ok()?;
     let key = decode_hex(parts.next()?).ok()?;
@@ -690,23 +760,30 @@ mod tests {
 
     use super::*;
 
-    /// Stands in for DPAPI: seals with a per-user key and a tag, so a record sealed for one user
+    /// Stands in for a helper: seals with a per-user key and a tag, so a record sealed for one user
     /// or changed on disk does not open.
     struct FakeDpapi {
         sid: &'static str,
+        seal: &'static str,
         down: AtomicBool,
     }
 
     impl FakeDpapi {
         fn new(sid: &'static str) -> Self {
+            Self::sealing_as(sid, sid)
+        }
+
+        /// Reports `sid` but seals under `seal`, as two profiles sharing one sealing key would.
+        fn sealing_as(sid: &'static str, seal: &'static str) -> Self {
             Self {
                 sid,
+                seal,
                 down: AtomicBool::new(false),
             }
         }
 
         fn stream(&self, value: &[u8]) -> Vec<u8> {
-            let key = hash(self.sid.as_bytes()).unwrap();
+            let key = hash(self.seal.as_bytes()).unwrap();
             value
                 .iter()
                 .enumerate()
@@ -715,7 +792,7 @@ mod tests {
         }
     }
 
-    impl DpapiWrapper for FakeDpapi {
+    impl Sealer for FakeDpapi {
         fn identity(&self) -> Result<String, PersistenceError> {
             if self.down.load(Ordering::SeqCst) {
                 return Err(PersistenceError::SecureStoreUnavailable);
@@ -728,7 +805,7 @@ mod tests {
                 return Err(PersistenceError::SecureStoreUnavailable);
             }
             let mut sealed = self.stream(plaintext);
-            sealed.extend_from_slice(&hash(&[self.sid.as_bytes(), plaintext].concat())?);
+            sealed.extend_from_slice(&hash(&[self.seal.as_bytes(), plaintext].concat())?);
             Ok(sealed)
         }
 
@@ -741,7 +818,7 @@ mod tests {
                 .checked_sub(48)
                 .ok_or(PersistenceError::SecureStoreAccessDenied)?;
             let plaintext = self.stream(&protected[..split]);
-            if hash(&[self.sid.as_bytes(), &plaintext].concat())?.as_slice() != &protected[split..]
+            if hash(&[self.seal.as_bytes(), &plaintext].concat())?.as_slice() != &protected[split..]
             {
                 return Err(PersistenceError::SecureStoreAccessDenied);
             }
@@ -769,7 +846,9 @@ mod tests {
     #[test]
     fn prepared_keys_load_only_once_activated_and_survive_reopening() {
         let root = root("lifecycle");
-        let store = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")).unwrap();
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
         assert!(store.available());
         assert_eq!(
             fs::metadata(&root).unwrap().mode() & 0o777,
@@ -803,7 +882,9 @@ mod tests {
             );
         }
         drop(store);
-        let reopened = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")).unwrap();
+        let reopened =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
         assert_eq!(reopened.load(SESSION, KEY, b"context").unwrap(), DATA);
         reopened.erase(SESSION, KEY).unwrap();
         assert_eq!(
@@ -816,10 +897,14 @@ mod tests {
     #[test]
     fn another_windows_user_or_a_changed_record_cannot_open_keys() {
         let root = root("identity");
-        let store = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")).unwrap();
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
         store.prepare(SESSION, KEY, &DATA, b"context").unwrap();
         store.activate(SESSION, KEY, b"context").unwrap();
-        let other = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-2")).unwrap();
+        let other =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-2"), &WSL_DPAPI)
+                .unwrap();
         assert_eq!(
             other.load(SESSION, KEY, b"context"),
             Err(PersistenceError::SecureStoreAccessDenied)
@@ -835,7 +920,9 @@ mod tests {
     #[test]
     fn a_record_renamed_to_another_key_is_refused() {
         let root = root("rename");
-        let store = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")).unwrap();
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
         store.prepare(SESSION, KEY, &DATA, b"context").unwrap();
         store.activate(SESSION, KEY, b"context").unwrap();
         fs::rename(
@@ -851,9 +938,77 @@ mod tests {
     }
 
     #[test]
+    fn the_wsl_record_format_is_unchanged() {
+        let root = root("wsl-format");
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
+        store.prepare(SESSION, KEY, &DATA, b"context").unwrap();
+        let path = store.path(SESSION, KEY, Lifecycle::Prepared);
+        assert_eq!(
+            path.file_name().unwrap().to_str().unwrap(),
+            format!(
+                "axl-e2ee-key-v1-{}-{}-prepared.wsldpapi",
+                "02".repeat(16),
+                "03".repeat(16)
+            )
+        );
+        let plaintext = store.wrapper.unprotect(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(&plaintext[..3], &[0, 1, 4]);
+        assert_eq!(
+            plaintext[3..51],
+            hash(format!("axl-wsl-dpapi-v1\0S-1-5-21-1\0{}", current_uid()).as_bytes()).unwrap()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn records_of_one_profile_are_never_read_under_another() {
+        const KEY_ID: &str = "00112233445566778899aabbccddeeff";
+        let root = root("profiles");
+        let wsl = SealedFileEnvelopeKeyStore::new(
+            &root,
+            FakeDpapi::sealing_as("S-1-5-21-1", "shared"),
+            &WSL_DPAPI,
+        )
+        .unwrap();
+        let keychain = SealedFileEnvelopeKeyStore::new(
+            &root,
+            FakeDpapi::sealing_as(KEY_ID, "shared"),
+            &MACOS_KEYCHAIN,
+        )
+        .unwrap();
+        wsl.prepare(SESSION, KEY, &DATA, b"context").unwrap();
+        wsl.activate(SESSION, KEY, b"context").unwrap();
+        assert_eq!(
+            keychain.load(SESSION, KEY, b"context"),
+            Err(PersistenceError::KeyRecordMissing)
+        );
+        keychain.destroy_session(SESSION).unwrap();
+        assert_eq!(wsl.load(SESSION, KEY, b"context").unwrap(), DATA);
+        fs::copy(
+            wsl.path(SESSION, KEY, Lifecycle::Active),
+            keychain.path(SESSION, KEY, Lifecycle::Active),
+        )
+        .unwrap();
+        assert_eq!(
+            keychain.load(SESSION, KEY, b"context"),
+            Err(PersistenceError::Corrupt),
+            "the platform byte inside the seal names the profile"
+        );
+        assert!(matches!(
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &MACOS_KEYCHAIN),
+            Err(PersistenceError::SecureStoreUnavailable)
+        ));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn reconciliation_keeps_the_committed_key_and_drops_abandoned_ones() {
         let root = root("reconcile");
-        let store = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")).unwrap();
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
         store.prepare(SESSION, KEY, &DATA, b"current").unwrap();
         store
             .prepare(SESSION, [4; 16], &[5; 32], b"abandoned")
@@ -885,7 +1040,9 @@ mod tests {
     #[test]
     fn a_crash_between_activation_steps_resolves_to_one_active_record() {
         let root = root("crash");
-        let store = WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")).unwrap();
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
         store.prepare(SESSION, KEY, &DATA, b"context").unwrap();
         // The active copy was written but the process died before removing the prepared one.
         let prepared = store
@@ -911,7 +1068,7 @@ mod tests {
     fn an_unavailable_helper_or_an_open_directory_fails_closed() {
         let root = root("closed");
         let wrapper = FakeDpapi::new("S-1-5-21-1");
-        let store = WslDpapiEnvelopeKeyStore::new(&root, wrapper).unwrap();
+        let store = SealedFileEnvelopeKeyStore::new(&root, wrapper, &WSL_DPAPI).unwrap();
         store.wrapper.down.store(true, Ordering::SeqCst);
         assert!(!store.available());
         assert_eq!(
@@ -922,7 +1079,7 @@ mod tests {
         fs::set_permissions(&root, fs::Permissions::from_mode(0o750)).unwrap();
         assert!(!store.available());
         assert!(matches!(
-            WslDpapiEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1")),
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI),
             Err(PersistenceError::SecureStoreAccessDenied)
         ));
         fs::remove_dir_all(root).unwrap();
@@ -954,23 +1111,56 @@ mod tests {
         );
     }
 
+    /// Runs on a macOS runner against a locally built, unsigned `axl-keychain-helper`:
+    /// `AXL_KEYCHAIN_HELPER=.../axl-keychain-helper cargo test sealed_file -- --ignored`. The
+    /// Keychain refuses a helper without its entitlement, so the store must fail closed.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a macOS session and a built axl-keychain-helper"]
+    fn an_unsigned_keychain_helper_fails_closed() {
+        let helper = std::env::var("AXL_KEYCHAIN_HELPER").expect("AXL_KEYCHAIN_HELPER");
+        let root = root("keychain");
+        let opened = SealedFileEnvelopeKeyStore::new(
+            &root,
+            HelperProcess::new(Path::new(&helper), &MACOS_KEYCHAIN).unwrap(),
+            &MACOS_KEYCHAIN,
+        );
+        eprintln!(
+            "macOS sealed-file evidence: architecture={}, unsigned helper result={:?}",
+            std::env::consts::ARCH,
+            opened.as_ref().map(|_| "opened")
+        );
+        assert!(matches!(
+            opened,
+            Err(PersistenceError::SecureStoreAccessDenied)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Runs against the real helper through WSL interop:
     /// `AXL_WSL_DPAPI_HELPER=/mnt/c/.../axl-dpapi-helper.exe cargo test wsl_dpapi -- --ignored`.
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "needs WSL interop and a built axl-dpapi-helper.exe"]
     fn real_helper_round_trips_records_for_this_windows_user() {
         let helper = std::env::var("AXL_WSL_DPAPI_HELPER").expect("AXL_WSL_DPAPI_HELPER");
         let root = root("real");
-        let store =
-            WslDpapiEnvelopeKeyStore::new(&root, HelperProcess::new(Path::new(&helper)).unwrap())
-                .unwrap();
+        let store = SealedFileEnvelopeKeyStore::new(
+            &root,
+            HelperProcess::new(Path::new(&helper), &WSL_DPAPI).unwrap(),
+            &WSL_DPAPI,
+        )
+        .unwrap();
         assert!(store.available());
         store.prepare(SESSION, KEY, &DATA, b"context").unwrap();
         store.activate(SESSION, KEY, b"context").unwrap();
         assert_eq!(store.load(SESSION, KEY, b"context").unwrap(), DATA);
-        let reopened =
-            WslDpapiEnvelopeKeyStore::new(&root, HelperProcess::new(Path::new(&helper)).unwrap())
-                .unwrap();
+        let reopened = SealedFileEnvelopeKeyStore::new(
+            &root,
+            HelperProcess::new(Path::new(&helper), &WSL_DPAPI).unwrap(),
+            &WSL_DPAPI,
+        )
+        .unwrap();
         assert_eq!(reopened.load(SESSION, KEY, b"context").unwrap(), DATA);
         fs::remove_dir_all(root).unwrap();
     }
