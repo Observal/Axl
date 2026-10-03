@@ -52,6 +52,7 @@ import {
 import { BrowserPane, type BrowserPaneState, EMPTY_BROWSER_STATE } from "./browser-pane.tsx";
 import { CommandPalette } from "./command-palette.tsx";
 import { Mascot, type MascotControl } from "./mascot.tsx";
+import { MASCOT_COLOURS } from "./mascot-atlas.ts";
 import { filterCommands, webPresentationCommands, workspaceReviewScope } from "./commands.ts";
 import type { ControlCenterTab } from "./control-center.tsx";
 import { Dock } from "./dock.tsx";
@@ -145,6 +146,8 @@ const DEFAULT_LAYOUT: WebPreferences = {
   panes: DEFAULT_PANES,
   theme: "system",
   loungeOpen: true,
+  mascot: true,
+  mascotColour: "Pink",
 };
 const PREVIEW_LAYOUT_KEY = "axl.preview.layout";
 const DAEMON_CONNECTION_LABELS: Readonly<Record<ConnectionState, string>> = {
@@ -266,9 +269,9 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [client, setClient] = useState<AxlClient>();
   const [bootstrap, setBootstrap] = useState<WebBootstrap>();
   const [loungeOpen, setLoungeOpen] = useState(initialLayout.loungeOpen);
-  // The mascot is a per-run presentation choice, off until /mascot, as in the terminal.
-  const [mascotOn, setMascotOn] = useState(false);
-  const [mascotColour, setMascotColour] = useState("Pink");
+  // On by default; /mascot changes it and the host remembers the choice.
+  const [mascotOn, setMascotOn] = useState(initialLayout.mascot);
+  const [mascotColour, setMascotColour] = useState(initialLayout.mascotColour);
   const mascotControl = useRef<MascotControl | null>(null);
   const failMascot = useCallback((message: string) => {
     setMascotOn(false);
@@ -645,6 +648,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (disposed) { environment.client.close(); return; }
       activeClient = environment.client; setClient(environment.client); setBootstrap(environment.bootstrap);
       setLoungeOpen(environment.bootstrap.preferences.loungeOpen);
+      setMascotOn(environment.bootstrap.preferences.mascot);
+      setMascotColour(environment.bootstrap.preferences.mascotColour);
       setLoungeSettings(environment.bootstrap.lounge?.settings);
       if (environment.bootstrap.lounge?.error !== undefined)
         setError(`Lounge settings could not be read, so defaults are in use: ${environment.bootstrap.lounge.error}`);
@@ -2112,6 +2117,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
 
   const currentPreferences = (): WebPreferences => ({
     loungeOpen,
+    mascot: mascotOn,
+    mascotColour,
     sidebarWidth,
     dockWidth,
     sidebarCollapsed,
@@ -2183,12 +2190,18 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       mascotControl.current.player.play("sass");
       return;
     }
+    if (argument !== undefined && !MASCOT_COLOURS.includes(argument)) {
+      throw new Error(`Mascot colour must be one of ${MASCOT_COLOURS.join(", ")}, or sas`);
+    }
     if (mascotOn && (argument === undefined || argument === mascotColour)) {
       setMascotOn(false);
+      persistLayout({ ...currentPreferences(), mascot: false });
       return;
     }
-    if (argument !== undefined) setMascotColour(argument);
+    const colour = argument ?? mascotColour;
+    setMascotColour(colour);
     setMascotOn(true);
+    persistLayout({ ...currentPreferences(), mascot: true, mascotColour: colour });
   };
   const toggleMascotRef = useRef(toggleMascot);
   toggleMascotRef.current = toggleMascot;
@@ -2207,6 +2220,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     setSidebarCollapsed(preferences.sidebarCollapsed);
     setChangesView(preferences.changesView);
     setLoungeOpen(preferences.loungeOpen);
+    setMascotOn(preferences.mascot);
+    setMascotColour(preferences.mascotColour);
     if (preferences.panes.join() !== paneLayout.panes.join()) setPaneLayout(createPaneLayout(preferences.panes));
     persistLayout(preferences);
   };

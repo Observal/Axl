@@ -3,6 +3,9 @@
 
 import type { MascotManifest } from "@axl/sdk";
 
+/** The colours the manifest ships. A test keeps this equal to the manifest's. */
+export const MASCOT_COLOURS: readonly string[] = ["Pink", "Albino", "Purple", "Deep_Sea"];
+
 type Rgb = readonly [number, number, number];
 
 /** Where one frame sits in the atlas grid. */

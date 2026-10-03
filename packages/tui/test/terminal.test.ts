@@ -11,6 +11,7 @@ import {
   type TerminalInput,
   type TerminalOutput,
   TerminalSession,
+  terminalBackground,
   TerminalUnavailableError,
 } from "../src/terminal.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -211,6 +212,32 @@ test("passes the reported device attributes on, still out of the input", () => {
     [[61, 4, 6, 7, 14, 21, 22]],
     "4 among them: this terminal draws sixel",
   );
+  terminal.stop();
+});
+
+test("the terminal's background reply is read, scaled to 8 bits, and kept out of the input", () => {
+  assert.deepEqual(terminalBackground("\x1b]11;rgb:1c1c/1c1c/1c1c\x1b\\"), [28, 28, 28]);
+  assert.deepEqual(terminalBackground("\x1b]11;rgb:ff/00/80\x07"), [255, 0, 128]);
+  assert.deepEqual(terminalBackground("\x1b]11;rgb:f/0/8\x07"), [255, 0, 136]);
+  assert.equal(terminalBackground("\x1b]11;?\x07"), undefined);
+  assert.equal(terminalBackground("\x1b]10;rgb:ff/ff/ff\x07"), undefined);
+
+  const reported: (readonly number[])[] = [];
+  const input = new FakeInput();
+  const output = new FakeOutput();
+  const terminal = new TerminalSession({
+    input,
+    output,
+    onInput: () => assert.fail("a background reply is not input"),
+    onInputError: (error) => assert.fail(error),
+    onResize: () => undefined,
+    onBackground: (rgb) => reported.push(rgb),
+  });
+  terminal.start();
+  terminal.queryBackground();
+  assert.ok(output.writes.includes("\x1b]11;?\x1b\\"));
+  input.emit("data", "\x1b]11;rgb:1c1c/1c1c/1c1c\x1b\\");
+  assert.deepEqual(reported, [[28, 28, 28]]);
   terminal.stop();
 });
 

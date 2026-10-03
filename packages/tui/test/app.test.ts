@@ -2788,6 +2788,61 @@ test("the mascot stays above a question dialog, so ask can be seen", async (cont
   await until(() => text().includes("selected runtime"), "question continuation");
 });
 
+test("the mascot starts on when asked and /mascot saves each change", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const saved: Record<string, unknown>[] = [];
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+    mascot: true,
+    mascotColour: "Purple",
+    onPreferenceChange: (update) => {
+      saved.push(update);
+    },
+  });
+  context.after(() => app.stop());
+  const mascot = () => (app as unknown as { mascot: unknown }).mascot;
+
+  await until(() => /[▀▄]/.test(text()), "the mascot, without /mascot");
+  assert.deepEqual(saved, [], "starting on is not a change to save");
+
+  input.write("/mascot\r");
+  await until(() => saved.length === 1, "off saved");
+  assert.equal(mascot(), null);
+  input.write("/mascot Albino\r");
+  await until(() => saved.length === 2, "on saved");
+  assert.deepEqual(saved, [{ mascot: false }, { mascot: true, mascotColour: "Albino" }]);
+});
+
+test("the composer's border is painted the terminal's background plus one level of blue", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: "kitty" },
+    mascot: true,
+  });
+  context.after(() => app.stop());
+
+  await until(() => text().includes("\x1b]11;?"), "the background query");
+  input.write("\x1b]11;rgb:1c1c/1c1c/1c1c\x1b\\");
+  await until(() => text().includes("\x1b[48;2;28;28;29m"), "the border in the reported colour");
+  assert.equal(text().includes("\x1b[48;2;1;0;0m"), false);
+});
+
 test("a second /mascot while the first is still setting up turns it off", async (context) => {
   const { socketPath, directory } = await startStack(context);
   const input = new PassThrough();

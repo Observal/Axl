@@ -37,6 +37,9 @@ export interface WebPreferences {
   readonly theme: "system" | "light" | "dark";
   /** Whether the Lounge game pane is shown beside the app. */
   readonly loungeOpen: boolean;
+  /** Whether the mascot is shown above the composer, and its colour. */
+  readonly mascot: boolean;
+  readonly mascotColour: string;
 }
 
 export type WebHostCapability = "project.folder.validate" | "provider.auth.login";
@@ -139,6 +142,13 @@ export function parseWebPreferences(value: unknown): WebPreferences {
     throw new Error("Invalid web preferences");
   if (preferences.loungeOpen !== undefined && typeof preferences.loungeOpen !== "boolean")
     throw new Error("Invalid web preferences");
+  if (preferences.mascot !== undefined && typeof preferences.mascot !== "boolean")
+    throw new Error("Invalid web preferences");
+  if (
+    preferences.mascotColour !== undefined &&
+    (typeof preferences.mascotColour !== "string" || !/^[A-Za-z_]+$/.test(preferences.mascotColour))
+  )
+    throw new Error("Invalid web preferences");
   return {
     sidebarWidth: preferences.sidebarWidth as number,
     dockWidth: preferences.dockWidth as number,
@@ -147,6 +157,8 @@ export function parseWebPreferences(value: unknown): WebPreferences {
     panes,
     theme: (preferences.theme as "system" | "light" | "dark" | undefined) ?? "system",
     loungeOpen: (preferences.loungeOpen as boolean | undefined) ?? true,
+    mascot: (preferences.mascot as boolean | undefined) ?? true,
+    mascotColour: (preferences.mascotColour as string | undefined) ?? "Pink",
   };
 }
 

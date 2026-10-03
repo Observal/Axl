@@ -62,6 +62,8 @@ test("persists and restores session defaults atomically", async (context) => {
     workspaceReview: true,
     imageDisplay: "metadata" as const,
     loungeEnabled: false,
+    mascot: false,
+    mascotColour: "Deep_Sea",
   };
 
   await saveTuiSettings(path, settings);
@@ -112,6 +114,10 @@ test("uses empty defaults only for a missing file and rejects invalid settings",
   await assert.rejects(loadTuiSettings(path), /enabled/);
   await writeFile(path, '{"version":1,"loungeEnabled":"yes"}\n');
   await assert.rejects(loadTuiSettings(path), /loungeEnabled must be a boolean/);
+  await writeFile(path, '{"version":1,"mascot":"yes"}\n');
+  await assert.rejects(loadTuiSettings(path), /mascot must be a boolean/);
+  await writeFile(path, '{"version":1,"mascotColour":"../x"}\n');
+  await assert.rejects(loadTuiSettings(path), /invalid mascotColour/);
 });
 
 test("expanded tool inspection does not become the next startup default", async (context) => {

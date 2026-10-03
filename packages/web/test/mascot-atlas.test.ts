@@ -8,7 +8,7 @@ import test from "node:test";
 import { parseMascotManifest } from "@axl/sdk";
 
 import { webPresentationCommands } from "../src/commands.ts";
-import { frameRect, recolourPixels } from "../src/mascot-atlas.ts";
+import { frameRect, MASCOT_COLOURS, recolourPixels } from "../src/mascot-atlas.ts";
 
 const manifestUrl = new URL("../src/mascot/axolotl.json", import.meta.url);
 const manifest = parseMascotManifest(JSON.parse(await readFile(manifestUrl, "utf8")));
@@ -19,6 +19,10 @@ test("the web mascot assets are the terminal's assets", async () => {
     const tui = await readFile(new URL(`../../tui/assets/mascot/${name}`, import.meta.url));
     assert.ok(web.equals(tui), `${name} has drifted from packages/tui/assets/mascot`);
   }
+});
+
+test("the colours the web offers are the manifest's", () => {
+  assert.deepEqual(MASCOT_COLOURS, manifest.colours);
 });
 
 test("a frame id picks its cell in the atlas grid", () => {

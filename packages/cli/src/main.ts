@@ -1295,6 +1295,8 @@ async function main(): Promise<void> {
     diffLayout: settings.diffLayout ?? "unified",
     workspaceReview: settings.workspaceReview ?? false,
     imageDisplay: settings.imageDisplay ?? "auto",
+    mascot: settings.mascot ?? true,
+    ...(settings.mascotColour === undefined ? {} : { mascotColour: settings.mascotColour }),
     loungeEnabled,
     loungeExtensionIds: [loungeExtension.manifest.id],
     ...(loungeSettings.lastActivityId === undefined

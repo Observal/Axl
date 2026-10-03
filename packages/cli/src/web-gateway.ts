@@ -72,6 +72,9 @@ export interface WebPreferences {
   readonly panes: readonly WebPaneId[];
   readonly theme: "system" | "light" | "dark";
   readonly loungeOpen: boolean;
+  /** Whether the mascot is shown, and its colour. */
+  readonly mascot: boolean;
+  readonly mascotColour: string;
 }
 
 const MAX_WEB_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -85,6 +88,8 @@ const DEFAULT_WEB_PREFERENCES: WebPreferences = {
   panes: ["browser", "files"],
   theme: "system",
   loungeOpen: true,
+  mascot: true,
+  mascotColour: "Pink",
 };
 
 function isWorkspaceDiffRequest(text: string): boolean {
@@ -122,9 +127,14 @@ function parsePreferences(value: unknown): WebPreferences {
           "panes",
           "theme",
           "loungeOpen",
+          "mascot",
+          "mascotColour",
         ].includes(key),
     ) ||
     (record.loungeOpen !== undefined && typeof record.loungeOpen !== "boolean") ||
+    (record.mascot !== undefined && typeof record.mascot !== "boolean") ||
+    (record.mascotColour !== undefined &&
+      (typeof record.mascotColour !== "string" || !/^[A-Za-z_]+$/.test(record.mascotColour))) ||
     (record.theme !== undefined &&
       record.theme !== "system" &&
       record.theme !== "light" &&
@@ -147,6 +157,8 @@ function parsePreferences(value: unknown): WebPreferences {
     panes: parsePaneIds(record.panes),
     theme: (record.theme as "system" | "light" | "dark" | undefined) ?? "system",
     loungeOpen: (record.loungeOpen as boolean | undefined) ?? true,
+    mascot: (record.mascot as boolean | undefined) ?? true,
+    mascotColour: (record.mascotColour as string | undefined) ?? "Pink",
   };
 }
 

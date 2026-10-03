@@ -602,6 +602,9 @@ export interface AxlAppOptions {
   readonly workspaceReview?: boolean;
   readonly imageDisplay?: ImageDisplay;
   readonly mediaCapabilities?: TerminalMediaCapabilities;
+  /** Show the mascot from the start. `/mascot` changes it and reports the change through `onPreferenceChange`. */
+  readonly mascot?: boolean;
+  readonly mascotColour?: string;
   readonly extensions?: readonly TerminalExtension[];
   /** Local process host loads enabled presentation entries from daemon SDK inventory. */
   readonly loadExtensions?: (
@@ -647,6 +650,8 @@ export interface AxlAppOptions {
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
     loungeEnabled?: boolean;
+    mascot?: boolean;
+    mascotColour?: string;
   }) => void | Promise<void>;
   /** Compatibility hook called after the daemon accepts a model switch. */
   readonly onModelChange?: (modelId: string) => void;
@@ -793,7 +798,7 @@ export class AxlApp {
   private mascotTimer: NodeJS.Timeout | null = null;
   private mascotActor: MascotActor | null = null;
   private mascotSteppedAt = 0;
-  private mascotColour = "Pink";
+  private mascotColour: string;
   /** Numbers each mascot setup, so only the latest one is installed. */
   private mascotSetup = 0;
   /** The colour a setup still waiting is for, or null. */
@@ -843,6 +848,7 @@ export class AxlApp {
   private readonly toolGroupModes = new Map<string, ToolOutputDisplay>();
   private readonly terminal: TerminalSession;
   private terminalCellSize: TerminalCellSize | undefined;
+  private terminalBackground: readonly [number, number, number] | undefined;
   private connectionState: "connected" | "reconnecting" | "detached" = "connected";
   private reconnectGeneration = 0;
   private reconnectAttempts = 0;
@@ -882,6 +888,7 @@ export class AxlApp {
     this.fullscreenMouse = options.fullscreenMouse ?? "capture";
     this.attention = options.attention ?? "off";
     this.editorMode = options.editorMode ?? "standard";
+    this.mascotColour = options.mascotColour ?? "Pink";
     this.modelFavorites = [...(options.modelFavorites ?? [])];
     this.refocusRecap = options.refocusRecap ?? false;
     this.developerPanelEnabled = options.developerPanel ?? false;
@@ -1043,6 +1050,10 @@ export class AxlApp {
         this.redraw();
       },
       onResize: this.resizeListener,
+      onBackground: (rgb) => {
+        this.terminalBackground = rgb;
+        if (!this.stopped && !this.hydrating && this.mascot !== null) this.redraw(true);
+      },
       onCellSize: (size) => {
         this.terminalCellSize = size;
         if (!this.stopped && !this.hydrating) this.redraw(true);
@@ -1332,6 +1343,8 @@ export class AxlApp {
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
       else app.repaintRegularTranscript();
       app.paint();
+      // After the terminal is listening, so its answers are not typed.
+      if (options.mascot === true) void app.enableMascot(app.mascotColour);
       if (initialResume) void app.openResume();
       return app;
     } catch (error) {
@@ -1708,7 +1721,7 @@ export class AxlApp {
       gapAbove: this.mascot === null,
       // Only a Kitty placement overlaps the border and needs hiding there; a
       // sixel image stops above it, and the dark band would only show.
-      opaqueBorder: this.mascot?.usesImages === true,
+      ...(this.mascot?.usesImages === true ? { opaqueBorder: this.mascotBorderColour() } : {}),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
       ...(editorMode ? { mode: editorMode } : {}),
       location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
@@ -2337,9 +2350,13 @@ export class AxlApp {
       this.disableMascot();
       this.invalidateFullscreenRows();
       this.redraw();
+      void this.persistPreferences({ mascot: false });
       return;
     }
-    await this.enableMascot(asked ?? this.mascotColour);
+    const chosen = asked ?? this.mascotColour;
+    await this.enableMascot(chosen);
+    // A colour the manifest does not have fails in setup and leaves it off.
+    if (this.mascot !== null) void this.persistPreferences({ mascot: true, mascotColour: chosen });
   }
 
   /**
@@ -2371,6 +2388,14 @@ export class AxlApp {
       if (!wantsImages && this.tuiMode === "regular") {
         this.askCellSize();
         await this.terminalAnswers(400);
+      }
+      if (wantsImages && this.terminalBackground === undefined) {
+        // The composer's border has to be painted a colour the terminal treats
+        // as its own, so ask what the terminal's background is.
+        this.terminal.queryBackground();
+        for (let waited = 0; this.terminalBackground === undefined && waited < 400; waited += 25) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
       }
       // Without Kitty graphics, sixel where the terminal has said it draws
       // them and how big a cell is: the image has to be exactly the strip's
@@ -2537,6 +2562,20 @@ export class AxlApp {
     }
     this.terminalAsked = true;
     this.options.output.write("\x1b[16t");
+  }
+
+  /**
+   * The colour of the composer's top border while a Kitty image is drawn. It
+   * has to differ from the terminal's default background, or the terminal
+   * leaves the image on top of the border. One level of blue is invisible, so
+   * the row looks unpainted. A terminal that does not answer the background
+   * query gets near black, which shows as a darker row.
+   */
+  private mascotBorderColour(): readonly [number, number, number] {
+    const background = this.terminalBackground;
+    if (background === undefined) return [1, 0, 0];
+    const [red, green, blue] = background;
+    return [red, green, blue === 255 ? 254 : blue + 1];
   }
 
   /** Waits up to `timeoutMs` for the terminal to say whether and how it draws sixel. */
@@ -6908,6 +6947,8 @@ export class AxlApp {
     diffLayout?: DiffLayout;
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
+    mascot?: boolean;
+    mascotColour?: string;
   }): Promise<void> {
     try {
       await this.options.onPreferenceChange?.(update);
