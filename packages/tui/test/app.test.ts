@@ -2983,6 +2983,86 @@ test("/model opens a selector and switches the model live", async (context) => {
   app.stop();
 });
 
+test("/model offers only models of providers that are logged in", async (context) => {
+  const provider = (providerId: string, displayName: string) => ({
+    providerId,
+    displayName,
+    enabled: true,
+    authMethods: ["environment" as const],
+    loginMethods: ["api_key" as const],
+    // The listing is stale; the status request below is what decides.
+    authentication: { providerId, phase: "idle" as const },
+    catalog: { refreshable: true },
+    models: [
+      {
+        providerId,
+        modelId: "shared-model",
+        displayName: `${displayName} Model`,
+        apiDialect: "openai-chat",
+        capabilities: { toolUse: true, structuredOutput: true, imageInput: false },
+        reasoning: false,
+        supportedThinkingLevels: ["off" as const],
+        contextWindow: 16_000,
+        maxOutputTokens: 2_000,
+        availability: { status: "available" as const },
+      },
+    ],
+  });
+  const providers = [provider("alpha", "Alpha"), provider("beta", "Beta")];
+  const service: ProviderManagementService = {
+    list: () => Promise.resolve({ providers }),
+    refresh: () => Promise.resolve({ providers: [] }),
+    authenticationStatus: () =>
+      Promise.resolve({
+        providers: [
+          { providerId: "alpha", phase: "authenticated" as const, source: "test environment" },
+          { providerId: "beta", phase: "logged_out" as const },
+        ],
+      }),
+    login: (params) => Promise.resolve({ providerId: params.providerId, phase: "authenticated" }),
+    logout: (params) => Promise.resolve({ providerId: params.providerId, phase: "logged_out" }),
+  };
+  const { socketPath, directory } = await startStack(
+    context,
+    port,
+    () => new ToolRegistry(),
+    undefined,
+    undefined,
+    service,
+  );
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const preferences: Array<Record<string, unknown>> = [];
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    currentProvider: "alpha",
+    currentModel: "shared-model",
+    mediaCapabilities: { images: null },
+    onPreferenceChange: (update) => {
+      preferences.push(update);
+    },
+  });
+  context.after(() => app.stop());
+
+  input.write("/model\r");
+  await until(() => text().includes("Select model by provider"), "model selector");
+  assert.match(text(), /Alpha · Alpha Model/);
+  assert.doesNotMatch(text(), /Beta · Beta Model/);
+  input.write("\x1b");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  input.write("/model beta/shared-model\r");
+  await until(() => text().includes("Beta is not logged in. Use /login beta"), "logged out notice");
+  assert.equal(
+    preferences.some((value) => value.providerId === "beta"),
+    false,
+  );
+});
+
 test("provider commands and /web use trusted TUI login and cancel refresh", async (context) => {
   const calls: string[] = [];
   let blockRefresh = false;

@@ -2008,7 +2008,7 @@ export class AxlApp {
     const values =
       command === "/model"
         ? [
-            ...this.providerInventory.flatMap((provider) =>
+            ...this.selectableProviders().flatMap((provider) =>
               provider.models.map((model) => `${provider.providerId}/${model.modelId}`),
             ),
             ...(this.providerInventory.length === 0 ? (this.options.models ?? []) : []),
@@ -5277,17 +5277,45 @@ export class AxlApp {
       providerId === undefined ? {} : { providerId },
       signal === undefined ? {} : { signal },
     );
-    if (providerId === undefined) this.providerInventory = listed.providers;
+    // The listing carries each provider's last known state. The status request
+    // checks the credentials, so a provider logged in through the environment
+    // or a stored key is not mistaken for a logged out one.
+    const statuses = this.client.connection.grantedCapabilities?.includes("provider.auth.status")
+      ? (
+          await this.client.providerAuthenticationStatus(
+            providerId === undefined ? {} : { providerId },
+            signal === undefined ? {} : { signal },
+          )
+        ).providers
+      : [];
+    const providers = listed.providers.map((provider) => ({
+      ...provider,
+      authentication:
+        statuses.find((status) => status.providerId === provider.providerId) ??
+        provider.authentication,
+    }));
+    if (providerId === undefined) this.providerInventory = providers;
     else {
       const retained = this.providerInventory.filter(
         (provider) => provider.providerId !== providerId,
       );
-      this.providerInventory = [...retained, ...listed.providers];
+      this.providerInventory = [...retained, ...providers];
     }
     this.view.setModels(
       this.providerInventory.flatMap((provider) => provider.models.map(formatProviderModel)),
     );
-    return listed.providers;
+    return providers;
+  }
+
+  /**
+   * Providers whose models can be chosen. A model of a provider that is not
+   * logged in cannot be selected, so, as in pi, the pickers and completions
+   * list only models with configured authentication.
+   */
+  private selectableProviders(): readonly ProviderInventoryGroup[] {
+    return this.providerInventory.filter(
+      (provider) => provider.authentication.phase === "authenticated",
+    );
   }
 
   private modelSelection(
@@ -5297,13 +5325,13 @@ export class AxlApp {
     if (separator > 0) {
       const providerId = value.slice(0, separator);
       const modelId = value.slice(separator + 1);
-      const provider = this.providerInventory.find(
+      const provider = this.selectableProviders().find(
         (candidate) => candidate.providerId === providerId,
       );
       const model = provider?.models.find((candidate) => candidate.modelId === modelId);
       return model === undefined ? undefined : { providerId, model };
     }
-    const candidates = this.providerInventory.flatMap((provider) =>
+    const candidates = this.selectableProviders().flatMap((provider) =>
       provider.models
         .filter((model) => model.modelId === value)
         .map((model) => ({ providerId: provider.providerId, model })),
@@ -5317,12 +5345,18 @@ export class AxlApp {
   private async applyConfigurationCommand(input: string): Promise<void> {
     const command = input.slice(1).split(/\s/u, 1)[0] ?? "";
     const argument = input.slice(command.length + 2).trim() || undefined;
-    const outcome = await this.commandController.invoke(input, this.sessionId, {
-      ...(this.sessionSubscription?.projector.overview.requestSettings === undefined
-        ? {}
-        : { requestSettings: this.sessionSubscription.projector.overview.requestSettings }),
-    });
-    await this.handleCommandOutcome(command, argument, outcome);
+    try {
+      const outcome = await this.commandController.invoke(input, this.sessionId, {
+        ...(this.sessionSubscription?.projector.overview.requestSettings === undefined
+          ? {}
+          : { requestSettings: this.sessionSubscription.projector.overview.requestSettings }),
+      });
+      await this.handleCommandOutcome(command, argument, outcome);
+    } catch (error) {
+      // Most callers are picker callbacks that cannot await this, so a
+      // rejection here would end the process instead of reaching the user.
+      this.notice = this.view.palette.error(`✖ ${providerErrorText(error)}`);
+    }
     this.redraw();
   }
 
@@ -5350,19 +5384,38 @@ export class AxlApp {
       this.redraw();
       return;
     }
-    const selections = this.providerInventory.flatMap((provider) =>
+    const selections = this.selectableProviders().flatMap((provider) =>
       provider.models.map((model) => ({ provider, model })),
     );
     if (modelId) {
       const selected = this.modelSelection(modelId);
       if (selected === undefined) {
-        this.notice = this.view.palette.error(`✖ unknown or ambiguous model ${modelId}`);
+        const loggedOut = this.providerInventory.find(
+          (provider) =>
+            provider.authentication.phase !== "authenticated" &&
+            provider.models.some(
+              (model) =>
+                modelId === `${provider.providerId}/${model.modelId}` || modelId === model.modelId,
+            ),
+        );
+        this.notice = this.view.palette.error(
+          loggedOut === undefined
+            ? `✖ unknown or ambiguous model ${modelId}`
+            : `✖ ${loggedOut.displayName} is not logged in. Use /login ${loggedOut.providerId}`,
+        );
         this.redraw();
         return;
       }
       await this.applyConfigurationCommand(
         `/model ${selected.providerId}/${selected.model.modelId}`,
       );
+      return;
+    }
+    if (selections.length === 0) {
+      this.notice = this.view.palette.error(
+        "✖ No models available. Use /login to configure a provider",
+      );
+      this.redraw();
       return;
     }
     const favorites = new Set(this.modelFavorites);

@@ -57,6 +57,7 @@ test("provider directory retains usable inventory when authentication status fai
   assert.equal(state.status, "ready");
   assert.equal(state.error, "Status failed");
   assert.equal(state.models[0]?.availability.reason, "Region unavailable");
+  assert.equal(state.models[0]?.authenticated, false);
   assert.equal(await controller.load(), state);
   assert.equal(listCalls, 1);
   controller.dispose();

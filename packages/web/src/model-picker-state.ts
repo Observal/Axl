@@ -18,6 +18,8 @@ export function filterModelChoices(
   const normalized = query.trim().toLocaleLowerCase();
   const groups = new Map<string, ModelChoice[]>();
   for (const choice of choices) {
+    // A model of a provider that is not logged in cannot be selected.
+    if (!choice.authenticated) continue;
     if (
       normalized &&
       !`${choice.providerDisplayName} ${choice.providerId} ${choice.displayName} ${choice.modelId}`

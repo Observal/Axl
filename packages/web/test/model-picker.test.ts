@@ -23,6 +23,7 @@ const choices: readonly ModelChoice[] = [
     modelId: "claude-sonnet",
     displayName: "Claude Sonnet",
     thinkingLevels: ["off", "low", "high"],
+    authenticated: true,
     availability: { status: "available" },
   },
   {
@@ -31,14 +32,19 @@ const choices: readonly ModelChoice[] = [
     modelId: "gpt",
     displayName: "GPT",
     thinkingLevels: ["low", "medium"],
+    authenticated: false,
     availability: { status: "unavailable", reason: "Sign in required" },
   },
 ];
 
 test("filters models across provider identity and groups by provider", () => {
   assert.deepEqual([...filterModelChoices(choices, "anthropic").keys()], ["anthropic"]);
-  assert.deepEqual([...filterModelChoices(choices, "GPT").keys()], ["openai"]);
+  assert.equal(filterModelChoices(choices, "GPT").size, 0);
   assert.equal(filterModelChoices(choices, "missing").size, 0);
+});
+
+test("models of a provider that is not logged in are not offered", () => {
+  assert.deepEqual([...filterModelChoices(choices, "").keys()], ["anthropic"]);
 });
 
 test("cycles only the selected model's supported thinking levels", () => {
