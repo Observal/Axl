@@ -5,7 +5,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EffectiveCommand } from "@axl/sdk";
 
-import { filterCommands, webPresentationCommands, workspaceReviewScope } from "../src/commands.ts";
+import {
+  filterCommands,
+  suggestCommand,
+  webPresentationCommands,
+  workspaceReviewScope,
+} from "../src/commands.ts";
 
 const commands: readonly EffectiveCommand[] = [
   {
@@ -102,4 +107,20 @@ test("command palette search matches names and descriptions", () => {
     ["model"],
   );
   assert.deepEqual(filterCommands(commands, "missing"), []);
+});
+
+test("palette and argument errors suggest the closest match", () => {
+  assert.equal(suggestCommand(commands, "/relaod"), "reload");
+  assert.equal(suggestCommand(commands, "zzzzzz"), undefined);
+  const [, theme] = webPresentationCommands({
+    canLogin: false,
+    openNewSession: () => undefined,
+    openProviders: () => undefined,
+    openTheme: () => undefined,
+    setTheme: () => undefined,
+  });
+  assert.throws(
+    () => theme?.run("dakr"),
+    /Theme must be system, light, or dark · did you mean dark\?/,
+  );
 });

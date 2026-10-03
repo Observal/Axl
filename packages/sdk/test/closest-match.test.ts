@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { closestMatch } from "../src/closest-match.ts";
+import { closestMatch, unknownNotice } from "../src/closest-match.ts";
 
 test("returns the candidate on an exact match", () => {
   assert.equal(closestMatch("/help", ["/help", "/theme", "/commands"]), "/help");
@@ -36,6 +36,23 @@ test("returns undefined for a single candidate beyond maxDistance", () => {
 
 test("picks the closer of two near candidates", () => {
   assert.equal(closestMatch("/hepl", ["/theme", "/help"]), "/help");
+});
+
+test("short inputs allow only distance 1", () => {
+  assert.equal(closestMatch("/xy", ["/ls", "/help"]), undefined);
+  assert.equal(closestMatch("/ls", ["/lsp"]), "/lsp");
+});
+
+test("matches case-insensitively and returns the original candidate", () => {
+  assert.equal(closestMatch("Ocean", ["ocean-Dark", "Ocean"]), "Ocean");
+});
+
+test("unknownNotice adds a hint only when a match is close", () => {
+  assert.equal(
+    unknownNotice("command", "/hepl", ["/help"]),
+    "unknown command /hepl · did you mean /help?",
+  );
+  assert.equal(unknownNotice("theme", "zzzzzz", ["dark"]), "unknown theme zzzzzz");
 });
 
 test("respects a custom maxDistance of 1", () => {

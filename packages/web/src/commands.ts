@@ -1,9 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-License-Identifier: Apache-2.0
 
-import type { EffectiveCommand, PresentationCommand, WorkspaceStatusScope } from "@axl/sdk";
+import {
+  closestMatch,
+  type EffectiveCommand,
+  type PresentationCommand,
+  type WorkspaceStatusScope,
+} from "@axl/sdk";
 
 export type WebTheme = "system" | "light" | "dark";
+
+function hint(input: string, options: readonly string[]): string {
+  const match = closestMatch(input, options);
+  return match === undefined ? "" : ` · did you mean ${match}?`;
+}
 
 export function workspaceReviewScope(argument?: string): WorkspaceStatusScope | undefined {
   if (argument === "off") return undefined;
@@ -31,7 +41,7 @@ export function webPresentationCommands({
       argument: { required: false, hint: "chat | code" },
       run: (argument?: string) => {
         if (argument !== undefined && argument !== "chat" && argument !== "code") {
-          throw new Error("Session mode must be chat or code");
+          throw new Error(`Session mode must be chat or code${hint(argument, ["chat", "code"])}`);
         }
         openNewSession(argument);
       },
@@ -57,7 +67,9 @@ export function webPresentationCommands({
           return;
         }
         if (argument !== "system" && argument !== "light" && argument !== "dark") {
-          throw new Error("Theme must be system, light, or dark");
+          throw new Error(
+            `Theme must be system, light, or dark${hint(argument, ["system", "light", "dark"])}`,
+          );
         }
         setTheme(argument);
       },
@@ -76,5 +88,18 @@ export function filterCommands(
       command.name.includes(term) ||
       command.aliases.some((alias) => alias.includes(term)) ||
       command.description.toLowerCase().includes(term),
+  );
+}
+
+/** Suggests a command name for a palette query that matched nothing. */
+export function suggestCommand(
+  commands: readonly EffectiveCommand[],
+  query: string,
+): string | undefined {
+  const term = query.trim().replace(/^\//, "");
+  if (!term) return undefined;
+  return closestMatch(
+    term,
+    commands.flatMap((command) => [command.name, ...command.aliases]),
   );
 }

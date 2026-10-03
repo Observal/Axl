@@ -73,6 +73,7 @@ import {
   supportedThinkingLevels,
   THINKING_LEVELS,
   type TrustedProviderHost,
+  unknownNotice,
 } from "@axl/sdk";
 
 import { ActivityComponent } from "./activity.ts";
@@ -83,7 +84,6 @@ import {
   readClipboardText,
   writeClipboardText,
 } from "./clipboard.ts";
-import { closestMatch } from "./closest-match.ts";
 import { loadThemeCatalog, type ThemeCatalog, watchThemeDirectories } from "./custom-themes.ts";
 import { DeveloperPanelComponent } from "./developer-panel.ts";
 import { renderDialog } from "./dialog.ts";
@@ -3313,17 +3313,15 @@ export class AxlApp {
       (path) => tokens.has(path) || tokens.has(JSON.stringify(path)) || tokens.has(`'${path}'`),
     );
     if (line.startsWith("/") && !images.includes(command ?? "")) {
-      const suggestion = closestMatch(
-        command?.toLowerCase() ?? "",
-        this.commandController.commands.flatMap((c) => [
-          `/${c.name}`,
-          ...c.aliases.map((alias) => `/${alias}`),
-        ]),
-      );
       this.notice = this.view.palette.error(
-        suggestion
-          ? `✖ unknown command ${command} · did you mean ${suggestion}?`
-          : `✖ unknown command ${command}`,
+        `✖ ${unknownNotice(
+          "command",
+          command ?? "",
+          this.commandController.commands.flatMap((c) => [
+            `/${c.name}`,
+            ...c.aliases.map((alias) => `/${alias}`),
+          ]),
+        )}`,
       );
       return;
     }
@@ -4371,11 +4369,8 @@ export class AxlApp {
     if (name) {
       const palette = this.themes[name];
       if (!palette) {
-        const suggestion = closestMatch(name, Object.keys(this.themes));
         this.notice = this.view.palette.error(
-          suggestion
-            ? `✖ unknown theme ${name} · did you mean ${suggestion}?`
-            : `✖ unknown theme ${name}`,
+          `✖ ${unknownNotice("theme", name, Object.keys(this.themes))}`,
         );
         return;
       }
