@@ -267,6 +267,66 @@ test("history is append-only; only operations may be completed in place", async 
   assert.equal((await reread.read(lineage))?.operations[0]?.journaled, true);
 });
 
+test("compaction deletes the compacted entries and keeps history positions", async (context) => {
+  const { db, client } = await fake(context);
+  const storage = new DynamoWitnessReplicaStorage({
+    tableName: "witness",
+    replicaId: replicaA,
+    client,
+  });
+  const full = record(80);
+  await storage.transact(lineage, () => ({
+    value: 0,
+    next: { ...full, ledger: full.ledger.slice(0, 60) },
+  }));
+  const compactedTo =
+    (count: number, ledgerLength: number) => (current: WitnessReplicaRecord | undefined) => ({
+      value: 0,
+      next: {
+        ...required(current),
+        checkpoint: {
+          sequence: BigInt(count),
+          revocationGeneration: 0n,
+          head: {
+            counter: BigInt(count),
+            commitment: new Uint8Array(48).fill(count - 1),
+            predecessorCommitment: new Uint8Array(48),
+          },
+        },
+        compacted: { ledger: count, operations: 0, retainedResponses: 0 },
+        ledger: full.ledger.slice(count, ledgerLength),
+      },
+    });
+  await storage.transact(lineage, compactedTo(16, 61));
+  const ledgerKeys = () =>
+    db
+      .items("witness")
+      .map((item) => String(item.sk?.S))
+      .filter((key) => key.startsWith("ledger#"))
+      .sort();
+  assert.equal(ledgerKeys().length, 45);
+  assert.equal(ledgerKeys()[0], "ledger#0000000016", "entries keep their history positions");
+
+  // A new process reads the compacted record whole.
+  const reread = new DynamoWitnessReplicaStorage({
+    tableName: "witness",
+    replicaId: replicaA,
+    client,
+  });
+  const loaded = required(await reread.read(lineage));
+  assert.equal(loaded.ledger.length, 45);
+  assert.equal(loaded.ledger[0]?.sequence, 17n);
+  assert.equal(loaded.checkpoint?.sequence, 16n);
+  assert.deepEqual(loaded.compacted, { ledger: 16, operations: 0, retainedResponses: 0 });
+
+  // Compaction only moves forward, and appends after it land at their history positions.
+  await assert.rejects(reread.transact(lineage, compactedTo(8, 61)), /cannot move backwards/u);
+  await reread.transact(lineage, compactedTo(32, 70));
+  assert.equal(ledgerKeys().length, 38);
+  assert.equal(ledgerKeys().at(-1), "ledger#0000000069");
+  assert.equal((await storage.read(lineage))?.ledger.at(-1)?.sequence, 70n);
+});
+
 test("two processes writing one lineage never lose a step", async (context) => {
   const { client } = await fake(context);
   const first = new DynamoWitnessReplicaStorage({

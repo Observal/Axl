@@ -146,9 +146,31 @@ export interface WitnessReplicaLedgerEvent {
   readonly forkResult?: "conflicting_successor" | "historical_fork";
 }
 
+/**
+ * What the ledger events compacted away from a record established: the state just before its first
+ * retained event. Rebuilding starts here instead of from the zero head.
+ */
+export interface WitnessCheckpoint {
+  readonly sequence: bigint;
+  readonly revocationGeneration: bigint;
+  readonly head: WitnessHead;
+  readonly revocation?: WitnessLedgerPosition;
+  readonly forkResult?: "conflicting_successor" | "historical_fork";
+}
+
+/** How many entries were compacted away from the front of each list; storage indexes by them. */
+export interface WitnessCompactedCounts {
+  readonly ledger: number;
+  readonly operations: number;
+  readonly retainedResponses: number;
+}
+
 export interface WitnessReplicaRecord {
   readonly lineageHash: Uint8Array;
   readonly binding: WitnessCredentialBinding;
+  /** Present once older ledger events were compacted away. */
+  readonly checkpoint?: WitnessCheckpoint;
+  readonly compacted?: WitnessCompactedCounts;
   readonly ledger: readonly WitnessReplicaLedgerEvent[];
   readonly operations: readonly WitnessAcceptedOperation[];
   readonly retainedResponses: readonly {
@@ -391,17 +413,29 @@ function sameHead(left: WitnessHead, right: WitnessHead): boolean {
 }
 
 function rebuild(record: WitnessReplicaRecord): RebuiltState {
-  let head: WitnessHead = {
-    counter: 0n,
-    commitment: zero(48),
-    predecessorCommitment: zero(48),
-  };
-  let expectedSequence = 1n;
-  let revocationGeneration = 0n;
-  let revocation: WitnessLedgerPosition | undefined;
-  let forkResult: RebuiltState["forkResult"];
+  const state = replay(record.checkpoint, record.ledger);
+  if (record.derivedHead !== undefined && !sameHead(record.derivedHead, state.head)) {
+    // Mutable heads are disposable. The caller rewrites this derived value after validating the journal.
+  }
+  return state;
+}
+
+/** The state after `events`, starting from `checkpoint` or, without one, from the zero head. */
+function replay(
+  checkpoint: WitnessCheckpoint | undefined,
+  events: readonly WitnessReplicaLedgerEvent[],
+): RebuiltState {
+  let head: WitnessHead =
+    checkpoint === undefined
+      ? { counter: 0n, commitment: zero(48), predecessorCommitment: zero(48) }
+      : cloneHead(checkpoint.head);
+  let expectedSequence = (checkpoint?.sequence ?? 0n) + 1n;
+  let revocationGeneration = checkpoint?.revocationGeneration ?? 0n;
+  let revocation: WitnessLedgerPosition | undefined = checkpoint?.revocation;
+  let forkResult: RebuiltState["forkResult"] = checkpoint?.forkResult;
+  // Only retained events contribute successors: a fork older than the window is not recorded.
   const successors: WitnessSuccessor[] = [];
-  for (const event of record.ledger) {
+  for (const event of events) {
     if (event.sequence !== expectedSequence || event.revocationGeneration < revocationGeneration) {
       throw new WitnessServiceError(
         "service_unavailable",
@@ -465,9 +499,6 @@ function rebuild(record: WitnessReplicaRecord): RebuiltState {
       };
     }
   }
-  if (record.derivedHead !== undefined && !sameHead(record.derivedHead, head)) {
-    // Mutable heads are disposable. The caller rewrites this derived value after validating the journal.
-  }
   return {
     head,
     successors,
@@ -475,6 +506,92 @@ function rebuild(record: WitnessReplicaRecord): RebuiltState {
     ...(forkResult === undefined ? {} : { forkResult }),
     lastSequence: expectedSequence - 1n,
     revocationGeneration,
+  };
+}
+
+/** Recent history each record keeps in full: ledger events, accepted operations, and responses. */
+export const WITNESS_HISTORY_WINDOW = 32;
+/**
+ * A list is compacted once it holds this many entries past the window, and a write removes at most
+ * this many entries of each list, so it stays well inside one storage transaction. A record written
+ * before compaction existed shrinks by this much per write until it is inside the window.
+ */
+export const WITNESS_COMPACTION_BATCH = 16;
+
+function excess(length: number): number {
+  return length > WITNESS_HISTORY_WINDOW + WITNESS_COMPACTION_BATCH ? WITNESS_COMPACTION_BATCH : 0;
+}
+
+/**
+ * Keep a bounded window of a record's history and a checkpoint for everything before it. An event
+ * still waiting for its journal entry, and an operation whose receipt is not retained or whose
+ * event is not journaled yet, are never compacted away, nor is anything after them.
+ *
+ * A request replayed after its operation left the window is decided afresh: a stale advance is
+ * refused as `stale_expected` instead of being answered with its original receipt, and a rollback
+ * further back than the window is refused the same way instead of marking the lineage forked.
+ */
+export function compactWitnessRecord(record: WitnessReplicaRecord): WitnessReplicaRecord {
+  let ledgerDrop = excess(record.ledger.length);
+  if (record.ledger.length > 1) {
+    const state = replay(record.checkpoint, record.ledger);
+    // Nothing advances a revoked or forked lineage again, so only its last event is kept.
+    if (state.revocation !== undefined || state.forkResult !== undefined) {
+      ledgerDrop = Math.min(record.ledger.length - 1, WITNESS_COMPACTION_BATCH);
+    }
+  }
+  const pendingSequence = record.pendingJournalSequence;
+  if (pendingSequence !== undefined) {
+    const pending = record.ledger.findIndex((event) => event.sequence >= pendingSequence);
+    if (pending >= 0) ledgerDrop = Math.min(ledgerDrop, pending);
+  }
+  let operationsDrop = excess(record.operations.length);
+  const unfinished = record.operations.findIndex(
+    (candidate) => candidate.exactReceipt === undefined || !candidate.journaled,
+  );
+  if (unfinished >= 0) {
+    operationsDrop = Math.min(operationsDrop, unfinished);
+    // Finishing an operation looks up its ledger event, so that event stays too.
+    const accepted = record.operations[unfinished]?.acceptedAt.sequence;
+    const event = record.ledger.findIndex((candidate) => candidate.sequence >= (accepted ?? 0n));
+    if (event >= 0) ledgerDrop = Math.min(ledgerDrop, event);
+  }
+  const responsesDrop = excess(record.retainedResponses.length);
+  if (ledgerDrop === 0 && operationsDrop === 0 && responsesDrop === 0) return record;
+  let checkpoint = record.checkpoint;
+  if (ledgerDrop > 0) {
+    const state = replay(record.checkpoint, record.ledger.slice(0, ledgerDrop));
+    checkpoint = {
+      sequence: state.lastSequence,
+      revocationGeneration: state.revocationGeneration,
+      head: cloneHead(state.head),
+      ...(state.revocation === undefined ? {} : { revocation: state.revocation }),
+      ...(state.forkResult === undefined ? {} : { forkResult: state.forkResult }),
+    };
+  }
+  const compacted = record.compacted ?? { ledger: 0, operations: 0, retainedResponses: 0 };
+  return {
+    ...record,
+    ...(checkpoint === undefined ? {} : { checkpoint }),
+    // Retained entries stay the same objects, so storage can tell them from new ones.
+    ledger: record.ledger.slice(ledgerDrop),
+    operations: record.operations.slice(operationsDrop),
+    retainedResponses: record.retainedResponses.slice(responsesDrop),
+    compacted: {
+      ledger: compacted.ledger + ledgerDrop,
+      operations: compacted.operations + operationsDrop,
+      retainedResponses: compacted.retainedResponses + responsesDrop,
+    },
+  };
+}
+
+/** The compaction state a rebuilt record carries over from the record it replaces. */
+function carriedHistory(
+  record: WitnessReplicaRecord | undefined,
+): Pick<WitnessReplicaRecord, "checkpoint" | "compacted"> {
+  return {
+    ...(record?.checkpoint === undefined ? {} : { checkpoint: record.checkpoint }),
+    ...(record?.compacted === undefined ? {} : { compacted: record.compacted }),
   };
 }
 
@@ -1021,7 +1138,7 @@ export class WitnessReplica implements WitnessReplicaClient {
       return this.#retainResponse(lineage, exactRequest, hash, exactReceipt, current);
     }
 
-    const stored = await this.#options.storage.transact<ReplicaDecision>(lineage, (record) => {
+    const stored = await this.#transact<ReplicaDecision>(lineage, (record) => {
       const decision = decide(record, request, hash);
       if (decision.exactReceipt !== undefined) return { value: decision };
       if (decision.mutation === undefined) return { value: decision };
@@ -1077,6 +1194,7 @@ export class WitnessReplica implements WitnessReplicaClient {
       const nextBase: WitnessReplicaRecord = {
         lineageHash: lineage.slice(),
         binding: nextBinding,
+        ...carriedHistory(record),
         ledger: nextLedger,
         operations: record?.operations ?? [],
         retainedResponses: record?.retainedResponses ?? [],
@@ -1161,7 +1279,7 @@ export class WitnessReplica implements WitnessReplicaClient {
 
   async #revoke(lineage: Uint8Array, generation: bigint): Promise<void> {
     if (generation <= 0n) throw new TypeError("Revocation generation must be positive");
-    const event = await this.#options.storage.transact(lineage, (record) => {
+    const event = await this.#transact(lineage, (record) => {
       if (record === undefined)
         throw new WitnessServiceError("bad_request", "Witness lineage is absent", 404);
       const state = rebuild(record);
@@ -1368,7 +1486,7 @@ export class WitnessReplica implements WitnessReplicaClient {
         503,
       );
     }
-    await this.#options.storage.transact(lineage, (current) => {
+    await this.#transact(lineage, (current) => {
       if (current === undefined) {
         throw new WitnessServiceError(
           "service_unavailable",
@@ -1530,132 +1648,130 @@ export class WitnessReplica implements WitnessReplicaClient {
       const lineage = lineageHash(request);
       const requestHash = digest(evidence.requestBytes);
       const credential = request.kind === "register" ? requestCredential(request) : undefined;
-      const event = await this.#options.storage.transact<WitnessReplicaLedgerEvent>(
-        lineage,
-        (record) => {
-          const state =
-            record === undefined
-              ? ({
-                  head: {
-                    counter: 0n,
-                    commitment: zero(48),
-                    predecessorCommitment: zero(48),
-                  },
-                  successors: [],
-                  lastSequence: 0n,
-                  revocationGeneration: 0n,
-                } satisfies RebuiltState)
-              : rebuild(record);
-          if (request.kind === "register" ? record !== undefined : record === undefined) {
-            throw new WitnessServiceError(
-              "service_unavailable",
-              "Recovery chain does not start at the local head",
-              503,
-            );
-          }
-          const successor = operation(request);
-          if (
-            request.kind === "advance" &&
-            (request.expectedCounter !== state.head.counter ||
-              request.expectedCommitment === undefined ||
-              !witnessBytesEqual(request.expectedCommitment, state.head.commitment))
-          ) {
-            throw new WitnessServiceError(
-              "service_unavailable",
-              "Recovery chain has a missing predecessor",
-              503,
-            );
-          }
-          if (record !== undefined && findOperation(record, request.operationId) !== undefined) {
-            throw new WitnessServiceError(
-              "service_unavailable",
-              "Recovery chain repeats an operation",
-              503,
-            );
-          }
-          if (
-            request.kind === "advance" &&
-            record !== undefined &&
-            !endpointSignatureValid(request, record.binding.verificationKey)
-          ) {
-            throw new WitnessServiceError(
-              "witness_auth_failed",
-              "Recovery request endpoint proof is invalid",
-              401,
-            );
-          }
-          const nextEvent: WitnessReplicaLedgerEvent = {
-            sequence: state.lastSequence + 1n,
-            revocationGeneration: ownReceipt.revocationGeneration,
-            kind: request.kind === "register" ? "registered" : "advanced",
-            requestHash: requestHash.slice(),
-            requestBytes: evidence.requestBytes.slice(),
-            operationId: request.operationId.slice(),
-            predecessorCounter: state.head.counter,
-            predecessorCommitment: state.head.commitment.slice(),
-            counter: successor.counter,
-            commitment: successor.commitment.slice(),
-          };
-          const fields = receiptFields(
-            request,
-            requestHash,
-            result,
-            {
-              ...state,
-              head: cloneHead(successor),
-              lastSequence: nextEvent.sequence,
-              revocationGeneration: ownReceipt.revocationGeneration,
-            },
-            this.#options.clock,
-          );
-          const nextBinding =
-            record?.binding ??
-            (credential === undefined ? undefined : bindingFrom(request, credential));
-          if (nextBinding === undefined) {
-            throw new WitnessServiceError(
-              "service_unavailable",
-              "Recovery credential binding is missing",
-              503,
-            );
-          }
-          const next: WitnessReplicaRecord = {
-            lineageHash: lineage.slice(),
-            binding: nextBinding,
-            ledger: [...(record?.ledger ?? []), nextEvent],
-            operations: [
-              ...(record?.operations ?? []),
-              {
-                operationId: request.operationId.slice(),
-                requestHash: requestHash.slice(),
-                requestBytes: evidence.requestBytes.slice(),
-                result,
-                successor: cloneHead(successor),
-                acceptedAt: {
-                  sequence: nextEvent.sequence,
-                  revocationGeneration: ownReceipt.revocationGeneration,
+      const event = await this.#transact<WitnessReplicaLedgerEvent>(lineage, (record) => {
+        const state =
+          record === undefined
+            ? ({
+                head: {
+                  counter: 0n,
+                  commitment: zero(48),
+                  predecessorCommitment: zero(48),
                 },
-                receiptFields: fields,
-                exactReceipt: ownReceipt.exactBytes.slice(),
-                journaled: true,
+                successors: [],
+                lastSequence: 0n,
+                revocationGeneration: 0n,
+              } satisfies RebuiltState)
+            : rebuild(record);
+        if (request.kind === "register" ? record !== undefined : record === undefined) {
+          throw new WitnessServiceError(
+            "service_unavailable",
+            "Recovery chain does not start at the local head",
+            503,
+          );
+        }
+        const successor = operation(request);
+        if (
+          request.kind === "advance" &&
+          (request.expectedCounter !== state.head.counter ||
+            request.expectedCommitment === undefined ||
+            !witnessBytesEqual(request.expectedCommitment, state.head.commitment))
+        ) {
+          throw new WitnessServiceError(
+            "service_unavailable",
+            "Recovery chain has a missing predecessor",
+            503,
+          );
+        }
+        if (record !== undefined && findOperation(record, request.operationId) !== undefined) {
+          throw new WitnessServiceError(
+            "service_unavailable",
+            "Recovery chain repeats an operation",
+            503,
+          );
+        }
+        if (
+          request.kind === "advance" &&
+          record !== undefined &&
+          !endpointSignatureValid(request, record.binding.verificationKey)
+        ) {
+          throw new WitnessServiceError(
+            "witness_auth_failed",
+            "Recovery request endpoint proof is invalid",
+            401,
+          );
+        }
+        const nextEvent: WitnessReplicaLedgerEvent = {
+          sequence: state.lastSequence + 1n,
+          revocationGeneration: ownReceipt.revocationGeneration,
+          kind: request.kind === "register" ? "registered" : "advanced",
+          requestHash: requestHash.slice(),
+          requestBytes: evidence.requestBytes.slice(),
+          operationId: request.operationId.slice(),
+          predecessorCounter: state.head.counter,
+          predecessorCommitment: state.head.commitment.slice(),
+          counter: successor.counter,
+          commitment: successor.commitment.slice(),
+        };
+        const fields = receiptFields(
+          request,
+          requestHash,
+          result,
+          {
+            ...state,
+            head: cloneHead(successor),
+            lastSequence: nextEvent.sequence,
+            revocationGeneration: ownReceipt.revocationGeneration,
+          },
+          this.#options.clock,
+        );
+        const nextBinding =
+          record?.binding ??
+          (credential === undefined ? undefined : bindingFrom(request, credential));
+        if (nextBinding === undefined) {
+          throw new WitnessServiceError(
+            "service_unavailable",
+            "Recovery credential binding is missing",
+            503,
+          );
+        }
+        const next: WitnessReplicaRecord = {
+          lineageHash: lineage.slice(),
+          binding: nextBinding,
+          ...carriedHistory(record),
+          ledger: [...(record?.ledger ?? []), nextEvent],
+          operations: [
+            ...(record?.operations ?? []),
+            {
+              operationId: request.operationId.slice(),
+              requestHash: requestHash.slice(),
+              requestBytes: evidence.requestBytes.slice(),
+              result,
+              successor: cloneHead(successor),
+              acceptedAt: {
+                sequence: nextEvent.sequence,
+                revocationGeneration: ownReceipt.revocationGeneration,
               },
-            ],
-            retainedResponses: record?.retainedResponses ?? [],
-            ...(record?.recoveryRequestHashes === undefined
-              ? {}
-              : { recoveryRequestHashes: record.recoveryRequestHashes }),
-            pendingJournalSequence: nextEvent.sequence,
-            derivedHead: cloneHead(successor),
-          };
-          return { value: nextEvent, next };
-        },
-      );
+              receiptFields: fields,
+              exactReceipt: ownReceipt.exactBytes.slice(),
+              journaled: true,
+            },
+          ],
+          retainedResponses: record?.retainedResponses ?? [],
+          ...(record?.recoveryRequestHashes === undefined
+            ? {}
+            : { recoveryRequestHashes: record.recoveryRequestHashes }),
+          pendingJournalSequence: nextEvent.sequence,
+          derivedHead: cloneHead(successor),
+        };
+        return { value: nextEvent, next };
+      });
       await this.#options.journal.append(journalEntry(lineage, event));
       await this.#markJournaled(lineage, event.sequence);
     }
   }
 
   async #markJournaled(lineage: Uint8Array, sequence: bigint): Promise<void> {
-    await this.#options.storage.transact(lineage, (record) => {
+    await this.#transact(lineage, (record) => {
       if (record === undefined) {
         throw new WitnessServiceError("service_unavailable", "Witness lineage disappeared", 503);
       }
@@ -1717,7 +1833,7 @@ export class WitnessReplica implements WitnessReplicaClient {
     }
     if (operationValue.exactReceipt !== undefined) return operationValue.exactReceipt.slice();
     const receipt = await signReceipt(operationValue.receiptFields, this.#options.signer);
-    await this.#options.storage.transact(lineage, (current) => {
+    await this.#transact(lineage, (current) => {
       if (current === undefined)
         throw new WitnessServiceError("service_unavailable", "Witness state disappeared", 503);
       const operations = current.operations.map((candidate) =>
@@ -1748,7 +1864,7 @@ export class WitnessReplica implements WitnessReplicaClient {
     known: WitnessReplicaRecord | undefined,
   ): Promise<Uint8Array> {
     if (known === undefined) return receipt;
-    return this.#options.storage.transact(lineage, (record) => {
+    return this.#transact(lineage, (record) => {
       if (record === undefined)
         throw new WitnessServiceError("service_unavailable", "Witness lineage disappeared", 503);
       const retained = record.retainedResponses.find((candidate) =>
@@ -1769,6 +1885,19 @@ export class WitnessReplica implements WitnessReplicaClient {
           ],
         },
       };
+    });
+  }
+
+  /** Every record this replica writes keeps only a bounded window of its history. */
+  #transact<T>(
+    lineage: Uint8Array,
+    transaction: (current: WitnessReplicaRecord | undefined) => WitnessReplicaTransaction<T>,
+  ): Promise<T> {
+    return this.#options.storage.transact(lineage, (current) => {
+      const outcome = transaction(current);
+      return outcome.next === undefined
+        ? outcome
+        : { value: outcome.value, next: compactWitnessRecord(outcome.next) };
     });
   }
 

@@ -33,6 +33,7 @@ import { HostedWitnessClient } from "../../../packages/sdk/src/witness.ts";
 
 import {
   type CanonicalWitnessReceipt,
+  compactWitnessRecord,
   createControlPlaneHandler,
   type HostedWitnessAuthorizer,
   InMemoryRelayTicketStore,
@@ -40,10 +41,15 @@ import {
   RelayTicketService,
   type WitnessAdmission,
   type WitnessEndpointCredentialDirectory,
+  WITNESS_COMPACTION_BATCH,
+  WITNESS_HISTORY_WINDOW,
+  type WitnessAcceptedOperation,
   WitnessGateway,
   type WitnessReceiptSigner,
   WitnessReplica,
   type WitnessReplicaClient,
+  type WitnessReplicaLedgerEvent,
+  type WitnessReplicaRecord,
   WitnessRevocationCoordinator,
   type WitnessSecurityAuditEvent,
   WitnessServiceError,
@@ -1350,4 +1356,204 @@ test("rejects credential replacement, wrong fingerprint, and endpoint signature 
     ).receipts[0].result,
     "registration_conflict",
   );
+});
+
+function syntheticRecord(
+  length: number,
+  extra: Partial<WitnessReplicaRecord> = {},
+): WitnessReplicaRecord {
+  const ledger = Array.from({ length }, (_value, index): WitnessReplicaLedgerEvent => {
+    const counter = BigInt(index + 1);
+    return {
+      sequence: counter,
+      revocationGeneration: 0n,
+      kind: index === 0 ? "registered" : "advanced",
+      ...(index === 0
+        ? {}
+        : {
+            predecessorCounter: counter - 1n,
+            predecessorCommitment: new Uint8Array(48).fill(index),
+          }),
+      counter,
+      commitment: new Uint8Array(48).fill(index + 1),
+    };
+  });
+  return {
+    lineageHash: new Uint8Array(48),
+    binding: {} as WitnessReplicaRecord["binding"],
+    ledger,
+    operations: [],
+    retainedResponses: [],
+    ...extra,
+  };
+}
+
+function syntheticOperation(sequence: bigint, finished: boolean): WitnessAcceptedOperation {
+  return {
+    operationId: id(Number(sequence)),
+    requestHash: new Uint8Array(48),
+    requestBytes: new Uint8Array(1),
+    result: "advanced",
+    successor: { counter: sequence, commitment: zero48(), predecessorCommitment: zero48() },
+    acceptedAt: { sequence, revocationGeneration: 0n },
+    receiptFields: {} as WitnessAcceptedOperation["receiptFields"],
+    ...(finished ? { exactReceipt: new Uint8Array(1) } : {}),
+    journaled: finished,
+  };
+}
+
+function zero48(): Uint8Array {
+  return new Uint8Array(48);
+}
+
+test("compaction keeps a window of history and a checkpoint for what came before", () => {
+  const short = syntheticRecord(WITNESS_HISTORY_WINDOW + WITNESS_COMPACTION_BATCH);
+  assert.equal(compactWitnessRecord(short), short, "history inside the window plus a batch stays");
+
+  // One write removes one batch, however far past the window the record is.
+  const long = syntheticRecord(60);
+  const compacted = compactWitnessRecord(long);
+  assert.equal(compacted.ledger.length, 60 - WITNESS_COMPACTION_BATCH);
+  assert.equal(compacted.ledger[0], long.ledger[16], "retained events stay the same objects");
+  assert.equal(compacted.checkpoint?.sequence, 16n);
+  assert.equal(compacted.checkpoint?.head.counter, 16n);
+  assert.deepEqual(compacted.checkpoint?.head.commitment, new Uint8Array(48).fill(16));
+  assert.deepEqual(compacted.compacted, { ledger: 16, operations: 0, retainedResponses: 0 });
+
+  // A second compaction builds on the first checkpoint.
+  const grown = syntheticRecord(80);
+  const again = compactWitnessRecord({
+    ...compacted,
+    ledger: grown.ledger.slice(16),
+  });
+  assert.equal(again.checkpoint?.sequence, 32n);
+  assert.equal(again.compacted?.ledger, 32);
+  assert.equal(again.ledger[0]?.sequence, 33n);
+
+  // A corrupt chain is refused rather than compacted into a checkpoint.
+  assert.throws(
+    () => compactWitnessRecord({ ...compacted, ledger: grown.ledger.slice(18) }),
+    (error) => error instanceof WitnessServiceError && error.code === "service_unavailable",
+  );
+});
+
+test("compaction never drops history an unfinished operation or journal entry needs", () => {
+  const pending = compactWitnessRecord(syntheticRecord(60, { pendingJournalSequence: 10n }));
+  assert.equal(pending.ledger[0]?.sequence, 10n);
+  assert.equal(pending.checkpoint?.sequence, 9n);
+
+  const operations = Array.from({ length: 60 }, (_value, index) =>
+    syntheticOperation(BigInt(index + 1), index !== 4),
+  );
+  const unfinished = compactWitnessRecord(syntheticRecord(60, { operations }));
+  assert.equal(unfinished.operations.length, 56, "operations before the unfinished one may go");
+  assert.equal(unfinished.operations[0]?.acceptedAt.sequence, 5n);
+  assert.equal(unfinished.ledger[0]?.sequence, 5n, "its ledger event stays for finishing it");
+  assert.deepEqual(unfinished.compacted, { ledger: 4, operations: 4, retainedResponses: 0 });
+
+  const responses = Array.from({ length: 50 }, () => ({
+    requestHash: zero48(),
+    requestBytes: new Uint8Array(1),
+    exactReceipt: new Uint8Array(1),
+  }));
+  const retained = compactWitnessRecord(syntheticRecord(2, { retainedResponses: responses }));
+  assert.equal(retained.retainedResponses.length, 50 - WITNESS_COMPACTION_BATCH);
+  assert.equal(retained.checkpoint, undefined);
+});
+
+test("a revoked lineage shrinks to its checkpoint and its last event", () => {
+  const advanced = syntheticRecord(20);
+  const head = required(advanced.ledger.at(-1));
+  const revoked = syntheticRecord(20, {
+    ledger: [
+      ...advanced.ledger,
+      {
+        sequence: 21n,
+        revocationGeneration: 1n,
+        kind: "revoked",
+        counter: head.counter,
+        commitment: head.commitment,
+      },
+    ],
+  });
+  const once = compactWitnessRecord(revoked);
+  assert.equal(once.ledger.length, 21 - WITNESS_COMPACTION_BATCH, "one batch per write");
+  const twice = compactWitnessRecord(once);
+  assert.deepEqual(
+    twice.ledger.map((event) => event.kind),
+    ["revoked"],
+  );
+  assert.equal(twice.checkpoint?.sequence, 20n);
+  assert.equal(twice.checkpoint?.head.counter, 20n);
+  assert.equal(compactWitnessRecord(twice), twice, "nothing is left to compact");
+});
+
+test("a long-lived lineage stays bounded, keeps advancing, and recovers after a restart", async () => {
+  const endpoint = endpointFixture();
+  const service = await harness();
+  const registration = register(endpoint);
+  await service.gateway.submit(principal(endpoint), registration);
+  await recoverReplicas(service, endpoint);
+  const lineage = witnessLineageHash(parseWitnessRequest(registration));
+  let commitment = proposedCommitment(registration);
+  const first = advance(endpoint, id(100), 1n, commitment, new Uint8Array(48).fill(101));
+  for (let counter = 1n; counter <= 70n; counter += 1n) {
+    const next =
+      counter === 1n
+        ? first
+        : advance(
+            endpoint,
+            id(100 + Number(counter)),
+            counter,
+            commitment,
+            new Uint8Array(48).fill(100 + Number(counter)),
+          );
+    const certificate = await service.gateway.submit(principal(endpoint), next);
+    assert.equal(parseWitnessQuorumCertificate(certificate).receipts[0].result, "advanced");
+    commitment = proposedCommitment(next);
+  }
+
+  for (const store of service.stores) {
+    const record = required(await store.read(lineage));
+    const last = required(record.ledger.at(-1));
+    assert.equal(last.counter, 71n);
+    assert.ok(record.ledger.length <= WITNESS_HISTORY_WINDOW + WITNESS_COMPACTION_BATCH);
+    assert.ok(record.operations.length <= WITNESS_HISTORY_WINDOW + WITNESS_COMPACTION_BATCH);
+    assert.equal(required(record.checkpoint).sequence + 1n, required(record.ledger[0]).sequence);
+    assert.equal(required(record.compacted).ledger + record.ledger.length, Number(last.sequence));
+  }
+
+  // An operation older than the window is decided afresh and refused, not forked or accepted.
+  assert.equal(
+    parseWitnessQuorumCertificate(await service.gateway.submit(principal(endpoint), first))
+      .receipts[0].result,
+    "stale_expected",
+  );
+
+  // Restarting over the compacted stores recovers the lineage from its checkpoint.
+  const resumed = ([0, 1, 2] as const).map((index) =>
+    reconstructedReplica(service, index),
+  ) as unknown as readonly [WitnessReplica, WitnessReplica, WitnessReplica];
+  await Promise.all(resumed.map((replica) => replica.resumeDurable()));
+  const admission = { principal: principal(endpoint), mode: "active" } as const;
+  const read = requestBytes(endpoint, {
+    kind: 2,
+    operationId: id(200),
+    nonce: new Uint8Array(32).fill(200),
+  });
+  const heads = await Promise.all(resumed.map((replica) => replica.recoveryHead(admission, read)));
+  await Promise.all(
+    resumed.map((replica, own) =>
+      replica.recoverLineage(
+        heads
+          .filter((_receipt, index) => index !== own)
+          .map((receiptBytes) => ({ requestBytes: read, receiptBytes })),
+      ),
+    ),
+  );
+  assert.ok(resumed.every((replica) => replica.lineageReady(lineage)));
+  const next = advance(endpoint, id(201), 71n, commitment, new Uint8Array(48).fill(201));
+  const receipt = parseWitnessReplicaReceipt(await resumed[0].submit(admission, next));
+  assert.equal(receipt.result, "advanced");
+  assert.equal(receipt.counter, 72n);
 });

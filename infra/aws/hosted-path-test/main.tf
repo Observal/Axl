@@ -330,7 +330,8 @@ resource "aws_dynamodb_table" "control_plane" {
 }
 
 # Rollback witness replica records: per lineage, a head item and one item per ledger event,
-# operation, retained response, and used recovery read. Records are never deleted, so no TTL.
+# operation, retained response, and used recovery read. The witness keeps a bounded window of each
+# lineage's history and deletes what it compacted into a checkpoint; records never expire.
 resource "aws_dynamodb_table" "witness" {
   name         = "${local.name}-witness"
   billing_mode = "PAY_PER_REQUEST"
@@ -453,11 +454,13 @@ resource "aws_iam_role_policy" "control_plane_state" {
         Resource = aws_dynamodb_table.control_plane.arn
       },
       {
-        # Transactions need only the item actions they contain.
+        # Transactions need only the item actions they contain. A compacting step deletes the
+        # history it folded into the record's checkpoint, in the same transaction.
         Effect = "Allow"
         Action = [
           "dynamodb:GetItem",
           "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
           "dynamodb:Query"
         ]
         Resource = aws_dynamodb_table.witness.arn
@@ -578,6 +581,130 @@ resource "aws_ecs_task_definition" "relay" {
       }
     }
   }])
+}
+
+# Prunes superseded witness journal entries, keeping each lineage's newest. It runs from the
+# control-plane image under its own role, which can only read journal keys and delete items: the
+# witness service keeps no delete permission on the journal, and the pruner cannot write entries.
+resource "aws_iam_role" "journal_pruner_task" {
+  name = "${local.name}-journal-pruner-task"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "journal_pruner" {
+  name = "journal-pruner"
+  role = aws_iam_role.journal_pruner_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["dynamodb:Scan", "dynamodb:DeleteItem"]
+      Resource = aws_dynamodb_table.witness_journal.arn
+    }]
+  })
+}
+
+resource "aws_ecs_task_definition" "journal_pruner" {
+  family                   = "${local.name}-journal-pruner"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.journal_pruner_task.arn
+
+  container_definitions = jsonencode([{
+    name                   = "journal-pruner"
+    image                  = "${aws_ecr_repository.control_plane.repository_url}:${var.image_tag}"
+    essential              = true
+    readonlyRootFilesystem = true
+    command                = ["node", "services/aws-control-plane/dist/witness-journal-pruner.js"]
+    environment = [
+      { name = "AXL_WITNESS_JOURNAL_TABLE", value = aws_dynamodb_table.witness_journal.name }
+    ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.control_plane.name
+        awslogs-region        = var.aws_region
+        awslogs-stream-prefix = "journal-pruner"
+      }
+    }
+  }])
+}
+
+resource "aws_iam_role" "journal_pruner_schedule" {
+  name = "${local.name}-journal-pruner-schedule"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "scheduler.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "journal_pruner_schedule" {
+  name = "run-journal-pruner"
+  role = aws_iam_role.journal_pruner_schedule.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["ecs:RunTask"]
+        Resource = aws_ecs_task_definition.journal_pruner.arn_without_revision
+        Condition = {
+          ArnEquals = { "ecs:cluster" = aws_ecs_cluster.main.arn }
+        }
+      },
+      {
+        Effect = "Allow"
+        Action = ["iam:PassRole"]
+        Resource = [
+          aws_iam_role.execution.arn,
+          aws_iam_role.journal_pruner_task.arn
+        ]
+      }
+    ]
+  })
+}
+
+resource "aws_scheduler_schedule" "journal_pruner" {
+  name                = "${local.name}-journal-pruner"
+  schedule_expression = "rate(1 day)"
+
+  flexible_time_window {
+    mode = "OFF"
+  }
+
+  target {
+    arn      = aws_ecs_cluster.main.arn
+    role_arn = aws_iam_role.journal_pruner_schedule.arn
+
+    ecs_parameters {
+      task_definition_arn = aws_ecs_task_definition.journal_pruner.arn_without_revision
+      launch_type         = "FARGATE"
+
+      network_configuration {
+        subnets          = aws_subnet.public[*].id
+        security_groups  = [aws_security_group.tasks.id]
+        assign_public_ip = true
+      }
+    }
+
+    retry_policy {
+      maximum_retry_attempts = 2
+    }
+  }
 }
 
 resource "aws_ecs_service" "control_plane" {

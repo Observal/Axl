@@ -3,7 +3,8 @@
 
 /**
  * An in-memory DynamoDB endpoint for tests: the JSON protocol subset the control-plane stores use
- * (GetItem, PutItem, UpdateItem with SET, Query by partition, TransactWriteItems of Puts) and
+ * (GetItem, PutItem, unconditional DeleteItem, UpdateItem with SET, Query by partition, Scan,
+ * TransactWriteItems of at most 100 Puts and Deletes) and
  * conditions that are conjunctions of `attribute_exists`, `attribute_not_exists`, and `=`, `<`, or
  * `>` comparisons. Anything else is a ValidationException, so a store that starts relying on more
  * DynamoDB behavior fails its tests instead of passing against a fake that guessed.
@@ -179,28 +180,85 @@ export async function startFakeDynamoDb(port = 0): Promise<FakeDynamoDb> {
           : {}),
       };
     },
-    TransactWriteItems(input) {
-      const writes = (input.TransactItems as { readonly Put?: Record<string, unknown> }[]).map(
-        (entry) => {
-          if (entry.Put === undefined) {
-            throw new DynamoError(
-              "ValidationException",
-              "Only Put transaction items are supported",
-            );
-          }
-          return entry.Put;
-        },
+    DeleteItem(input) {
+      if (input.ConditionExpression !== undefined) {
+        throw new DynamoError("ValidationException", "Conditional deletes are not supported");
+      }
+      table(input.TableName).delete(keyOf(input.Key as Item));
+      return {};
+    },
+    Scan(input) {
+      const projection =
+        input.ProjectionExpression === undefined
+          ? undefined
+          : String(input.ProjectionExpression).split(/,\s*/u);
+      const matching = [...table(input.TableName).values()].sort((left, right) =>
+        keyOf(left).localeCompare(keyOf(right)),
       );
-      const keys = writes.map((put) => `${String(put.TableName)}\u0001${keyOf(put.Item as Item)}`);
+      const start = input.ExclusiveStartKey as Item | undefined;
+      const from =
+        start === undefined ? 0 : matching.findIndex((item) => keyOf(item) === keyOf(start)) + 1;
+      const page = matching.slice(from, from + fake.pageSize);
+      const last = page.at(-1);
+      return {
+        Items: page.map((item) =>
+          projection === undefined
+            ? item
+            : Object.fromEntries(projection.map((name) => [name, item[name]])),
+        ),
+        Count: page.length,
+        ...(from + fake.pageSize < matching.length && last !== undefined
+          ? { LastEvaluatedKey: { pk: last.pk, ...(last.sk === undefined ? {} : { sk: last.sk }) } }
+          : {}),
+      };
+    },
+    TransactWriteItems(input) {
+      const entries = input.TransactItems as {
+        readonly Put?: Record<string, unknown>;
+        readonly Delete?: Record<string, unknown>;
+      }[];
+      if (entries.length > 100) {
+        throw new DynamoError("ValidationException", "A transaction holds at most 100 items");
+      }
+      const writes = entries.map((entry) => {
+        const write = (
+          request: Record<string, unknown>,
+          key: Item,
+          put: Item | undefined,
+        ): {
+          readonly TableName: unknown;
+          readonly ConditionExpression: unknown;
+          readonly ExpressionAttributeValues: unknown;
+          readonly key: Item;
+          readonly put: Item | undefined;
+        } => ({
+          TableName: request.TableName,
+          ConditionExpression: request.ConditionExpression,
+          ExpressionAttributeValues: request.ExpressionAttributeValues,
+          key,
+          put,
+        });
+        if (entry.Put !== undefined && entry.Delete === undefined) {
+          return write(entry.Put, entry.Put.Item as Item, entry.Put.Item as Item);
+        }
+        if (entry.Delete !== undefined && entry.Put === undefined) {
+          return write(entry.Delete, entry.Delete.Key as Item, undefined);
+        }
+        throw new DynamoError(
+          "ValidationException",
+          "Only Put and Delete transaction items are supported",
+        );
+      });
+      const keys = writes.map((write) => `${String(write.TableName)}\u0001${keyOf(write.key)}`);
       if (new Set(keys).size !== keys.length) {
         throw new DynamoError("ValidationException", "Transaction writes one item twice");
       }
-      const reasons = writes.map((put) => {
-        const existing = table(put.TableName).get(keyOf(put.Item as Item));
+      const reasons = writes.map((write) => {
+        const existing = table(write.TableName).get(keyOf(write.key));
         return conditionHolds(
           existing,
-          put.ConditionExpression,
-          put.ExpressionAttributeValues as Record<string, AttributeValue> | undefined,
+          write.ConditionExpression,
+          write.ExpressionAttributeValues as Record<string, AttributeValue> | undefined,
         )
           ? { Code: "None" }
           : { Code: "ConditionalCheckFailed", Message: "The conditional request failed" };
@@ -210,9 +268,9 @@ export async function startFakeDynamoDb(port = 0): Promise<FakeDynamoDb> {
           CancellationReasons: reasons,
         });
       }
-      for (const put of writes) {
-        const item = put.Item as Item;
-        table(put.TableName).set(keyOf(item), structuredClone(item));
+      for (const write of writes) {
+        if (write.put === undefined) table(write.TableName).delete(keyOf(write.key));
+        else table(write.TableName).set(keyOf(write.key), structuredClone(write.put));
       }
       return {};
     },
