@@ -7,3 +7,5 @@ packages:
   - apps/*
 allowBuilds:
   esbuild: false
+overrides:
+  fast-uri: 3.1.8
