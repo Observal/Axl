@@ -125,6 +125,15 @@ test("rejects invalid session profile arguments", async () => {
   assert.match(resume.stderr, /--profile cannot be combined with --resume/);
 });
 
+test("rejects invalid thinking level arguments", async () => {
+  const unknown = await runCli(["--thinking", "hgih"]);
+  assert.equal(unknown.code, 1);
+  assert.match(
+    unknown.stderr,
+    /Unknown thinking level hgih; expected off, minimal, low, medium, high, xhigh, or max/,
+  );
+});
+
 test("offline raw session export requires explicit raw mode and preserves bytes", async (context) => {
   const home = await temporaryDirectory(context);
   const sessionId = "00000000-0000-4000-8000-000000000401";

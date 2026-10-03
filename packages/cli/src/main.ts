@@ -25,6 +25,7 @@ import {
   type SessionId,
   type SessionProfile,
   type ThinkingLevel,
+  THINKING_LEVELS,
 } from "@axl/protocol";
 import {
   diagnoseLocalSandboxes,
@@ -234,8 +235,17 @@ function parseArguments(argv: readonly string[]): CliArguments {
         ...DEFAULT_MODEL_REQUEST_SETTINGS,
         httpIdleTimeoutMs: parsed.httpIdleTimeoutMs,
       });
-    } else if (argument === "--thinking") parsed.thinking = next() as ThinkingLevel;
-    else if (argument === "--profile") {
+    } else if (argument === "--thinking") {
+      const level = next();
+      if (!THINKING_LEVELS.includes(level as ThinkingLevel)) {
+        const expected =
+          THINKING_LEVELS.length > 1
+            ? `${THINKING_LEVELS.slice(0, -1).join(", ")}, or ${THINKING_LEVELS[THINKING_LEVELS.length - 1]}`
+            : THINKING_LEVELS[0];
+        throw new Error(`Unknown thinking level ${level}; expected ${expected}`);
+      }
+      parsed.thinking = level as ThinkingLevel;
+    } else if (argument === "--profile") {
       const profile = next();
       if (profile !== "standard" && profile !== "exec") {
         throw new Error(`Unknown profile ${profile}; expected standard or exec`);
