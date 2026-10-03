@@ -201,6 +201,7 @@ h1 { margin:0; font-size:23px; line-height:1.25; letter-spacing:-.025em; }
 .empty { display:grid; place-items:center; align-content:center; height:100%; text-align:center; }
 .empty h1 { margin-top:16px; }.empty p{color:var(--muted)}.empty button{padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:var(--text);color:var(--bg);font-weight:600;cursor:pointer}
 .composer { position:absolute; right:32px; bottom:24px; left:32px; width:min(910px,calc(100% - 64px)); margin:auto; padding:14px; border:1px solid var(--line); border-radius:11px; background:var(--glass); box-shadow:0 16px 42px var(--shadow),0 1px 0 color-mix(in srgb,var(--text) 5%,transparent) inset; backdrop-filter:blur(18px) saturate(112%); }
+.mascot-strip { position:absolute; right:0; bottom:100%; left:0; height:72px; pointer-events:none; }
 .slash-commands { position:absolute; right:0; bottom:calc(100% + 8px); left:0; display:flex; max-height:250px; padding:6px; flex-direction:column; overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--raised); box-shadow:0 18px 45px var(--shadow); }
 .slash-commands button { display:flex; align-items:center; gap:12px; padding:9px 10px; border:0; border-radius:6px; background:transparent; text-align:left; cursor:pointer; }
 .slash-commands button:hover,.slash-commands button:focus-visible,.slash-commands button[aria-selected="true"] { background:var(--selected); outline:0; }

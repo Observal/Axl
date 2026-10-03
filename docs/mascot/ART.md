@@ -85,7 +85,7 @@ Two rules follow from this:
 
 ## Player contract
 
-The player is `MascotPlayer` in `packages/tui/src/mascot.ts`:
+The player is `MascotPlayer` in `packages/sdk/src/mascot.ts`:
 
 ```text
 play(state)                       cut to the state now. Plays in, then loop or next.
@@ -104,13 +104,15 @@ Priority rules the harness must apply:
 
 ## How the client draws it
 
-The client is five pieces in `packages/tui/src/`, and each is tested on its own:
+The client is five pieces, and each is tested on its own. The first three are platform neutral and live in `packages/sdk/src/`, so the terminal and the browser share them. The last two are terminal drawing and live in `packages/tui/src/`:
 
 - `mascot.ts`: the manifest parser and the player. The player only keeps time. It plays a state's `in`, `loop` and `out` segments in order, hands off to the state's `next`, and says which atlas frame to show.
 - `mascot-director.ts`: maps session events onto states (a prompt is `thinking`, a tool call is `working`, a permission request is `ask`, and so on). It is the only piece that knows about the session.
 - `mascot-actor.ts`: where the sprite sits in its strip, in cells. See [Placement and motion](#placement-and-motion).
 - `mascot-render.ts`: the component that turns the frame and the placement into terminal rows, the Kitty renderer, the text pack loader, and the colour swaps.
 - `mascot-sixel.ts`: the indexed PNG decoder and the sixel encoder.
+
+The web client (`packages/web/src/mascot.tsx`) uses the same player, director, and actor with the same manifest. It draws the Pink atlas to a canvas above the composer, swaps the palette in the decoded pixels for the other colours, and mirrors the canvas for the other facing. A cell is 9 by 18 CSS pixels, so the actor's placement means the same thing in both clients. `/mascot` works the same way, and `packages/web/src/mascot/` holds copies of the manifest and the atlas that a test keeps equal to the terminal's.
 
 `/mascot` turns it on. The app ticks it every 50 ms and repaints only when the frame or the placement changed. It picks a drawing when it is turned on, and again when the display mode changes:
 

@@ -49,6 +49,7 @@ axl/
     tui/               # terminal event projection and interaction UI
       assets/          # presentation assets, such as the mascot sprite atlases and packs
     web/               # web client
+      src/mascot/      # presentation copies of the mascot manifest and Pink atlas
     ui/                # shared presentation tokens and React renderers
     sdk/               # shared TypeScript client SDK when multiple clients need it
     extensions/        # first-party extensions, one package per feature (roadmap §2.9)
