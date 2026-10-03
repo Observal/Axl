@@ -54,14 +54,14 @@ pub(crate) mod linux_secret_service;
 #[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
 pub(crate) mod macos_keychain;
 mod pairing_lifecycle;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod sealed_file;
 #[cfg(target_os = "windows")]
 #[allow(dead_code)] // Constructed only by the later internal production endpoint factory.
 pub(crate) mod windows_dpapi;
 #[cfg(target_os = "windows")]
 mod windows_fs;
 mod witness_v2;
-#[cfg(target_os = "linux")]
-pub(crate) mod wsl_dpapi;
 pub use pairing_lifecycle::{
     ActivationAcceptance, ActivationOutcome, ClaimFailure, ClaimSubmission,
     DurablePendingInvitation, DurablePreJoinDevice, EpochReadyAcceptance, InvitationLifecycle,
@@ -334,16 +334,38 @@ pub trait EnvelopeKeyStore: Send + Sync {
 }
 
 /// Envelope keys for a daemon in WSL: records under `root`, each sealed by Windows DPAPI through
-/// the `axl-dpapi-helper.exe` at `helper`. See `wsl_dpapi` for what it does and does not protect.
+/// the `axl-dpapi-helper.exe` at `helper`. See `sealed_file` for what it does and does not protect.
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub fn wsl_dpapi_envelope_key_store(
     root: &Path,
     helper: &Path,
 ) -> Result<Arc<dyn EnvelopeKeyStore>, PersistenceError> {
-    Ok(Arc::new(wsl_dpapi::WslDpapiEnvelopeKeyStore::new(
+    sealed_file_envelope_key_store(root, helper, &sealed_file::WSL_DPAPI)
+}
+
+/// Envelope keys for a daemon on macOS: records under `root`, each sealed under a key in the
+/// data-protection Keychain through the signed `axl-keychain-helper` at `helper`. An unsigned
+/// helper is refused by the Keychain, so this fails closed with `SecureStoreAccessDenied`.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn macos_keychain_envelope_key_store(
+    root: &Path,
+    helper: &Path,
+) -> Result<Arc<dyn EnvelopeKeyStore>, PersistenceError> {
+    sealed_file_envelope_key_store(root, helper, &sealed_file::MACOS_KEYCHAIN)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sealed_file_envelope_key_store(
+    root: &Path,
+    helper: &Path,
+    profile: &'static sealed_file::SealProfile,
+) -> Result<Arc<dyn EnvelopeKeyStore>, PersistenceError> {
+    Ok(Arc::new(sealed_file::SealedFileEnvelopeKeyStore::new(
         root,
-        wsl_dpapi::HelperProcess::new(helper)?,
+        sealed_file::HelperProcess::new(helper, profile)?,
+        profile,
     )?))
 }
 

@@ -23,6 +23,9 @@ hosted-wsl = []
 # Hosted daemon on a Linux desktop: build-pinned replica trust and envelope keys in the session's
 # Secret Service (GNOME Keyring or KWallet 6).
 hosted-linux = []
+# Hosted daemon on macOS: build-pinned replica trust and envelope keys sealed under a key in the
+# data-protection Keychain through the user's signed `axl-keychain-helper`.
+hosted-macos = []
 
 [dependencies]
 axl-e2ee = { path = "../.." }

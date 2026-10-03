@@ -4,7 +4,8 @@
 /**
  * `axl remote login` and `axl remote logout`: sign this machine's daemon in to remote access, or
  * forget the account. Login runs the browser sign-in, stores the account with its secrets sealed
- * by the platform (Windows DPAPI in WSL, the desktop keyring on Linux), and registers the
+ * by the platform (Windows DPAPI in WSL, the Keychain on macOS, the desktop keyring on Linux), and
+ * registers the
  * installation's key, which also tells whether remote access is enabled for the account yet.
  */
 
@@ -15,8 +16,10 @@ import {
   DEFAULT_REMOTE_ORIGIN,
   defaultDpapiHelper,
   defaultHostedBinding,
+  defaultKeychainHelper,
   detectSecretService,
   forgetProductionRemotePairing,
+  HelperSealer,
   isWsl,
   loadDaemonSignInConfig,
   loadRemoteAccount,
@@ -42,8 +45,9 @@ login   Sign this machine in to remote access with Google and register it.
 logout  Remove the paired phone, which ends every share, and forget the signed-in account.
 
   --origin <url>    The remote stack (default ${DEFAULT_REMOTE_ORIGIN})
-  --helper <path>   axl-dpapi-helper.exe in WSL (default %LOCALAPPDATA%\\Axl\\bin in Windows)
-  --binding <path>  The hosted Node binding loader (WSL or Linux desktop)
+  --helper <path>   axl-dpapi-helper.exe in WSL (default %LOCALAPPDATA%\\Axl\\bin in Windows), or
+                    axl-keychain-helper on macOS (default ~/Library/Application Support/Axl)
+  --binding <path>  The hosted Node binding loader (WSL, macOS, or Linux desktop)
   --no-open         Print the sign-in link instead of opening a browser
 `;
 
@@ -90,12 +94,45 @@ async function exists(path: string, mode = constants.R_OK): Promise<boolean> {
   }
 }
 
-/** Where this machine seals the account: Windows DPAPI in WSL, the desktop keyring on Linux. */
+/** The Keychain helper, checked before sign-in: an unsigned build is refused by the Keychain. */
+async function keychainSealer(
+  options: RemoteOptions,
+  binding: string,
+): Promise<RemoteAccountSealer> {
+  const helper = options.helper ?? (defaultKeychainHelper() as string);
+  if (!(await exists(helper, constants.X_OK))) {
+    throw new Error(
+      `Remote access on macOS keeps its keys in the Keychain, through axl-keychain-helper, which is not at ${helper}. Install it with packages/e2ee/helpers/keychain/install-macos.sh, or pass --helper.`,
+    );
+  }
+  if (!(await exists(binding))) {
+    throw new Error(
+      `The hosted macOS binding is not built yet (${binding}). Build it with infra/aws/hosted-path-test/daemon-binding.sh, or pass --binding.`,
+    );
+  }
+  const sealer = await HelperSealer.open(helper, "keychain");
+  try {
+    await sealer.identity();
+  } catch (cause) {
+    throw new Error(
+      `The Keychain did not give axl-keychain-helper its key (${cause instanceof Error ? cause.message : String(cause)}). It needs the Developer ID signed helper and an unlocked login session.`,
+    );
+  } finally {
+    sealer.close();
+  }
+  return { kind: "keychain", helper };
+}
+
+/**
+ * Where this machine seals the account: Windows DPAPI in WSL, the Keychain on macOS, the desktop
+ * keyring on Linux.
+ */
 async function accountSealer(
   options: RemoteOptions,
   binding: string,
   write: (text: string) => void,
 ): Promise<RemoteAccountSealer> {
+  if (process.platform === "darwin") return keychainSealer(options, binding);
   if (options.helper !== undefined || isWsl()) {
     const helper = options.helper ?? (await defaultDpapiHelper());
     if (helper === undefined || !(await exists(helper, constants.X_OK))) {
@@ -112,7 +149,7 @@ async function accountSealer(
   }
   if (process.platform !== "linux") {
     throw new Error(
-      "Remote access runs from a daemon in WSL 2 or on a Linux desktop; this platform is not supported yet.",
+      "Remote access runs from a daemon in WSL 2, on macOS, or on a Linux desktop; this platform is not supported yet.",
     );
   }
   // The desktop keyring is reached through the binding, so it must be built before login.

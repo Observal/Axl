@@ -220,6 +220,7 @@ path = [
   "packages/e2ee/bindings/node/loader/deployment-test-exports.js",
   "packages/e2ee/bindings/node/loader/hosted-wsl-exports.js",
   "packages/e2ee/bindings/node/loader/hosted-linux-exports.js",
+  "packages/e2ee/bindings/node/loader/hosted-macos-exports.js",
 ]
 SPDX-FileCopyrightText = "2026 Lokesh"
 SPDX-License-Identifier = "Apache-2.0"

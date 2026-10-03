@@ -9,17 +9,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const mode = process.argv[2];
-if (!["production", "test", "deployment-test", "hosted-wsl", "hosted-linux"].includes(mode)) {
-  throw new Error("usage: build.mjs production|test|deployment-test|hosted-wsl|hosted-linux");
+const HOSTED_PLATFORM = { "hosted-wsl": "linux", "hosted-linux": "linux", "hosted-macos": "darwin" };
+if (!["production", "test", "deployment-test", ...Object.keys(HOSTED_PLATFORM)].includes(mode)) {
+  throw new Error("usage: build.mjs production|test|deployment-test|hosted-wsl|hosted-linux|hosted-macos");
 }
 if (mode === "deployment-test" && !process.env.AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE) {
   throw new Error("deployment-test builds require AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE");
 }
-if (mode === "hosted-wsl" && (!process.env.AXL_E2EE_HOSTED_TRUST_FILE || process.platform !== "linux")) {
-  throw new Error("hosted-wsl builds run on Linux and require AXL_E2EE_HOSTED_TRUST_FILE");
-}
-if (mode === "hosted-linux" && (!process.env.AXL_E2EE_HOSTED_TRUST_FILE || process.platform !== "linux")) {
-  throw new Error("hosted-linux builds run on Linux and require AXL_E2EE_HOSTED_TRUST_FILE");
+const hosted = mode in HOSTED_PLATFORM;
+if (hosted && (!process.env.AXL_E2EE_HOSTED_TRUST_FILE || process.platform !== HOSTED_PLATFORM[mode])) {
+  throw new Error(`${mode} builds run on ${HOSTED_PLATFORM[mode]} and require AXL_E2EE_HOSTED_TRUST_FILE`);
 }
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const e2eeRoot = resolve(packageRoot, "../..");
@@ -43,6 +42,7 @@ const staging = join(
     "deployment-test": "deployment-test",
     "hosted-wsl": "hosted-wsl",
     "hosted-linux": "hosted-linux",
+    "hosted-macos": "hosted-macos",
   }[mode],
 );
 rmSync(staging, { recursive: true, force: true });
@@ -50,8 +50,7 @@ mkdirSync(join(staging, "native"), { recursive: true });
 const cargoArguments = ["build", "--locked", "--release", "-p", "axl-e2ee-node", "--target-dir", targetDirectory];
 if (mode === "test") cargoArguments.push("--features", "test-fixtures");
 if (mode === "deployment-test") cargoArguments.push("--features", "deployment-test");
-if (mode === "hosted-wsl") cargoArguments.push("--features", "hosted-wsl");
-if (mode === "hosted-linux") cargoArguments.push("--features", "hosted-linux");
+if (hosted) cargoArguments.push("--features", mode);
 execFileSync("cargo", cargoArguments, { cwd: e2eeRoot, stdio: "inherit" });
 const library = join(
   targetDirectory,
@@ -130,7 +129,7 @@ if (mode === "production") {
   const packaged = { name: sourcePackage.name, version: sourcePackage.version, private: true, type: "module", engines: sourcePackage.engines, exports: sourcePackage.exports, files: sourcePackage.files };
   writeFileSync(join(staging, "package.json"), `${JSON.stringify(packaged, null, 2)}\n`);
 }
-if (mode === "deployment-test" || mode === "hosted-wsl" || mode === "hosted-linux") {
+if (mode === "deployment-test" || hosted) {
   // The production loader with its appended exports; nothing else is packaged.
   mkdirSync(join(staging, "loader"), { recursive: true });
   writeFileSync(

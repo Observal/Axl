@@ -632,7 +632,8 @@ fn configured_config(
     feature = "test-fixtures",
     feature = "deployment-test",
     all(feature = "hosted-wsl", target_os = "linux"),
-    all(feature = "hosted-linux", target_os = "linux")
+    all(feature = "hosted-linux", target_os = "linux"),
+    all(feature = "hosted-macos", target_os = "macos")
 ))]
 fn daemon_handle(config: Config) -> DaemonEndpoint {
     DaemonEndpoint {
@@ -658,7 +659,8 @@ fn device_handle(config: Config) -> DeviceEndpoint {
 #[cfg(any(
     feature = "deployment-test",
     all(feature = "hosted-wsl", target_os = "linux"),
-    all(feature = "hosted-linux", target_os = "linux")
+    all(feature = "hosted-linux", target_os = "linux"),
+    all(feature = "hosted-macos", target_os = "macos")
 ))]
 const PINNED_REPLICA_TRUST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/replica-trust.bin"));
 
@@ -703,6 +705,38 @@ pub fn hosted_wsl_daemon_endpoint(
 ) -> Result<DaemonEndpoint> {
     let root = PathBuf::from(root);
     let keys = axl_e2ee::persistence::wsl_dpapi_envelope_key_store(
+        &root.join("keys"),
+        std::path::Path::new(&helper),
+    )
+    .map_err(map_persistence)?;
+    let trust = ReplicaTrustSet::decode_config(PINNED_REPLICA_TRUST)
+        .map_err(|_| error("rollback_anchor_unavailable"))?;
+    Ok(daemon_handle(Config {
+        root,
+        account: id(account.as_ref())?,
+        installation: id(installation.as_ref())?,
+        session: id(session.as_ref())?,
+        device: None,
+        keys,
+        trust: Arc::new(trust),
+    }))
+}
+
+/// Hosted daemon endpoint for a macOS daemon: storage under `root`, envelope keys sealed under a key
+/// in the data-protection Keychain through `helper` (the user's signed `axl-keychain-helper`), and
+/// certificates verified against the build-pinned replica trust. An unsigned helper is refused by
+/// the Keychain, so the endpoint fails closed with `secure_store_access_denied`.
+#[cfg(all(feature = "hosted-macos", target_os = "macos"))]
+#[napi]
+pub fn hosted_macos_daemon_endpoint(
+    root: String,
+    helper: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+) -> Result<DaemonEndpoint> {
+    let root = PathBuf::from(root);
+    let keys = axl_e2ee::persistence::macos_keychain_envelope_key_store(
         &root.join("keys"),
         std::path::Path::new(&helper),
     )

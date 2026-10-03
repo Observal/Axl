@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Lokesh
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "axl-keychain-helper"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+license = "Apache-2.0"
+publish = false
+description = "Data-protection Keychain sealing for the envelope keys of an Axl daemon on macOS"
+
+[[bin]]
+name = "axl-keychain-helper"
+path = "src/main.rs"
+
+[dependencies]
+openmls_libcrux_crypto = { version = "=0.4.0", default-features = false }
+openmls_traits = { version = "=0.6.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "=0.10.1", default-features = false }
+security-framework = { version = "=3.7.0", default-features = false, features = ["OSX_10_15"] }
+security-framework-sys = { version = "=2.17.0", default-features = false, features = ["OSX_10_15"] }
