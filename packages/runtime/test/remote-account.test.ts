@@ -13,6 +13,8 @@ import { remoteDevicePossessionMessage } from "@axl/protocol";
 
 import {
   DpapiHelper,
+  detectSecretService,
+  KeySealer,
   loadRemoteAccount,
   parseRemoteAccountFile,
   RemoteAccountError,
@@ -92,14 +94,14 @@ async function signedIn(context: TestContext) {
       refreshToken: "refresh-one",
       idToken: jwt({ sub: accountId, email: "person@example.com" }),
     },
-    helper,
+    sealer: { kind: "dpapi", helper },
     binding: "/nowhere/loader/index.js",
   });
   return { home, helper, account };
 }
 
 test("login stores an owner-only account whose secrets are sealed, not written", async (context) => {
-  const { home, account } = await signedIn(context);
+  const { home, helper, account } = await signedIn(context);
   assert.equal(account.accountId, accountId);
   assert.equal(account.email, "person@example.com");
   const path = remoteAccountPath(home);
@@ -108,6 +110,11 @@ test("login stores an owner-only account whose secrets are sealed, not written",
   assert(!raw.includes("refresh-one"), "the refresh token is sealed");
   assert(!raw.includes("PRIVATE KEY"));
   assert.deepEqual(await loadRemoteAccount(home), parseRemoteAccountFile(JSON.parse(raw)));
+  // A WSL account file keeps its original shape, so older daemons still read it.
+  const stored = JSON.parse(raw) as Record<string, unknown>;
+  assert.equal(stored.helper, helper);
+  assert.equal(stored.sealer, undefined);
+  assert.deepEqual(account.sealer, { kind: "dpapi", helper });
 });
 
 test("a session refreshes access tokens, proves possession, and registers once", async (context) => {
@@ -183,7 +190,10 @@ test("sealed values open only for their purpose, account, and Windows user", asy
     installationKey: account.refreshToken,
   };
   await assert.rejects(RemoteAccountSession.open(home, swapped), /belongs elsewhere/u);
-  const otherUser = { ...account, helper: await fakeHelper(home, 0x33) };
+  const otherUser = {
+    ...account,
+    sealer: { kind: "dpapi", helper: await fakeHelper(home, 0x33) } as const,
+  };
   await assert.rejects(RemoteAccountSession.open(home, otherUser), (error: unknown) => {
     assert(error instanceof RemoteAccountError);
     assert.equal(error.code, "sign_in_required");
@@ -207,7 +217,7 @@ test("signing in again as the same person keeps the installation", async (contex
       expiresAt: Date.now() + 3_600_000,
       refreshToken: "refresh-two",
     },
-    helper,
+    sealer: { kind: "dpapi", helper },
     binding: account.binding,
   });
   assert.equal(again.installationId, account.installationId);
@@ -223,10 +233,117 @@ test("signing in again as the same person keeps the installation", async (contex
       expiresAt: Date.now() + 3_600_000,
       refreshToken: "refresh-three",
     },
-    helper,
+    sealer: { kind: "dpapi", helper },
     binding: account.binding,
   });
   assert.notEqual(someoneElse.installationId, account.installationId);
+});
+
+/**
+ * A stand-in for the hosted Linux binding: the keyring's account key is a file, created only when
+ * asked, and the binding reports `key_record_missing` like the real one when it is absent.
+ */
+async function fakeLinuxBinding(directory: string, name = "binding"): Promise<string> {
+  const path = join(directory, `${name}.mjs`);
+  const keyPath = join(directory, `${name}.key`);
+  await writeFile(
+    path,
+    `import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+const keyPath = ${JSON.stringify(keyPath)};
+export const hostedLinuxSecretService = () => "gnome-keyring";
+export const hostedLinuxAccountKey = (implementation, create) => {
+  if (implementation !== "gnome-keyring") throw Object.assign(new Error("denied"), { code: "secure_store_access_denied" });
+  if (!existsSync(keyPath)) {
+    if (!create) throw Object.assign(new Error("missing"), { code: "key_record_missing" });
+    writeFileSync(keyPath, randomBytes(32));
+  }
+  return new Uint8Array(readFileSync(keyPath));
+};
+`,
+  );
+  return path;
+}
+
+test("a Linux desktop account is sealed under the keyring's key", async (context) => {
+  const home = await directory(context);
+  const binding = await fakeLinuxBinding(home);
+  assert.equal(await detectSecretService(binding), "gnome-keyring");
+  const account = await saveRemoteAccount({
+    axlHome: home,
+    origin: "https://stack.invalid",
+    pagePath: "/remote/",
+    config,
+    tokens: {
+      accessToken: jwt({ sub: accountId, token_use: "access" }),
+      expiresAt: Date.now() + 3_600_000,
+      refreshToken: "refresh-linux",
+    },
+    sealer: { kind: "secret-service", implementation: "gnome-keyring" },
+    binding,
+  });
+  const raw = await readFile(remoteAccountPath(home), "utf8");
+  assert(!raw.includes("refresh-linux"), "the refresh token is sealed");
+  const stored = JSON.parse(raw) as Record<string, unknown>;
+  assert.deepEqual(stored.sealer, { kind: "secret-service", implementation: "gnome-keyring" });
+  assert.equal(stored.helper, undefined);
+  assert.deepEqual(await loadRemoteAccount(home), account);
+
+  const session = await RemoteAccountSession.open(home, account);
+  assert.equal(session.publicKey().byteLength, 91);
+
+  // Another keyring key (another user, or a keyring reset) does not open the account.
+  await writeFile(join(home, "binding.key"), Buffer.alloc(32, 7));
+  await assert.rejects(RemoteAccountSession.open(home, account), (error: unknown) => {
+    assert(error instanceof RemoteAccountError);
+    assert.equal(error.code, "sign_in_required");
+    return true;
+  });
+  // A keyring without the key asks for login again; only login creates it.
+  await rm(join(home, "binding.key"));
+  await assert.rejects(RemoteAccountSession.open(home, account), /run axl remote login/u);
+  await assert.rejects(
+    RemoteAccountSession.open(home, { ...account, binding: join(home, "missing.mjs") }),
+    (error: unknown) => error instanceof RemoteAccountError && error.code === "helper_unavailable",
+  );
+});
+
+test("the key sealer refuses tampered and malformed values", async () => {
+  const sealer = new KeySealer(Buffer.alloc(32, 1));
+  const sealed = await sealer.protect(Buffer.from("secret"));
+  assert.equal((await sealer.unprotect(sealed)).toString(), "secret");
+  const tampered = Buffer.from(sealed);
+  tampered[tampered.byteLength - 1] = (tampered[tampered.byteLength - 1] ?? 0) ^ 1;
+  await assert.rejects(sealer.unprotect(tampered), /does not open/u);
+  await assert.rejects(sealer.unprotect(Buffer.alloc(8)), /malformed/u);
+  assert.throws(() => new KeySealer(Buffer.alloc(16)), RangeError);
+});
+
+test("account files name exactly one sealer", () => {
+  const base = {
+    version: 1,
+    origin: "https://stack.invalid",
+    pagePath: "/remote/",
+    authority: "https://auth.stack.invalid",
+    clientId: "daemon-client",
+    accountId,
+    installationId: "01890a5d-ac96-774b-bcce-b302099a8057",
+    binding: "/nowhere/loader/index.js",
+    refreshToken: "c2VhbGVk",
+    installationKey: "c2VhbGVk",
+  };
+  assert.deepEqual(parseRemoteAccountFile({ ...base, helper: "/h.exe" }).sealer, {
+    kind: "dpapi",
+    helper: "/h.exe",
+  });
+  for (const invalid of [
+    { ...base },
+    { ...base, helper: "/h.exe", sealer: { kind: "secret-service", implementation: "kwallet6" } },
+    { ...base, sealer: { kind: "dpapi", helper: "/h.exe" } },
+    { ...base, sealer: { kind: "secret-service", implementation: "pass" } },
+  ]) {
+    assert.throws(() => parseRemoteAccountFile(invalid), RemoteAccountError);
+  }
 });
 
 async function freePort(): Promise<number> {
@@ -290,9 +407,39 @@ test(
         expiresAt: Date.now() + 3_600_000,
         refreshToken: "refresh-real",
       },
-      helper: process.env.AXL_WSL_DPAPI_HELPER as string,
+      sealer: { kind: "dpapi", helper: process.env.AXL_WSL_DPAPI_HELPER as string },
       binding: "/nowhere/loader/index.js",
     });
+    const session = await RemoteAccountSession.open(home, account);
+    assert.equal(session.publicKey().byteLength, 91);
+  },
+);
+
+test(
+  "the real desktop keyring seals the account for this user",
+  {
+    skip:
+      process.env.AXL_LIVE_HOSTED_LINUX_BINDING === undefined &&
+      "set AXL_LIVE_HOSTED_LINUX_BINDING in an unlocked desktop session",
+  },
+  async (context) => {
+    const home = await directory(context);
+    const binding = process.env.AXL_LIVE_HOSTED_LINUX_BINDING as string;
+    const implementation = await detectSecretService(binding);
+    const account = await saveRemoteAccount({
+      axlHome: home,
+      origin: "https://stack.invalid",
+      pagePath: "/remote/",
+      config,
+      tokens: {
+        accessToken: jwt({ sub: accountId }),
+        expiresAt: Date.now() + 3_600_000,
+        refreshToken: "refresh-keyring",
+      },
+      sealer: { kind: "secret-service", implementation },
+      binding,
+    });
+    assert(!(await readFile(remoteAccountPath(home), "utf8")).includes("refresh-keyring"));
     const session = await RemoteAccountSession.open(home, account);
     assert.equal(session.publicKey().byteLength, 91);
   },

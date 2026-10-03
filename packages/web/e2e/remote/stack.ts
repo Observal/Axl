@@ -704,7 +704,7 @@ export async function startStack(directory) {
         refreshToken: tokens.refresh_token,
         expiresAt: Date.now() + tokens.expires_in * 1000,
       },
-      helper,
+      sealer: { kind: "dpapi", helper },
       binding: join(repositoryRoot, "packages/e2ee/bindings/node/dist/hosted-wsl/loader/index.js"),
     });
   }

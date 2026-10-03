@@ -6,10 +6,14 @@
  * it holds, the account's refresh token and the installation's P-256 key.
  *
  * `axl remote login` writes `~/.axl/remote/account.json` (owner-only). Both secrets in it are sealed
- * by Windows DPAPI for the signed-in Windows user through `axl-dpapi-helper.exe`, the same helper
- * that seals the E2EE envelope keys, so a copy of the WSL disk opened by another Windows user or on
- * another machine cannot use them. Each sealed value carries its purpose and account, so one cannot
- * stand in for the other.
+ * by the same platform store that keeps the E2EE envelope keys, so a copy of the file opened by
+ * another user or on another machine cannot use them:
+ *
+ * - in WSL, Windows DPAPI for the signed-in Windows user, through `axl-dpapi-helper.exe`; and
+ * - on a Linux desktop, AES-256-GCM under a key kept in the session's Secret Service (GNOME Keyring
+ *   or KWallet 6), which the hosted Linux binding creates and reads.
+ *
+ * Each sealed value carries its purpose and account, so one cannot stand in for the other.
  *
  * At run time the refresh token gets short-lived access tokens from the user pool, and the key
  * signs each daemon relay admission (the same possession proof a device gives), registered once
@@ -18,6 +22,8 @@
 
 import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
 import {
+  createCipheriv,
+  createDecipheriv,
   createHash,
   createPrivateKey,
   createPublicKey,
@@ -28,8 +34,9 @@ import {
   sign,
 } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { release } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -74,10 +81,21 @@ export function remoteAccountPath(axlHome: string): string {
   return join(axlHome, "remote", "account.json");
 }
 
-/** The hosted WSL Node binding built beside this checkout (`build.mjs hosted-wsl`). */
-export function defaultHostedBinding(): string {
+/** Whether this is a Linux kernel running under WSL 2. */
+export function isWsl(): boolean {
+  return process.platform === "linux" && /microsoft/iu.test(release());
+}
+
+/** The hosted Node binding this machine's daemon uses: WSL 2 or a Linux desktop. */
+export function hostedBindingKind(): "hosted-wsl" | "hosted-linux" | undefined {
+  if (process.platform !== "linux") return undefined;
+  return isWsl() ? "hosted-wsl" : "hosted-linux";
+}
+
+/** The hosted Node binding built beside this checkout (`build.mjs hosted-wsl|hosted-linux`). */
+export function defaultHostedBinding(kind = hostedBindingKind() ?? "hosted-wsl"): string {
   return fileURLToPath(
-    new URL("../../e2ee/bindings/node/dist/hosted-wsl/loader/index.js", import.meta.url),
+    new URL(`../../e2ee/bindings/node/dist/${kind}/loader/index.js`, import.meta.url),
   );
 }
 
@@ -93,7 +111,7 @@ const OP_UNPROTECT = 3;
  * One helper process, spoken to with its framed protocol: `op u8 | length u32 | payload` in and
  * `status u8 | length u32 | payload` out.
  */
-export class DpapiHelper {
+export class DpapiHelper implements AccountSealer {
   readonly #child: ChildProcessWithoutNullStreams;
   #buffer = Buffer.alloc(0);
   #waiting: ((frame: { status: number; payload: Buffer } | Error) => void) | undefined;
@@ -201,6 +219,149 @@ export class DpapiHelper {
   }
 }
 
+// ---- Secret Service key -------------------------------------------------------------------------
+
+/** The hosted Linux binding's account-key and service-detection exports. */
+interface HostedLinuxSealing {
+  hostedLinuxSecretService(): string;
+  hostedLinuxAccountKey(implementation: string, create: boolean): Uint8Array;
+}
+
+const KEY_SEAL_VERSION = 1;
+const KEY_SEAL_NONCE_BYTES = 12;
+const KEY_SEAL_TAG_BYTES = 16;
+const KEY_SEAL_AAD = Buffer.from("axl-remote-account-key-seal-v1", "utf8");
+
+/** AES-256-GCM under a 32-byte key: `version u8 | nonce | ciphertext | tag`. */
+export class KeySealer implements AccountSealer {
+  readonly #key: Buffer;
+
+  constructor(key: Uint8Array) {
+    if (key.byteLength !== 32) throw new RangeError("An account key is 32 bytes");
+    this.#key = Buffer.from(key);
+  }
+
+  async protect(value: Buffer): Promise<Buffer> {
+    const nonce = randomBytes(KEY_SEAL_NONCE_BYTES);
+    const cipher = createCipheriv("aes-256-gcm", this.#key, nonce);
+    cipher.setAAD(KEY_SEAL_AAD);
+    const ciphertext = Buffer.concat([cipher.update(value), cipher.final()]);
+    return Buffer.concat([Buffer.of(KEY_SEAL_VERSION), nonce, ciphertext, cipher.getAuthTag()]);
+  }
+
+  async unprotect(sealed: Buffer): Promise<Buffer> {
+    const header = 1 + KEY_SEAL_NONCE_BYTES;
+    if (sealed.byteLength < header + KEY_SEAL_TAG_BYTES || sealed[0] !== KEY_SEAL_VERSION) {
+      throw new RemoteAccountError("invalid_account", "A sealed account value is malformed");
+    }
+    const decipher = createDecipheriv("aes-256-gcm", this.#key, sealed.subarray(1, header));
+    decipher.setAAD(KEY_SEAL_AAD);
+    decipher.setAuthTag(sealed.subarray(sealed.byteLength - KEY_SEAL_TAG_BYTES));
+    try {
+      return Buffer.concat([
+        decipher.update(sealed.subarray(header, sealed.byteLength - KEY_SEAL_TAG_BYTES)),
+        decipher.final(),
+      ]);
+    } catch {
+      throw new RemoteAccountError(
+        "sign_in_required",
+        "The keyring's account key does not open the remote account",
+      );
+    }
+  }
+
+  close(): void {
+    this.#key.fill(0);
+  }
+}
+
+async function hostedLinuxBinding(binding: string): Promise<HostedLinuxSealing> {
+  try {
+    return (await import(pathToFileURL(binding).href)) as HostedLinuxSealing;
+  } catch (cause) {
+    throw new RemoteAccountError(
+      "helper_unavailable",
+      `The hosted Linux binding at ${binding} is not available: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
+/** Why the desktop keyring refused, as an account error. */
+function keyringError(cause: unknown): RemoteAccountError {
+  const code = (cause as { readonly code?: unknown } | undefined)?.code;
+  if (code === "key_record_missing") {
+    return new RemoteAccountError(
+      "sign_in_required",
+      "The desktop keyring holds no remote account key; run axl remote login",
+    );
+  }
+  return new RemoteAccountError(
+    "helper_unavailable",
+    `The desktop keyring is not available (${typeof code === "string" ? code : String(cause)}). Remote access needs an unlocked GNOME Keyring or KWallet 6 in a graphical session.`,
+  );
+}
+
+/** The tested Secret Service implementation serving this desktop session. */
+export async function detectSecretService(binding: string): Promise<SecretServiceImplementation> {
+  const module = await hostedLinuxBinding(binding);
+  let found: string;
+  try {
+    found = module.hostedLinuxSecretService();
+  } catch (cause) {
+    throw keyringError(cause);
+  }
+  return parseImplementation(found);
+}
+
+// ---- Sealing ------------------------------------------------------------------------------------
+
+/** Seals and opens the account's secrets for this machine's user. */
+export interface AccountSealer {
+  protect(value: Buffer): Promise<Buffer>;
+  unprotect(value: Buffer): Promise<Buffer>;
+  close(): void;
+}
+
+export type SecretServiceImplementation = "gnome-keyring" | "kwallet6";
+
+/**
+ * Where an account's secrets are sealed: through the Windows user's `axl-dpapi-helper.exe` (a WSL
+ * path), or under a key in the Linux desktop session's Secret Service.
+ */
+export type RemoteAccountSealer =
+  | { readonly kind: "dpapi"; readonly helper: string }
+  | { readonly kind: "secret-service"; readonly implementation: SecretServiceImplementation };
+
+function parseImplementation(value: unknown): SecretServiceImplementation {
+  if (value === "gnome-keyring" || value === "kwallet6") return value;
+  throw new RemoteAccountError("invalid_account", "Remote account keyring is not supported");
+}
+
+/** Open the account's sealer. Only login creates a missing keyring key. */
+export async function openAccountSealer(
+  sealer: RemoteAccountSealer,
+  binding: string,
+  options: { readonly create?: boolean } = {},
+): Promise<AccountSealer> {
+  if (sealer.kind === "dpapi") return DpapiHelper.open(sealer.helper);
+  const module = await hostedLinuxBinding(binding);
+  let key: Uint8Array;
+  try {
+    key = module.hostedLinuxAccountKey(sealer.implementation, options.create ?? false);
+  } catch (cause) {
+    throw keyringError(cause);
+  }
+  const opened = new KeySealer(key);
+  key.fill(0);
+  return opened;
+}
+
+function sameSealer(left: RemoteAccountSealer, right: RemoteAccountSealer): boolean {
+  return left.kind === "dpapi"
+    ? right.kind === "dpapi" && left.helper === right.helper
+    : right.kind === "secret-service" && left.implementation === right.implementation;
+}
+
 type SealPurpose = "refresh-token" | "installation-key";
 
 function sealContext(purpose: SealPurpose, accountId: string): Buffer {
@@ -208,7 +369,7 @@ function sealContext(purpose: SealPurpose, accountId: string): Buffer {
 }
 
 async function seal(
-  helper: DpapiHelper,
+  helper: AccountSealer,
   purpose: SealPurpose,
   accountId: string,
   value: Buffer,
@@ -218,7 +379,7 @@ async function seal(
 }
 
 async function unseal(
-  helper: DpapiHelper,
+  helper: AccountSealer,
   purpose: SealPurpose,
   accountId: string,
   sealed: string,
@@ -273,14 +434,34 @@ export interface RemoteAccountFile {
   readonly accountId: string;
   readonly email?: string;
   readonly installationId: InstallationId;
-  /** WSL path of the Windows user's `axl-dpapi-helper.exe`. */
-  readonly helper: string;
-  /** The hosted WSL Node binding loader. */
+  /**
+   * Where the secrets are sealed. Stored as `helper` alone for DPAPI, as before, so a WSL account
+   * file reads the same in older daemons.
+   */
+  readonly sealer: RemoteAccountSealer;
+  /** The hosted Node binding loader. */
   readonly binding: string;
-  /** Base64 of the DPAPI-sealed refresh token. */
+  /** Base64 of the sealed refresh token. */
   readonly refreshToken: string;
-  /** Base64 of the DPAPI-sealed PKCS#8 installation key. */
+  /** Base64 of the sealed PKCS#8 installation key. */
   readonly installationKey: string;
+}
+
+function parseSealer(record: Record<string, unknown>): RemoteAccountSealer {
+  if (record.sealer === undefined) return { kind: "dpapi", helper: text(record.helper, "helper") };
+  const sealer = (
+    typeof record.sealer === "object" && record.sealer !== null ? record.sealer : {}
+  ) as Record<string, unknown>;
+  if (sealer.kind === "secret-service" && record.helper === undefined) {
+    return { kind: "secret-service", implementation: parseImplementation(sealer.implementation) };
+  }
+  throw new RemoteAccountError("invalid_account", "Remote account sealer is invalid");
+}
+
+/** The account as stored: DPAPI accounts keep the original `helper` field. */
+function storedAccount(account: RemoteAccountFile): Record<string, unknown> {
+  const { sealer, ...rest } = account;
+  return sealer.kind === "dpapi" ? { ...rest, helper: sealer.helper } : { ...rest, sealer };
 }
 
 function text(value: unknown, name: string, maximum = 4_096): string {
@@ -333,7 +514,7 @@ export function parseRemoteAccountFile(value: unknown): RemoteAccountFile {
       ? { email: record.email }
       : {}),
     installationId: parseInstallationId(record.installationId),
-    helper: text(record.helper, "helper"),
+    sealer: parseSealer(record),
     binding: text(record.binding, "binding"),
     refreshToken: text(record.refreshToken, "refreshToken", 65_536),
     installationKey: text(record.installationKey, "installationKey", 65_536),
@@ -356,7 +537,10 @@ async function writeRemoteAccount(axlHome: string, account: RemoteAccountFile): 
   const path = remoteAccountPath(axlHome);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const staging = `${path}.${randomUUID()}.next`;
-  await writeFile(staging, `${JSON.stringify(account, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  await writeFile(staging, `${JSON.stringify(storedAccount(account), null, 2)}\n`, {
+    mode: 0o600,
+    flag: "wx",
+  });
   await rename(staging, path);
 }
 
@@ -604,7 +788,7 @@ function uuidV7(): string {
 
 /**
  * Store the signed-in account: a new installation and key unless this machine already has one for
- * the same account and stack, with both secrets sealed through `helper`.
+ * the same account and stack, with both secrets sealed by `sealer`.
  */
 export async function saveRemoteAccount(options: {
   readonly axlHome: string;
@@ -612,7 +796,7 @@ export async function saveRemoteAccount(options: {
   readonly pagePath: string;
   readonly config: DaemonSignInConfig;
   readonly tokens: TokenAnswer;
-  readonly helper: string;
+  readonly sealer: RemoteAccountSealer;
   readonly binding: string;
 }): Promise<RemoteAccountFile> {
   const refreshToken = options.tokens.refreshToken;
@@ -624,20 +808,20 @@ export async function saveRemoteAccount(options: {
   const email =
     options.tokens.idToken === undefined ? undefined : claims(options.tokens.idToken).email;
   const previous = await loadRemoteAccount(options.axlHome).catch(() => undefined);
-  const helper = await DpapiHelper.open(options.helper);
+  const helper = await openAccountSealer(options.sealer, options.binding, { create: true });
   try {
     // Keep the installation (and its paired phone) when the same person signs in again.
     const keep =
       previous !== undefined &&
       previous.accountId === accountId &&
       previous.origin === options.origin &&
-      previous.helper === options.helper;
+      sameSealer(previous.sealer, options.sealer);
     let installationId: InstallationId;
     let installationKey: string;
     if (keep) {
       installationId = previous.installationId;
       installationKey = previous.installationKey;
-      // Unsealing proves the kept key still opens for this Windows user.
+      // Unsealing proves the kept key still opens for this user.
       (await unseal(helper, "installation-key", accountId, installationKey)).fill(0);
     } else {
       installationId = parseInstallationId(uuidV7());
@@ -655,12 +839,12 @@ export async function saveRemoteAccount(options: {
       accountId,
       ...(typeof email === "string" ? { email } : {}),
       installationId,
-      helper: options.helper,
+      sealer: options.sealer,
       binding: options.binding,
       refreshToken: await seal(helper, "refresh-token", accountId, Buffer.from(refreshToken)),
       installationKey,
     };
-    await writeRemoteAccount(options.axlHome, parseRemoteAccountFile(account));
+    await writeRemoteAccount(options.axlHome, parseRemoteAccountFile(storedAccount(account)));
     return account;
   } finally {
     helper.close();
@@ -706,7 +890,7 @@ export class RemoteAccountSession {
     account: RemoteAccountFile,
     options: { readonly fetch?: typeof fetch; readonly now?: () => number } = {},
   ): Promise<RemoteAccountSession> {
-    const helper = await DpapiHelper.open(account.helper);
+    const helper = await openAccountSealer(account.sealer, account.binding);
     try {
       const refreshToken = await unseal(
         helper,
@@ -767,7 +951,7 @@ export class RemoteAccountSession {
     if (answer.refreshToken !== undefined && answer.refreshToken !== this.#refreshToken) {
       // A rotated refresh token replaces the stored one, sealed again.
       this.#refreshToken = answer.refreshToken;
-      const helper = await DpapiHelper.open(this.account.helper);
+      const helper = await openAccountSealer(this.account.sealer, this.account.binding);
       try {
         const account = {
           ...this.account,

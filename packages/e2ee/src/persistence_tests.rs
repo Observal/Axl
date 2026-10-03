@@ -25,7 +25,7 @@ use crate::{
         FaultInjector, FaultPoint, InvitationLifecycle, NativeTransactionalProvider, NoFaults,
         PairLifecycle, PendingWitnessRequest, PersistenceError, PreJoinLifecycle, RemovalOutcome,
         ReservationOutcome, RuntimeHooks, TypedResult, WelcomeOutcome, WitnessEndpoint,
-        WitnessOutcome, discard_interrupted_creation,
+        WitnessOutcome, account_sealing_key, discard_interrupted_creation,
     },
     test_witness::TestWitness,
     witness::{EndpointReconciliation, WitnessRequest, WitnessRequestKind},
@@ -5604,4 +5604,36 @@ fn facade_preconditions_cannot_preempt_same_id_conflict_quarantine() {
             .unwrap_err(),
         PersistenceError::Quarantined
     );
+}
+
+#[test]
+fn account_sealing_key_is_created_once_and_never_for_a_session() {
+    let keys = TestKeys::enabled();
+    assert!(matches!(
+        account_sealing_key(keys.as_ref(), false),
+        Err(PersistenceError::KeyRecordMissing | PersistenceError::KeyUnavailable)
+    ));
+    let created = account_sealing_key(keys.as_ref(), true).unwrap();
+    assert_eq!(account_sealing_key(keys.as_ref(), false).unwrap(), created);
+    assert_eq!(account_sealing_key(keys.as_ref(), true).unwrap(), created);
+    assert_eq!(keys.activity_counts(), (1, 0));
+    let (_, session, _, _, active) = keys.snapshot().remove(0);
+    assert!(active);
+    // A UUID's version nibble is 1 to 8 and its variant bits are 10; the reserved ID is neither.
+    assert!(!(1..=8).contains(&(session[6] >> 4)) || session[8] >> 6 != 0b10);
+}
+
+#[test]
+fn account_sealing_key_discards_an_interrupted_creation() {
+    let keys = TestKeys::enabled();
+    keys.prepare(
+        *b"axl-account-seal",
+        *b"sealing-key-v1  ",
+        &[7; 32],
+        b"Axl remote account sealing key v1",
+    )
+    .unwrap();
+    let created = account_sealing_key(keys.as_ref(), true).unwrap();
+    assert_ne!(created, [7; 32], "a prepared key is never activated");
+    assert_eq!(keys.activity_counts(), (1, 0));
 }

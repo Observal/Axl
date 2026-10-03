@@ -631,7 +631,8 @@ fn configured_config(
 #[cfg(any(
     feature = "test-fixtures",
     feature = "deployment-test",
-    all(feature = "hosted-wsl", target_os = "linux")
+    all(feature = "hosted-wsl", target_os = "linux"),
+    all(feature = "hosted-linux", target_os = "linux")
 ))]
 fn daemon_handle(config: Config) -> DaemonEndpoint {
     DaemonEndpoint {
@@ -656,7 +657,8 @@ fn device_handle(config: Config) -> DeviceEndpoint {
 /// The replica trust configuration pinned into this hosted build.
 #[cfg(any(
     feature = "deployment-test",
-    all(feature = "hosted-wsl", target_os = "linux")
+    all(feature = "hosted-wsl", target_os = "linux"),
+    all(feature = "hosted-linux", target_os = "linux")
 ))]
 const PINNED_REPLICA_TRUST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/replica-trust.bin"));
 
@@ -716,6 +718,55 @@ pub fn hosted_wsl_daemon_endpoint(
         keys,
         trust: Arc::new(trust),
     }))
+}
+
+/// Hosted daemon endpoint for a Linux desktop daemon: storage under `root`, envelope keys in the
+/// session's Secret Service as served by `implementation` (`gnome-keyring` or `kwallet6`, checked
+/// again on every connection), and certificates verified against the build-pinned replica trust.
+#[cfg(all(feature = "hosted-linux", target_os = "linux"))]
+#[napi]
+pub fn hosted_linux_daemon_endpoint(
+    root: String,
+    implementation: String,
+    account: Buffer,
+    installation: Buffer,
+    session: Buffer,
+) -> Result<DaemonEndpoint> {
+    let keys = axl_e2ee::persistence::linux_secret_service_envelope_key_store(&implementation)
+        .map_err(map_persistence)?;
+    let trust = ReplicaTrustSet::decode_config(PINNED_REPLICA_TRUST)
+        .map_err(|_| error("rollback_anchor_unavailable"))?;
+    Ok(daemon_handle(Config {
+        root: PathBuf::from(root),
+        account: id(account.as_ref())?,
+        installation: id(installation.as_ref())?,
+        session: id(session.as_ref())?,
+        device: None,
+        keys,
+        trust: Arc::new(trust),
+    }))
+}
+
+/// The tested Secret Service implementation serving this desktop session, `gnome-keyring` or
+/// `kwallet6`, for `axl remote login` to record.
+#[cfg(all(feature = "hosted-linux", target_os = "linux"))]
+#[napi]
+pub fn hosted_linux_secret_service() -> Result<String> {
+    axl_e2ee::persistence::linux_secret_service_implementation()
+        .map(str::to_owned)
+        .map_err(map_persistence)
+}
+
+/// The 32-byte key that seals the remote account file, kept in the session's Secret Service.
+/// `create` makes it when it is missing, which only `axl remote login` does.
+#[cfg(all(feature = "hosted-linux", target_os = "linux"))]
+#[napi]
+pub fn hosted_linux_account_key(implementation: String, create: bool) -> Result<Buffer> {
+    let mut key = axl_e2ee::persistence::linux_secret_service_sealing_key(&implementation, create)
+        .map_err(map_persistence)?;
+    let buffer = Buffer::from(key.to_vec());
+    key.fill(0);
+    Ok(buffer)
 }
 
 #[doc(hidden)]

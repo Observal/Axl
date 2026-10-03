@@ -161,6 +161,10 @@ for (const forbidden of [
   "axl-deployment-test-keys",
   "hostedWslDaemonEndpoint",
   "hosted_wsl_daemon_endpoint",
+  "hostedLinuxDaemonEndpoint",
+  "hosted_linux_daemon_endpoint",
+  "hostedLinuxAccountKey",
+  "hostedLinuxSecretService",
 ]) {
   assert(!nativeBytes.includes(Buffer.from(forbidden)), `production binary contains ${forbidden}`);
   assert(!loaderText.includes(forbidden), `production loader contains ${forbidden}`);
@@ -208,26 +212,42 @@ if (existsSync(join(deploymentRoot, "integrity.json"))) {
   assertNoFixtureBytes(deploymentBytes, "deployment-test native binary");
 }
 
-// A hosted WSL artifact, when built, is the production binding plus one daemon constructor.
-const hostedRoot = join(root, "dist/hosted-wsl");
-if (existsSync(join(hostedRoot, "integrity.json"))) {
+// A hosted artifact, when built, is the production binding plus its own daemon exports and none of
+// the other hosted kind's.
+const HOSTED = {
+  "hosted-wsl": ["hostedWslDaemonEndpoint"],
+  "hosted-linux": ["hostedLinuxDaemonEndpoint", "hostedLinuxSecretService", "hostedLinuxAccountKey"],
+};
+for (const [kind, exports] of Object.entries(HOSTED)) {
+  const hostedRoot = join(root, `dist/${kind}`);
+  if (!existsSync(join(hostedRoot, "integrity.json"))) continue;
   const hostedManifest = JSON.parse(readFileSync(join(hostedRoot, "integrity.json"), "utf8"));
-  assert.equal(hostedManifest.artifactKind, "hosted-wsl");
+  assert.equal(hostedManifest.artifactKind, kind);
   const [hostedArtifact] = hostedManifest.artifacts;
   const hostedBytes = readFileSync(join(hostedRoot, hostedArtifact.path));
   assert.equal(
     createHash("sha256").update(hostedBytes).digest("hex"),
     hostedArtifact.sha256,
-    "hosted-wsl native integrity drift",
+    `${kind} native integrity drift`,
   );
   assert.equal(
     readFileSync(join(hostedRoot, "loader/index.js"), "utf8"),
-    `${loaderText}${readFileSync(join(root, "loader/hosted-wsl-exports.js"), "utf8")}`,
-    "the hosted-wsl loader must be the production loader plus its one appended export",
+    `${loaderText}${readFileSync(join(root, `loader/${kind}-exports.js`), "utf8")}`,
+    `the ${kind} loader must be the production loader plus its appended exports`,
   );
-  assert(hostedBytes.includes(Buffer.from("hostedWslDaemonEndpoint")));
-  for (const forbidden of [...derived, "deploymentTestDaemonEndpoint", "axl-deployment-test-keys"]) {
-    assert(!hostedBytes.includes(Buffer.from(forbidden)), `hosted-wsl binary contains ${forbidden}`);
+  for (const name of exports) {
+    assert(hostedBytes.includes(Buffer.from(name)), `${kind} binary lacks ${name}`);
   }
-  assertNoFixtureBytes(hostedBytes, "hosted-wsl native binary");
+  const others = Object.entries(HOSTED)
+    .filter(([other]) => other !== kind)
+    .flatMap(([, names]) => names);
+  for (const forbidden of [
+    ...derived,
+    ...others,
+    "deploymentTestDaemonEndpoint",
+    "axl-deployment-test-keys",
+  ]) {
+    assert(!hostedBytes.includes(Buffer.from(forbidden)), `${kind} binary contains ${forbidden}`);
+  }
+  assertNoFixtureBytes(hostedBytes, `${kind} native binary`);
 }

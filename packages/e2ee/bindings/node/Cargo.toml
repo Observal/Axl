@@ -20,6 +20,9 @@ deployment-test = []
 # Hosted daemon in WSL 2: build-pinned replica trust and envelope keys sealed by Windows DPAPI through
 # the Windows user's helper process.
 hosted-wsl = []
+# Hosted daemon on a Linux desktop: build-pinned replica trust and envelope keys in the session's
+# Secret Service (GNOME Keyring or KWallet 6).
+hosted-linux = []
 
 [dependencies]
 axl-e2ee = { path = "../.." }
