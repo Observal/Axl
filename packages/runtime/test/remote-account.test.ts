@@ -12,8 +12,8 @@ import test, { type TestContext } from "node:test";
 import { remoteDevicePossessionMessage } from "@axl/protocol";
 
 import {
-  DpapiHelper,
   detectSecretService,
+  HelperSealer,
   KeySealer,
   loadRemoteAccount,
   parseRemoteAccountFile,
@@ -32,11 +32,18 @@ const config = {
 };
 
 /**
- * A stand-in for axl-dpapi-helper.exe: the same frames, with "sealing" that is a keyed XOR plus a
- * tag, so a value sealed under another key (another Windows user) is refused as denied.
+ * A stand-in for axl-dpapi-helper.exe or axl-keychain-helper: the same frames, with "sealing" that
+ * is a keyed XOR plus a tag, so a value sealed under another key (another Windows user, another
+ * Keychain key) is refused as denied. A `refusing` helper denies everything after its hello, as the
+ * Keychain does for an unsigned helper.
  */
-async function fakeHelper(directory: string, key = 0x5a): Promise<string> {
-  const path = join(directory, `helper-${key}.mjs`);
+async function fakeHelper(
+  directory: string,
+  key = 0x5a,
+  protocol = "axl-dpapi-helper-v1",
+  refusing = false,
+): Promise<string> {
+  const path = join(directory, `helper-${protocol}-${key}-${refusing}.mjs`);
   await writeFile(
     path,
     `#!/usr/bin/env node
@@ -55,7 +62,9 @@ process.stdin.on("data", (chunk) => {
     const payload = buffer.subarray(5, 5 + buffer.readUInt32BE(1));
     buffer = buffer.subarray(5 + payload.length);
     const xor = (value) => Buffer.from(value.map((byte) => byte ^ ${key}));
-    if (op === 0) respond(0, Buffer.from("axl-dpapi-helper-v1"));
+    if (op === 0) respond(0, Buffer.from("${protocol}"));
+    else if (${refusing}) respond(2);
+    else if (op === 1) respond(0, Buffer.from("identity-${key}"));
     else if (op === 2) respond(0, Buffer.concat([TAG, xor(payload)]));
     else if (op === 3) {
       if (!payload.subarray(0, TAG.length).equals(TAG)) respond(2);
@@ -200,9 +209,65 @@ test("sealed values open only for their purpose, account, and Windows user", asy
     return true;
   });
   await assert.rejects(
-    DpapiHelper.open(join(home, "missing-helper.exe")),
+    HelperSealer.open(join(home, "missing-helper.exe"), "dpapi"),
     (error: unknown) => error instanceof RemoteAccountError && error.code === "helper_unavailable",
   );
+});
+
+test("a macOS account is sealed by the Keychain helper, and an unsigned one is refused", async (context) => {
+  const home = await directory(context);
+  const helper = await fakeHelper(home, 0x44, "axl-keychain-helper-v1");
+  const account = await saveRemoteAccount({
+    axlHome: home,
+    origin: "https://stack.invalid",
+    pagePath: "/remote/",
+    config,
+    tokens: {
+      accessToken: jwt({ sub: accountId, token_use: "access" }),
+      expiresAt: Date.now() + 3_600_000,
+      refreshToken: "refresh-mac",
+      idToken: jwt({ sub: accountId, email: "person@example.com" }),
+    },
+    sealer: { kind: "keychain", helper },
+    binding: "/nowhere/loader/index.js",
+  });
+  const stored = JSON.parse(await readFile(remoteAccountPath(home), "utf8"));
+  assert.deepEqual(stored.sealer, { kind: "keychain", helper });
+  assert.equal(stored.helper, undefined);
+  assert.deepEqual((await loadRemoteAccount(home))?.sealer, { kind: "keychain", helper });
+  assert(!JSON.stringify(stored).includes("refresh-mac"));
+  await RemoteAccountSession.open(home, account);
+
+  // Another key, or a DPAPI helper standing in for the Keychain one, opens nothing.
+  const otherKey = {
+    ...account,
+    sealer: {
+      kind: "keychain",
+      helper: await fakeHelper(home, 0x45, "axl-keychain-helper-v1"),
+    } as const,
+  };
+  await assert.rejects(RemoteAccountSession.open(home, otherKey), /Keychain refused/u);
+  const dpapi = await fakeHelper(home, 0x44);
+  await assert.rejects(
+    HelperSealer.open(dpapi, "keychain"),
+    (error: unknown) => error instanceof RemoteAccountError && error.code === "helper_unavailable",
+  );
+
+  // The Keychain refuses an unsigned helper: it still answers hello, then denies everything.
+  const unsigned = await HelperSealer.open(
+    await fakeHelper(home, 0x44, "axl-keychain-helper-v1", true),
+    "keychain",
+  );
+  try {
+    await assert.rejects(unsigned.identity(), (error: unknown) => {
+      assert(error instanceof RemoteAccountError);
+      assert.equal(error.code, "sign_in_required");
+      assert.match(error.message, /signed axl-keychain-helper/u);
+      return true;
+    });
+  } finally {
+    unsigned.close();
+  }
 });
 
 test("signing in again as the same person keeps the installation", async (context) => {
@@ -336,11 +401,17 @@ test("account files name exactly one sealer", () => {
     kind: "dpapi",
     helper: "/h.exe",
   });
+  assert.deepEqual(
+    parseRemoteAccountFile({ ...base, sealer: { kind: "keychain", helper: "/h" } }).sealer,
+    { kind: "keychain", helper: "/h" },
+  );
   for (const invalid of [
     { ...base },
     { ...base, helper: "/h.exe", sealer: { kind: "secret-service", implementation: "kwallet6" } },
     { ...base, sealer: { kind: "dpapi", helper: "/h.exe" } },
     { ...base, sealer: { kind: "secret-service", implementation: "pass" } },
+    { ...base, helper: "/h", sealer: { kind: "keychain", helper: "/h" } },
+    { ...base, sealer: { kind: "keychain" } },
   ]) {
     assert.throws(() => parseRemoteAccountFile(invalid), RemoteAccountError);
   }
@@ -442,5 +513,30 @@ test(
     assert(!(await readFile(remoteAccountPath(home), "utf8")).includes("refresh-keyring"));
     const session = await RemoteAccountSession.open(home, account);
     assert.equal(session.publicKey().byteLength, 91);
+  },
+);
+
+test(
+  "the Keychain refuses a locally built, unsigned axl-keychain-helper",
+  {
+    skip:
+      process.env.AXL_LIVE_KEYCHAIN_HELPER === undefined &&
+      "set AXL_LIVE_KEYCHAIN_HELPER to an unsigned axl-keychain-helper on macOS",
+  },
+  async () => {
+    const helper = await HelperSealer.open(
+      process.env.AXL_LIVE_KEYCHAIN_HELPER as string,
+      "keychain",
+    );
+    try {
+      await assert.rejects(helper.identity(), (error: unknown) => {
+        assert(error instanceof RemoteAccountError);
+        assert.equal(error.code, "sign_in_required");
+        return true;
+      });
+      await assert.rejects(helper.protect(Buffer.from("value")), RemoteAccountError);
+    } finally {
+      helper.close();
+    }
   },
 );

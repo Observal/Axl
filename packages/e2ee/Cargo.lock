@@ -246,6 +246,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "axl-keychain-helper"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "openmls_libcrux_crypto",
+ "openmls_traits",
+ "security-framework",
+ "security-framework-sys",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

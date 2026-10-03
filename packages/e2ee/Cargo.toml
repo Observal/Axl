@@ -11,7 +11,7 @@ license = "Apache-2.0"
 publish = false
 
 [workspace]
-members = ["bindings/node", "bindings/browser", "helpers/dpapi"]
+members = ["bindings/node", "bindings/browser", "helpers/dpapi", "helpers/keychain"]
 resolver = "2"
 
 [features]

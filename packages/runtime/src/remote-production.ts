@@ -36,6 +36,13 @@ interface HostedBinding {
     installationId: Uint8Array,
     cryptoSessionId: Uint8Array,
   ): HostedDaemonEndpoint;
+  hostedMacosDaemonEndpoint?(
+    root: string,
+    helper: string,
+    accountId: Uint8Array,
+    installationId: Uint8Array,
+    cryptoSessionId: Uint8Array,
+  ): HostedDaemonEndpoint;
 }
 
 /** The host for a stored account. Secrets are unsealed on first use, not at daemon start. */
@@ -68,22 +75,13 @@ export function openProductionRemoteHost(
         binding ??= import(pathToFileURL(account.binding).href) as Promise<HostedBinding>;
         const loaded = await binding;
         const sealer = account.sealer;
+        const ids = [accountId, installationId, cryptoSessionId] as const;
         const endpoint =
           sealer.kind === "dpapi"
-            ? loaded.hostedWslDaemonEndpoint?.(
-                root,
-                sealer.helper,
-                accountId,
-                installationId,
-                cryptoSessionId,
-              )
-            : loaded.hostedLinuxDaemonEndpoint?.(
-                root,
-                sealer.implementation,
-                accountId,
-                installationId,
-                cryptoSessionId,
-              );
+            ? loaded.hostedWslDaemonEndpoint?.(root, sealer.helper, ...ids)
+            : sealer.kind === "keychain"
+              ? loaded.hostedMacosDaemonEndpoint?.(root, sealer.helper, ...ids)
+              : loaded.hostedLinuxDaemonEndpoint?.(root, sealer.implementation, ...ids);
         if (endpoint === undefined) {
           throw new Error(`The binding at ${account.binding} does not serve this account's keys`);
         }
