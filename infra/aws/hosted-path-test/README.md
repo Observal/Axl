@@ -22,7 +22,10 @@ The control plane also serves the rollback witness at `/v1/e2ee/witness` with th
 replicas. Their Ed25519 signing keys live in the `axl/hosted-path/witness-keys` secret, which
 `deploy.sh` generates once. Replica records live in the `witness` DynamoDB table and each
 replica's immutable high-water journal in the separate `witness-journal` table, whose items the
-task role can write once but never update or delete. A restarted or redeployed control plane
+task role can write once but never update or delete. Each record keeps a bounded window of its
+lineage's history and a checkpoint for the rest. A daily scheduled task under its own role, which
+can only read journal keys and delete items, prunes each lineage's journal to its newest entry,
+the only one a restart checks. A restarted or redeployed control plane
 resumes from them lineage by lineage: the first fresh witness read of a lineage, which endpoints
 make before every mutation, has all three replicas check that lineage's head against each other
 before it is used again, so paired phones keep working. On an empty table the first endpoint to

@@ -14,6 +14,11 @@
  * consistent head read confirms the revision it was computed from. Ledger, response, and recovery
  * entries are write-once; only an operation's receipt fields may be filled in later.
  *
+ * The witness compacts old history away from the front of a record's lists. Entries are keyed by
+ * their position in the whole history, so the head records how many of each list were compacted,
+ * and a compacting step deletes the compacted items in the same transaction that writes it. A list
+ * only ever loses entries from its front, and only by compaction.
+ *
  * A lineage's record grows with every message its endpoint seals, so nothing here copies or
  * re-encodes the whole record per step. The cached record is frozen and handed to transactions and
  * readers as is; the witness builds each next record from it without changing it, so an entry the
@@ -47,7 +52,10 @@ import type {
 } from "@axl/control-plane";
 import { witnessBytesEqual, witnessBytesHex } from "@axl/protocol";
 
-/** DynamoDB accepts at most 100 items in one transaction; one witness step writes a few. */
+/**
+ * DynamoDB accepts at most 100 items in one transaction. One witness step writes a few, plus the
+ * deletes of at most one compaction batch per list.
+ */
 const MAX_TRANSACTION_ITEMS = 100;
 const MAX_CONFLICT_RETRIES = 8;
 const INDEX_DIGITS = 10;
@@ -95,6 +103,8 @@ const WRITE_ONCE: ReadonlySet<EntryKind> = new Set([
 interface StoredHead {
   readonly lineageHash: Uint8Array;
   readonly binding: WitnessReplicaRecord["binding"];
+  readonly checkpoint?: WitnessReplicaRecord["checkpoint"];
+  readonly compacted?: WitnessReplicaRecord["compacted"];
   readonly pendingJournalSequence?: bigint;
   readonly derivedHead?: WitnessReplicaRecord["derivedHead"];
   readonly counts: Readonly<Record<EntryKind, number>>;
@@ -114,6 +124,14 @@ const EMPTY: Loaded = {
 
 function entryKey(kind: EntryKind, index: number): string {
   return `${kind}#${String(index).padStart(INDEX_DIGITS, "0")}`;
+}
+
+/** How many of a list's entries were compacted away: the history position of its first entry. */
+function entryBase(
+  compacted: WitnessReplicaRecord["compacted"] | undefined,
+  kind: EntryKind,
+): number {
+  return kind === "recoveryRequestHashes" ? 0 : (compacted?.[kind] ?? 0);
 }
 
 function entryValues(
@@ -307,9 +325,10 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
     if (head === undefined) throw new StaleRead();
     const entries = {} as Record<EntryKind, string[]>;
     for (const kind of ENTRY_KINDS) {
+      const base = entryBase(head.compacted, kind);
       const count = head.counts[kind];
       const values: string[] = [];
-      for (let index = 0; index < count; index += 1) {
+      for (let index = base; index < base + count; index += 1) {
         const value = found[kind].get(index);
         if (value === undefined) throw new StaleRead();
         values.push(value);
@@ -321,6 +340,8 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
     const record: WitnessReplicaRecord = {
       lineageHash: head.lineageHash,
       binding: head.binding,
+      ...(head.checkpoint === undefined ? {} : { checkpoint: head.checkpoint }),
+      ...(head.compacted === undefined ? {} : { compacted: head.compacted }),
       ledger: decode(entries.ledger),
       operations: decode(entries.operations),
       retainedResponses: decode(entries.retainedResponses),
@@ -345,14 +366,31 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
       const before = loaded.entries[kind];
       const previous = entryValues(loaded.record, kind);
       const values = entryValues(next, kind);
-      if (values.length < before.length) throw new Error(`Witness ${kind} cannot shrink`);
+      const base = entryBase(loaded.record?.compacted, kind);
+      const nextBase = entryBase(next.compacted, kind);
+      // Entries compacted away in this step; the rest keep their history positions.
+      const removed = nextBase - base;
+      if (removed < 0 || removed > before.length) {
+        throw new Error(`Witness ${kind} compaction cannot move backwards or past its entries`);
+      }
+      if (values.length < before.length - removed) throw new Error(`Witness ${kind} cannot shrink`);
       // An entry the step kept is the cached object itself, so its stored form is reused as is.
       const after = values.map((item, index) =>
-        item === previous[index] ? (before[index] as string) : encodeWitnessValue(item),
+        item === previous[index + removed]
+          ? (before[index + removed] as string)
+          : encodeWitnessValue(item),
       );
       entries[kind] = after;
+      for (let index = base; index < nextBase; index += 1) {
+        items.push({
+          Delete: {
+            TableName: this.#tableName,
+            Key: { pk: { S: partition }, sk: { S: entryKey(kind, index) } },
+          },
+        });
+      }
       after.forEach((value, index) => {
-        const existing = before[index];
+        const existing = before[index + removed];
         if (existing === value) return;
         if (existing !== undefined && WRITE_ONCE.has(kind)) {
           throw new Error(`Witness ${kind} entries are write-once`);
@@ -362,7 +400,7 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
             TableName: this.#tableName,
             Item: {
               pk: { S: partition },
-              sk: { S: entryKey(kind, index) },
+              sk: { S: entryKey(kind, nextBase + index) },
               revision: { N: String(revision) },
               value: { S: value },
             },
@@ -374,6 +412,8 @@ export class DynamoWitnessReplicaStorage implements WitnessReplicaStorage {
     const head: StoredHead = {
       lineageHash: next.lineageHash,
       binding: next.binding,
+      ...(next.checkpoint === undefined ? {} : { checkpoint: next.checkpoint }),
+      ...(next.compacted === undefined ? {} : { compacted: next.compacted }),
       ...(next.pendingJournalSequence === undefined
         ? {}
         : { pendingJournalSequence: next.pendingJournalSequence }),
