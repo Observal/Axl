@@ -347,6 +347,93 @@ pub fn wsl_dpapi_envelope_key_store(
     )?))
 }
 
+/// Envelope keys for a Linux desktop daemon: one Secret Service item per record in the user's
+/// unlocked collection, served by `implementation` (`gnome-keyring` or `kwallet6`), which is
+/// checked again on every connection. See `linux_secret_service` for the session it requires.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn linux_secret_service_envelope_key_store(
+    implementation: &str,
+) -> Result<Arc<dyn EnvelopeKeyStore>, PersistenceError> {
+    Ok(Arc::new(
+        linux_secret_service::LinuxSecretServiceEnvelopeKeyStore::new(
+            linux_secret_service::SecretServiceImplementation::parse(implementation)?,
+        )?,
+    ))
+}
+
+/// The tested Secret Service implementation that owns this desktop session's service, by name.
+/// Fails with the last refusal when none of them does.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn linux_secret_service_implementation() -> Result<&'static str, PersistenceError> {
+    let mut refusal = PersistenceError::SecureStoreUnavailable;
+    for implementation in linux_secret_service::SecretServiceImplementation::ALL {
+        match linux_secret_service::LinuxSecretServiceEnvelopeKeyStore::new(implementation) {
+            Ok(_) => return Ok(implementation.name()),
+            Err(error) => refusal = error,
+        }
+    }
+    Err(refusal)
+}
+
+/// The 32-byte key that seals a Linux desktop daemon's remote account, kept as one reserved record
+/// in the same Secret Service store as the envelope keys. `create` makes it when it is missing;
+/// otherwise a missing key is `KeyRecordMissing`, or `KeyUnavailable` after an interrupted creation.
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub fn linux_secret_service_sealing_key(
+    implementation: &str,
+    create: bool,
+) -> Result<[u8; 32], PersistenceError> {
+    let store = linux_secret_service_envelope_key_store(implementation)?;
+    account_sealing_key(store.as_ref(), create)
+}
+
+/// The reserved record holding an account sealing key. Crypto session IDs are UUIDv7, so this
+/// non-UUID identifier never names a session's keys.
+#[cfg(any(target_os = "linux", test))]
+const ACCOUNT_SEALING_SESSION: Id = *b"axl-account-seal";
+#[cfg(any(target_os = "linux", test))]
+const ACCOUNT_SEALING_KEY: [u8; 16] = *b"sealing-key-v1\0\0";
+#[cfg(any(target_os = "linux", test))]
+const ACCOUNT_SEALING_CONTEXT: &[u8] = b"Axl remote account sealing key v1";
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn account_sealing_key(
+    store: &dyn EnvelopeKeyStore,
+    create: bool,
+) -> Result<[u8; 32], PersistenceError> {
+    match store.load(
+        ACCOUNT_SEALING_SESSION,
+        ACCOUNT_SEALING_KEY,
+        ACCOUNT_SEALING_CONTEXT,
+    ) {
+        // Missing, or only prepared by an interrupted creation.
+        Err(PersistenceError::KeyRecordMissing | PersistenceError::KeyUnavailable) if create => {}
+        loaded => return loaded,
+    }
+    // A key prepared by an interrupted earlier attempt is discarded, never activated.
+    store.reconcile_prepared(ACCOUNT_SEALING_SESSION, None)?;
+    let key: [u8; 32] = CoreProvider::new()
+        .map_err(|_| PersistenceError::SecureStoreUnavailable)?
+        .rand()
+        .random_array()
+        .map_err(|_| PersistenceError::SecureStoreUnavailable)?;
+    store.prepare(
+        ACCOUNT_SEALING_SESSION,
+        ACCOUNT_SEALING_KEY,
+        &key,
+        ACCOUNT_SEALING_CONTEXT,
+    )?;
+    store.activate(
+        ACCOUNT_SEALING_SESSION,
+        ACCOUNT_SEALING_KEY,
+        ACCOUNT_SEALING_CONTEXT,
+    )?;
+    Ok(key)
+}
+
 #[cfg(all(target_os = "windows", feature = "node-test-fixtures"))]
 #[doc(hidden)]
 pub fn windows_test_envelope_key_store(

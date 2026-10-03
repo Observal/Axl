@@ -6,8 +6,9 @@
  *
  * The daemon signs control-plane requests with the account's access tokens, admits its relay
  * connections with the installation's own key, registers that key before its first pairing or
- * restore, and runs its E2EE endpoints from the hosted WSL Node artifact, whose envelope keys
- * Windows DPAPI seals. Nothing here holds a shared credential.
+ * restore, and runs its E2EE endpoints from the hosted Node artifact for its platform: in WSL,
+ * envelope keys Windows DPAPI seals; on a Linux desktop, envelope keys in the session's Secret
+ * Service. Nothing here holds a shared credential.
  */
 
 import { join } from "node:path";
@@ -20,10 +21,17 @@ import {
 } from "./remote-account.ts";
 import { type HostedDaemonEndpoint, HostedRemoteHost } from "./remote-host.ts";
 
-interface HostedWslBinding {
-  hostedWslDaemonEndpoint(
+interface HostedBinding {
+  hostedWslDaemonEndpoint?(
     root: string,
     helper: string,
+    accountId: Uint8Array,
+    installationId: Uint8Array,
+    cryptoSessionId: Uint8Array,
+  ): HostedDaemonEndpoint;
+  hostedLinuxDaemonEndpoint?(
+    root: string,
+    implementation: string,
     accountId: Uint8Array,
     installationId: Uint8Array,
     cryptoSessionId: Uint8Array,
@@ -46,7 +54,7 @@ export function openProductionRemoteHost(
     });
     return session;
   };
-  let binding: Promise<HostedWslBinding> | undefined;
+  let binding: Promise<HostedBinding> | undefined;
   return HostedRemoteHost.open(
     {
       origin: account.origin,
@@ -57,14 +65,29 @@ export function openProductionRemoteHost(
       possession: async (ticket) => (await credentials()).proof(ticket),
       prepare: async () => (await credentials()).register(),
       async endpoint(root, accountId, installationId, cryptoSessionId) {
-        binding ??= import(pathToFileURL(account.binding).href) as Promise<HostedWslBinding>;
-        return (await binding).hostedWslDaemonEndpoint(
-          root,
-          account.helper,
-          accountId,
-          installationId,
-          cryptoSessionId,
-        );
+        binding ??= import(pathToFileURL(account.binding).href) as Promise<HostedBinding>;
+        const loaded = await binding;
+        const sealer = account.sealer;
+        const endpoint =
+          sealer.kind === "dpapi"
+            ? loaded.hostedWslDaemonEndpoint?.(
+                root,
+                sealer.helper,
+                accountId,
+                installationId,
+                cryptoSessionId,
+              )
+            : loaded.hostedLinuxDaemonEndpoint?.(
+                root,
+                sealer.implementation,
+                accountId,
+                installationId,
+                cryptoSessionId,
+              );
+        if (endpoint === undefined) {
+          throw new Error(`The binding at ${account.binding} does not serve this account's keys`);
+        }
+        return endpoint;
       },
     },
     // Per account and installation, so signing in as someone else never reuses a pairing.

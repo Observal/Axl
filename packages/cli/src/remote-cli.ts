@@ -4,8 +4,8 @@
 /**
  * `axl remote login` and `axl remote logout`: sign this machine's daemon in to remote access, or
  * forget the account. Login runs the browser sign-in, stores the account with its secrets sealed
- * by Windows DPAPI, and registers the installation's key, which also tells whether remote access
- * is enabled for the account yet.
+ * by the platform (Windows DPAPI in WSL, the desktop keyring on Linux), and registers the
+ * installation's key, which also tells whether remote access is enabled for the account yet.
  */
 
 import { access, constants, readdir } from "node:fs/promises";
@@ -15,11 +15,14 @@ import {
   DEFAULT_REMOTE_ORIGIN,
   defaultDpapiHelper,
   defaultHostedBinding,
+  detectSecretService,
   forgetProductionRemotePairing,
+  isWsl,
   loadDaemonSignInConfig,
   loadRemoteAccount,
   RemoteAccountError,
   type RemoteAccountFile,
+  type RemoteAccountSealer,
   RemoteAccountSession,
   removeRemoteAccount,
   saveRemoteAccount,
@@ -39,8 +42,8 @@ login   Sign this machine in to remote access with Google and register it.
 logout  Remove the paired phone, which ends every share, and forget the signed-in account.
 
   --origin <url>    The remote stack (default ${DEFAULT_REMOTE_ORIGIN})
-  --helper <path>   axl-dpapi-helper.exe (default %LOCALAPPDATA%\\Axl\\bin in Windows)
-  --binding <path>  The hosted WSL Node binding loader
+  --helper <path>   axl-dpapi-helper.exe in WSL (default %LOCALAPPDATA%\\Axl\\bin in Windows)
+  --binding <path>  The hosted Node binding loader (WSL or Linux desktop)
   --no-open         Print the sign-in link instead of opening a browser
 `;
 
@@ -87,19 +90,43 @@ async function exists(path: string, mode = constants.R_OK): Promise<boolean> {
   }
 }
 
-async function login(axlHome: string, options: RemoteOptions, write: (text: string) => void) {
-  const helper = options.helper ?? (await defaultDpapiHelper());
-  if (helper === undefined || !(await exists(helper, constants.X_OK))) {
+/** Where this machine seals the account: Windows DPAPI in WSL, the desktop keyring on Linux. */
+async function accountSealer(
+  options: RemoteOptions,
+  binding: string,
+  write: (text: string) => void,
+): Promise<RemoteAccountSealer> {
+  if (options.helper !== undefined || isWsl()) {
+    const helper = options.helper ?? (await defaultDpapiHelper());
+    if (helper === undefined || !(await exists(helper, constants.X_OK))) {
+      throw new Error(
+        `Remote access keeps its keys sealed by Windows, through axl-dpapi-helper.exe, which is not at ${helper ?? "%LOCALAPPDATA%\\Axl\\bin"}. Build and install it with packages/e2ee/helpers/dpapi/install-wsl.sh, or pass --helper.`,
+      );
+    }
+    if (!(await exists(binding))) {
+      write(
+        `Note: the hosted WSL binding is not built yet (${binding}). Pairing needs it; build it with infra/aws/hosted-path-test/daemon-binding.sh.\n`,
+      );
+    }
+    return { kind: "dpapi", helper };
+  }
+  if (process.platform !== "linux") {
     throw new Error(
-      `Remote access keeps its keys sealed by Windows, through axl-dpapi-helper.exe, which is not at ${helper ?? "%LOCALAPPDATA%\\Axl\\bin"}. Build and install it with packages/e2ee/helpers/dpapi/install-wsl.sh, or pass --helper.`,
+      "Remote access runs from a daemon in WSL 2 or on a Linux desktop; this platform is not supported yet.",
     );
   }
-  const binding = options.binding ?? defaultHostedBinding();
+  // The desktop keyring is reached through the binding, so it must be built before login.
   if (!(await exists(binding))) {
-    write(
-      `Note: the hosted WSL binding is not built yet (${binding}). Pairing needs it; build it with infra/aws/hosted-path-test/daemon-binding.sh.\n`,
+    throw new Error(
+      `The hosted Linux binding is not built yet (${binding}). Build it with infra/aws/hosted-path-test/daemon-binding.sh, or pass --binding.`,
     );
   }
+  return { kind: "secret-service", implementation: await detectSecretService(binding) };
+}
+
+async function login(axlHome: string, options: RemoteOptions, write: (text: string) => void) {
+  const binding = options.binding ?? defaultHostedBinding();
+  const sealer = await accountSealer(options, binding, write);
   const config = await loadDaemonSignInConfig(options.origin, PAGE_PATH);
   const pending = await startRemoteSignIn({ config });
   write(`Sign in to remote access in your browser:\n  ${pending.url}\n`);
@@ -115,7 +142,7 @@ async function login(axlHome: string, options: RemoteOptions, write: (text: stri
     pagePath: PAGE_PATH,
     config,
     tokens,
-    helper,
+    sealer,
     binding,
   });
   const who = account.email ?? account.accountId;

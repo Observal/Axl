@@ -137,6 +137,7 @@ jobs:
           cargo test --locked -p axl-e2ee-node --features deployment-test deployment_store
           cargo clippy --locked -p axl-e2ee-node --all-targets --features deployment-test -- -D warnings
           cargo clippy --locked -p axl-e2ee-node --all-targets --features hosted-wsl -- -D warnings
+          cargo clippy --locked -p axl-e2ee-node --all-targets --features hosted-linux -- -D warnings
           cargo audit --deny warnings
           cargo deny check
       - name: Sweep the crash and recovery matrix
@@ -171,6 +172,67 @@ jobs:
           sw_vers
           uname -m
           cargo test --locked -p axl-e2ee macos_keychain -- --nocapture
+
+  e2ee-linux-secret-service:
+    name: E2EE Linux Secret Service
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: No E2EE changes
+        if: needs.changes.outputs.e2ee != 'true'
+        run: echo "No E2EE changes detected; required check reports success."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.e2ee == 'true'
+        with:
+          node-version: 24.13.1
+      - name: Install GNOME Keyring
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends gnome-keyring dbus-daemon libglib2.0-bin
+      - name: Install pinned pnpm and Node dependencies
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          npm install --global pnpm@11.25.0 --ignore-scripts
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm --filter @axl/protocol build
+      - name: Build the hosted Linux binding
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          : > "$RUNNER_TEMP/empty-trust.bin"
+          AXL_E2EE_HOSTED_TRUST_FILE="$RUNNER_TEMP/empty-trust.bin" \
+            node packages/e2ee/bindings/node/scripts/build.mjs hosted-linux
+      - name: Run the store, the binding, and account sealing against a real keyring
+        if: needs.changes.outputs.e2ee == 'true'
+        run: |
+          # The store accepts only a desktop session: the user's runtime directory, its bus, and a
+          # desktop and display named in the environment.
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          export XDG_CURRENT_DESKTOP=GNOME DISPLAY=:99
+          dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork
+          printf '%s' "ci-only-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+          binding="$PWD/packages/e2ee/bindings/node/dist/hosted-linux/loader/index.js"
+
+          (cd packages/e2ee && cargo test --locked -p axl-e2ee live_secret_service -- --ignored --skip locked --test-threads=1)
+          AXL_LIVE_HOSTED_LINUX_BINDING="$binding" node --test packages/runtime/test/remote-account.test.ts
+
+          # Without a session bus the binding fails closed.
+          env -u DBUS_SESSION_BUS_ADDRESS node --input-type=module -e "
+            const binding = await import('$binding');
+            try { binding.hostedLinuxSecretService(); process.exit(1); }
+            catch (error) { console.log(error.code); process.exit(error.code === 'secure_store_unavailable' ? 0 : 1); }
+          "
+
+          # A locked collection fails closed too.
+          gdbus call --session --dest org.freedesktop.secrets --object-path /org/freedesktop/secrets \
+            --method org.freedesktop.Secret.Service.Lock "['/org/freedesktop/secrets/collection/login']"
+          (cd packages/e2ee && cargo test --locked -p axl-e2ee live_secret_service_locked -- --ignored)
 
   e2ee-storage-cross:
     name: E2EE storage compile (${{ matrix.target }})
@@ -445,6 +507,12 @@ jobs:
       - name: Install Node dependencies
         if: needs.changes.outputs.e2ee == 'true'
         run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build the hosted Linux artifact for the ABI check
+        if: needs.changes.outputs.e2ee == 'true' && matrix.target == 'linux-x64-gnu' && matrix.node == '24.13.1'
+        run: |
+          : > "$RUNNER_TEMP/empty-trust.bin"
+          AXL_E2EE_HOSTED_TRUST_FILE="$RUNNER_TEMP/empty-trust.bin" \
+            node packages/e2ee/bindings/node/scripts/build.mjs hosted-linux
       - name: Build, test, verify, and package the Node binding
         if: needs.changes.outputs.e2ee == 'true'
         env:

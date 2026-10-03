@@ -40,6 +40,9 @@ const ATTR_FORMAT: &str = "axl-format";
 const ATTR_SESSION: &str = "axl-session";
 const ATTR_KEY: &str = "axl-key";
 const ATTR_LIFECYCLE: &str = "axl-lifecycle";
+/// GNOME Keyring files an item created without a schema under `org.freedesktop.Secret.Generic`,
+/// so every item names its own and the stored attributes are exactly the ones written.
+const ATTR_SCHEMA: &str = "xdg:schema";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SecretServiceImplementation {
@@ -48,6 +51,22 @@ pub(crate) enum SecretServiceImplementation {
 }
 
 impl SecretServiceImplementation {
+    pub(crate) const ALL: [Self; 2] = [Self::GnomeKeyring, Self::KWallet6];
+
+    pub(crate) fn parse(name: &str) -> Result<Self, PersistenceError> {
+        Self::ALL
+            .into_iter()
+            .find(|implementation| implementation.name() == name)
+            .ok_or(PersistenceError::SecureStoreUnavailable)
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::GnomeKeyring => "gnome-keyring",
+            Self::KWallet6 => "kwallet6",
+        }
+    }
+
     fn accepts_executable(self, executable: &Path) -> bool {
         let accepted: &[&str] = match self {
             Self::GnomeKeyring => &[
@@ -765,6 +784,7 @@ fn public_identity(crypto_session_id: Id, key_id: Id, lifecycle: Lifecycle) -> P
             (ATTR_SESSION.to_owned(), session),
             (ATTR_KEY.to_owned(), key),
             (ATTR_LIFECYCLE.to_owned(), lifecycle_name.to_owned()),
+            (ATTR_SCHEMA.to_owned(), SERVICE_NAME.to_owned()),
         ]),
     }
 }
@@ -772,8 +792,9 @@ fn public_identity(crypto_session_id: Id, key_id: Id, lifecycle: Lifecycle) -> P
 fn decode_public_identity(
     identity: &PublicIdentity,
 ) -> Result<(Id, Id, Lifecycle), PersistenceError> {
-    if identity.attributes.len() != 5
+    if identity.attributes.len() != 6
         || identity.attributes.get(ATTR_SERVICE).map(String::as_str) != Some(SERVICE_NAME)
+        || identity.attributes.get(ATTR_SCHEMA).map(String::as_str) != Some(SERVICE_NAME)
         || identity.attributes.get(ATTR_FORMAT).map(String::as_str) != Some("1")
     {
         return Err(PersistenceError::Corrupt);
@@ -1133,7 +1154,11 @@ mod tests {
             decode_public_identity(&identity).unwrap(),
             ([1; 16], [2; 16], Lifecycle::Prepared)
         );
-        assert_eq!(identity.attributes.len(), 5);
+        assert_eq!(identity.attributes.len(), 6);
+        assert_eq!(
+            identity.attributes.get("xdg:schema").map(String::as_str),
+            Some(SERVICE_NAME)
+        );
         assert!(!identity.label.contains(&hex([4; 16])));
 
         let mut malformed = encoded;
@@ -1142,12 +1167,22 @@ mod tests {
             KeyRecord::decode(&malformed),
             Err(PersistenceError::Corrupt)
         );
-        let mut malformed_identity = identity;
+        let mut malformed_identity = identity.clone();
         malformed_identity
             .attributes
             .insert("unexpected".to_owned(), "value".to_owned());
         assert_eq!(
             decode_public_identity(&malformed_identity),
+            Err(PersistenceError::Corrupt)
+        );
+        // An item filed under the service's generic schema is not one of ours.
+        let mut generic = identity;
+        generic.attributes.insert(
+            "xdg:schema".to_owned(),
+            "org.freedesktop.Secret.Generic".to_owned(),
+        );
+        assert_eq!(
+            decode_public_identity(&generic),
             Err(PersistenceError::Corrupt)
         );
     }
@@ -1321,6 +1356,101 @@ mod tests {
                 operation_lock: Mutex::new(()),
             }
             .hardware_backing()
+        );
+    }
+}
+
+/// Against a real Secret Service, in an unlocked desktop session. CI starts GNOME Keyring on the
+/// session bus and runs these with `--ignored`; nothing here runs by default.
+#[cfg(test)]
+mod live {
+    use super::*;
+    use crate::persistence::{
+        linux_secret_service_envelope_key_store, linux_secret_service_implementation,
+        linux_secret_service_sealing_key,
+    };
+
+    const SESSION: Id = *b"axl-live-test-01";
+    const CONTEXT: &[u8] = b"live Secret Service test";
+
+    #[test]
+    #[ignore = "needs an unlocked GNOME Keyring on the session bus; CI runs it"]
+    fn live_secret_service_record_lifecycle() {
+        assert_eq!(
+            linux_secret_service_implementation().unwrap(),
+            "gnome-keyring"
+        );
+        let store = linux_secret_service_envelope_key_store("gnome-keyring").unwrap();
+        store.destroy_session(SESSION).unwrap();
+        let key_id = *b"live-key-0000001";
+        store.prepare(SESSION, key_id, &[9; 32], CONTEXT).unwrap();
+        assert!(matches!(
+            store.load(SESSION, key_id, CONTEXT),
+            Err(PersistenceError::KeyUnavailable)
+        ));
+        store.activate(SESSION, key_id, CONTEXT).unwrap();
+        store.activate(SESSION, key_id, CONTEXT).unwrap();
+        assert_eq!(store.load(SESSION, key_id, CONTEXT).unwrap(), [9; 32]);
+        assert!(store.load(SESSION, key_id, b"another context").is_err());
+
+        // An orphaned prepared record is erased; the committed active one stays.
+        let orphan = *b"live-key-0000002";
+        store.prepare(SESSION, orphan, &[8; 32], CONTEXT).unwrap();
+        store.reconcile_prepared(SESSION, None).unwrap();
+        assert!(matches!(
+            store.load(SESSION, orphan, CONTEXT),
+            Err(PersistenceError::KeyRecordMissing)
+        ));
+        assert_eq!(store.load(SESSION, key_id, CONTEXT).unwrap(), [9; 32]);
+
+        // A store opened again, as after a daemon restart, reads the same record.
+        let reopened = linux_secret_service_envelope_key_store("gnome-keyring").unwrap();
+        assert_eq!(reopened.load(SESSION, key_id, CONTEXT).unwrap(), [9; 32]);
+        reopened.erase(SESSION, key_id).unwrap();
+        assert!(matches!(
+            reopened.load(SESSION, key_id, CONTEXT),
+            Err(PersistenceError::KeyRecordMissing)
+        ));
+        reopened.destroy_session(SESSION).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs an unlocked GNOME Keyring on the session bus; CI runs it"]
+    fn live_secret_service_account_key_and_wrong_implementation() {
+        let created = linux_secret_service_sealing_key("gnome-keyring", true).unwrap();
+        assert_eq!(
+            linux_secret_service_sealing_key("gnome-keyring", false).unwrap(),
+            created
+        );
+        // KWallet does not own the bus here, so naming it is refused rather than trusted.
+        assert!(matches!(
+            linux_secret_service_envelope_key_store("kwallet6"),
+            Err(PersistenceError::SecureStoreAccessDenied)
+        ));
+        assert!(matches!(
+            linux_secret_service_envelope_key_store("pass"),
+            Err(PersistenceError::SecureStoreUnavailable)
+        ));
+    }
+
+    #[test]
+    #[ignore = "needs a locked GNOME Keyring collection; CI locks it and runs this"]
+    fn live_secret_service_locked_collection_fails_closed() {
+        let failed = linux_secret_service_sealing_key("gnome-keyring", false)
+            .err()
+            .or_else(|| {
+                linux_secret_service_envelope_key_store("gnome-keyring")
+                    .and_then(|store| store.load(SESSION, *b"live-key-0000001", CONTEXT))
+                    .err()
+            });
+        assert!(
+            matches!(
+                failed,
+                Some(
+                    PersistenceError::SecureStoreLocked | PersistenceError::SecureStoreUnavailable
+                )
+            ),
+            "{failed:?}"
         );
     }
 }

@@ -6,13 +6,15 @@ fn main() {
     napi_build::setup();
     // Hosted daemons trust exactly the replicas named at build time. Without a trust file (unit
     // tests, lint) the pinned trust is empty and every endpoint fails closed with
-    // `rollback_anchor_unavailable`; `scripts/build.mjs deployment-test|hosted-wsl` always supplies
-    // one.
+    // `rollback_anchor_unavailable`; `scripts/build.mjs deployment-test|hosted-wsl|hosted-linux`
+    // always supplies one.
     println!("cargo:rerun-if-env-changed=AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE");
     println!("cargo:rerun-if-env-changed=AXL_E2EE_HOSTED_TRUST_FILE");
     let variable = if std::env::var_os("CARGO_FEATURE_DEPLOYMENT_TEST").is_some() {
         Some("AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE")
-    } else if std::env::var_os("CARGO_FEATURE_HOSTED_WSL").is_some() {
+    } else if std::env::var_os("CARGO_FEATURE_HOSTED_WSL").is_some()
+        || std::env::var_os("CARGO_FEATURE_HOSTED_LINUX").is_some()
+    {
         Some("AXL_E2EE_HOSTED_TRUST_FILE")
     } else {
         None
