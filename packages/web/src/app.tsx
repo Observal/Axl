@@ -51,6 +51,8 @@ import {
 
 import { BrowserPane, type BrowserPaneState, EMPTY_BROWSER_STATE } from "./browser-pane.tsx";
 import { CommandPalette } from "./command-palette.tsx";
+import { Mascot, type MascotControl } from "./mascot.tsx";
+import { MASCOT_COLOURS } from "./mascot-atlas.ts";
 import { filterCommands, webPresentationCommands, workspaceReviewScope } from "./commands.ts";
 import type { ControlCenterTab } from "./control-center.tsx";
 import { Dock } from "./dock.tsx";
@@ -144,6 +146,8 @@ const DEFAULT_LAYOUT: WebPreferences = {
   panes: DEFAULT_PANES,
   theme: "system",
   loungeOpen: true,
+  mascot: true,
+  mascotColour: "Pink",
 };
 const PREVIEW_LAYOUT_KEY = "axl.preview.layout";
 const DAEMON_CONNECTION_LABELS: Readonly<Record<ConnectionState, string>> = {
@@ -265,6 +269,14 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const [client, setClient] = useState<AxlClient>();
   const [bootstrap, setBootstrap] = useState<WebBootstrap>();
   const [loungeOpen, setLoungeOpen] = useState(initialLayout.loungeOpen);
+  // On by default; /mascot changes it and the host remembers the choice.
+  const [mascotOn, setMascotOn] = useState(initialLayout.mascot);
+  const [mascotColour, setMascotColour] = useState(initialLayout.mascotColour);
+  const mascotControl = useRef<MascotControl | null>(null);
+  const failMascot = useCallback((message: string) => {
+    setMascotOn(false);
+    setError(`Mascot: ${message}`);
+  }, []);
   const [authRequired, setAuthRequired] = useState(false);
   const [loungeSettings, setLoungeSettings] = useState<LoungeSettings>();
   // Every responsive decision follows the app frame, not the window, so the app keeps its
@@ -574,6 +586,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       let live = false;
       const nextSubscription = await subscribeSession(current, next.sessionId, {
         onEvent: (event) => {
+          if (live) mascotControl.current?.director.handleEvent(event, Date.now());
           if (live && webExtensionSession.current === sessionId) {
             void webExtensionRef.current?.dispatch("session.event", event).catch((cause: unknown) =>
               setError(cause instanceof Error ? cause.message : String(cause)),
@@ -635,6 +648,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (disposed) { environment.client.close(); return; }
       activeClient = environment.client; setClient(environment.client); setBootstrap(environment.bootstrap);
       setLoungeOpen(environment.bootstrap.preferences.loungeOpen);
+      setMascotOn(environment.bootstrap.preferences.mascot);
+      setMascotColour(environment.bootstrap.preferences.mascotColour);
       setLoungeSettings(environment.bootstrap.lounge?.settings);
       if (environment.bootstrap.lounge?.error !== undefined)
         setError(`Lounge settings could not be read, so defaults are in use: ${environment.bootstrap.lounge.error}`);
@@ -670,6 +685,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
             },
             setTheme,
             ...(environment.bootstrap.lounge === undefined ? {} : { toggleLounge: (open?: boolean) => toggleLoungeRef.current(open) }),
+            toggleMascot: (argument?: string) => toggleMascotRef.current(argument),
           }),
           ...(webExtensionRef.current?.commands().map((command) => ({
             id: `${command.extensionId}.${command.name}`,
@@ -1895,6 +1911,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     if (compacting && opened !== undefined) {
       setDirectOperation({ kind: "compaction", sessionId: opened.sessionId, cancelling: false });
     }
+    if (compacting) mascotControl.current?.director.compactionStarted();
     try {
       const outcome = previewCompact !== null && preview?.compact !== undefined
         ? (await preview.compact(previewCompact[1]?.trim() || undefined, setConversation), {
@@ -1998,6 +2015,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       if (compacting && directCancellationRequested.current) showActionNotice("Compaction cancelled");
       else setError(cause instanceof Error ? cause.message : "Command failed");
     } finally {
+      if (compacting) mascotControl.current?.director.compactionFinished();
       if (generation === selectionGeneration.current) {
         setDirectBusy(false);
         if (compacting) setDirectOperation(undefined);
@@ -2099,6 +2117,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
 
   const currentPreferences = (): WebPreferences => ({
     loungeOpen,
+    mascot: mascotOn,
+    mascotColour,
     sidebarWidth,
     dockWidth,
     sidebarCollapsed,
@@ -2163,6 +2183,29 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
   const toggleLoungeRef = useRef(toggleLounge);
   toggleLoungeRef.current = toggleLounge;
 
+  const toggleMascot = (argument?: string): void => {
+    if (argument === "sas") {
+      if (mascotControl.current === null) throw new Error("/mascot sas needs the mascot on");
+      // A one-shot that plays over whatever is running and hands back on its own.
+      mascotControl.current.player.play("sass");
+      return;
+    }
+    if (argument !== undefined && !MASCOT_COLOURS.includes(argument)) {
+      throw new Error(`Mascot colour must be one of ${MASCOT_COLOURS.join(", ")}, or sas`);
+    }
+    if (mascotOn && (argument === undefined || argument === mascotColour)) {
+      setMascotOn(false);
+      persistLayout({ ...currentPreferences(), mascot: false });
+      return;
+    }
+    const colour = argument ?? mascotColour;
+    setMascotColour(colour);
+    setMascotOn(true);
+    persistLayout({ ...currentPreferences(), mascot: true, mascotColour: colour });
+  };
+  const toggleMascotRef = useRef(toggleMascot);
+  toggleMascotRef.current = toggleMascot;
+
   const updateLoungeSettings = (update: Partial<LoungeSettings>): void => {
     setLoungeSettings((current) => current === undefined ? current : { ...current, ...update });
     void saveLoungeSettings(update).catch((cause: unknown) =>
@@ -2177,6 +2220,8 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
     setSidebarCollapsed(preferences.sidebarCollapsed);
     setChangesView(preferences.changesView);
     setLoungeOpen(preferences.loungeOpen);
+    setMascotOn(preferences.mascot);
+    setMascotColour(preferences.mascotColour);
     if (preferences.panes.join() !== paneLayout.panes.join()) setPaneLayout(createPaneLayout(preferences.panes));
     persistLayout(preferences);
   };
@@ -2640,7 +2685,7 @@ export function AxlApp({ preview }: { readonly preview?: WebPreview } = {}): Rea
       {actionNotice && !error && <div className="action-notice" role="status">{actionNotice}</div>}
       {error && <div className="error-banner" role="alert"><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError(undefined)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>}
       {directOperation && directOperation.source !== "terminal" && <div className="direct-operation" role="status" aria-live="polite"><progress aria-label={directOperation.kind === "compaction" ? "Compaction progress" : "Shell command progress"} /><span><strong>{directOperation.kind === "compaction" ? "Compacting context" : "Running shell command"}</strong><small>{directOperation.kind === "compaction" ? "Summarizing older context into a durable checkpoint." : "The sandboxed command result will appear in the transcript."}</small></span><button type="button" disabled={directOperation.cancelling} onClick={() => void cancelDirectOperation()}>{directOperation.cancelling ? "Cancelling…" : "Cancel"}</button></div>}
-      {opened && <form className="composer" ref={composerForm} onSubmit={(event) => { event.preventDefault(); if (canDeliver) void send(); }}>{slashCommands.length > 0 && <div id="slash-command-list" className="slash-commands" role="listbox" aria-label="Slash commands">{slashCommands.map((command) => <button key={command.id} id={`slash-command-${command.id}`} type="button" role="option" aria-selected={command === slashCommands[slashCommandIndex]} disabled={command.availability.state === "unavailable"} onClick={() => selectCommand(command)}><strong>/{command.name}</strong><span>{command.availability.state === "unavailable" ? command.availability.reason : command.description}</span></button>)}</div>}<input ref={fileInput} className="attachment-input" type="file" multiple tabIndex={-1} aria-hidden="true" onChange={(event) => { attachFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments" aria-label="Prompt attachments">{attachments.map((attachment) => <div key={attachment.id} className={`composer-attachment ${attachment.status}`}><span className="attachment-glyph" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4zM9 2.5v3h3" /></svg></span><span className="attachment-copy"><strong title={attachment.file.name}>{attachment.file.name}</strong><small>{attachment.status === "uploading" ? `Uploading ${Math.round(attachment.progress * 100)}%` : attachment.status === "failed" ? attachment.error : `${Math.ceil((attachment.reference?.sizeBytes ?? attachment.file.size) / 1024)} KB · Ready`}</small></span>{attachment.status === "failed" && <button type="button" onClick={() => void uploadAttachment(attachment)}>Retry</button>}<button type="button" aria-label={attachment.status === "uploading" ? `Cancel upload ${attachment.file.name}` : `Remove ${attachment.file.name}`} onClick={() => removeAttachment(attachment.id)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>)}</div>}{orderedPendingInputs.length > 0 && <div className="pending-inputs" role="status" aria-label="Pending prompt delivery">{orderedPendingInputs.map((pending) => <div key={pending.id}><strong>{pending.mode === "steer" ? "Steering" : pending.mode === "follow_up" ? "Follow-up" : "Interrupting"}</strong><span>{pending.text}</span></div>)}</div>}<textarea ref={composer} value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (slashCommands.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setSlashCommandIndex((current) => nextSelectableSlashIndex(slashCommands, current, event.key === "ArrowDown" ? 1 : -1)); } else if (slashCommands.length > 0 && (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))) { const chosen = selectableSlashCommand(slashCommands, slashCommandIndex); if (chosen !== undefined) { event.preventDefault(); selectCommand(chosen); } else if (event.key === "Enter") { event.preventDefault(); void send(promptDeliveryShortcut(event)); } } else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(promptDeliveryShortcut(event)); } }} placeholder="Ask Axl…" aria-label="Message" role="combobox" aria-controls="slash-command-list" aria-haspopup="listbox" aria-autocomplete="list" {...(slashCommands.length > 0 ? { "aria-activedescendant": `slash-command-${slashCommands[slashCommandIndex]?.id}` } : {})} aria-keyshortcuts="Enter Alt+Enter Control+Enter Meta+Enter Shift+Tab" aria-expanded={slashCommands.length > 0} rows={3} disabled={composerBusy} /><div className="composer-footer"><button type="button" className="attach-button" aria-label="Attach files" title={canUpload ? "Attach files" : "Unavailable because attachment upload was not granted"} disabled={!canUpload || composerBusy || !connected} onClick={() => fileInput.current?.click()}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 8.5 4.2-4.2a2.1 2.1 0 0 1 3 3l-5.5 5.5a3.5 3.5 0 0 1-5-5l5.4-5.4" /></svg></button><span className="composer-spacer" />{pendingDeliveries > 0 && <span className="delivery-status" role="status">Delivering {pendingDeliveries}</span>}<ModelPicker choices={modelCatalog} provider={conversation.provider} model={conversation.model} thinking={conversation.thinking} openRequest={modelPickerOpenRequest} initialFocus={modelPickerInitialFocus} disabled={!canConfigure || composerBusy || configurationPending || (preview === undefined && conversation.activeOperationId !== undefined) || !connected} {...(unavailableConfigurationError === undefined ? {} : { unavailableReason: unavailableConfigurationError })} {...(presentedModelConfigurationError === undefined ? {} : { error: presentedModelConfigurationError })} onModel={(choice) => void configureModel(choice)} onThinking={(level) => void configureThinking(level)} />{conversation.activeOperationId && directOperation === undefined && <button type="button" className="composer-submit stop" aria-label="Stop response" onClick={() => void interrupt()} title={canInterrupt ? undefined : "Unavailable because session interruption was not granted"} disabled={!connected || !canInterrupt}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.75" y="3.75" width="8.5" height="8.5" rx="1.25" /></svg></button>}<button className="composer-submit send" aria-label={deliveryActive ? "Deliver during active response" : "Send message"} title={canDeliver ? undefined : `Unavailable because ${deliveryActive ? "steering" : "prompt delivery"} was not granted`} disabled={!canDeliver || (!draft.trim() && readyAttachmentCount === 0) || attachmentUploading || composerBusy || !connected}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 2 8.5 14 6.4 9.6 2 7.5 14 2Z M6.4 9.6 10 6" /></svg></button></div></form>}
+      {opened && <form className="composer" ref={composerForm} onSubmit={(event) => { event.preventDefault(); if (canDeliver) void send(); }}>{mascotOn && <Mascot colour={mascotColour} draft={draft} control={mascotControl} onError={failMascot} />}{slashCommands.length > 0 && <div id="slash-command-list" className="slash-commands" role="listbox" aria-label="Slash commands">{slashCommands.map((command) => <button key={command.id} id={`slash-command-${command.id}`} type="button" role="option" aria-selected={command === slashCommands[slashCommandIndex]} disabled={command.availability.state === "unavailable"} onClick={() => selectCommand(command)}><strong>/{command.name}</strong><span>{command.availability.state === "unavailable" ? command.availability.reason : command.description}</span></button>)}</div>}<input ref={fileInput} className="attachment-input" type="file" multiple tabIndex={-1} aria-hidden="true" onChange={(event) => { attachFiles(Array.from(event.target.files ?? [])); event.target.value = ""; }} />{attachments.length > 0 && <div className="composer-attachments" aria-label="Prompt attachments">{attachments.map((attachment) => <div key={attachment.id} className={`composer-attachment ${attachment.status}`}><span className="attachment-glyph" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 2.5h5l3 3v8H4zM9 2.5v3h3" /></svg></span><span className="attachment-copy"><strong title={attachment.file.name}>{attachment.file.name}</strong><small>{attachment.status === "uploading" ? `Uploading ${Math.round(attachment.progress * 100)}%` : attachment.status === "failed" ? attachment.error : `${Math.ceil((attachment.reference?.sizeBytes ?? attachment.file.size) / 1024)} KB · Ready`}</small></span>{attachment.status === "failed" && <button type="button" onClick={() => void uploadAttachment(attachment)}>Retry</button>}<button type="button" aria-label={attachment.status === "uploading" ? `Cancel upload ${attachment.file.name}` : `Remove ${attachment.file.name}`} onClick={() => removeAttachment(attachment.id)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg></button></div>)}</div>}{orderedPendingInputs.length > 0 && <div className="pending-inputs" role="status" aria-label="Pending prompt delivery">{orderedPendingInputs.map((pending) => <div key={pending.id}><strong>{pending.mode === "steer" ? "Steering" : pending.mode === "follow_up" ? "Follow-up" : "Interrupting"}</strong><span>{pending.text}</span></div>)}</div>}<textarea ref={composer} value={draft} onChange={(event) => { mascotControl.current?.director.keystroke(Date.now()); setDraft(event.target.value); }} onKeyDown={(event) => { if (slashCommands.length > 0 && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setSlashCommandIndex((current) => nextSelectableSlashIndex(slashCommands, current, event.key === "ArrowDown" ? 1 : -1)); } else if (slashCommands.length > 0 && (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))) { const chosen = selectableSlashCommand(slashCommands, slashCommandIndex); if (chosen !== undefined) { event.preventDefault(); selectCommand(chosen); } else if (event.key === "Enter") { event.preventDefault(); void send(promptDeliveryShortcut(event)); } } else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void send(promptDeliveryShortcut(event)); } }} placeholder="Ask Axl…" aria-label="Message" role="combobox" aria-controls="slash-command-list" aria-haspopup="listbox" aria-autocomplete="list" {...(slashCommands.length > 0 ? { "aria-activedescendant": `slash-command-${slashCommands[slashCommandIndex]?.id}` } : {})} aria-keyshortcuts="Enter Alt+Enter Control+Enter Meta+Enter Shift+Tab" aria-expanded={slashCommands.length > 0} rows={3} disabled={composerBusy} /><div className="composer-footer"><button type="button" className="attach-button" aria-label="Attach files" title={canUpload ? "Attach files" : "Unavailable because attachment upload was not granted"} disabled={!canUpload || composerBusy || !connected} onClick={() => fileInput.current?.click()}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 8.5 4.2-4.2a2.1 2.1 0 0 1 3 3l-5.5 5.5a3.5 3.5 0 0 1-5-5l5.4-5.4" /></svg></button><span className="composer-spacer" />{pendingDeliveries > 0 && <span className="delivery-status" role="status">Delivering {pendingDeliveries}</span>}<ModelPicker choices={modelCatalog} provider={conversation.provider} model={conversation.model} thinking={conversation.thinking} openRequest={modelPickerOpenRequest} initialFocus={modelPickerInitialFocus} disabled={!canConfigure || composerBusy || configurationPending || (preview === undefined && conversation.activeOperationId !== undefined) || !connected} {...(unavailableConfigurationError === undefined ? {} : { unavailableReason: unavailableConfigurationError })} {...(presentedModelConfigurationError === undefined ? {} : { error: presentedModelConfigurationError })} onModel={(choice) => void configureModel(choice)} onThinking={(level) => void configureThinking(level)} />{conversation.activeOperationId && directOperation === undefined && <button type="button" className="composer-submit stop" aria-label="Stop response" onClick={() => void interrupt()} title={canInterrupt ? undefined : "Unavailable because session interruption was not granted"} disabled={!connected || !canInterrupt}><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.75" y="3.75" width="8.5" height="8.5" rx="1.25" /></svg></button>}<button className="composer-submit send" aria-label={deliveryActive ? "Deliver during active response" : "Send message"} title={canDeliver ? undefined : `Unavailable because ${deliveryActive ? "steering" : "prompt delivery"} was not granted`} disabled={!canDeliver || (!draft.trim() && readyAttachmentCount === 0) || attachmentUploading || composerBusy || !connected}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M14 2 8.5 14 6.4 9.6 2 7.5 14 2Z M6.4 9.6 10 6" /></svg></button></div></form>}
     </section>
     <div id="pane-dock" ref={mobileDockPanel} className={`dock-column${dockOpen ? " open" : ""}`} aria-hidden={!dockOpen} aria-label={mobileDock ? "Open panes" : undefined} role={mobileDock ? "dialog" : undefined} aria-modal={mobileDock || undefined} inert={sidebarOpen} onKeyDown={(event) => { if (mobileDock) trapDialogFocus(event, mobileDockPanel.current); }}>
       <button ref={mobileDockClose} type="button" className="mobile-dock-close" onClick={() => setMobileDock(false)}><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" /></svg>Conversation</button>

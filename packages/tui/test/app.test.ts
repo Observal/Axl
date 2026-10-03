@@ -2219,6 +2219,7 @@ test("every TUI command has an explicit owner", async (context) => {
       "hotkeys",
       "lounge",
       "play",
+      "mascot",
       "regular",
       "reload-tui",
       "settings",
@@ -2722,6 +2723,207 @@ test("ask_user_question blocks and resumes through the TUI", async (context) => 
   await until(() => text().includes("selected runtime"), "question continuation");
 });
 
+test("the mascot stays above a question dialog, so ask can be seen", async (context) => {
+  let call = 0;
+  const model: ModelPort = {
+    stream() {
+      call += 1;
+      return (async function* (): AsyncGenerator<ModelStreamEvent> {
+        if (call === 1) {
+          yield {
+            type: "tool_call",
+            callId: "question",
+            name: "ask_user_question",
+            input: {
+              questions: [
+                {
+                  header: "Runtime",
+                  question: "Which runtime?",
+                  options: [
+                    { label: "Node", description: "Use Node.js" },
+                    { label: "Bun", description: "Use Bun" },
+                  ],
+                },
+              ],
+            },
+          };
+          yield { type: "completed", stopReason: "tool_use", usage };
+        } else {
+          yield { type: "text_delta", text: "selected runtime" };
+          yield { type: "completed", stopReason: "stop", usage };
+        }
+      })();
+    },
+  };
+  const { socketPath, directory } = await startStack(context, model, (interact) => {
+    const tools = new ToolRegistry();
+    tools.register(makeAskUserQuestionTool(interact));
+    return tools;
+  });
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  // room for the 12-row text pack above the dialog
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+  });
+  context.after(() => app.stop());
+  const drawsMascot = (from: number) => /[▀▄]/.test(text().slice(from));
+
+  input.write("/mascot\r");
+  await until(() => drawsMascot(0), "the mascot");
+  input.write("ask me\r");
+  await until(() => text().includes("Which runtime?"), "question prompt");
+  // The dialog is up; the mascot has to keep being drawn while it waits.
+  const opened = text().length;
+  await until(() => drawsMascot(opened), "the mascot above the dialog");
+  input.write("\r");
+  await until(() => text().includes("Review answers"), "answer review");
+  input.write("\r");
+  await until(() => text().includes("selected runtime"), "question continuation");
+});
+
+test("the mascot starts on when asked and /mascot saves each change", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const saved: Record<string, unknown>[] = [];
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+    mascot: true,
+    mascotColour: "Purple",
+    onPreferenceChange: (update) => {
+      saved.push(update);
+    },
+  });
+  context.after(() => app.stop());
+  const mascot = () => (app as unknown as { mascot: unknown }).mascot;
+
+  await until(() => /[▀▄]/.test(text()), "the mascot, without /mascot");
+  assert.deepEqual(saved, [], "starting on is not a change to save");
+
+  input.write("/mascot\r");
+  await until(() => saved.length === 1, "off saved");
+  assert.equal(mascot(), null);
+  input.write("/mascot Albino\r");
+  await until(() => saved.length === 2, "on saved");
+  assert.deepEqual(saved, [{ mascot: false }, { mascot: true, mascotColour: "Albino" }]);
+});
+
+test("the composer's border is painted the terminal's background plus one level of blue", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: "kitty" },
+    mascot: true,
+  });
+  context.after(() => app.stop());
+
+  await until(() => text().includes("\x1b]11;?"), "the background query");
+  input.write("\x1b]11;rgb:1c1c/1c1c/1c1c\x1b\\");
+  await until(() => text().includes("\x1b[48;2;28;28;29m"), "the border in the reported colour");
+  assert.equal(text().includes("\x1b[48;2;1;0;0m"), false);
+});
+
+test("the mascot is drawn in sixel once the terminal reports sixel and its cell size", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+    mascot: true,
+  });
+  context.after(() => app.stop());
+  const mascot = () => (app as unknown as { mascot: { drawsSixel: boolean } | null }).mascot;
+
+  await until(() => mascot() !== null, "the mascot in glyphs");
+  assert.equal(mascot()?.drawsSixel, false);
+  // The terminal session takes both replies out of the input and reports them.
+  input.write("\x1b[?62;4c");
+  input.write("\x1b[6;20;10t");
+  await until(() => mascot()?.drawsSixel === true, "the mascot rebuilt as sixel");
+  await until(() => text().includes("\x1bP"), "a sixel frame");
+});
+
+test("a second /mascot while the first is still setting up turns it off", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+  });
+  context.after(() => app.stop());
+  const mascot = () => (app as unknown as { mascot: unknown }).mascot;
+
+  // The first setup waits up to 400 ms for the terminal's answers.
+  input.write("/mascot\r");
+  input.write("/mascot\r");
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(mascot(), null, "the second /mascot won");
+  assert.doesNotMatch(text(), /[▀▄]/);
+});
+
+test("a paste and a focus report are not read as the terminal's reports or as typing", async (context) => {
+  const { socketPath, directory } = await startStack(context);
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  output.rows = 40;
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    mediaCapabilities: { images: null },
+  });
+  context.after(() => app.stop());
+  const inner = app as unknown as {
+    terminalCellSize: unknown;
+    mascotPlayer: { state: string | null } | null;
+  };
+  input.write("/mascot\r");
+  await until(() => /[▀▄]/.test(text()), "the mascot");
+
+  input.write("\x1b[I");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.notEqual(inner.mascotPlayer?.state, "typing", "focusing the window is not typing");
+
+  // A pasted cell-size reply is the user's text, not the terminal's answer.
+  input.write("\x1b[200~a\x1b[6;20;10tb\x1b[201~");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(inner.terminalCellSize, undefined);
+});
+
 test("MCP interactions block the operation until the user responds", async (context) => {
   let call = 0;
   const interactiveModel: ModelPort = {
@@ -2860,6 +3062,86 @@ test("/model opens a selector and switches the model live", async (context) => {
   assert.deepEqual(preferences, [{ modelId: "gpt-4.1" }]);
   await until(() => text().includes("→ gpt-4.1"), "committed line");
   app.stop();
+});
+
+test("/model offers only models of providers that are logged in", async (context) => {
+  const provider = (providerId: string, displayName: string) => ({
+    providerId,
+    displayName,
+    enabled: true,
+    authMethods: ["environment" as const],
+    loginMethods: ["api_key" as const],
+    // The listing is stale; the status request below is what decides.
+    authentication: { providerId, phase: "idle" as const },
+    catalog: { refreshable: true },
+    models: [
+      {
+        providerId,
+        modelId: "shared-model",
+        displayName: `${displayName} Model`,
+        apiDialect: "openai-chat",
+        capabilities: { toolUse: true, structuredOutput: true, imageInput: false },
+        reasoning: false,
+        supportedThinkingLevels: ["off" as const],
+        contextWindow: 16_000,
+        maxOutputTokens: 2_000,
+        availability: { status: "available" as const },
+      },
+    ],
+  });
+  const providers = [provider("alpha", "Alpha"), provider("beta", "Beta")];
+  const service: ProviderManagementService = {
+    list: () => Promise.resolve({ providers }),
+    refresh: () => Promise.resolve({ providers: [] }),
+    authenticationStatus: () =>
+      Promise.resolve({
+        providers: [
+          { providerId: "alpha", phase: "authenticated" as const, source: "test environment" },
+          { providerId: "beta", phase: "logged_out" as const },
+        ],
+      }),
+    login: (params) => Promise.resolve({ providerId: params.providerId, phase: "authenticated" }),
+    logout: (params) => Promise.resolve({ providerId: params.providerId, phase: "logged_out" }),
+  };
+  const { socketPath, directory } = await startStack(
+    context,
+    port,
+    () => new ToolRegistry(),
+    undefined,
+    undefined,
+    service,
+  );
+  const input = new PassThrough();
+  const { output, text } = captureOutput();
+  const preferences: Array<Record<string, unknown>> = [];
+  const app = await AxlApp.start({
+    client: await connectUnixClient(socketPath),
+    input,
+    output,
+    cwd: directory,
+    color: false,
+    currentProvider: "alpha",
+    currentModel: "shared-model",
+    mediaCapabilities: { images: null },
+    onPreferenceChange: (update) => {
+      preferences.push(update);
+    },
+  });
+  context.after(() => app.stop());
+
+  input.write("/model\r");
+  await until(() => text().includes("Select model by provider"), "model selector");
+  assert.match(text(), /Alpha · Alpha Model/);
+  assert.doesNotMatch(text(), /Beta · Beta Model/);
+  input.write("\x1b");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  input.write("/model beta/shared-model\r");
+  await until(() => text().includes("Beta is not logged in. Use /login beta"), "logged out notice");
+  assert.equal(
+    preferences.some((value) => value.providerId === "beta"),
+    false,
+  );
 });
 
 test("provider commands and /web use trusted TUI login and cancel refresh", async (context) => {

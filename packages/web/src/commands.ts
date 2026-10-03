@@ -27,6 +27,7 @@ export function webPresentationCommands({
   openTheme,
   setTheme,
   toggleLounge,
+  toggleMascot,
 }: {
   readonly canLogin: boolean;
   readonly openNewSession: (mode?: "chat" | "code") => void;
@@ -35,6 +36,8 @@ export function webPresentationCommands({
   readonly setTheme: (theme: WebTheme) => void;
   /** Present only when the host enabled Lounge. */
   readonly toggleLounge?: (open?: boolean) => void;
+  /** Turns the mascot on or off, or picks its colour. */
+  readonly toggleMascot?: (argument?: string) => void;
 }): readonly PresentationCommand[] {
   return [
     {
@@ -91,6 +94,17 @@ export function webPresentationCommands({
               }
               toggleLounge(argument === undefined ? undefined : argument === "on");
             },
+          },
+        ]),
+    ...(toggleMascot === undefined
+      ? []
+      : [
+          {
+            id: "web.mascot",
+            name: "mascot",
+            description: "Show or hide the axolotl above the composer",
+            argument: { required: false, hint: "Pink | Albino | Purple | Deep_Sea | sas" },
+            run: (argument?: string) => toggleMascot(argument),
           },
         ]),
   ];

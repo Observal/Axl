@@ -408,6 +408,8 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
       panes: ["browser", "files"],
       theme: "system",
       loungeOpen: true,
+      mascot: true,
+      mascotColour: "Pink",
     },
     hostCapabilities: ["project.folder.validate", "provider.auth.login"],
   });
@@ -468,6 +470,8 @@ test("the gateway exchanges one launch token and authenticates one daemon bridge
     panes: ["browser", "terminal"],
     theme: "system",
     loungeOpen: true,
+    mascot: true,
+    mascotColour: "Pink",
   });
   const themed = await fetch(new URL("preferences", gateway.origin), {
     method: "POST",

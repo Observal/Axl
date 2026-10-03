@@ -63,6 +63,7 @@ export const previewFixture: WebPreview = {
       modelId: "claude-haiku-4-5",
       displayName: "Claude Haiku 4.5",
       thinkingLevels: ["off", "low", "medium", "high"],
+      authenticated: true,
       availability: { status: "available" },
     },
   ],

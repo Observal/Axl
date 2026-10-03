@@ -53,6 +53,8 @@ export interface TuiSettings {
   readonly workspaceReview?: boolean;
   readonly imageDisplay?: ImageDisplay;
   readonly loungeEnabled?: boolean;
+  readonly mascot?: boolean;
+  readonly mascotColour?: string;
 }
 
 const EMPTY_SETTINGS: TuiSettings = { version: 1 };
@@ -119,6 +121,8 @@ function parseSettings(value: unknown, path: string): TuiSettings {
     "workspaceReview",
     "imageDisplay",
     "loungeEnabled",
+    "mascot",
+    "mascotColour",
   ]);
   for (const key of Object.keys(input)) {
     if (!allowed.has(key)) throw new Error(`${path}: unknown setting ${key}`);
@@ -224,6 +228,15 @@ function parseSettings(value: unknown, path: string): TuiSettings {
   }
   if (input.loungeEnabled !== undefined && typeof input.loungeEnabled !== "boolean") {
     throw new Error(`${path}: loungeEnabled must be a boolean`);
+  }
+  if (input.mascot !== undefined && typeof input.mascot !== "boolean") {
+    throw new Error(`${path}: mascot must be a boolean`);
+  }
+  if (
+    input.mascotColour !== undefined &&
+    (typeof input.mascotColour !== "string" || !/^[A-Za-z_]+$/.test(input.mascotColour))
+  ) {
+    throw new Error(`${path}: invalid mascotColour`);
   }
   if (
     input.imageDisplay !== undefined &&

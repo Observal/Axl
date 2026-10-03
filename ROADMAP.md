@@ -1322,6 +1322,7 @@ Use incremental terminal rendering principles:
 - Inline diffs and images
 - IME-safe cursor placement
 - Responsive layouts
+- An optional mascot that reflects session state, off by default, drawn through the same image and glyph ladder as any other media
 
 #### 16.2 Web
 

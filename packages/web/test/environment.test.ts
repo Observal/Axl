@@ -26,6 +26,8 @@ const valid = {
     panes: ["browser", "files"],
     theme: "system",
     loungeOpen: true,
+    mascot: true,
+    mascotColour: "Pink",
   },
   hostCapabilities: ["project.folder.validate", "provider.auth.login"],
 };

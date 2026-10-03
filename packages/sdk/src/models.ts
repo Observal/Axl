@@ -18,6 +18,11 @@ export interface ModelChoice {
   readonly modelId: string;
   readonly displayName: string;
   readonly thinkingLevels: readonly ThinkingLevel[];
+  /**
+   * Whether the provider is logged in. Clients offer only authenticated models
+   * for selection, and keep the rest so a session already on one still shows it.
+   */
+  readonly authenticated: boolean;
   readonly availability: {
     readonly status: "available" | "preview" | "deprecated" | "unavailable";
     readonly reason?: string;
@@ -165,6 +170,7 @@ export class ProviderDirectoryController {
           modelId: model.modelId,
           displayName: model.displayName,
           thinkingLevels: model.supportedThinkingLevels,
+          authenticated: provider.authentication.phase === "authenticated",
           availability: model.availability,
         })),
       ),

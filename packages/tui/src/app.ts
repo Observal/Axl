@@ -57,6 +57,10 @@ import {
   type DaemonHostStatus,
   formatMcpServerSummary,
   MCP_ADD_SERVER_QUESTIONS,
+  MascotActor,
+  MascotDirector,
+  type MascotManifest,
+  MascotPlayer,
   MCP_IMPORT_QUESTION,
   type McpImportedServer,
   type ModelRequestSettings,
@@ -115,10 +119,22 @@ import {
 import { isMouseReport } from "./fullscreen-input.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
 import type { LoginDialogDefinition } from "./login-dialog.ts";
+import {
+  loadMascotAssets,
+  loadMascotAtlas,
+  loadMascotAtlasMirrored,
+  MascotAtlasRenderer,
+  MascotComponent,
+  type MascotPack,
+  packSegmentRows,
+  packTo256,
+} from "./mascot-render.ts";
+import { MascotSixelError, MascotSixelRenderer } from "./mascot-sixel.ts";
 import { McpPanelOverlay } from "./mcp-panel.ts";
 import {
   AttachmentBarComponent,
   detectTerminalMedia,
+  detectTruecolour,
   type ImageDisplay,
   MediaCache,
   type TerminalMediaCapabilities,
@@ -170,6 +186,12 @@ import {
   type TranscriptRow,
 } from "./transcript-document.ts";
 import { VimModeController } from "./vim-mode.ts";
+
+/** AXL_IMAGE_PROTOCOL=none turns every image off, the mascot's sixel included. */
+function imagesTurnedOff(): boolean {
+  const value = process.env.AXL_IMAGE_PROTOCOL?.toLowerCase();
+  return value === "none" || value === "0";
+}
 
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 const FRAME_INTERVAL_MS = 16;
@@ -417,6 +439,7 @@ const TUI_COMMANDS: readonly { readonly name: string; readonly description: stri
   { name: "stash", description: "stash, restore, swap, or clear the prompt" },
   { name: "favorite", description: "toggle a model in the favorites list" },
   { name: "developer", description: "toggle the optional developer panel" },
+  { name: "mascot", description: "toggle the mascot, /mascot <colour>, or /mascot sas" },
   { name: "vim", description: "toggle optional Vim editing" },
   { name: "commands", description: "browse and search available commands" },
   { name: "history", description: "search prompt history" },
@@ -579,6 +602,9 @@ export interface AxlAppOptions {
   readonly workspaceReview?: boolean;
   readonly imageDisplay?: ImageDisplay;
   readonly mediaCapabilities?: TerminalMediaCapabilities;
+  /** Show the mascot from the start. `/mascot` changes it and reports the change through `onPreferenceChange`. */
+  readonly mascot?: boolean;
+  readonly mascotColour?: string;
   readonly extensions?: readonly TerminalExtension[];
   /** Local process host loads enabled presentation entries from daemon SDK inventory. */
   readonly loadExtensions?: (
@@ -624,6 +650,8 @@ export interface AxlAppOptions {
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
     loungeEnabled?: boolean;
+    mascot?: boolean;
+    mascotColour?: string;
   }) => void | Promise<void>;
   /** Compatibility hook called after the daemon accepts a model switch. */
   readonly onModelChange?: (modelId: string) => void;
@@ -690,6 +718,7 @@ export class AxlApp {
   private readonly liveAssistant: LiveAssistantComponent;
   private readonly attachmentBar: AttachmentBarComponent;
   private readonly mediaCache: MediaCache;
+  private readonly media: TerminalMediaCapabilities;
   private extensionHost: TerminalExtensionHost;
   private extensionCompletionRequest:
     | { text: string; prefix: string; controller: AbortController }
@@ -763,6 +792,20 @@ export class AxlApp {
   private stopped = false;
   private spinnerIndex = 0;
   private spinnerTimer: NodeJS.Timeout | null = null;
+  private mascot: MascotComponent | null = null;
+  private mascotPlayer: MascotPlayer | null = null;
+  private mascotDirector: MascotDirector | null = null;
+  private mascotTimer: NodeJS.Timeout | null = null;
+  private mascotActor: MascotActor | null = null;
+  private mascotSteppedAt = 0;
+  private mascotColour: string;
+  /** Numbers each mascot setup, so only the latest one is installed. */
+  private mascotSetup = 0;
+  /** The colour a setup still waiting is for, or null. */
+  private mascotPending: string | null = null;
+  /** What the terminal said about sixel, once asked; undefined until it answers. */
+  private terminalSixel: boolean | undefined;
+  private terminalAsked = false;
   private completionIndex = 0;
   private completionText = "";
   private unsubscribeDisconnect: () => void = () => undefined;
@@ -804,6 +847,7 @@ export class AxlApp {
   private readonly toolGroupModes = new Map<string, ToolOutputDisplay>();
   private readonly terminal: TerminalSession;
   private terminalCellSize: TerminalCellSize | undefined;
+  private terminalBackground: readonly [number, number, number] | undefined;
   private connectionState: "connected" | "reconnecting" | "detached" = "connected";
   private reconnectGeneration = 0;
   private reconnectAttempts = 0;
@@ -843,6 +887,7 @@ export class AxlApp {
     this.fullscreenMouse = options.fullscreenMouse ?? "capture";
     this.attention = options.attention ?? "off";
     this.editorMode = options.editorMode ?? "standard";
+    this.mascotColour = options.mascotColour ?? "Pink";
     this.modelFavorites = [...(options.modelFavorites ?? [])];
     this.refocusRecap = options.refocusRecap ?? false;
     this.developerPanelEnabled = options.developerPanel ?? false;
@@ -857,11 +902,11 @@ export class AxlApp {
     this.webFetchEnabled = options.webFetch ?? true;
     this.webSearchEnabled = options.webSearch ?? true;
     this.initialResumePending = options.initialResume ?? false;
-    const mediaCapabilities = options.mediaCapabilities ?? detectTerminalMedia();
+    this.media = options.mediaCapabilities ?? detectTerminalMedia();
     this.mediaCache = new MediaCache(
       () => this.client,
       sessionId,
-      mediaCapabilities,
+      this.media,
       () => this.imageDisplay,
       () => {
         if (!this.stopped && !this.hydrating) this.redraw();
@@ -924,7 +969,7 @@ export class AxlApp {
         reducedMotion: this.loungeReducedMotion,
         textOnly: this.loungeTextOnly,
       }),
-      rasterProtocol: mediaCapabilities.activityRaster ?? null,
+      rasterProtocol: this.media.activityRaster ?? null,
       terminalCellPixels: () => this.terminalCellSize,
       returnToTranscript: () => {
         if (this.tuiMode === "regular") this.repaintRegularTranscript();
@@ -991,6 +1036,10 @@ export class AxlApp {
     this.terminal = new TerminalSession({
       input: options.input,
       output: options.output,
+      onDeviceAttributes: (features) => {
+        this.terminalSixel = features.includes(4);
+        this.useSixelWhenKnown();
+      },
       onInput: (sequence) => {
         this.handleInput(sequence);
         if (!isMouseReport(sequence)) this.redraw(true);
@@ -1000,8 +1049,13 @@ export class AxlApp {
         this.redraw();
       },
       onResize: this.resizeListener,
+      onBackground: (rgb) => {
+        this.terminalBackground = rgb;
+        if (!this.stopped && !this.hydrating && this.mascot !== null) this.redraw(true);
+      },
       onCellSize: (size) => {
         this.terminalCellSize = size;
+        this.useSixelWhenKnown();
         if (!this.stopped && !this.hydrating) this.redraw(true);
       },
       ...(options.suspendProcess === undefined ? {} : { suspendProcess: options.suspendProcess }),
@@ -1289,6 +1343,8 @@ export class AxlApp {
       if (app.tuiMode === "fullscreen") app.fullscreen.enter();
       else app.repaintRegularTranscript();
       app.paint();
+      // After the terminal is listening, so its answers are not typed.
+      if (options.mascot === true) void app.enableMascot(app.mascotColour);
       if (initialResume) void app.openResume();
       return app;
     } catch (error) {
@@ -1325,6 +1381,11 @@ export class AxlApp {
 
     const failures: unknown[] = [];
     const activityCleanup = this.activitySurface.dispose();
+    try {
+      this.disableMascot();
+    } catch (error) {
+      failures.push(error);
+    }
     const extensionCleanup = this.extensionHost.dispose();
     try {
       this.attentionOverlay.clear();
@@ -1657,6 +1718,10 @@ export class AxlApp {
     this.editorCompletions = completion;
     const editorMode = this.editorMode === "vim" ? this.vim.mode.toUpperCase() : undefined;
     this.editorFrame.update({
+      gapAbove: this.mascot === null,
+      // Only a Kitty placement overlaps the border and needs hiding there; a
+      // sixel image stops above it, and the dark band would only show.
+      ...(this.mascot?.usesImages === true ? { opaqueBorder: this.mascotBorderColour() } : {}),
       ...(this.notice === undefined ? {} : { notice: this.notice }),
       ...(editorMode ? { mode: editorMode } : {}),
       location: `${formatPath(this.cwd)}${this.branch ? `  git:${this.branch}` : ""}${
@@ -1739,6 +1804,25 @@ export class AxlApp {
     };
   }
 
+  /**
+   * A dialog replaces the frame, but the mascot stays above it when both fit:
+   * a question or permission dialog is exactly when `ask` plays, and dropping
+   * the mascot for the dialog hid that state for as long as it was meant to
+   * show. The fit is measured before rendering, because the image path sends
+   * its atlas on the first render. A placement is not part of the text grid, so
+   * one left out would sit behind the dialog; it is removed explicitly.
+   */
+  private mascotAboveDialog(
+    rowsBelow: number,
+    frameHeight: number,
+  ): { above: string[]; clear: string } {
+    const mascot = this.mascot;
+    if (mascot === null) return { above: [], clear: "" };
+    if (rowsBelow + mascot.height <= frameHeight)
+      return { above: mascot.render(this.width), clear: "" };
+    return { above: [], clear: mascot.usesImages ? mascot.clearImage() : "" };
+  }
+
   private liveFrame(
     includePendingTools = true,
     includeOverlay = true,
@@ -1766,24 +1850,38 @@ export class AxlApp {
       this.tuiMode === "regular" ? this.height : fullscreenDockHeight(this.height);
     if (includeOverlay && this.attentionOverlay.active !== undefined) {
       const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
-      const lines = [...prefix, ...this.attentionOverlay.render(this.width)];
+      const dialog = this.attentionOverlay.render(this.width);
+      const { above, clear } = this.mascotAboveDialog(prefix.length + dialog.length, frameHeight);
+      const lines = [...prefix, ...above, ...dialog];
+      if (lines.length > 0) lines[0] = `${clear}${lines[0]}`;
       const cursor = this.attentionOverlay.cursorPlacement();
+      const top = prefix.length + above.length;
       return clipFrame(
         lines,
         frameHeight,
-        cursor === undefined ? undefined : { ...cursor, row: prefix.length + cursor.row },
-        prefix.length,
+        cursor === undefined ? undefined : { ...cursor, row: top + cursor.row },
+        top,
       );
     }
     if (includeOverlay && this.overlays.active !== undefined) {
       const prefix = unsafeComponents.flatMap((component) => component.render(this.width));
-      const lines = [...prefix, ...this.overlays.render(this.width)];
+      const overlay = this.overlays.render(this.width);
+
+      const { above, clear: clearMascot } = this.mascotAboveDialog(
+        prefix.length + overlay.length,
+        frameHeight,
+      );
+      const lines = [...prefix, ...above, ...overlay];
+      // The clear is not a row: a separate element would shift the cursor and
+      // the clipping by one.
+      if (lines.length > 0) lines[0] = `${clearMascot}${lines[0]}`;
       const cursor = this.overlays.cursorPlacement();
+      const top = prefix.length + above.length;
       return clipFrame(
         lines,
         frameHeight,
-        cursor === undefined ? undefined : { ...cursor, row: prefix.length + cursor.row },
-        prefix.length + (this.overlays.active instanceof PickerOverlay ? 4 : 0),
+        cursor === undefined ? undefined : { ...cursor, row: top + cursor.row },
+        top + (this.overlays.active instanceof PickerOverlay ? 4 : 0),
       );
     }
     if (this.activitySurface.visible) {
@@ -1835,6 +1933,7 @@ export class AxlApp {
       ...(this.developerPanelEnabled ? [this.developerPanel] : []),
       { render: (width) => this.pendingInputStatusRows(width) },
       this.activity,
+      ...(this.mascot === null ? [] : [this.mascot]),
       this.editorSurface,
       this.extensionWidgetsBelow,
       {
@@ -1926,7 +2025,7 @@ export class AxlApp {
     const values =
       command === "/model"
         ? [
-            ...this.providerInventory.flatMap((provider) =>
+            ...this.selectableProviders().flatMap((provider) =>
               provider.models.map((model) => `${provider.providerId}/${model.modelId}`),
             ),
             ...(this.providerInventory.length === 0 ? (this.options.models ?? []) : []),
@@ -2231,6 +2330,284 @@ export class AxlApp {
     }
   }
 
+  /**
+   * Turns the mascot on or off. Colour is presentation preference only and
+   * carries no meaning about the session.
+   */
+  private async toggleMascot(colour?: string): Promise<void> {
+    const asked = colour === undefined || colour === "" ? undefined : colour;
+    if (asked === "sas") {
+      if (this.mascotPlayer === null) {
+        this.notice = this.view.palette.error("✖ /mascot sas needs the mascot on");
+        this.redraw();
+        return;
+      }
+      // A one-shot: it plays over whatever is running and hands back on its own.
+      this.mascotPlayer.play("sass");
+      this.redraw();
+      return;
+    }
+    // A setup still waiting counts as on, so a second /mascot turns it off.
+    const on = this.mascot !== null || this.mascotPending !== null;
+    const shown = this.mascotPending ?? this.mascotColour;
+    if (on && (asked === undefined || asked === shown)) {
+      this.disableMascot();
+      this.invalidateFullscreenRows();
+      this.redraw();
+      void this.persistPreferences({ mascot: false });
+      return;
+    }
+    const chosen = asked ?? this.mascotColour;
+    await this.enableMascot(chosen);
+    // A colour the manifest does not have fails in setup and leaves it off.
+    if (this.mascot !== null) void this.persistPreferences({ mascot: true, mascotColour: chosen });
+  }
+
+  /**
+   * Builds the mascot for the current display mode.
+   *
+   * The image path is chosen here, so a display-mode change has to come back
+   * through this: fullscreen suppresses inline images, and a component built
+   * for the image path would keep emitting graphics escapes into the dock.
+   */
+  private async enableMascot(requested: string): Promise<void> {
+    // Setup waits on files and on the terminal's answers. A newer /mascot, a
+    // display mode change or shutdown can come in meanwhile, so each setup is
+    // numbered and only the latest is installed.
+    const setup = ++this.mascotSetup;
+    const mode = this.tuiMode;
+    this.mascotPending = requested;
+    const current = () => setup === this.mascotSetup && !this.stopped;
+    try {
+      const loaded = await loadMascotAssets(requested);
+      const manifest = loaded.manifest;
+      // The text pack in 256 colours where the terminal has no 24-bit colour.
+      const pack = detectTruecolour() ? loaded.pack : packTo256(loaded.pack);
+      // Real pixels where the terminal supports the Kitty graphics protocol,
+      // sixel or the half-block pack otherwise. Fullscreen suppresses inline
+      // images, so it always uses the pack.
+      const wantsImages = this.media.images === "kitty" && this.tuiMode !== "fullscreen";
+      // Ask only now, when the mascot is turned on, and give the answer a
+      // moment, so the mascot does not show in glyphs first and then change.
+      if (!wantsImages && this.tuiMode === "regular") {
+        this.askCellSize();
+        await this.terminalAnswers(400);
+      }
+      if (wantsImages && this.terminalBackground === undefined) {
+        // The composer's border has to be painted a colour the terminal treats
+        // as its own, so ask what the terminal's background is.
+        this.terminal.queryBackground();
+        for (let waited = 0; this.terminalBackground === undefined && waited < 400; waited += 25) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      // Without Kitty graphics, sixel where the terminal has said it draws
+      // them and how big a cell is: the image has to be exactly the strip's
+      // height, or it would be drawn over the composer.
+      const sixelCell =
+        !wantsImages && this.tuiMode === "regular" && this.terminalSixel === true
+          ? this.terminalCellSize
+          : undefined;
+      // The pack and the atlas are the same art, so rows measured from the
+      // pack tell the image path where each state sits without decoding a PNG.
+      const bands = packSegmentRows(pack, manifest);
+      const source = wantsImages
+        ? await this.atlasRenderer(requested, manifest)
+        : sixelCell === undefined
+          ? pack
+          : await this.sixelRenderer(requested, manifest, sixelCell, pack);
+      if (!current()) return;
+      if (this.tuiMode !== mode) {
+        // The drawing was chosen for the mode setup started in; choose again.
+        void this.enableMascot(requested);
+        return;
+      }
+      this.teardownMascot();
+      this.mascotPending = null;
+      this.mascotColour = requested;
+      const player = new MascotPlayer(manifest);
+      this.mascotPlayer = player;
+      this.mascotDirector = new MascotDirector(player);
+      this.mascot = new MascotComponent(player, source, {
+        column: 2,
+        bands,
+        totalRows: pack.cell[1],
+      });
+      this.mascotActor = new MascotActor();
+      this.mascotSteppedAt = Date.now();
+      this.mascotDirector.attach();
+      this.mascotTimer = setInterval(() => this.tickMascot(), 50);
+      this.mascotTimer.unref?.();
+      // The mascot appearing is its own confirmation, and a notice line would
+      // sit between it and the composer. A failure still reports loudly below.
+    } catch (error) {
+      if (!current()) return;
+      this.teardownMascot();
+      this.mascotPending = null;
+      this.notice = this.view.palette.error(
+        `✖ mascot: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.invalidateFullscreenRows();
+    this.redraw();
+  }
+
+  /** Turns the mascot off, and cancels a setup still waiting. */
+  private disableMascot(): void {
+    this.mascotSetup += 1;
+    this.mascotPending = null;
+    this.teardownMascot();
+  }
+
+  private teardownMascot(): void {
+    // Runs during shutdown too, when `stopped` is already set: the placement
+    // outlives the process otherwise and stays on the user's screen. The state
+    // goes first, so a write that fails cannot leave the timer running.
+    const clear = this.mascot?.usesImages === true ? this.mascot.clearImage() : "";
+    if (this.mascotTimer !== null) {
+      clearInterval(this.mascotTimer);
+      this.mascotTimer = null;
+    }
+    this.mascot = null;
+    this.mascotPlayer = null;
+    this.mascotDirector = null;
+    this.mascotActor = null;
+    if (clear !== "") this.options.output.write(clear);
+  }
+
+  private async atlasRenderer(
+    colour: string,
+    manifest: MascotManifest,
+  ): Promise<MascotAtlasRenderer> {
+    const atlas = await loadMascotAtlas(colour, manifest);
+    const mirrored = await loadMascotAtlasMirrored(colour, manifest);
+    return new MascotAtlasRenderer(atlas, manifest, mirrored === undefined ? {} : { mirrored });
+  }
+
+  /** Advances the mascot and repaints only when the visible frame changed. */
+  private tickMascot(): void {
+    if (this.stopped || this.mascotPlayer === null || this.mascot === null) return;
+    const now = Date.now();
+    const changed = this.mascotPlayer.tick(now);
+    const released = this.mascotDirector?.tick(now) ?? false;
+    const elapsed = now - this.mascotSteppedAt;
+    this.mascotSteppedAt = now;
+    let moved = false;
+    if (this.mascotActor !== null) {
+      moved = this.mascotActor.step(elapsed, {
+        state: this.mascotPlayer.state,
+        segment: this.mascotPlayer.segment,
+        width: this.width,
+        spriteWidth: this.mascot.width,
+        stripHeight: this.mascot.height,
+        cursorColumn: this.editorFrame.cursorPlacement().column,
+      });
+      const { column, sink, mirrored, travelling } = this.mascotActor.placement();
+      this.mascot.setColumn(column);
+      this.mascot.setSink(sink);
+      this.mascot.setMirrored(mirrored);
+      void travelling;
+    }
+    if (!changed && !released && !moved) return;
+    this.invalidateFullscreenRows();
+    this.redraw();
+  }
+
+  /** The sixel renderer, or the glyph pack when the atlas cannot be drawn as sixel. */
+  private async sixelRenderer(
+    colour: string,
+    manifest: MascotManifest,
+    cell: { readonly width: number; readonly height: number },
+    pack: MascotPack,
+  ): Promise<MascotSixelRenderer | MascotPack> {
+    try {
+      return new MascotSixelRenderer(await loadMascotAtlas(colour, manifest), manifest, cell);
+    } catch (error) {
+      // A user's own atlas that is not indexed cannot be drawn as sixel.
+      if (error instanceof MascotSixelError) return pack;
+      throw error;
+    }
+  }
+
+  /**
+   * Takes the terminal's answers to the sixel and cell size questions out of
+   * the input, so they are never typed. Once both are in, a mascot drawn in
+   * glyphs is rebuilt with sixel.
+   */
+  private takeTerminalReports(data: string): string {
+    if (!data.includes("\x1b[")) return data;
+    let rest = "";
+    let changed = false;
+    for (let index = 0; index < data.length; ) {
+      const decoded = decodeOneKey(data, index);
+      if (decoded.key.kind === "device-attributes") {
+        this.terminalSixel = decoded.key.features.includes(4);
+        changed = true;
+      } else if (decoded.key.kind === "cell-size") {
+        this.terminalCellSize = { width: decoded.key.width, height: decoded.key.height };
+        changed = true;
+      } else {
+        rest += data.slice(index, decoded.next);
+      }
+      index = decoded.next;
+    }
+    if (changed) this.useSixelWhenKnown();
+    return rest;
+  }
+
+  /**
+   * Asks the terminal once how big a cell is, which sixel needs to draw the
+   * mascot at exactly the strip's height. Whether it draws sixel at all comes
+   * from the device attributes the terminal session asks for at start.
+   */
+  private askCellSize(): void {
+    if (this.terminalAsked || this.media.images === "kitty" || imagesTurnedOff()) {
+      return;
+    }
+    this.terminalAsked = true;
+    this.options.output.write("\x1b[16t");
+  }
+
+  /**
+   * The colour of the composer's top border while a Kitty image is drawn. It
+   * has to differ from the terminal's default background, or the terminal
+   * leaves the image on top of the border. One level of blue is invisible, so
+   * the row looks unpainted. A terminal that does not answer the background
+   * query gets near black, which shows as a darker row.
+   */
+  private mascotBorderColour(): readonly [number, number, number] {
+    const background = this.terminalBackground;
+    if (background === undefined) return [1, 0, 0];
+    const [red, green, blue] = background;
+    return [red, green, blue === 255 ? 254 : blue + 1];
+  }
+
+  /** Waits up to `timeoutMs` for the terminal to say whether and how it draws sixel. */
+  private async terminalAnswers(timeoutMs: number): Promise<void> {
+    const settled = () =>
+      this.terminalSixel === false ||
+      (this.terminalSixel === true && this.terminalCellSize !== undefined);
+    for (let waited = 0; !settled() && this.terminalAsked && waited < timeoutMs; waited += 25) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
+  /** Rebuilds a mascot drawn in glyphs with sixel once both answers are in. */
+  private useSixelWhenKnown(): void {
+    if (
+      this.terminalSixel === true &&
+      this.terminalCellSize !== undefined &&
+      this.mascotPlayer !== null &&
+      this.mascot !== null &&
+      !this.mascot.drawsSixel &&
+      !this.mascot.usesImages &&
+      this.tuiMode === "regular" &&
+      !imagesTurnedOff()
+    ) {
+      void this.enableMascot(this.mascotColour);
+    }
+  }
+
   private async prepareEventMedia(event: CanonicalEvent): Promise<void> {
     if (
       event.type !== "user.message" &&
@@ -2249,6 +2626,7 @@ export class AxlApp {
 
   private commitEvent(event: CanonicalEvent, redraw = true): void {
     if (this.seenEventIds.has(event.id)) return;
+    this.mascotDirector?.handleEvent(event, Date.now());
     this.seenEventIds.add(event.id);
     this.transcript.push({ kind: "event", event });
     void this.extensionHost
@@ -2624,9 +3002,15 @@ export class AxlApp {
     return true;
   }
 
-  private handleInput(data: string): void {
+  private handleInput(input: string): void {
+    // A paste is the user's text, whatever it holds, so the terminal's reports
+    // are only looked for outside one.
+    const pasted = input.startsWith("\x1b[200~") && input.endsWith("\x1b[201~");
+    const data = pasted ? input : this.takeTerminalReports(input);
+    if (data === "") return;
     if (this.stopped) return;
-    if (data.startsWith("\x1b[200~") && data.endsWith("\x1b[201~")) {
+    if (pasted) {
+      this.mascotDirector?.keystroke(Date.now());
       const text = data.slice(6, -6);
       if (this.attentionOverlay.paste(text) || this.overlays.paste(text)) this.redraw();
       else if (!this.activitySurface.visible || this.activitySurface.agentFocused)
@@ -2677,6 +3061,8 @@ export class AxlApp {
       if (!this.stopped) this.redraw();
       return;
     }
+    // Focus and mouse reports are not typing.
+    if (!isMouseReport(data)) this.mascotDirector?.keystroke(Date.now());
     if (this.tuiMode === "fullscreen" && this.overlays.active === undefined) {
       if (this.fullscreen.handleInput(data)) {
         this.redraw();
@@ -3377,6 +3763,9 @@ export class AxlApp {
       case "theme":
         this.selectTheme(argument ?? "");
         return;
+      case "mascot":
+        await this.toggleMascot(argument ?? "");
+        return;
       case "status":
         this.commitLines([
           this.view.palette.accent("Session"),
@@ -3904,6 +4293,15 @@ export class AxlApp {
   }
 
   private setTuiMode(mode: "regular" | "fullscreen"): void {
+    if (mode !== this.tuiMode && this.mascot !== null) {
+      // Rebuild for the new mode before switching: the source is chosen once,
+      // at construction, and fullscreen may not carry inline images.
+      const colour = this.mascotColour;
+      this.disableMascot();
+      queueMicrotask(() => {
+        if (!this.stopped) void this.enableMascot(colour);
+      });
+    }
     if (mode === this.tuiMode) {
       if (mode === "fullscreen") {
         this.fullscreen.invalidate();
@@ -4922,17 +5320,45 @@ export class AxlApp {
       providerId === undefined ? {} : { providerId },
       signal === undefined ? {} : { signal },
     );
-    if (providerId === undefined) this.providerInventory = listed.providers;
+    // The listing carries each provider's last known state. The status request
+    // checks the credentials, so a provider logged in through the environment
+    // or a stored key is not mistaken for a logged out one.
+    const statuses = this.client.connection.grantedCapabilities?.includes("provider.auth.status")
+      ? (
+          await this.client.providerAuthenticationStatus(
+            providerId === undefined ? {} : { providerId },
+            signal === undefined ? {} : { signal },
+          )
+        ).providers
+      : [];
+    const providers = listed.providers.map((provider) => ({
+      ...provider,
+      authentication:
+        statuses.find((status) => status.providerId === provider.providerId) ??
+        provider.authentication,
+    }));
+    if (providerId === undefined) this.providerInventory = providers;
     else {
       const retained = this.providerInventory.filter(
         (provider) => provider.providerId !== providerId,
       );
-      this.providerInventory = [...retained, ...listed.providers];
+      this.providerInventory = [...retained, ...providers];
     }
     this.view.setModels(
       this.providerInventory.flatMap((provider) => provider.models.map(formatProviderModel)),
     );
-    return listed.providers;
+    return providers;
+  }
+
+  /**
+   * Providers whose models can be chosen. A model of a provider that is not
+   * logged in cannot be selected, so, as in pi, the pickers and completions
+   * list only models with configured authentication.
+   */
+  private selectableProviders(): readonly ProviderInventoryGroup[] {
+    return this.providerInventory.filter(
+      (provider) => provider.authentication.phase === "authenticated",
+    );
   }
 
   private modelSelection(
@@ -4942,13 +5368,13 @@ export class AxlApp {
     if (separator > 0) {
       const providerId = value.slice(0, separator);
       const modelId = value.slice(separator + 1);
-      const provider = this.providerInventory.find(
+      const provider = this.selectableProviders().find(
         (candidate) => candidate.providerId === providerId,
       );
       const model = provider?.models.find((candidate) => candidate.modelId === modelId);
       return model === undefined ? undefined : { providerId, model };
     }
-    const candidates = this.providerInventory.flatMap((provider) =>
+    const candidates = this.selectableProviders().flatMap((provider) =>
       provider.models
         .filter((model) => model.modelId === value)
         .map((model) => ({ providerId: provider.providerId, model })),
@@ -4962,12 +5388,18 @@ export class AxlApp {
   private async applyConfigurationCommand(input: string): Promise<void> {
     const command = input.slice(1).split(/\s/u, 1)[0] ?? "";
     const argument = input.slice(command.length + 2).trim() || undefined;
-    const outcome = await this.commandController.invoke(input, this.sessionId, {
-      ...(this.sessionSubscription?.projector.overview.requestSettings === undefined
-        ? {}
-        : { requestSettings: this.sessionSubscription.projector.overview.requestSettings }),
-    });
-    await this.handleCommandOutcome(command, argument, outcome);
+    try {
+      const outcome = await this.commandController.invoke(input, this.sessionId, {
+        ...(this.sessionSubscription?.projector.overview.requestSettings === undefined
+          ? {}
+          : { requestSettings: this.sessionSubscription.projector.overview.requestSettings }),
+      });
+      await this.handleCommandOutcome(command, argument, outcome);
+    } catch (error) {
+      // Most callers are picker callbacks that cannot await this, so a
+      // rejection here would end the process instead of reaching the user.
+      this.notice = this.view.palette.error(`✖ ${providerErrorText(error)}`);
+    }
     this.redraw();
   }
 
@@ -4995,19 +5427,38 @@ export class AxlApp {
       this.redraw();
       return;
     }
-    const selections = this.providerInventory.flatMap((provider) =>
+    const selections = this.selectableProviders().flatMap((provider) =>
       provider.models.map((model) => ({ provider, model })),
     );
     if (modelId) {
       const selected = this.modelSelection(modelId);
       if (selected === undefined) {
-        this.notice = this.view.palette.error(`✖ unknown or ambiguous model ${modelId}`);
+        const loggedOut = this.providerInventory.find(
+          (provider) =>
+            provider.authentication.phase !== "authenticated" &&
+            provider.models.some(
+              (model) =>
+                modelId === `${provider.providerId}/${model.modelId}` || modelId === model.modelId,
+            ),
+        );
+        this.notice = this.view.palette.error(
+          loggedOut === undefined
+            ? `✖ unknown or ambiguous model ${modelId}`
+            : `✖ ${loggedOut.displayName} is not logged in. Use /login ${loggedOut.providerId}`,
+        );
         this.redraw();
         return;
       }
       await this.applyConfigurationCommand(
         `/model ${selected.providerId}/${selected.model.modelId}`,
       );
+      return;
+    }
+    if (selections.length === 0) {
+      this.notice = this.view.palette.error(
+        "✖ No models available. Use /login to configure a provider",
+      );
+      this.redraw();
       return;
     }
     const favorites = new Set(this.modelFavorites);
@@ -6500,6 +6951,8 @@ export class AxlApp {
     diffLayout?: DiffLayout;
     workspaceReview?: boolean;
     imageDisplay?: ImageDisplay;
+    mascot?: boolean;
+    mascotColour?: string;
   }): Promise<void> {
     try {
       await this.options.onPreferenceChange?.(update);
@@ -6775,6 +7228,7 @@ export class AxlApp {
     this.activeRequest = "compaction";
     this.awaitingOperationOwnership = true;
     this.setWorking(true);
+    this.mascotDirector?.compactionStarted();
     this.notice = undefined;
     this.redraw();
     try {
@@ -6799,6 +7253,9 @@ export class AxlApp {
         this.awaitingOperationOwnership ||
           this.sessionSubscription?.projector.overview.activeOperationId !== undefined,
       );
+      // context.compacted normally ends it first; a failed or queued
+      // compaction has no such event and would leave the mascot curled up
+      this.mascotDirector?.compactionFinished();
       this.redraw();
       void this.drainQueue();
     }

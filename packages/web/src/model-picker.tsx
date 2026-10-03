@@ -152,7 +152,7 @@ export function ModelPicker({
         </label>
         <div className="model-options" aria-label="Models">
           {visibleCount === 0 && (
-            <p className="model-empty">{choices.length === 0 ? "No models available" : "No matching models"}</p>
+            <p className="model-empty">{choices.some((choice) => choice.authenticated) ? "No matching models" : "No models available. Log in with /login"}</p>
           )}
           {[...groups].map(([providerId, models]) => (
             <section className="model-provider-group" key={providerId}>

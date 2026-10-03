@@ -12,6 +12,7 @@ const MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
 const KITTY_QUERY_AND_ENABLE = "\x1b[>1u\x1b[?u\x1b[c";
 const CELL_SIZE_QUERY = "\x1b[16t";
+const BACKGROUND_QUERY = "\x1b]11;?\x1b\\";
 const KITTY_KEYS_OFF = "\x1b[<u";
 const MODIFY_OTHER_KEYS_ON = "\x1b[>4;2m";
 const MODIFY_OTHER_KEYS_OFF = "\x1b[>4;0m";
@@ -61,9 +62,17 @@ export interface TerminalSessionOptions {
   readonly input: TerminalInput;
   readonly output: TerminalOutput;
   readonly onInput: (sequence: string) => void;
+  /**
+   * The features the terminal reports in its device attributes (4 is sixel).
+   * The session asks at start to negotiate the keyboard and keeps the reply
+   * out of the input, so this is how the rest of the client hears it.
+   */
+  readonly onDeviceAttributes?: (features: readonly number[]) => void;
   readonly onInputError: (error: Error) => void;
   readonly onResize: () => void;
   readonly onCellSize?: (size: TerminalCellSize | undefined) => void;
+  /** The terminal's default background, as 8-bit red, green, and blue, after `queryBackground`. */
+  readonly onBackground?: (rgb: readonly [number, number, number]) => void;
   readonly suspendProcess?: () => void;
   readonly keyboardNegotiationTimeoutMs?: number;
 }
@@ -79,6 +88,27 @@ function kittyFlags(sequence: string): number | undefined {
 function isDeviceAttributes(sequence: string): boolean {
   if (!sequence.startsWith("\x1b[")) return false;
   return sequence === "\x1b[c" || /^\?[0-9;]*c$/.test(sequence.slice(2));
+}
+
+/**
+ * The terminal's answer to an OSC 11 background query,
+ * `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` ended by BEL or ST, with 1 to 4 hex digits
+ * per channel. Undefined for anything else.
+ */
+export function terminalBackground(
+  sequence: string,
+): readonly [number, number, number] | undefined {
+  const prefix = "\x1b]11;rgb:";
+  if (!sequence.startsWith(prefix)) return undefined;
+  const terminator = sequence.endsWith("\x07") ? 1 : sequence.endsWith("\x1b\\") ? 2 : 0;
+  if (terminator === 0) return undefined;
+  const match = /^([0-9a-f]{1,4})\/([0-9a-f]{1,4})\/([0-9a-f]{1,4})$/i.exec(
+    sequence.slice(prefix.length, sequence.length - terminator),
+  );
+  if (match === null) return undefined;
+  const channel = (digits: string): number =>
+    Math.round((Number.parseInt(digits, 16) / (16 ** digits.length - 1)) * 255);
+  return [channel(match[1] as string), channel(match[2] as string), channel(match[3] as string)];
 }
 
 function terminalCellSize(sequence: string): TerminalCellSize | null | undefined {
@@ -236,7 +266,17 @@ export class TerminalSession {
     this.options.onResize();
   };
 
+  /** Asks the terminal for its default background. The answer arrives through `onBackground`. */
+  queryBackground(): void {
+    this.options.output.write(BACKGROUND_QUERY);
+  }
+
   private handleSequence(sequence: string): void {
+    const background = terminalBackground(sequence);
+    if (background !== undefined) {
+      this.options.onBackground?.(background);
+      return;
+    }
     const size = terminalCellSize(sequence);
     if (size !== undefined) {
       this.options.onCellSize?.(size ?? undefined);
@@ -256,6 +296,8 @@ export class TerminalSession {
     }
     if (isDeviceAttributes(sequence)) {
       if (this.keyboardMode === "negotiating") this.enableModifyOtherKeys();
+      const features = sequence.slice(3, -1).split(";").filter(Boolean).map(Number);
+      this.options.onDeviceAttributes?.(features);
       return;
     }
     this.options.onInput(sequence);
