@@ -82,6 +82,11 @@ export class VimModeController {
     else if (char === "x") editor.apply({ kind: "delete" });
     else if (char === "u") editor.apply({ kind: "ctrl", char: "_" });
     else if (char === "p" || char === "P") editor.apply({ kind: "ctrl", char: "y" });
+    else if (char === "D") editor.apply({ kind: "ctrl", char: "k" });
+    else if (char === "C") {
+      editor.apply({ kind: "ctrl", char: "k" });
+      this.current = "insert";
+    }
     return true;
   }
 
