@@ -15,8 +15,7 @@ import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
-import type { MascotManifest, MascotPlayer } from "./mascot.ts";
-import { parseMascotManifest } from "./mascot.ts";
+import { type MascotManifest, type MascotPlayer, parseMascotManifest } from "@axl/sdk";
 import { MascotSixelRenderer } from "./mascot-sixel.ts";
 import { type Component, stripAnsi } from "./render.ts";
 

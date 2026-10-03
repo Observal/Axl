@@ -14,7 +14,7 @@
 
 import { inflateSync } from "node:zlib";
 
-import type { MascotManifest } from "./mascot.ts";
+import type { MascotManifest } from "@axl/sdk";
 
 export class MascotSixelError extends Error {
   constructor(message: string) {

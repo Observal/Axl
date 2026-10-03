@@ -57,6 +57,10 @@ import {
   type DaemonHostStatus,
   formatMcpServerSummary,
   MCP_ADD_SERVER_QUESTIONS,
+  MascotActor,
+  MascotDirector,
+  type MascotManifest,
+  MascotPlayer,
   MCP_IMPORT_QUESTION,
   type McpImportedServer,
   type ModelRequestSettings,
@@ -115,9 +119,6 @@ import {
 import { isMouseReport } from "./fullscreen-input.ts";
 import { LiveAssistantComponent } from "./live-assistant.ts";
 import type { LoginDialogDefinition } from "./login-dialog.ts";
-import { type MascotManifest, MascotPlayer } from "./mascot.ts";
-import { MascotActor } from "./mascot-actor.ts";
-import { MascotDirector } from "./mascot-director.ts";
 import {
   loadMascotAssets,
   loadMascotAtlas,
