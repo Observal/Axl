@@ -83,6 +83,7 @@ import {
   readClipboardText,
   writeClipboardText,
 } from "./clipboard.ts";
+import { closestMatch } from "./closest-match.ts";
 import { loadThemeCatalog, type ThemeCatalog, watchThemeDirectories } from "./custom-themes.ts";
 import { DeveloperPanelComponent } from "./developer-panel.ts";
 import { renderDialog } from "./dialog.ts";
@@ -155,7 +156,6 @@ import {
   type TranscriptRow,
 } from "./transcript-document.ts";
 import { VimModeController } from "./vim-mode.ts";
-import { closestMatch } from "./closest-match.js";
 
 const SPINNER_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 const FRAME_INTERVAL_MS = 16;
