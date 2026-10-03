@@ -23,7 +23,7 @@ In scope:
 - the production daemon host and browser page, enabled by an opt-in; and
 - the evidence each of these needs before the opt-in is widened.
 
-Out of scope: native Windows, macOS, and Linux desktop daemons (their RFC rows are unchanged), remote permission approvals (see [Remote permission authorization](remote-permission-authorization.md)), and enabling remote access for anyone but opted-in accounts.
+Out of scope: native Windows, macOS, and Linux desktop daemons (macOS and Linux desktop are proposed in [Production remote access from macOS and Linux desktop daemons](remote-production-desktop.md)), remote permission approvals (see [Remote permission authorization](remote-permission-authorization.md)), and enabling remote access for anyone but opted-in accounts.
 
 ## Envelope keys in WSL
 
