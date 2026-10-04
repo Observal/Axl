@@ -38,6 +38,16 @@ import { connectUnixClient } from "@axl/sdk/unix";
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
 const RELAY_TOKEN = "internal-fixture";
 const production = (process.env.AXL_REMOTE_E2E_MODE ?? "production") === "production";
+/** In production mode, a WSL daemon (fake DPAPI helper) or a Linux desktop one (Secret Service). */
+const desktopKeyring = process.env.AXL_REMOTE_E2E_SEALER === "secret-service";
+/** What the desktop keyring needs to see in the daemon's environment. */
+const DESKTOP_SESSION_ENV = [
+  "DBUS_SESSION_BUS_ADDRESS",
+  "XDG_RUNTIME_DIR",
+  "XDG_CURRENT_DESKTOP",
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+] as const;
 const PAGE_HEADERS = {
   "content-security-policy":
     "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
@@ -687,12 +697,22 @@ export async function startStack(directory) {
   );
   if (production) {
     // What `axl remote login` leaves behind, signed in through the fake pool's daemon client.
-    const helper = join(directory, "dpapi-helper.mjs");
-    writeFileSync(helper, FAKE_DPAPI_HELPER);
-    chmodSync(helper, 0o755);
-    const { saveRemoteAccount } = await import(
+    const { detectSecretService, saveRemoteAccount } = await import(
       join(repositoryRoot, "packages/runtime/dist/index.js")
     );
+    const binding = join(
+      repositoryRoot,
+      `packages/e2ee/bindings/node/dist/${desktopKeyring ? "hosted-linux" : "hosted-wsl"}/loader/index.js`,
+    );
+    let sealer: Record<string, string>;
+    if (desktopKeyring) {
+      sealer = { kind: "secret-service", implementation: await detectSecretService(binding) };
+    } else {
+      const helper = join(directory, "dpapi-helper.mjs");
+      writeFileSync(helper, FAKE_DPAPI_HELPER);
+      chmodSync(helper, 0o755);
+      sealer = { kind: "dpapi", helper };
+    }
     const tokens = authority.daemonTokens();
     await saveRemoteAccount({
       axlHome: join(home, ".axl"),
@@ -704,8 +724,8 @@ export async function startStack(directory) {
         refreshToken: tokens.refresh_token,
         expiresAt: Date.now() + tokens.expires_in * 1000,
       },
-      sealer: { kind: "dpapi", helper },
-      binding: join(repositoryRoot, "packages/e2ee/bindings/node/dist/hosted-wsl/loader/index.js"),
+      sealer,
+      binding,
     });
   }
   const socketPath = join(home, ".axl/axl.sock");
@@ -728,6 +748,13 @@ export async function startStack(directory) {
           HOME: home,
           PATH: process.env.PATH,
           ...(production ? {} : { AXL_REMOTE_DEPLOYMENT_TEST: remoteConfig }),
+          ...(desktopKeyring
+            ? Object.fromEntries(
+                DESKTOP_SESSION_ENV.flatMap((name) =>
+                  process.env[name] === undefined ? [] : [[name, process.env[name]]],
+                ),
+              )
+            : {}),
           // The daemon reaches the origin over HTTPS; trust only this run's certificate.
           NODE_EXTRA_CA_CERTS: join(directory, "tls/cert.pem"),
         },

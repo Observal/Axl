@@ -33,6 +33,12 @@ const mode = process.env.AXL_REMOTE_E2E_MODE ?? "production";
 if (mode !== "production" && mode !== "deployment-test") {
   throw new Error("AXL_REMOTE_E2E_MODE must be production or deployment-test");
 }
+// Production mode seals the daemon's keys as in WSL (a fake DPAPI helper) by default, or with the
+// Linux desktop's Secret Service (AXL_REMOTE_E2E_SEALER=secret-service, in an unlocked session).
+const sealer = process.env.AXL_REMOTE_E2E_SEALER ?? "dpapi";
+if (sealer !== "dpapi" && sealer !== "secret-service") {
+  throw new Error("AXL_REMOTE_E2E_SEALER must be dpapi or secret-service");
+}
 const scratch = mkdtempSync(join(tmpdir(), "axl-remote-e2e-"));
 const run = (command, args, options = {}) =>
   execFileSync(command, args, { cwd: root, stdio: "inherit", ...options });
@@ -82,7 +88,12 @@ try {
     AXL_E2EE_DEPLOYMENT_TEST_TRUST_FILE: trustFile,
     AXL_E2EE_HOSTED_TRUST_FILE: trustFile,
   };
-  const nodeArtifact = mode === "production" ? "hosted-wsl" : "deployment-test";
+  const nodeArtifact =
+    mode !== "production"
+      ? "deployment-test"
+      : sealer === "secret-service"
+        ? "hosted-linux"
+        : "hosted-wsl";
   preserve(join(bindings, `node/dist/${nodeArtifact}`));
   preserve(join(bindings, "browser/dist/deployment-test"));
   run(process.execPath, [join(bindings, "node/scripts/build.mjs"), nodeArtifact], { env });
