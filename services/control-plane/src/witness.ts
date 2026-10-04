@@ -82,7 +82,8 @@ export interface WitnessSecurityAuditEvent {
     | "receipt_invalid"
     | "replica_disagreement"
     | "journal_inconsistent"
-    | "replica_behind";
+    | "replica_behind"
+    | "replica_caught_up";
   readonly lineageHash?: string;
   readonly replicaId?: string;
 }
@@ -953,6 +954,174 @@ export class WitnessReplica implements WitnessReplicaClient {
     });
   }
 
+  /**
+   * The endpoint-signed request behind this replica's head of `lineage`, so that a replica a crash
+   * left one step behind can take the same step. Undefined unless the head is an accepted step.
+   */
+  async headStep(lineage: Uint8Array): Promise<Uint8Array | undefined> {
+    const stored = await this.#options.storage.read(lineage);
+    if (stored === undefined) return undefined;
+    const state = rebuild(stored);
+    const last = stored.ledger.at(-1);
+    if (
+      last === undefined ||
+      (last.kind !== "registered" && last.kind !== "advanced") ||
+      last.requestBytes === undefined ||
+      state.forkResult !== undefined ||
+      state.revocation !== undefined ||
+      last.counter !== state.head.counter ||
+      !witnessBytesEqual(last.commitment, state.head.commitment)
+    ) {
+      return undefined;
+    }
+    return last.requestBytes.slice();
+  }
+
+  /**
+   * Take the one step a crash between replica writes left this replica without. The gateway writes
+   * each step to all three replicas and the endpoint needs all three receipts, so a crash part way
+   * leaves some replicas one step ahead with no certificate issued, and the endpoint still holds
+   * that step pending. `exactStep` is the endpoint-signed request the ahead replicas accepted.
+   *
+   * It applies only to an unrecovered lineage of a resumed replica, only as a direct successor of
+   * this replica's own head, and only when fresh heads that both other replicas signed for one
+   * endpoint-signed read each sit at this replica's head or at that successor, at least one at the
+   * successor. The step then goes through every check of an ordinary submission. No replica moves
+   * backward, and every head a replica holds is one the endpoint signed, so rollback detection is
+   * unchanged. The lineage still recovers through `recoverLineage` afterwards.
+   */
+  async catchUpLineage(
+    admission: WitnessAdmission,
+    exactStep: Uint8Array,
+    peerEvidence: readonly WitnessPeerHeadEvidence[],
+  ): Promise<void> {
+    if (this.#state !== "lineage_recovery") {
+      throw new WitnessServiceError(
+        "witness_unavailable",
+        "Lineage catch-up applies only to a resumed replica",
+        503,
+      );
+    }
+    const step = parseWitnessRequest(exactStep);
+    if (step.kind !== "advance") {
+      throw new WitnessServiceError("bad_request", "Lineage catch-up takes an advance", 400);
+    }
+    const lineage = lineageHash(step);
+    const key = witnessBytesHex(lineage);
+    await this.#withLineage(key, async () => {
+      if (this.#recoveredLineages.has(key)) return;
+      const stored = await this.#options.storage.read(lineage);
+      if (stored === undefined) {
+        throw new WitnessServiceError("witness_unavailable", "Recovery lineage is missing", 503);
+      }
+      const { record, state } = await this.#validateLocalState(lineage, stored);
+      const successor = operation(step);
+      if (
+        state.forkResult !== undefined ||
+        state.revocation !== undefined ||
+        step.expectedCounter !== state.head.counter ||
+        !witnessBytesEqual(step.expectedCommitment ?? zero(48), state.head.commitment) ||
+        successor.counter !== state.head.counter + 1n
+      ) {
+        throw new WitnessServiceError(
+          "witness_unavailable",
+          "The catch-up step does not follow this replica's head",
+          503,
+        );
+      }
+      const evidence = peerEvidence.map((value) => ({
+        request: parseWitnessRequest(value.requestBytes),
+        receipt: parseWitnessReplicaReceipt(value.receiptBytes),
+      }));
+      const [first, second] = evidence;
+      if (
+        evidence.length !== 2 ||
+        first === undefined ||
+        second === undefined ||
+        !witnessBytesEqual(first.request.exactBytes, second.request.exactBytes)
+      ) {
+        throw new WitnessServiceError(
+          "witness_unavailable",
+          "Catch-up requires fresh heads from both other replicas for one read",
+          503,
+        );
+      }
+      const read = first.request;
+      if (
+        read.kind !== "read" ||
+        !witnessBytesEqual(lineageHash(read), lineage) ||
+        !witnessBytesEqual(read.credentialFingerprint, record.binding.credentialFingerprint) ||
+        !endpointSignatureValid(read, record.binding.verificationKey)
+      ) {
+        throw new WitnessServiceError(
+          "witness_auth_failed",
+          "Catch-up read request endpoint proof is invalid",
+          401,
+        );
+      }
+      const expectedPeerIds = new Set(this.#otherReplicaIds().map(witnessBytesHex));
+      const actualPeerIds = new Set(
+        evidence.map(({ receipt }) => witnessBytesHex(receipt.replicaId)),
+      );
+      if (
+        actualPeerIds.size !== 2 ||
+        [...actualPeerIds].some((replicaId) => !expectedPeerIds.has(replicaId))
+      ) {
+        throw new WitnessServiceError(
+          "witness_receipt_invalid",
+          "Catch-up evidence must come from both other distinct replicas",
+          400,
+        );
+      }
+      const now = this.#options.clock.nowMs();
+      let ahead = 0;
+      for (const { receipt } of evidence) {
+        verifyReceiptForRequest(read, receipt, this.#recoveryTrust);
+        if (
+          receipt.result !== "head" ||
+          receipt.issuedAtMs > now ||
+          now - receipt.issuedAtMs > WITNESS_RECOVERY_EVIDENCE_MAX_AGE_MS ||
+          receipt.revocationGeneration !== state.revocationGeneration
+        ) {
+          throw new WitnessServiceError(
+            "witness_receipt_invalid",
+            "Catch-up peer evidence is stale or has the wrong terminal state",
+            400,
+          );
+        }
+        const peer = {
+          counter: receipt.counter,
+          commitment: receipt.commitment,
+          predecessorCommitment: receipt.predecessorCommitment,
+        };
+        if (
+          sameHead(peer, successor) &&
+          witnessBytesEqual(peer.predecessorCommitment, state.head.commitment)
+        ) {
+          ahead += 1;
+        } else if (!sameHead(peer, state.head)) {
+          throw new WitnessServiceError("witness_unavailable", "Recovery peer heads conflict", 503);
+        }
+      }
+      if (ahead === 0) {
+        throw new WitnessServiceError(
+          "witness_unavailable",
+          "No other replica holds the catch-up step",
+          503,
+        );
+      }
+      const receipt = parseWitnessReplicaReceipt(await this.#submit(admission, exactStep));
+      if (receipt.result !== "advanced" || !sameHead(receipt, successor)) {
+        throw new WitnessServiceError(
+          "service_unavailable",
+          "The catch-up step was not accepted",
+          503,
+        );
+      }
+      await this.#audit("replica_caught_up", lineage);
+    });
+  }
+
   /** Run `work` after every earlier operation on the lineage `key` in this process. */
   async #withLineage<T>(key: string, work: () => Promise<T>): Promise<T> {
     const prior = this.#lineageQueues.get(key) ?? Promise.resolve();
@@ -1519,6 +1688,26 @@ export class WitnessReplica implements WitnessReplicaClient {
     admission: WitnessAdmission,
     exactReadRequest: Uint8Array,
   ): Promise<Uint8Array> {
+    return this.#recoveryHead(admission, exactReadRequest, true);
+  }
+
+  /**
+   * `recoveryHead` without keeping the answer as this read's response. A split repair compares
+   * heads with it before it brings replicas forward, after which the same read must see the new
+   * head. The receipt serves only as catch-up evidence inside the gateway.
+   */
+  async currentHead(
+    admission: WitnessAdmission,
+    exactReadRequest: Uint8Array,
+  ): Promise<Uint8Array> {
+    return this.#recoveryHead(admission, exactReadRequest, false);
+  }
+
+  async #recoveryHead(
+    admission: WitnessAdmission,
+    exactReadRequest: Uint8Array,
+    retain: boolean,
+  ): Promise<Uint8Array> {
     const request = parseWitnessRequest(exactReadRequest);
     if (request.kind !== "read") {
       throw new WitnessServiceError(
@@ -1567,6 +1756,7 @@ export class WitnessReplica implements WitnessReplicaClient {
       receiptFields(request, hash, result, state, this.#options.clock),
       this.#options.signer,
     );
+    if (!retain) return receipt;
     return this.#retainResponse(lineage, exactReadRequest, hash, receipt, record);
   }
 

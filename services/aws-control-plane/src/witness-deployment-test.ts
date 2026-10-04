@@ -35,8 +35,10 @@ import {
   witnessLineageHash,
 } from "@axl/control-plane";
 import {
+  parseWitnessReplicaReceipt,
   parseWitnessRequest,
   WITNESS_RECEIPT_SIGNATURE_DOMAIN,
+  type WitnessReplicaReceipt,
   type WitnessReplicaTrust,
   type WitnessRequest,
   witnessBytesEqual,
@@ -356,6 +358,16 @@ export async function createDeploymentTestWitness(
   );
 }
 
+function sameHead(left: WitnessReplicaReceipt, right: WitnessReplicaReceipt): boolean {
+  return (
+    left.result === right.result &&
+    left.counter === right.counter &&
+    witnessBytesEqual(left.commitment, right.commitment) &&
+    witnessBytesEqual(left.predecessorCommitment, right.predecessorCommitment) &&
+    left.revocationGeneration === right.revocationGeneration
+  );
+}
+
 class RecoveringWitnessGateway extends WitnessGateway {
   readonly #replicas: readonly WitnessReplica[];
   readonly #admit: (
@@ -437,6 +449,7 @@ class RecoveringWitnessGateway extends WitnessGateway {
     }
     if (ready()) return;
     const attempt = (async () => {
+      await this.#repairSplit(admission, lineage, exactRequest);
       const receipts = await Promise.all(
         this.#replicas.map((replica) => replica.recoveryHead(admission, exactRequest)),
       );
@@ -461,6 +474,56 @@ class RecoveringWitnessGateway extends WitnessGateway {
     } finally {
       this.#recovering.delete(key);
     }
+  }
+
+  /**
+   * Each step goes to all three replicas, so a crash part way through one leaves some replicas a
+   * step ahead of the rest, with no certificate issued and the step still pending on the endpoint.
+   * Recovery needs all three to agree, so first bring the others forward by that same
+   * endpoint-signed step: a missed registration through an ordinary submission, since those
+   * replicas never held the lineage, and a missed advance through `catchUpLineage`, which checks
+   * the step against both other replicas' fresh heads. Anything else is left for recovery to refuse.
+   */
+  async #repairSplit(admission: WitnessAdmission, lineage: Uint8Array, exactRead: Uint8Array) {
+    const raw = await Promise.all(
+      this.#replicas.map((replica) =>
+        replica.currentHead(admission, exactRead).catch(() => undefined),
+      ),
+    );
+    const heads = raw.map((bytes) =>
+      bytes === undefined ? undefined : parseWitnessReplicaReceipt(bytes),
+    );
+    const held = heads.filter((head): head is WitnessReplicaReceipt => head !== undefined);
+    const top = held.reduce<WitnessReplicaReceipt | undefined>(
+      (best, head) => (best === undefined || head.counter > best.counter ? head : best),
+      undefined,
+    );
+    if (top === undefined || heads.every((head) => head !== undefined && sameHead(head, top))) {
+      return;
+    }
+    const step = await this.#replicas[heads.indexOf(top)]?.headStep(lineage);
+    if (step === undefined) return;
+    const kind = parseWitnessRequest(step).kind;
+    await Promise.all(
+      this.#replicas.map(async (replica, own) => {
+        const head = heads[own];
+        if (head !== undefined && sameHead(head, top)) return;
+        if (head === undefined) {
+          if (kind === "register") await replica.submit(admission, step);
+          return;
+        }
+        if (kind !== "advance" || replica.lineageReady(lineage)) return;
+        await replica.catchUpLineage(
+          admission,
+          step,
+          raw.flatMap((receiptBytes, index) =>
+            index === own || receiptBytes === undefined
+              ? []
+              : [{ requestBytes: exactRead, receiptBytes }],
+          ),
+        );
+      }),
+    );
   }
 
   /** Move every replica from bootstrap to ready with the first registered lineage's signed read. */
