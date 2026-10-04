@@ -10,9 +10,10 @@ import {
   sign,
 } from "node:crypto";
 import test, { type TestContext } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { WitnessServiceError } from "@axl/control-plane";
+import { type WitnessReplicaStorage, WitnessServiceError } from "@axl/control-plane";
 import {
   parseWitnessQuorumCertificate,
   WITNESS_REQUEST_SIGNATURE_DOMAIN,
@@ -112,6 +113,8 @@ function endpoint(session: number) {
     read: () => request(2),
     /** Advance from counter `expected`, whose commitment is filled with `expected`. */
     advance: (expected: bigint) => request(3, { expected, commitment: Number(expected) + 1 }),
+    /** A different successor of `expected`, as an endpoint restored from a backup would propose. */
+    diverge: (expected: bigint) => request(3, { expected, commitment: 0x7f }),
   };
 }
 
@@ -127,7 +130,28 @@ function keys(): DeploymentTestWitnessKey[] {
   });
 }
 
-async function durable(context: TestContext) {
+/**
+ * Replica storage whose writes fail while its replica is in `crashed`, as if the process died
+ * before reaching it. The failure waits for the other replicas' writes to land first.
+ */
+function crashable(storage: WitnessReplicaStorage, replica: number, crashed: Set<number>) {
+  return {
+    transact: async <T>(
+      lineageHash: Uint8Array,
+      transaction: Parameters<WitnessReplicaStorage["transact"]>[1],
+    ): Promise<T> => {
+      if (crashed.has(replica)) {
+        await delay(300);
+        throw new Error("The control plane stopped before this replica's write");
+      }
+      return storage.transact(lineageHash, transaction) as Promise<T>;
+    },
+    listLineageHashes: () => storage.listLineageHashes(),
+    read: (lineageHash: Uint8Array) => storage.read(lineageHash),
+  } satisfies WitnessReplicaStorage;
+}
+
+async function durable(context: TestContext, crashed = new Set<number>()) {
   const db = await startFakeDynamoDb();
   db.pageSize = 5;
   const client = new DynamoDBClient({
@@ -145,11 +169,15 @@ async function durable(context: TestContext) {
       keys: witnessKeys,
       accountId: ACCOUNT_ID,
       stores: (key) => ({
-        storage: new DynamoWitnessReplicaStorage({
-          tableName: key === witnessKeys[0] ? tableName : "witness",
-          replicaId: key.replicaId,
-          client,
-        }),
+        storage: crashable(
+          new DynamoWitnessReplicaStorage({
+            tableName: key === witnessKeys[0] ? tableName : "witness",
+            replicaId: key.replicaId,
+            client,
+          }),
+          witnessKeys.indexOf(key),
+          crashed,
+        ),
         journal: new DynamoWitnessHighWaterJournal({
           tableName: "journal",
           replicaId: key.replicaId,
@@ -215,6 +243,112 @@ test("paired endpoints keep their witness heads across a control-plane restart",
     result: "head",
     counter: 3n,
   });
+});
+
+const unavailable = (error: unknown) =>
+  error instanceof WitnessServiceError && error.code === "witness_unavailable";
+
+for (const crashedReplicas of [[2], [1, 2]]) {
+  test(`a step that reached ${3 - crashedReplicas.length} of 3 replicas before a crash completes after the restart`, async (context) => {
+    const crashed = new Set<number>();
+    const start = await durable(context, crashed);
+    const phone = endpoint(9);
+    let witness = await start();
+    await witness.submit(principal, phone.register());
+    await witness.submit(principal, phone.read());
+    await witness.submit(principal, phone.advance(1n));
+
+    const pending = phone.advance(2n);
+    for (const replica of crashedReplicas) crashed.add(replica);
+    await assert.rejects(witness.submit(principal, pending));
+    crashed.clear();
+
+    witness = await start();
+    // The endpoint reads first, as it does before every mutation; the replicas left behind take
+    // the step, so all three agree on it.
+    assert.deepEqual(result(await witness.submit(principal, phone.read())), {
+      result: "head",
+      counter: 3n,
+    });
+    // The endpoint resends its pending step and gets that step's certificate.
+    assert.deepEqual(result(await witness.submit(principal, pending)), {
+      result: "advanced",
+      counter: 3n,
+    });
+    assert.deepEqual(result(await witness.submit(principal, phone.advance(3n))), {
+      result: "advanced",
+      counter: 4n,
+    });
+  });
+}
+
+test("a registration that reached some replicas before a crash completes after the restart", async (context) => {
+  const crashed = new Set<number>();
+  const start = await durable(context, crashed);
+  let witness = await start();
+  // Another pairing keeps every replica non-empty, as on a running stack, and its first read ends
+  // bootstrap.
+  const other = endpoint(10);
+  await witness.submit(principal, other.register());
+  await witness.submit(principal, other.read());
+  const phone = endpoint(11);
+  const registration = phone.register();
+  crashed.add(0);
+  await assert.rejects(witness.submit(principal, registration));
+  crashed.clear();
+
+  witness = await start();
+  assert.deepEqual(result(await witness.submit(principal, phone.read())), {
+    result: "head",
+    counter: 1n,
+  });
+  assert.deepEqual(result(await witness.submit(principal, registration)), {
+    result: "registered",
+    counter: 1n,
+  });
+  assert.deepEqual(result(await witness.submit(principal, phone.advance(1n))), {
+    result: "advanced",
+    counter: 2n,
+  });
+});
+
+test("after a split is repaired, an endpoint restored from before its pending step is caught", async (context) => {
+  const crashed = new Set<number>();
+  const start = await durable(context, crashed);
+  const phone = endpoint(12);
+  let witness = await start();
+  await witness.submit(principal, phone.register());
+  await witness.submit(principal, phone.read());
+  crashed.add(1);
+  await assert.rejects(witness.submit(principal, phone.advance(1n)));
+  crashed.clear();
+
+  witness = await start();
+  await witness.submit(principal, phone.read());
+  // A copy of the endpoint from before the pending step proposes another successor: a fork.
+  assert.equal(
+    result(await witness.submit(principal, phone.diverge(1n))).result,
+    "conflicting_successor",
+  );
+});
+
+test("a replica behind replicas that disagree with each other stays unrecovered", async (context) => {
+  const crashed = new Set<number>();
+  const start = await durable(context, crashed);
+  const phone = endpoint(13);
+  let witness = await start();
+  await witness.submit(principal, phone.register());
+  await witness.submit(principal, phone.read());
+  // Replica 0 takes one successor and replica 1 another; replica 2 takes neither.
+  crashed.add(1).add(2);
+  await assert.rejects(witness.submit(principal, phone.advance(1n)));
+  crashed.clear();
+  crashed.add(0).add(2);
+  await assert.rejects(witness.submit(principal, phone.diverge(1n)));
+  crashed.clear();
+
+  witness = await start();
+  await assert.rejects(witness.submit(principal, phone.read()), unavailable);
 });
 
 test("replicas that disagree about holding state refuse to start", async (context) => {
