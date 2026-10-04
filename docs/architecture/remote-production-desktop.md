@@ -3,7 +3,7 @@
 
 # Production remote access from macOS and Linux desktop daemons
 
-Status: proposed for architecture and security review. It extends [Production remote access from a WSL daemon](remote-production-wsl.md) to two more daemon targets and changes nothing about the WSL path. Remote access stays enabled only through the per-account opt-in, and no public support claim follows from it.
+Status: implemented in RC behind the per-account opt-in, awaiting the security review. The Linux desktop path passes the full phone E2E against GNOME Keyring in CI. The macOS path is built and fails closed until the Developer ID signed helper exists. It extends [Production remote access from a WSL daemon](remote-production-wsl.md) to two more daemon targets and changes nothing about the WSL record format. No public support claim follows from it.
 
 ## Purpose
 
@@ -85,10 +85,22 @@ Login opens the system browser with `open` on macOS and `xdg-open` on Linux. The
 
 ## Evidence
 
-In CI, before merge:
+In CI, on every change (all passing):
 
-- **Linux:** the Secret Service store and the hosted endpoint against `gnome-keyring` started under `dbus-run-session` and unlocked with a throwaway password: record lifecycle, restart, the account sealer, and failing closed when the collection is locked, when another executable owns the bus name, and when no session bus exists.
-- **macOS:** the helper and the `hosted-macos` artifact build on arm64 and x64 runners. The unsigned helper is refused by the Keychain and the endpoint fails with `secure_store_access_denied`. The generic file store's lifecycle and crash tests run against a test sealer.
+- **Linux:** against `gnome-keyring` on the user's session bus, unlocked with a throwaway password (`E2EE Linux Secret Service`):
+  - the store: record lifecycle, restart, the account sealer;
+  - failing closed when the collection is locked, when another implementation is named, and when no session bus exists;
+  - the hosted binding and the account sealing in TypeScript.
+
+  `Remote phone E2E (Linux desktop keyring)` runs all 14 phone scenarios with the daemon's keys in that keyring: pairing, turns, dropped and stalled connections, daemon, relay, and control-plane restarts, questions, sharing, a second tab, and re-pairing.
+- **macOS:** on arm64 and x64 runners (`E2EE macOS Keychain`):
+  - the helper's and the generic file store's tests;
+  - a locally built, unsigned helper is refused by the Keychain, in three places: the store (`secure_store_access_denied`), the `hosted-macos` binding, and account sealing.
+
+  The darwin Node legs build `hosted-macos` for the ABI check.
+- **WSL:** the WSL profile's record bytes, file names, and identity domain are pinned by a test. The real `axl-dpapi-helper.exe` round-trips records through the generic store.
+
+The Secret Service store reuses one validated connection and its encrypted session while the same service process owns the bus name and the collection stays unlocked, checking both on every operation. Each key rotation still writes the keyring through GNOME Keyring's own item creation and deletion.
 
 Before the opt-in is widened, on each target, recorded in `docs/evidence/`:
 
