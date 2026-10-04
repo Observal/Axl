@@ -441,6 +441,63 @@ jobs:
           path: packages/web/dist/remote-e2e-results
           retention-days: 7
 
+  remote-e2e-linux-desktop:
+    name: Remote phone E2E (Linux desktop keyring)
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: No remote-control changes
+        if: needs.changes.outputs.remote != 'true'
+        run: echo "No remote-control changes detected."
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        if: needs.changes.outputs.remote == 'true'
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        if: needs.changes.outputs.remote == 'true'
+        with:
+          standalone: true
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        if: needs.changes.outputs.remote == 'true'
+        with:
+          node-version: 24.13.1
+          cache: pnpm
+      - name: Set up Erlang and Elixir for the relay
+        if: needs.changes.outputs.remote == 'true'
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: 27.3.4.17
+          elixir-version: 1.18.5
+      - name: Install dependencies, GNOME Keyring, and the daemon's sandbox
+        if: needs.changes.outputs.remote == 'true'
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          cargo fetch --locked --manifest-path packages/e2ee/bindings/browser/scripts/wasm-bindgen-driver/Cargo.toml
+          (cd services/relay && mix deps.get --check-locked)
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends bubblewrap gnome-keyring dbus-daemon
+          # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; bubblewrap needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Pair a phone-emulated Chrome with a daemon whose keys live in the desktop keyring
+        if: needs.changes.outputs.remote == 'true'
+        run: |
+          # The store accepts only a desktop session: the user's runtime directory, its bus, and a
+          # desktop and display named in the environment.
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" "$XDG_RUNTIME_DIR"
+          export XDG_RUNTIME_DIR
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          export XDG_CURRENT_DESKTOP=GNOME DISPLAY=:99
+          dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --fork
+          printf '%s' "ci-only-keyring-password" | gnome-keyring-daemon --unlock --components=secrets
+          AXL_REMOTE_E2E_SEALER=secret-service pnpm --filter @axl/web test:remote-e2e
+      - name: Keep the stack logs and Playwright traces
+        if: failure() && needs.changes.outputs.remote == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: remote-e2e-linux-desktop
+          path: packages/web/dist/remote-e2e-results
+          retention-days: 7
+
   e2ee-browser-safari:
     name: E2EE browser (Safari WebDriver)
     needs: changes

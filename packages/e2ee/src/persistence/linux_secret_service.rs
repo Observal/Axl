@@ -13,7 +13,7 @@ use std::{
     fmt, fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use openmls_traits::{OpenMlsProvider, crypto::OpenMlsCrypto as _};
@@ -245,29 +245,42 @@ pub(crate) trait SecretServiceBackend: Send + Sync {
 
 pub(crate) struct SystemBackend {
     implementation: SecretServiceImplementation,
+    /// The last fully validated connection and its encrypted session. Opening both costs a new
+    /// bus connection, several bus calls, and a Diffie-Hellman exchange, which made every key
+    /// operation tens of milliseconds; it is reused only while the same service process still owns
+    /// the bus name, which every operation checks again.
+    validated: Mutex<Option<SystemConnection>>,
 }
 
+#[derive(Clone)]
 pub(crate) struct SystemConnection {
     connection: Connection,
     owner: String,
     implementation: SecretServiceImplementation,
+    service: Arc<SecretService<'static>>,
 }
 
 impl SystemBackend {
     fn new(implementation: SecretServiceImplementation) -> Self {
-        Self { implementation }
-    }
-}
-
-impl SecretServiceBackend for SystemBackend {
-    type Connection<'a> = SystemConnection;
-
-    fn available(&self) -> bool {
-        self.connect().is_ok()
+        Self {
+            implementation,
+            validated: Mutex::new(None),
+        }
     }
 
-    fn connect(&self) -> Result<Self::Connection<'_>, PersistenceError> {
-        validate_desktop_session()?;
+    /// The cached connection, if its service is still owned by the same process and its
+    /// collection is still unlocked; otherwise it is dropped.
+    fn reuse(&self) -> Option<SystemConnection> {
+        let mut validated = self.validated.lock().ok()?;
+        let cached = validated.clone()?;
+        if cached.verify_owner().is_ok() && cached.collection(&cached.service).is_ok() {
+            return Some(cached);
+        }
+        *validated = None;
+        None
+    }
+
+    fn open(&self) -> Result<SystemConnection, PersistenceError> {
         let connection = Connection::session().map_err(map_zbus_error)?;
         let proxy = DBusProxy::new(&connection).map_err(map_zbus_error)?;
         let own_name = connection
@@ -286,28 +299,45 @@ impl SecretServiceBackend for SystemBackend {
             )
             .map_err(map_fdo_error)?;
         validate_service_process(&proxy, &owner, self.implementation)?;
+        let service = SecretService::connect_with_existing(EncryptionType::Dh, connection.clone())
+            .map_err(map_secret_service_error)?;
         let result = SystemConnection {
             connection,
             owner: owner.to_string(),
             implementation: self.implementation,
+            service: Arc::new(service),
         };
+        // The session was opened with the process checked above, and nobody else since.
         result.verify_owner()?;
-        {
-            let service = result.service()?;
-            result.collection(&service)?;
-        }
+        result.collection(&result.service)?;
         Ok(result)
     }
 }
 
+impl SecretServiceBackend for SystemBackend {
+    type Connection<'a> = SystemConnection;
+
+    fn available(&self) -> bool {
+        self.connect().is_ok()
+    }
+
+    fn connect(&self) -> Result<Self::Connection<'_>, PersistenceError> {
+        validate_desktop_session()?;
+        if let Some(connection) = self.reuse() {
+            return Ok(connection);
+        }
+        let connection = self.open()?;
+        if let Ok(mut validated) = self.validated.lock() {
+            *validated = Some(connection.clone());
+        }
+        Ok(connection)
+    }
+}
+
 impl SystemConnection {
-    fn service(&self) -> Result<SecretService<'_>, PersistenceError> {
+    fn service(&self) -> Result<&SecretService<'static>, PersistenceError> {
         self.verify_owner()?;
-        let service =
-            SecretService::connect_with_existing(EncryptionType::Dh, self.connection.clone())
-                .map_err(map_secret_service_error)?;
-        self.verify_owner()?;
-        Ok(service)
+        Ok(&self.service)
     }
 
     fn collection<'a>(
@@ -367,7 +397,7 @@ impl ServiceConnection for SystemConnection {
         attributes: &BTreeMap<String, String>,
     ) -> Result<Vec<StoredItem>, PersistenceError> {
         let service = self.service()?;
-        let collection = self.collection(&service)?;
+        let collection = self.collection(service)?;
         let borrowed: HashMap<&str, &str> = attributes
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str()))
@@ -389,7 +419,7 @@ impl ServiceConnection for SystemConnection {
         secret: &[u8],
     ) -> Result<CreateOutcome, PersistenceError> {
         let service = self.service()?;
-        let collection = self.collection(&service)?;
+        let collection = self.collection(service)?;
         let borrowed: HashMap<&str, &str> = identity
             .attributes
             .iter()
