@@ -37,17 +37,22 @@ function settings(prepare: () => Promise<void>): HostedRemoteSettings {
 /** A paired host whose every `prepare` fails with `failure`, and the lines it logged. */
 async function pairedHost(context: TestContext, failure: () => Error) {
   const root = await mkdtemp(join(tmpdir(), "axl-remote-host-"));
-  context.after(() => rm(root, { recursive: true, force: true }));
+  let host: HostedRemoteHost | undefined;
+  // `after` hooks run in the order they are added, so one hook closes the host first: a restore
+  // still retrying would otherwise write into the directory while it is being removed.
+  context.after(async () => {
+    await host?.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
+  });
   await writeFile(join(root, "host.json"), PAIRED);
   const output: string[] = [];
-  const host = await HostedRemoteHost.open(
+  host = await HostedRemoteHost.open(
     settings(async () => {
       throw failure();
     }),
     root,
     (message) => output.push(message),
   );
-  context.after(() => host.close());
   await host.attach({} as AxlDaemon);
   return { root, host, output };
 }
