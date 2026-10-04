@@ -382,7 +382,9 @@ async function openExclusive(
   superseded: () => boolean,
 ): Promise<BrowserDeviceEndpoint | undefined> {
   const deadline = Date.now() + HANDOFF_WAIT_MS;
-  let takenOver = false;
+  // Set once this tab takes the endpoint: the lock manager may see the taken lock's release
+  // after the worker's next request, so the tab keeps trying (and taking) until this passes.
+  let takeoverDeadline: number | undefined;
   for (let round = 0; ; round += 1) {
     if (superseded() || ownedByNewer(link)) return undefined;
     if (round % 4 === 0) {
@@ -397,15 +399,17 @@ async function openExclusive(
       return await openEndpoint(binding, link);
     } catch (cause) {
       if ((cause as { readonly code?: unknown }).code !== "lifecycle_busy") throw cause;
-      if (Date.now() > deadline) {
-        if (takenOver) throw cause;
-        trace("another tab did not let go of the pairing; taking it over");
-        status("Taking over from another tab");
+      const now = Date.now();
+      if (takeoverDeadline !== undefined && now > takeoverDeadline) throw cause;
+      if (now > deadline && (takeoverDeadline === undefined || round % 4 === 0)) {
+        if (takeoverDeadline === undefined) {
+          trace("another tab did not let go of the pairing; taking it over");
+          status("Taking over from another tab");
+          takeoverDeadline = now + HANDOFF_WAIT_MS;
+        }
         await binding.takeOverDeviceEndpoint({
           cryptoSessionId: uuidToBytes(link.cryptoSessionId),
         });
-        takenOver = true;
-        continue;
       }
       await sleep(250);
     }
