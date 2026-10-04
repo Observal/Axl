@@ -175,7 +175,9 @@ function createOptions(peer, witness, operationId) {
 
 export async function runDeviceBarrierScenario() {
   const witness = new TestWitness();
-  const peer = new TestPeerDaemonFixture(0x91, Date.now());
+  // The peer daemon's clock runs behind this device's, as a laptop's can after sleep. A KeyPackage
+  // must still be accepted (this was the intermittent join failure on slow CI browsers).
+  const peer = new TestPeerDaemonFixture(0x91, Date.now() - 1_500);
   const session = peer.crypto_session_id();
   const databaseName = `axl-e2ee-production-v1:${hex(session)}`;
   const lockName = `axl-e2ee-v1:${hex(session)}`;

@@ -43,6 +43,9 @@ pub const SUITE_VALUE: u16 = 0x004e;
 pub const HANDSHAKE_MAX_BYTES: usize = 16 * 1024;
 /// KeyPackage lifetime fixed by the pairing profile.
 pub const KEY_PACKAGE_LIFETIME_SECONDS: u64 = 10 * 60;
+/// How far a daemon's and a device's clocks may disagree during pairing. Each side allows it
+/// only for the other side's timestamps; its checks against its own clock stay exact.
+pub const PAIRING_CLOCK_SKEW_SECONDS: u64 = 2 * 60;
 /// Maximum authenticated-data length.
 pub const AAD_MAX_BYTES: usize = 512;
 /// Maximum application plaintext length.
@@ -1350,12 +1353,16 @@ impl Phone {
             CoreProvider::new().map_err(|_| Error::Crypto("provider initialization failed"))?;
         ensure_suite(&provider)?;
         let (credential, signer) = make_credential(&provider, &identity)?;
+        // Starting the lifetime a little in the past lets a daemon whose clock is behind this
+        // device's accept the KeyPackage, as OpenMLS's own default lifetimes do. It still ends
+        // the full lifetime from now.
         let now_seconds = now_ms / 1_000;
+        let not_before = now_seconds.saturating_sub(PAIRING_CLOCK_SKEW_SECONDS);
         let not_after = now_seconds
             .checked_add(KEY_PACKAGE_LIFETIME_SECONDS)
             .ok_or(Error::ClockRollback)?;
         let bundle = KeyPackage::builder()
-            .key_package_lifetime(Lifetime::init(now_seconds, not_after))
+            .key_package_lifetime(Lifetime::init(not_before, not_after))
             .build(SUITE, &provider, &signer, credential)
             .map_err(|_| Error::Crypto("KeyPackage creation failed"))?;
         let bytes = bundle
@@ -1787,7 +1794,10 @@ fn validate_phone_key_package(
     }
     let lifetime = package.life_time();
     let now_seconds = now_ms / 1_000;
-    if lifetime.not_after().checked_sub(lifetime.not_before()) != Some(KEY_PACKAGE_LIFETIME_SECONDS)
+    // The lifetime starts the clock skew early; devices built before that started it now.
+    let span = lifetime.not_after().checked_sub(lifetime.not_before());
+    if (span != Some(KEY_PACKAGE_LIFETIME_SECONDS + PAIRING_CLOCK_SKEW_SECONDS)
+        && span != Some(KEY_PACKAGE_LIFETIME_SECONDS))
         || now_seconds < lifetime.not_before()
         || now_seconds >= lifetime.not_after()
     {
@@ -1941,6 +1951,37 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon consuming the KeyPackage of a phone whose clock is `ahead_ms` ahead of its own.
+    fn consume_from_phone_ahead_by(ahead_ms: u64) -> Result<PairWelcome, Error> {
+        let context = PairContext {
+            crypto_session_id: [21; 16],
+            group_id: [22; 32],
+            account_id: [23; 16],
+            installation_id: [24; 16],
+            device_id: [25; 16],
+        };
+        let phone_identity = Identity::device(
+            context.account_id,
+            context.installation_id,
+            context.device_id,
+        )?;
+        let now_ms = SystemClock.now_ms()?;
+        let (_, package) = Phone::create_at(phone_identity, now_ms + ahead_ms)?;
+        let mut daemon = Daemon::create(
+            Identity::daemon(context.account_id, context.installation_id),
+            context,
+        )?;
+        daemon.consume_key_package(package)
+    }
+
+    #[test]
+    fn a_daemon_accepts_a_phone_clock_ahead_by_up_to_the_pairing_skew() {
+        consume_from_phone_ahead_by(0).unwrap();
+        consume_from_phone_ahead_by(1_500).unwrap();
+        consume_from_phone_ahead_by((PAIRING_CLOCK_SKEW_SECONDS - 5) * 1_000).unwrap();
+        assert!(consume_from_phone_ahead_by((PAIRING_CLOCK_SKEW_SECONDS + 5) * 1_000).is_err());
+    }
 
     #[test]
     fn rejects_invalid_key_package_lifetime_and_capabilities() {
