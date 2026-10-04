@@ -70,7 +70,8 @@ token.
 token, and possession proof:
 
 - People sign in through the user pool: the daemon with `axl remote login` (the `daemon` app
-  client, returning to `http://localhost:47813/callback`), the phone on its page. The account is
+  client, returning to `http://localhost:47813/callback`), the phone on its page or in the iOS
+  app, which uses the page's client and returns to `ai.observal.axl://auth/callback`. The account is
   the pool's `sub`.
 - Remote access is opt-in. Only members of the pool's `remote` group are accepted; anyone else who
   signs in is refused. After a person's first sign-in, add them with

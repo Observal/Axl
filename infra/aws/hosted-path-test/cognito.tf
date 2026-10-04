@@ -12,6 +12,9 @@ locals {
   auth_host     = "auth.${var.domain_name}"
   # The page signs in and returns here; the fragment of a pairing link waits in session storage.
   phone_callback = "https://${var.domain_name}/remote/"
+  # The iOS app signs in with the same client through ASWebAuthenticationSession, which returns to
+  # the app's own URL scheme: Google refuses sign-in inside an embedded web view.
+  phone_app_callback = "ai.observal.axl://auth/callback"
   # `axl remote login` listens here for the redirect; Cognito allows http only for localhost.
   daemon_callback = "http://localhost:47813/callback"
 }
@@ -66,8 +69,8 @@ resource "aws_cognito_user_pool_client" "phone" {
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["code"]
   allowed_oauth_scopes                 = ["openid", "email"]
-  callback_urls                        = [local.phone_callback]
-  logout_urls                          = [local.phone_callback]
+  callback_urls                        = [local.phone_callback, local.phone_app_callback]
+  logout_urls                          = [local.phone_callback, local.phone_app_callback]
   supported_identity_providers         = [aws_cognito_identity_provider.google[0].provider_name]
   explicit_auth_flows                  = ["ALLOW_REFRESH_TOKEN_AUTH"]
   prevent_user_existence_errors        = "ENABLED"
