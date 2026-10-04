@@ -316,6 +316,8 @@ export class HostedRemoteHost implements RemotePairingService {
   #restoreTimer: ReturnType<typeof setTimeout> | undefined;
   /** The restore in progress; a new pairing waits for it so it cannot revive a replaced session. */
   #restoreRun: Promise<void> = Promise.resolve();
+  /** Set by `close`: a closed host never restores or retries again. */
+  #closed = false;
   #restoring = false;
   /** A failed `/remote` interrupted a pairing it never replaced; restore it once the start settles. */
   #restoreAfterStart = false;
@@ -397,7 +399,7 @@ export class HostedRemoteHost implements RemotePairingService {
   /** Reopen a completed pairing, retrying with backoff until it succeeds or a new pairing starts. */
   async #restore(attempt: number): Promise<void> {
     this.#restoreTimer = undefined;
-    if (this.#session !== undefined || this.#starting !== undefined) return;
+    if (this.#closed || this.#session !== undefined || this.#starting !== undefined) return;
     const state = await this.#readState();
     if (state?.phase !== "paired") return;
     this.#restoring = true;
@@ -411,6 +413,7 @@ export class HostedRemoteHost implements RemotePairingService {
       this.#log(`remote: restored paired session ${state.cryptoSessionId}`);
     } catch (cause) {
       await this.#closeSession();
+      if (this.#closed) return;
       const delay = Math.min(RESTORE_RETRY_MAX_MS, 2_000 * 2 ** attempt);
       this.#fail(
         `remote: could not restore the paired session, retrying in ${Math.round(delay / 1_000)} s: ${describe(cause)}`,
@@ -488,7 +491,10 @@ export class HostedRemoteHost implements RemotePairingService {
 
   /** Stop retrying and close the current session. */
   async close(): Promise<void> {
+    this.#closed = true;
     this.#cancelRestore();
+    // A restore already under way finishes, without retrying, before its session is closed.
+    await this.#restoreRun;
     await this.#closeSession();
     await this.#logWrites;
   }
