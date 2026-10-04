@@ -10,6 +10,7 @@ import test, { type TestContext } from "node:test";
 import { type AxlDaemon, RemoteDeviceAuthorityStore, RemotePairingStartError } from "@axl/daemon";
 import { parseDeviceId, parseInstallationId, parseSessionId } from "@axl/protocol";
 
+import { RemoteAccessBusyError } from "../src/remote-claim.ts";
 import { HostedRemoteHost, type HostedRemoteSettings } from "../src/remote-host.ts";
 
 const PAIRED = JSON.stringify({
@@ -101,6 +102,39 @@ test("a /remote refused for the account names the reason", async (context) => {
     name: "RemotePairingStartError",
     message: "Remote access is not enabled for this account.",
   });
+});
+
+test("a /remote while another daemon serves remote access names that daemon and keeps the pairing", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-remote-host-"));
+  let host: HostedRemoteHost | undefined;
+  context.after(async () => {
+    await host?.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
+  });
+  await writeFile(join(root, "host.json"), PAIRED);
+  const busy = new RemoteAccessBusyError(4242, "/home/user/.axl/unsafe");
+  let opened = 0;
+  host = await HostedRemoteHost.open(
+    {
+      ...settings(async () => undefined),
+      claim: async () => {
+        throw busy;
+      },
+      endpoint: async () => {
+        opened += 1;
+        throw new Error("no endpoint in this test");
+      },
+    },
+    root,
+  );
+  await host.attach({} as AxlDaemon);
+  await assert.rejects(host.start(), {
+    name: "RemotePairingStartError",
+    message: busy.message,
+  });
+  assert.equal(opened, 0, "no session was opened while the other daemon held remote access");
+  assert.equal(await readFile(join(root, "host.json"), "utf8"), PAIRED, "nothing was replaced");
+  assert.match(host.status().lastError?.message ?? "", /another Axl daemon \(process 4242/u);
 });
 
 test("unpairing forgets the paired device and ends its shares", async (context) => {

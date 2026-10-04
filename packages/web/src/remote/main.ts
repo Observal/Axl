@@ -26,8 +26,10 @@
  * Phones suspend pages and drop sockets, so the page keeps its own connection honest: it probes
  * the relay on a heartbeat and whenever it becomes visible again, the session resends requests
  * the daemon has not answered, and an open conversation resumes from its last acknowledged cursor
- * after any reconnect. One tab owns the pairing at a time; a newer tab asks the older one to let
- * go of the endpoint instead of failing on its lock.
+ * after any reconnect. One tab owns the pairing at a time, and the tab opened last wins: it asks
+ * older tabs to let go of the endpoint, takes it from one that never answers (a tab the phone
+ * suspended in the background), and marks itself the owner, so an older tab that wakes up later
+ * stops instead of reconnecting over it. "Use this tab" reloads, which makes that tab the newest.
  */
 
 import {
@@ -82,6 +84,7 @@ interface DeviceBinding {
   openDeviceEndpoint(session: {
     readonly cryptoSessionId: Uint8Array;
   }): Promise<BrowserDeviceEndpoint>;
+  takeOverDeviceEndpoint(session: { readonly cryptoSessionId: Uint8Array }): Promise<void>;
 }
 
 /** What `session.subscribe` answers: the subscription and, for a fresh view, its snapshot. */
@@ -112,11 +115,14 @@ const SEND_TIMEOUT_MS = 30 * 60_000;
 const SEND_REOPEN_ATTEMPTS = 2;
 /** Probe the relay this often; a suspended page's socket usually dies without a close event. */
 const HEARTBEAT_MS = 25_000;
-/** How long a new tab waits for an older one to release the endpoint. */
-const HANDOFF_WAIT_MS = 5_000;
+/** How long a new tab waits for an older one to release the endpoint before taking it. */
+const HANDOFF_WAIT_MS = 4_000;
 /** How long the pairing waits for the daemon to answer before resending its activation. */
 const CONFIRM_TIMEOUT_MS = 5_000;
 const TAB_CHANNEL = "axl-remote-tabs";
+/** The tab that owns the pairing, as `<crypto session>/<tab>`; other tabs see it change. */
+const OWNER_KEY = "axl.remote.owner";
+const MOVED = "This pairing moved to another tab";
 /**
  * Acknowledge a view's cursor this long after new events arrive. Every acknowledgement is a full
  * encrypted round trip through the phone's one witness queue, so it waits for any request the page
@@ -127,6 +133,8 @@ const ACK_DELAY_MS = 10_000;
 /** A sent prompt the transcript never showed stops being drawn as pending after this long. */
 const PENDING_SETTLE_MS = 15_000;
 const TAB_ID = crypto.randomUUID();
+/** When this tab loaded; between tabs of one pairing, the later one wins. */
+const TAB_STARTED = Date.now();
 const STEP_LABELS: Readonly<Record<RemoteBrowserPairingStep, string>> = {
   claim: "Create this device's pairing claim",
   notice: "Reach the daemon through the relay",
@@ -186,7 +194,12 @@ function connection(state: "online" | "connecting" | "offline"): void {
   view.connection.dataset.state = state;
 }
 
-function status(text: string, tone: "normal" | "error" = "normal"): void {
+/** Set once this tab has let go of the pairing; whatever was in flight then fails quietly. */
+let letGo = false;
+
+function status(text: string, tone: "normal" | "error" = "normal", final = false): void {
+  // Requests cut off when the tab let go must not replace the reason it shows.
+  if (letGo && !final) return;
   view.status.textContent = text;
   view.status.classList.toggle("error", tone === "error");
 }
@@ -307,26 +320,108 @@ function tabChannel(): BroadcastChannel | undefined {
   return typeof BroadcastChannel === "function" ? new BroadcastChannel(TAB_CHANNEL) : undefined;
 }
 
+/** Whether the tab that loaded at `started` came after this one. */
+function newerTab(started: unknown, tab: unknown): boolean {
+  return (
+    typeof started === "number" &&
+    typeof tab === "string" &&
+    (started > TAB_STARTED || (started === TAB_STARTED && tab > TAB_ID))
+  );
+}
+
+function markOwner(link: RemotePairingLink): void {
+  try {
+    localStorage.setItem(
+      OWNER_KEY,
+      JSON.stringify({ session: link.cryptoSessionId, tab: TAB_ID, started: TAB_STARTED }),
+    );
+  } catch {
+    // Without storage, the tab channel and the endpoint lock still keep one owner.
+  }
+}
+
+/** The tab marked as owning this pairing, if one is. */
+function owner(
+  link: RemotePairingLink,
+): { readonly tab?: unknown; readonly started?: unknown } | undefined {
+  try {
+    const value = JSON.parse(localStorage.getItem(OWNER_KEY) ?? "null") as {
+      readonly session?: unknown;
+      readonly tab?: unknown;
+      readonly started?: unknown;
+    } | null;
+    return value?.session === link.cryptoSessionId ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether another tab has taken this pairing since this one did. */
+function ownedElsewhere(link: RemotePairingLink): boolean {
+  const current = owner(link);
+  return current !== undefined && current.tab !== TAB_ID;
+}
+
+/** Whether a tab opened after this one already owns the pairing. */
+function ownedByNewer(link: RemotePairingLink): boolean {
+  const current = owner(link);
+  return current !== undefined && newerTab(current.started, current.tab);
+}
+
 /**
  * Open the endpoint, first asking any older tab holding this pairing to let go. The binding keeps
- * one exclusive lock per pairing, so without the handoff a second tab fails with lifecycle_busy.
+ * one exclusive lock per pairing. The request repeats while this tab waits, for a tab that was
+ * still starting when it was first sent; a tab that never answers, because the phone suspended it,
+ * loses the lock to this one, and its endpoint fails closed. Resolves undefined, having taken
+ * nothing, once a newer tab wants the pairing.
  */
 async function openExclusive(
   binding: DeviceBinding,
   link: RemotePairingLink,
   channel: BroadcastChannel | undefined,
-): Promise<BrowserDeviceEndpoint> {
-  channel?.postMessage({ type: "takeover", session: link.cryptoSessionId, tab: TAB_ID });
+  superseded: () => boolean,
+): Promise<BrowserDeviceEndpoint | undefined> {
   const deadline = Date.now() + HANDOFF_WAIT_MS;
-  for (;;) {
+  let takenOver = false;
+  for (let round = 0; ; round += 1) {
+    if (superseded() || ownedByNewer(link)) return undefined;
+    if (round % 4 === 0) {
+      channel?.postMessage({
+        type: "takeover",
+        session: link.cryptoSessionId,
+        tab: TAB_ID,
+        started: TAB_STARTED,
+      });
+    }
     try {
       return await openEndpoint(binding, link);
     } catch (cause) {
       if ((cause as { readonly code?: unknown }).code !== "lifecycle_busy") throw cause;
-      if (Date.now() > deadline) throw cause;
+      if (Date.now() > deadline) {
+        if (takenOver) throw cause;
+        trace("another tab did not let go of the pairing; taking it over");
+        status("Taking over from another tab");
+        await binding.takeOverDeviceEndpoint({
+          cryptoSessionId: uuidToBytes(link.cryptoSessionId),
+        });
+        takenOver = true;
+        continue;
+      }
       await sleep(250);
     }
   }
+}
+
+/** Show that another tab has this pairing now, with a button to take it back. */
+function showMoved(): void {
+  letGo = true;
+  connection("offline");
+  show("pairing");
+  view.steps.replaceChildren();
+  status(MOVED, "normal", true);
+  view.hint.textContent = "Tap the button to use this pairing here instead.";
+  view.retry.textContent = "Use this tab";
+  view.retry.hidden = false;
 }
 
 /** This device's key for `deviceId`, created on first use and kept in IndexedDB. */
@@ -1105,6 +1200,31 @@ async function main(): Promise<void> {
     view.hint.textContent = "Run /remote in the Axl terminal again and open the new link.";
     return;
   }
+  // A newer tab for this pairing may ask for it at any point, even while this one is starting.
+  const channel = tabChannel();
+  let superseded = false;
+  let onTakeover = () => {
+    superseded = true;
+  };
+  if (channel !== undefined) {
+    channel.onmessage = (event: MessageEvent) => {
+      const message = event.data as {
+        type?: unknown;
+        session?: unknown;
+        tab?: unknown;
+        started?: unknown;
+      };
+      // Only a newer tab takes the pairing; an older one that is still starting waits for this
+      // tab's owner mark and gives up.
+      if (
+        message.type === "takeover" &&
+        message.session === link.cryptoSessionId &&
+        newerTab(message.started, message.tab)
+      ) {
+        onTakeover();
+      }
+    };
+  }
   // Enrollment comes first: a link already used on another device must be refused before this
   // browser touches any E2EE or witness state for its device ID.
   const token = tokenFor(signIn, link);
@@ -1133,46 +1253,58 @@ async function main(): Promise<void> {
       if (document.visibilityState === "visible") keepFresh();
     });
   }
-  const channel = tabChannel();
   status("Opening this device's keys");
-  const endpoint = traced(await openExclusive(binding, link, channel));
+  const opened = await openExclusive(binding, link, channel, () => superseded);
+  if (opened === undefined || superseded) {
+    // A newer tab asked for the pairing while this one was starting.
+    relay.close();
+    await opened?.close().catch(() => undefined);
+    showMoved();
+    return;
+  }
+  markOwner(link);
+  const endpoint = traced(opened);
   const session = new RemoteBrowserSession({ endpoint, relay, ...link, trace });
 
   // A newer tab for the same pairing takes over; this one lets go of the endpoint and its lock.
   let released = false;
-  const release = async (reason: string) => {
+  const release = async (moved: boolean) => {
     if (released) return;
     released = true;
+    letGo = true;
     session.close();
     relay.close();
     await endpoint.close().catch(() => undefined);
+    if (moved) {
+      showMoved();
+      return;
+    }
     show("pairing");
     view.steps.replaceChildren();
-    status(reason);
+    status("Paused", "normal", true);
     view.hint.textContent = "Tap the button to use this pairing here instead.";
     view.retry.textContent = "Use this tab";
     view.retry.hidden = false;
   };
-  if (channel !== undefined) {
-    channel.onmessage = (event: MessageEvent) => {
-      const message = event.data as { type?: unknown; session?: unknown; tab?: unknown };
-      if (
-        message.type === "takeover" &&
-        message.session === link.cryptoSessionId &&
-        message.tab !== TAB_ID
-      ) {
-        void release("This pairing moved to another tab");
-      }
-    };
-  }
+  onTakeover = () => void release(true);
+  // A tab that missed the request, because the phone had suspended it, sees the new owner here.
+  addEventListener("storage", (event) => {
+    if (event.key === OWNER_KEY && ownedElsewhere(link)) void release(true);
+  });
   // A page restored from the back-forward cache let go of everything when it was hidden.
-  addEventListener("pagehide", () => void release("Paused"));
+  addEventListener("pagehide", () => void release(false));
   addEventListener("pageshow", (event) => {
     if (event.persisted) location.reload();
   });
 
   relay.onState((state) => {
     trace(`relay ${state}`);
+    if (released) return;
+    // Another tab connecting replaces this one's relay route; reconnecting would replace it back.
+    if (state !== "connected" && ownedElsewhere(link)) {
+      void release(true);
+      return;
+    }
     connection(state === "connected" ? "online" : "connecting");
     if (state === "reconnecting") status("Reconnecting to the relay");
     else if (state === "connected" && view.status.textContent === "Reconnecting to the relay") {
@@ -1191,7 +1323,9 @@ async function main(): Promise<void> {
   // A phone that wakes the page or regains its network checks the socket at once, rather than
   // waiting for the next heartbeat to notice it died while suspended.
   const wake = () => {
-    if (document.visibilityState === "visible" && !released) void relay.checkAlive();
+    if (document.visibilityState !== "visible" || released) return;
+    if (ownedElsewhere(link)) void release(true);
+    else void relay.checkAlive();
   };
   document.addEventListener("visibilitychange", wake);
   addEventListener("online", wake);
@@ -1226,6 +1360,8 @@ addEventListener("hashchange", () => location.reload());
 view.retry.addEventListener("click", () => location.reload());
 
 main().catch((cause: unknown) => {
+  // A tab that handed the pairing over already says so; what it was doing then was cut off.
+  if (letGo) return;
   connection("offline");
   const code = (cause as { readonly code?: unknown }).code;
   const known = typeof code === "string" && REFUSALS[code] !== undefined;

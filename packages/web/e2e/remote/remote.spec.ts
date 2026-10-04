@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-
+import type { SessionId } from "@axl/sdk";
 import {
   type Browser,
   type BrowserContext,
@@ -18,8 +18,6 @@ import {
   type Page,
   test,
 } from "@playwright/test";
-
-import type { SessionId } from "@axl/sdk";
 
 import { type RemoteStack, startStack } from "./stack.ts";
 
@@ -231,6 +229,75 @@ test("a second tab takes over and sees every reply exactly once", async () => {
     await expect(replies(second, prompt), prompt).toHaveCount(1);
   }
   await second.close();
+});
+
+test("tabs opened back to back: the newest one works and the others say why", async () => {
+  test.setTimeout(180_000);
+  const tabs: Page[] = [];
+  for (let index = 0; index < 3; index += 1) {
+    const tab = await context.newPage();
+    await tab.goto(`${stack.origin}/remote/?debug`);
+    tabs.push(tab);
+    await delay(300);
+  }
+  const newest = tabs[2] as Page;
+  await expect(newest.locator("#thread")).toBeVisible({ timeout: 60_000 });
+  await through("newest of three tabs", newest, "p9b in the newest tab", 60_000);
+  for (const older of [page, ...tabs.slice(0, 2)]) {
+    await expect(older.locator("#status")).toHaveText(/moved to another tab/u, { timeout: 30_000 });
+    await expect(older.locator("#retry")).toHaveText("Use this tab");
+  }
+  for (const tab of tabs) await tab.close();
+});
+
+test("a tab that never lets go loses the pairing to a new one, and stays out when it wakes", async () => {
+  test.setTimeout(240_000);
+  // A suspended tab neither hears other tabs nor releases the endpoint: no tab channel, frozen.
+  const stuck = await context.newPage();
+  await stuck.addInitScript(() => {
+    Reflect.deleteProperty(globalThis, "BroadcastChannel");
+  });
+  await stuck.goto(`${stack.origin}/remote/?debug`);
+  await expect(stuck.locator("#thread")).toBeVisible({ timeout: 60_000 });
+  const lifecycle = await context.newCDPSession(stuck);
+  await lifecycle.send("Page.setWebLifecycleState", { state: "frozen" });
+
+  const fresh = await context.newPage();
+  const started = Date.now();
+  await fresh.goto(`${stack.origin}/remote/?debug`);
+  await expect(fresh.locator("#thread")).toBeVisible({ timeout: 60_000 });
+  timings["took over a stuck tab"] = Date.now() - started;
+  await through("beside a stuck tab", fresh, "p9c beside a stuck tab", 60_000);
+
+  // Woken, the old tab sees the new owner and stops instead of reconnecting over it.
+  await lifecycle.send("Page.setWebLifecycleState", { state: "active" });
+  await lifecycle.detach();
+  await stuck.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(stuck.locator("#status")).toHaveText(/moved to another tab/u, { timeout: 30_000 });
+  await delay(10_000);
+  await through("after the stuck tab woke", fresh, "p9d after the stuck tab woke", 60_000);
+  await stuck.close();
+  await fresh.close();
+});
+
+test("a second daemon's /remote is refused while the first serves the phone", async () => {
+  test.setTimeout(180_000);
+  const current = await context.newPage();
+  await current.goto(`${stack.origin}/remote/?debug`);
+  await expect(current.locator("#thread")).toBeVisible({ timeout: 60_000 });
+  // `axl --unsafe` runs its own daemon, with its own state, for the same installation.
+  const unsafe = await stack.startUnsafeDaemon();
+  try {
+    const other = await unsafe.createSession();
+    await assert.rejects(unsafe.pair(other), /another Axl daemon \(process \d+/u);
+    assert.equal((await unsafe.remoteStatus()).phase, "unpaired");
+    // The first daemon kept its relay route: the phone gets through without a reconnect.
+    await through("second daemon refused", current, "p9e beside a second daemon", 30_000);
+    assert.equal((await stack.remoteStatus()).relay, "connected");
+  } finally {
+    await unsafe.stop();
+  }
+  await current.close();
 });
 
 test("pairing again moves the daemon to the new phone and locks the old one out", async ({

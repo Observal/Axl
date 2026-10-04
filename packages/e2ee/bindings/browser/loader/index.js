@@ -434,6 +434,26 @@ export const openDeviceEndpoint = ({ cryptoSessionId } = {}) =>
     nullResult(value);
     return deviceEndpointHandle();
   });
+/**
+ * Take a crypto session's endpoint from another tab or window of this browser profile that holds
+ * it and does not let go, such as a background tab the browser suspended. The worker there loses
+ * the session's lifetime lock, so its endpoint fails closed and later calls are refused, exactly as
+ * for any lost lock; committed state is not touched. Resolves once the lock is free, after which
+ * `openDeviceEndpoint` can take it.
+ */
+export const takeOverDeviceEndpoint = async ({ cryptoSessionId } = {}) => {
+  if (!(cryptoSessionId instanceof Uint8Array) || cryptoSessionId.byteLength !== 16) {
+    throw new AxlE2eeError("invalid_argument");
+  }
+  if (!globalThis.navigator?.locks) throw new AxlE2eeError("storage_unavailable");
+  // The name the worker's store holds for the endpoint's lifetime (worker/storage.js).
+  const sessionHex = [...cryptoSessionId].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  await globalThis.navigator.locks.request(
+    `axl-e2ee-v1:${sessionHex}`,
+    { mode: "exclusive", steal: true },
+    () => undefined,
+  );
+};
 export const closeBrowserBinding = () => {
   if (state === "closed") return;
   state = "closed";
