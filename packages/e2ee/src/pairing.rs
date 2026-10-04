@@ -313,8 +313,16 @@ impl PairingInvitation {
         self.verify_at(now_ms)
     }
 
+    /// A device's check of the daemon's invitation against the device's own clock, which may be
+    /// up to `PAIRING_CLOCK_SKEW_SECONDS` behind the daemon's. The daemon keeps its exact checks.
     pub(crate) fn verify_at(&self, now_ms: u64) -> Result<(), PairingError> {
-        self.validate_time(now_ms)?;
+        self.validate_time_shape()?;
+        if now_ms.saturating_add(crate::PAIRING_CLOCK_SKEW_SECONDS * 1_000) < self.issued_at_ms {
+            return Err(PairingError::ClockRollback);
+        }
+        if now_ms >= self.expires_at_ms {
+            return Err(PairingError::Expired);
+        }
         self.verify_signature()
     }
 
@@ -1540,7 +1548,16 @@ mod tests {
             extended.validate_time_shape(),
             Err(PairingError::InvalidTime)
         );
-        fixture.clock.set(fixture.invitation.issued_at_ms - 1);
+        // A device clock may be behind the daemon's by up to the pairing skew, and no further.
+        let skew_ms = crate::PAIRING_CLOCK_SKEW_SECONDS * 1_000;
+        fixture.clock.set(fixture.invitation.issued_at_ms - skew_ms);
+        fixture
+            .invitation
+            .verify_with_clock(fixture.clock.as_ref())
+            .unwrap();
+        fixture
+            .clock
+            .set(fixture.invitation.issued_at_ms - skew_ms - 1);
         assert_eq!(
             fixture.invitation.verify_with_clock(fixture.clock.as_ref()),
             Err(PairingError::ClockRollback)
