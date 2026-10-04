@@ -83,6 +83,8 @@ import {
   uuidToBytes,
 } from "@axl/sdk";
 
+import type { RemoteAccessClaim } from "./remote-claim.ts";
+
 /** Version 2 records the device ID minted for each pairing. */
 const STATE_VERSION = 2;
 const DEVICE_SCOPES: readonly RemoteDeviceScope[] = ["observe", "steer"];
@@ -148,7 +150,9 @@ function startFailure(cause: unknown, origin: string, logPath: string): RemotePa
         ? "Remote access is not enabled for this account."
         : code === "helper_unavailable"
           ? `The key helper is not available. Details are in ${logPath}.`
-          : `Remote pairing could not start. Details are in ${logPath}.`;
+          : code === "remote_busy" && cause instanceof Error
+            ? cause.message
+            : `Remote pairing could not start. Details are in ${logPath}.`;
   return new RemotePairingStartError(reason, { cause });
 }
 
@@ -212,6 +216,11 @@ export interface HostedRemoteSettings {
   readonly linkAccessToken?: string;
   /** Run before a pairing starts or a paired session is restored; it may run again. */
   prepare?(): Promise<void>;
+  /**
+   * Claim remote access among the user's daemons before serving a session, held until the session
+   * closes. It rejects with code `remote_busy` while another daemon serves this installation.
+   */
+  claim?(): Promise<RemoteAccessClaim>;
   /** The daemon endpoint for one crypto session, with its storage under `root`. */
   endpoint(
     root: string,
@@ -323,6 +332,8 @@ export class HostedRemoteHost implements RemotePairingService {
   #restoreAfterStart = false;
   /** The device of the completed pairing, whether or not its session is being served yet. */
   #paired: DeviceId | undefined;
+  /** This daemon's claim on remote access, held while it has a session open. */
+  #claim: RemoteAccessClaim | undefined;
 
   private constructor(
     config: HostedRemoteSettings,
@@ -512,6 +523,8 @@ export class HostedRemoteHost implements RemotePairingService {
     // One pairing at a time: the device of the pairing this one replaces loses access for good.
     try {
       await this.#config.prepare?.();
+      // Before the current pairing is replaced: another daemon serving remote access keeps it.
+      await this.#acquireClaim();
     } catch (cause) {
       this.#fail(`remote: pairing could not start: ${describe(cause)}`);
       // Nothing about the current pairing has changed yet, so go back to serving it.
@@ -588,7 +601,18 @@ export class HostedRemoteHost implements RemotePairingService {
     this.#log(`remote: device ${deviceId} revoked`);
   }
 
+  async #acquireClaim(): Promise<void> {
+    if (this.#claim === undefined) this.#claim = await this.#config.claim?.();
+  }
+
+  async #releaseClaim(): Promise<void> {
+    const claim = this.#claim;
+    this.#claim = undefined;
+    await claim?.release().catch(() => undefined);
+  }
+
   async #openSession(cryptoSessionId: CryptoSessionId, deviceId: DeviceId): Promise<Session> {
+    await this.#acquireClaim();
     const endpoint = await this.#config.endpoint(
       join(this.#root, "sessions", cryptoSessionId),
       uuidToBytes(this.#config.accountId),
@@ -705,6 +729,12 @@ export class HostedRemoteHost implements RemotePairingService {
       return;
     }
     const envelope = parseRemoteE2eeEnvelope(delivery.opaquePayload);
+    if (envelope.messageClass === "application_request" && session.claimHash !== undefined) {
+      // The device sends its first request right behind its activation and resends both until a
+      // request is answered. One that arrives first, because the relay lost the activation, is
+      // dropped here and comes again after the activation.
+      return;
+    }
     if (envelope.messageClass !== "pair_activation" || session.claimHash === undefined) {
       throw new Error(`Unexpected ${envelope.messageClass} before pairing completed`);
     }
@@ -822,10 +852,12 @@ export class HostedRemoteHost implements RemotePairingService {
   async #closeSession(): Promise<void> {
     const session = this.#session;
     this.#session = undefined;
-    if (session === undefined) return;
-    session.relay.close();
-    if (session.bridge === undefined) session.endpoint.close();
-    else await session.bridge.shutdown();
+    if (session !== undefined) {
+      session.relay.close();
+      if (session.bridge === undefined) session.endpoint.close();
+      else await session.bridge.shutdown();
+    }
+    await this.#releaseClaim();
   }
 
   /** Forget every session directory except `keep`. */

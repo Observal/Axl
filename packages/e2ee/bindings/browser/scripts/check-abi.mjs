@@ -227,6 +227,7 @@ const valueExports = [
   "inspectPairingInvitation",
   "openDaemonEndpoint",
   "openDeviceEndpoint",
+  "takeOverDeviceEndpoint",
 ].sort();
 const declared = [...declarations.matchAll(/^export declare (?:class|const|function) ([A-Za-z0-9_]+)/gmu)]
   .map((match) => match[1])

@@ -729,9 +729,10 @@ export async function startStack(directory) {
     });
   }
   const socketPath = join(home, ".axl/axl.sock");
-  const startDaemon = async () => {
+  const startDaemon = async (unsafe = false) => {
+    const target = unsafe ? join(home, ".axl/unsafe/axl.sock") : socketPath;
     const daemon = new Service(
-      "daemon",
+      unsafe ? "daemon-unsafe" : "daemon",
       process.execPath,
       [
         join(repositoryRoot, "packages/cli/dist/main.js"),
@@ -742,6 +743,7 @@ export async function startStack(directory) {
         "echo",
         "--thinking",
         "off",
+        ...(unsafe ? ["--unsafe"] : []),
       ],
       {
         env: {
@@ -764,7 +766,7 @@ export async function startStack(directory) {
     await until(
       "the daemon socket",
       async () => {
-        const client = await connectUnixClient(socketPath);
+        const client = await connectUnixClient(target);
         client.close();
         return true;
       },
@@ -774,8 +776,8 @@ export async function startStack(directory) {
   };
   let daemon = await startDaemon();
 
-  const client = async (work) => {
-    const connected = await connectUnixClient(socketPath);
+  const client = async (work, path = socketPath) => {
+    const connected = await connectUnixClient(path);
     try {
       return await work(connected);
     } finally {
@@ -814,6 +816,33 @@ export async function startStack(directory) {
       ).sessionId,
     dropConnections: (side = "all") => originServer.drop(side),
     stallConnections: (side = "all") => originServer.stall(side),
+    /** A second daemon for the same user, as `axl --unsafe` starts one, with its own state. */
+    async startUnsafeDaemon() {
+      const extra = await startDaemon(true);
+      const path = join(home, ".axl/unsafe/axl.sock");
+      return {
+        createSession: async (): Promise<SessionId> =>
+          (
+            await client(
+              (connected) =>
+                connected.request(
+                  "session.create",
+                  { cwd: workspace },
+                  { idempotencyKey: randomUUID() },
+                ),
+              path,
+            )
+          ).sessionId,
+        pair: (sessionId: SessionId) =>
+          client(
+            async (connected) =>
+              (await connected.startRemotePairing({ shareSessionId: sessionId })).link,
+            path,
+          ),
+        remoteStatus: () => client((connected) => connected.remoteStatus(), path),
+        stop: () => extra.stop(),
+      };
+    },
     async restartDaemon() {
       await daemon.stop();
       daemon = await startDaemon();

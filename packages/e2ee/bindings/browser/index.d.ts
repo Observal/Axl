@@ -164,5 +164,12 @@ export declare function createDeviceEndpoint(
 export declare function openDeviceEndpoint(session: {
   readonly cryptoSessionId: Uint8Array;
 }): Promise<DeviceEndpoint>;
+/**
+ * Take a crypto session's endpoint from another tab of this profile that does not let go; that
+ * tab's endpoint fails closed as for any lost lock.
+ */
+export declare function takeOverDeviceEndpoint(session: {
+  readonly cryptoSessionId: Uint8Array;
+}): Promise<void>;
 /** Permanently closes this module instance. Repeated close calls are harmless. */
 export declare function closeBrowserBinding(): void;
