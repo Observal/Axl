@@ -90,6 +90,8 @@ Remote access is opt-in per person: the control plane accepts a token only when 
 
 The control plane never accepts a static account token in production.
 
+One daemon at a time serves remote access for an installation. A user can run several daemons, for example `axl` and `axl --unsafe`, each with its own state directory and so its own pairing, but they share the installation and its relay identity; two connected at once would replace each other's relay route without end and neither phone would get through. The daemon serving remote access holds a claim file in `~/.axl/remote/`, which names its process and state directory. Another daemon's `/remote` is refused with that name, and its restore waits until the claim is released or its owner has exited.
+
 ## Production control plane
 
 A production runtime replaces the deployment-test runtime's single configured account:
@@ -106,6 +108,8 @@ It replaces the deployment-test runtime on the existing stack (`infra/aws/hosted
 ## Witness
 
 The witness keeps its current shape: three replicas inside the control plane, each with its own Ed25519 signing key and its own DynamoDB records and high-water journal, recovering lineage by lineage after a restart. The gateway requires all three receipts.
+
+A restart can find a lineage split: the process stopped after some replicas stored a step and before the rest did. No certificate was issued for that step, and the endpoint still holds it pending. Recovery needs all three replicas to agree, so before it runs, the gateway brings the replicas left behind forward by that same endpoint-signed step. A replica takes it only for a lineage it has not recovered, only as a direct successor of its own head, and only when fresh heads that both other replicas signed for one endpoint-signed read each sit at its head or at that successor. A registration that some replicas missed is completed as an ordinary registration, since they never held the lineage. Anything else, such as two replicas holding different successors, is left unrecovered and the endpoint fails closed. No replica moves backward and every head is one the endpoint signed, so rollback detection is unchanged: an endpoint restored from before its pending step proposes a conflicting successor and is caught.
 
 This does not meet the RFC's "independently administered" requirement. One account's credentials can reach all three replicas, so they protect against a lost or rolled-back table, not against a compromised operator account. Spreading the replicas over regions of the same account was considered and rejected for now: it would add two cross-region round trips to every message and make any one region an outage for all of remote access, while buying no independence. Three replicas in separately administered accounts, each its own service, are a prerequisite for widening the opt-in beyond the owner.
 

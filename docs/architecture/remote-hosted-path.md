@@ -3,7 +3,7 @@
 
 # Remote hosted-path checkpoint
 
-Status: real E2EE integration adapters implemented with local test stores; production startup disabled
+Status: checkpoint record from the Session 60 integration. The production path it led to is described in [Production remote access from a WSL daemon](remote-production-wsl.md), [from macOS and Linux desktop daemons](remote-production-desktop.md), and [Pair once, share per session](remote-session-sharing.md). The gates below record how each one was settled.
 
 ## Scope
 
@@ -88,12 +88,14 @@ Every sealed envelope costs a native endpoint transaction, a witness round, and 
 - **Superseded grants.** An application envelope sealed under an older hosted grant generation is never opened or executed. The bridge answers it once per operation with `daemon_rejected` (`stale_grant_generation`), sealed under the current generation and sent to the frame's source route without moving the reply route. The SDK removes the matching record from the outbox and reports the request as failed, instead of retrying ciphertext that can never be accepted. The bridge remembers the last 256 rejected operations; each rejection is still bounded by the sender's relay frame budget. An envelope from a generation ahead of the daemon's is refused without a reply.
 - **Route following.** The daemon follows the relay's route view for the paired device. A device that reconnects receives deliveries on its new route before it sends anything. When the device route disappears, the bridge keeps the last one and sends fail at the relay until the device returns.
 
-## Remaining gates
+## Gates
 
-Before production remote control:
+This checkpoint listed five gates before production remote control. Where they stand:
 
-- Person 1 must provide the reviewed OpenMLS prepared-envelope transaction and browser/WASM persistence strategy.
-- MLS application, Update, commit, and epoch-ready delivery classes need an ordered priority contract.
-- Production identity, datastore, workload authentication, quotas, deployment, and TLS termination must be selected.
-- Permission lifecycle, action-digest binding, policy generations, and race resolution must be implemented and reviewed.
-- Ordinary-session remote exposure must receive an explicit enablement review.
+- **Browser persistence:** settled. The worker barrier and the IndexedDB strategy in [Endpoint E2EE platform bindings](e2ee-platform-bindings.md) are implemented, including one tab per pairing: a newer tab takes the endpoint's lifetime lock from an older one, and the older endpoint fails closed.
+- **Delivery-class priority:** still open as a written contract. The daemon delivery shape above orders replies after the deliveries that preceded them.
+- **Production identity, datastore, and deployment:** settled. Accounts sign in through Cognito, the daemon admits its relay connections with its installation key, tickets, the witness, and its journal live in DynamoDB, and the stack serves TLS on its own domain.
+- **Permission lifecycle:** not needed for the first release. The phone answers only the agent's questions; it never approves tool actions.
+- **Ordinary-session exposure:** settled by sharing per session. The phone reaches only the sessions where `/remote` ran, a share ends after 24 hours idle, and remote access stays behind the per-account opt-in.
+
+The gates that remain are the evidence runs and the independent security review in the WSL and desktop documents.
