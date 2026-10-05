@@ -204,7 +204,7 @@ SPDX-License-Identifier = "Apache-2.0"
 
 # The mascot atlases and frame packs are images and JSON with no room for a header.
 [[annotations]]
-path = ["packages/tui/assets/mascot/**", "packages/web/src/mascot/**"]
+path = ["packages/tui/assets/mascot/**", "packages/web/src/mascot/**", "docs/img/axolotl.gif"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Dheirav"
 SPDX-License-Identifier = "Apache-2.0"

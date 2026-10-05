@@ -4,453 +4,296 @@
 <!-- SPDX-FileCopyrightText: 2026 Shaan Narendran -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# Axl
+<p align="center">
+  <img src="docs/img/axolotl.gif" alt="Axl, a pixel-art axolotl" width="220">
+</p>
 
-Axl, short for Axolotl, is a local-first agent harness for developers who want one durable coding session across multiple clients without giving each client its own agent runtime.
+<pre>
+ █████╗ ██╗  ██╗██╗
+██╔══██╗╚██╗██╔╝██║
+███████║ ╚███╔╝ ██║
+██╔══██║ ██╔██╗ ██║
+██║  ██║██╔╝ ██╗███████╗
+╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝
+</pre>
 
-A single daemon owns the session, model loop, tools, policy, and canonical event history. Clients connect through a typed protocol and shared SDK. They render the same state and submit user intent, but they do not become independent agents.
+**Axl is a local-first agent harness: one daemon owns your coding session, and every client is a window into it.**
 
-> **Project status:** Axl is under active development and has not published its first release. Roadmap phases 0 through 4 are complete. The TUI, prompt templates, Agent Skills, MCP support, native Linux hardening, and local OCI execution were brought forward from later phases. Web, desktop, mobile, hosted relay, and broader provider work remain planned unless explicitly marked implemented.
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
+  <img src="https://img.shields.io/badge/node-%5E22.19%20%7C%7C%20%E2%89%A524-339933?style=flat-square&logo=node.js&logoColor=white" alt="Node.js">
+  <img src="https://img.shields.io/badge/TypeScript-3178c6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
+  <a href="https://github.com/Observal/Axl/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Observal/Axl/ci.yml?branch=main&style=flat-square&logo=github&label=ci" alt="CI"></a>
+  <a href="https://github.com/Observal/Axl/graphs/contributors"><img src="https://img.shields.io/github/contributors/Observal/Axl?style=flat-square&logo=github" alt="Contributors"></a>
+  <a href="https://github.com/Observal/Axl/stargazers"><img src="https://img.shields.io/github/stars/Observal/Axl?style=flat-square&logo=github" alt="Stars"></a>
+  <a href="https://discord.gg/SFPjnTWddk"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fdiscord.com%2Fapi%2Fv10%2Finvites%2FSFPjnTWddk%3Fwith_counts%3Dtrue&query=%24.approximate_member_count&label=Discord&logo=discord&color=5865F2&style=flat-square" alt="Discord Server"></a>
+</p>
 
-## Who Axl is for
+> Axl is short for Axolotl. If you find it useful, please consider giving it a star. It helps others find the project.
 
-Axl currently fits developers who want:
-
-- a terminal coding agent with durable, resumable sessions
-- model and provider code separated from the agent kernel
-- sandboxed file, shell, and web tools with fail-closed isolation
-- explicit control over steering, follow-ups, interruption, and detachment
-- Agent Skills and MCP support without moving those features into the kernel
-- a typed SDK for building another client over the same daemon
-- auditable JSONL history and deterministic replay rather than client-owned chat state
-
-Axl is not yet a hosted service, remote collaboration product, browser application, mobile application, or general workflow engine. Those surfaces are documented where planned, but they are not silently represented as shipped features.
-
-## What works today
-
-| Area | Current capability |
-| --- | --- |
-| Sessions | Create, list, resume, fork, clone, interrupt, detach, reconnect, compact, configure, and dispose |
-| Durability | Append-only canonical JSONL, operation IDs, crash-safe mutation journal, restart reconciliation, and deterministic replay |
-| Multi-client behavior | Independent attachments, paged snapshots, acknowledged cursors, presence, reconnect recovery, and shared deterministic projection |
-| Automation | One-shot text and canonical JSONL output with `axl print` and `axl json`, plus native daemon RPC with `axl rpc` |
-| Model interaction | Provider-grouped text-model catalog, provider-qualified model selection, authentication management, usage and costs, streaming text and reasoning, tool calls, steering, and follow-ups |
-| Built-in tools | `read`, `write`, `edit`, `bash`, `web_fetch`, and `web_search` |
-| Extensions | Public extension API, prompt templates, Agent Skills, and MCP 2025-11-25 over stdio and Streamable HTTP |
-| Workspace review | Bounded file listing and reads, Git status, structured diffs, and daemon-owned last-turn checkpoints |
-| Terminal UI | Multiline editor, history, themes, model controls, tool rendering, image attachments, regular scrollback mode, and fullscreen mode |
-| Isolation | Bubblewrap, Landlock, seccomp, and rlimits on Linux; Seatbelt on macOS; optional rootless Podman or Docker execution |
-| Safety | Path canonicalization, symlink-escape rejection, secret redaction, bounded protocol messages, and fail-closed sandbox selection |
-
-## Project instructions
-
-Axl loads `AGENTS.md` files from the nearest Git repository root through the session working directory, with broader instructions first and nearer instructions last. Outside a Git repository, only the working directory is considered. `AGENTS.override.md` replaces `AGENTS.md` in the same directory. Global instructions come from `~/.axl/AGENTS.md` and support the same override filename.
-
-Loaded paths and exact model-visible content are recorded in the canonical session log and projected through the SDK. A resumed session keeps its recorded instruction snapshot. Run `/reload` to discover file changes and record a new context boundary. Symlinks that escape the applicable project or global root are rejected.
-
-## Optional capabilities
-
-Standard sessions expose one stable `capability_search` tool instead of placing every installed Skill in the prompt. The model searches compact authorized metadata, then explicitly activates selected identities once. Activation rechecks policy and path containment, records the exact model-visible instructions canonically, and keeps them active for the rest of the session, including after restart. Referenced files remain sandboxed behind the same tool's `read` action and require an active Skill.
-
-Agent Skills are discovered from `~/.axl/skills/`, `~/.agents/skills/`, and repository-root-to-working-directory `.axl/skills/` and `.agents/skills/` locations. Later definitions replace earlier definitions with the same `skill:<name>` identity. Discovery validates frontmatter and containment only. It does not execute scripts or expose instruction bodies, references, or assets. Full instructions load only through explicit activation.
-
-Daemon extensions are TypeScript or JavaScript files in `~/.axl/extensions/`. They run inside the daemon process with its permissions and can add model-discoverable tools, block tool calls, replace or refuse built-in commands such as `/compact`, and observe canonical events. See [Daemon extensions](docs/extensions.md).
-
-Daemon commands may declare a model-callable tool in the authoritative command registry. The current `compact_context` and `reload_context` tools use that progressive disclosure path: their provider-native schemas are absent until activation and remain available for the session afterward. Compaction and reload requests made during a response queue behind that response.
-
-## Prompt templates
-
-Put reusable Markdown prompts in `~/.axl/prompts/` or `.axl/prompts/`. Project templates override global templates with the same filename. Run `/prompt` to browse them or `/prompt <name> [arguments]` to expand one into the editor for review before sending. Templates reload with `/reload`.
-
-```markdown
 ---
-description: Review one file
-usage: "<path> [focus]"
+
+## What is Axl and what does it solve?
+
+Most agent harnesses tie a session to the client that started it. Close the terminal and the work stops. Open a browser and you get a second agent with its own loop, tools, and history. Provider code leaks into the core, and sandboxing is whatever the client happened to implement.
+
+Axl takes the opposite approach:
+
+1. **One authority per session.** A single daemon owns the model loop, tools, policy, and canonical event history. Terminal, browser, and SDK clients render the same state and submit intent. None of them is an independent agent.
+2. **Isolation that fails closed.** Model-selected commands run in Bubblewrap, Landlock, seccomp, Seatbelt, or a rootless OCI container. If the isolation you asked for is unavailable, Axl refuses to run instead of downgrading.
+
+Everything the model sees is recorded in an append-only JSONL log, so sessions resume after a crash, replay deterministically, and can be audited.
+
+### Why developers use Axl
+
+- **Durable sessions:** Detach, close your laptop, reconnect from another client, or resume after a daemon restart.
+- **Terminal and browser, same session:** `axl` and `axl web` attach to one daemon and show the same history.
+- **Your models:** Over 35 built-in providers, plus any OpenAI-compatible endpoint, with provider code kept out of the kernel.
+- **Sandboxed by default:** File, shell, and web tools run under enforced OS-level isolation.
+- **Control while it works:** Steer mid-turn, queue follow-ups, interrupt, or detach without losing accepted work.
+- **Extensible without bloat:** Agent Skills, MCP, prompt templates, and daemon extensions load on demand, so unused features add nothing to the prompt.
+- **Build your own client:** A typed SDK handles reconnects, cursors, and projections for you.
+
 ---
-Review {{1}}. Focus on {{2=correctness}}.
+
+## Quick start
+
+Axl requires Node.js `^22.19.0` or `>=24`. Linux needs Bubblewrap for native sandboxing. macOS uses Seatbelt. Rootless Podman or Docker is optional.
+
+### 1. Install
+
+```bash
+git clone https://github.com/Observal/Axl.git && cd Axl
+pnpm install --frozen-lockfile
+pnpm run install:cli
 ```
 
-Use `{{1}}` through `{{99}}` for quoted positional arguments, `{{all}}` for every argument, and `{{1=default}}` or `{{all=default}}` for defaults.
+See [SETUP.md](SETUP.md) for requirements and platform notes.
 
-## User themes
+### 2. Connect a model
 
-Put Axl theme JSON files in `~/.axl/themes/` or `.axl/themes/`. Project themes override global themes with the same ID. Select one with `/theme <id>`. Axl reloads changed theme files while the TUI is running, retains the last valid palette after an invalid edit, and reports the validation error. Use `/reload` after creating a theme directory during an active session. See [`packages/tui/README.md`](packages/tui/README.md) for the format and color roles.
+```bash
+axl providers            # list providers and authentication status
+axl models openai        # list models for one provider
+axl login openai api_key
+```
 
-## Architecture
+### 3. Start a session
+
+```bash
+axl                      # terminal UI
+axl web                  # browser UI over the same daemon
+```
+
+The CLI connects to the matching local daemon and starts one if needed. Run `/commands` for actions and `/hotkeys` for keyboard controls inside the UI.
+
+```bash
+axl -r                          # pick a saved session
+axl <session-id>                # resume a known session
+axl --cwd ~/code/project        # choose the workspace
+axl --profile exec              # sandboxed Bash only
+axl doctor                      # check local sandbox support
+axl print "describe this repo"  # one headless response
+axl json "describe this repo"   # canonical events as JSONL
+axl rpc                         # JSONL RPC over stdin and stdout
+```
+
+---
+
+## How Axl works
 
 ```mermaid
 flowchart LR
   subgraph Clients[Presentation clients]
     TUI[Terminal UI]
-    Future[Future web, desktop, IDE, and mobile clients]
+    Web[Web UI]
+    Yours[Your own client]
   end
 
-  CLI[CLI process host]
-  SDK[TypeScript SDK<br/>connection, retry, cursors,<br/>subscriptions, projections]
-  Protocol[Protocol<br/>events, RPCs, capabilities,<br/>runtime validation]
+  SDK[TypeScript SDK<br/>retry, cursors, projections]
+  Protocol[Protocol<br/>events, RPCs, validation]
 
   subgraph Authority[Authoritative daemon process]
-    Runtime[Runtime assembly]
-    Daemon[Daemon<br/>sessions, subscriptions,<br/>presence, workspace RPCs]
-    Kernel[Kernel<br/>JSONL, agent loop, tools,<br/>policy, operation ownership]
-    AI[AI providers<br/>credentials, models, dialects]
-    Extensions[Extensions<br/>prompts, Skills, and MCP]
+    Daemon[Daemon<br/>sessions, presence, workspace RPCs]
+    Kernel[Kernel<br/>JSONL, agent loop, tools, policy]
+    AI[AI providers]
+    Extensions[Extensions<br/>prompts, Skills, MCP]
     Sandbox[Sandbox<br/>native and OCI]
   end
 
   TUI --> SDK
-  Future --> SDK
+  Web --> SDK
+  Yours --> SDK
   SDK -->|typed RPC and events| Daemon
   SDK -. validates with .-> Protocol
   Daemon --> Kernel
-  Daemon -. validates with .-> Protocol
-  CLI --> Runtime
-  CLI --> TUI
-  Runtime --> Daemon
-  Runtime --> AI
-  Runtime --> Extensions
-  Runtime --> Sandbox
   AI -. model port .-> Kernel
   Extensions -. public extension API .-> Kernel
   Sandbox -. command execution .-> Kernel
 ```
 
-The boundaries are deliberate:
-
-- **Protocol:** `packages/protocol` owns event schemas, RPC schemas, capabilities, versioning, and trust-boundary validation. It has no runtime dependencies.
-- **Kernel:** `packages/kernel` owns canonical history, the agent loop, tool execution protocol, cancellation, operation ownership, prompt queues, policy, and extension-host lifecycle. It depends only on the protocol and Node.js built-ins.
-- **Daemon:** `packages/daemon` owns live sessions, subscriptions, presence, idempotency, persistence coordination, workspace APIs, and concurrent client access.
-- **SDK:** `packages/sdk` owns typed requests, capability checks, transport reconnection, idempotent mutation retry, snapshot paging, cursor acknowledgement, gap recovery, and deterministic client projection.
-- **Runtime:** `packages/runtime` assembles providers, tools, extensions, and sandbox implementations for the daemon process.
-- **Clients:** presentation packages render SDK state and submit intent. They do not own model loops, tools, policies, queues, persistence, or canonical events.
-- **CLI:** `packages/cli` selects placement, starts or connects to the daemon, gathers provider configuration, and launches the selected client.
-
-The canonical order is always:
+Every operation takes the same path:
 
 1. A client submits typed user intent.
 2. The daemon validates capability, policy, and operation ownership.
 3. The kernel performs the operation.
-4. The canonical event is appended before derived state changes.
+4. The canonical event is appended before any derived state changes.
 5. Every subscribed client receives and projects the same event.
 
-See [Client authority and adapter boundaries](docs/architecture/client-boundaries.md) for the complete ownership rules.
+Boundaries are deliberate. The protocol has no dependencies. The kernel depends only on the protocol and Node.js. Provider behavior lives in `packages/ai`. Clients never own loops, tools, policy, or history. See [Client authority and adapter boundaries](docs/architecture/client-boundaries.md).
 
-## Sessions, detach, and reconnect
+### Sessions belong to the daemon
 
-A session belongs to the daemon, not to the terminal that created it. Closing a client attachment does not cancel accepted work.
+- `/detach` closes the client and leaves the session running.
+- `/quit` interrupts work, flushes history, and stops the daemon.
+- Escape interrupts without exiting.
+- Resume uses a frozen, paged snapshot followed by an acknowledged live stream. Gaps are detected and repaired from an authoritative snapshot.
+- Restart recovery reconciles accepted operations against the canonical log before serving clients.
 
-- `/detach` closes the TUI attachment and leaves the session running.
-- `/quit` interrupts work, flushes history, shuts down the daemon, and exits. It asks for confirmation when other sessions or clients are affected.
-- Escape interrupts without exiting. Ctrl+C clears the draft; a second press within 500 ms quits. Ctrl+D quits when the draft is empty.
-- `axl daemon status`, `stop`, and `restart` provide explicit upgrade recovery. See [daemon lifecycle](SETUP.md#daemon-lifecycle-and-upgrade-recovery).
-- `axl -r` opens the all-placement resume picker.
-- `axl <session-id>` resumes a known session directly.
-- `session.interrupt` is the explicit cancellation operation.
-- `/request` shows or changes the daemon-owned output ceiling and HTTP idle timeout. The default output ceiling is the model maximum, fitted to available context; the idle timeout is five minutes and refreshes on response bytes.
-- Daemon restart recovery reconciles accepted operations against canonical history before serving clients.
+### Steering and follow-ups
 
-Resume uses a frozen, paged snapshot followed by an acknowledged live event stream. The SDK rejects altered duplicates, detects gaps, and replaces a projection from an authoritative snapshot when a cursor cannot be resumed safely.
+While a turn is active, **Enter** sends steering that lands at the next model boundary, and **Alt+Enter** queues a follow-up that runs when the turn would otherwise end. Both are FIFO, and steering wins at each boundary. Durable queued prompts are recorded before acknowledgement and pause after a restart, so Axl never guesses whether deferred work should run again.
 
-### Steering, follow-ups, and queued prompts
+---
 
-While a model turn is active:
+## What works today
 
-- **Enter** submits steering. It is inserted at the next model boundary after the current complete tool-call batch.
-- **Alt+Enter** submits a follow-up. It runs when the turn would otherwise finish.
-- Multiple steering messages remain FIFO with other steering messages.
-- Multiple follow-ups remain FIFO with other follow-ups.
-- Steering has priority over follow-ups at each model boundary.
-
-Durable queued prompts use the daemon's canonical queue lifecycle. They are recorded before acknowledgement and are visible to every attachment. Pending durable queue items become paused after daemon restart and require explicit re-queueing, so Axl never guesses whether deferred work should run again.
-
-## Installation
-
-Axl requires Node.js `^22.19.0` or `>=24`. Native sandboxed execution requires Bubblewrap on Linux. Axl installs its pinned Landlock launcher dependency. macOS uses Seatbelt. Local OCI execution optionally uses rootless Podman or Docker with seccomp and cgroups v2.
-
-Axl has not published its first release yet. After the first release passes the gate in [RELEASES.md](RELEASES.md), install from npm:
-
-```bash
-npm install --global @observal/axl
-```
-
-Or install a checksum-verified GitHub release artifact:
-
-```bash
-curl -fsSL https://github.com/Observal/Axl/releases/latest/download/install.sh | sh
-```
-
-Install a specific release by setting `AXL_VERSION`:
-
-```bash
-AXL_VERSION=v0.1.0 \
-  curl -fsSL https://github.com/Observal/Axl/releases/download/v0.1.0/install.sh | sh
-```
-
-For development from this repository:
-
-```bash
-git clone https://github.com/Observal/Axl.git
-cd Axl
-pnpm install --frozen-lockfile
-pnpm run install:cli
-```
-
-## Quick start
-
-Inspect providers, authenticate one, choose its model, and start a session:
-
-```bash
-axl providers
-axl models openai
-axl login openai api_key
-axl
-```
-
-The `provider` and `model` startup options select a canonical pair for a new session. In the TUI, use `/model` to choose a grouped provider and model pair.
-
-Common entry points:
-
-```bash
-axl -r                          # choose a saved session
-axl <session-id>                # resume a known session
-axl --cwd ~/code/project        # choose the workspace
-axl --profile exec              # expose only sandboxed Bash
-axl --no-web-fetch              # disable one web tool
-axl --no-web-search
-axl --no-web-tools              # disable both web tools
-axl doctor                      # inspect local sandbox support
-axl daemon                      # run the daemon in the foreground
-axl print "describe this repo"  # print one headless response
-axl json "describe this repo"   # stream canonical events as JSONL
-axl rpc                         # bridge JSONL RPC over stdin and stdout
-```
-
-The CLI connects to the matching local daemon and starts one in the background when necessary. Native, OCI, and unsafe placements use separate state and are labeled in the resume picker.
-
-## Model providers
-
-Use `axl providers` for explicit authentication and catalog status, `axl models` for grouped text models, `axl login` and `axl logout` for stored authentication, and `axl refresh` for explicit catalog refresh. These commands report actionable authentication, entitlement, region, catalog, model, and configuration failures. Add named local or hosted endpoints in `~/.axl/models.json`; see the [native configuration example](docs/provider-support/provider-reference.md#user-configured-endpoints).
-
-Inside the TUI, `/model` selects a provider-qualified model. `/providers`, `/login`, `/logout`, and `/refresh` expose the same daemon-owned operations. Escape cancels an active provider operation. The editor reports last-turn and cumulative token usage and USD cost when available.
-
-Provider secrets never pass through daemon RPC or SDK projection.
-
-1. The daemon owns provider and session operations.
-2. `packages/ai` owns provider-specific credentials, authentication, model metadata, API dialects, and request behavior.
-3. The trusted CLI process-host adapter renders provider prompts and collects answers inside the daemon process.
-4. Login RPC carries only the provider ID and login method.
-5. Authorization launch is restricted to HTTPS URLs without embedded credentials.
-6. Canonical events, SDK cursors, catalogs, and client projections never contain credential values, OAuth codes, or prompt answers.
-
-Provider listing is offline and side-effect free. Authentication status and catalog refresh are separate explicit operations. API dialect is model metadata, not user-selectable configuration. See the [provider setup and compatibility reference](docs/provider-support/provider-reference.md) for every provider, environment variable, endpoint, region, authentication method, catalog type, custom-endpoint boundary, limitation, and opt-in smoke procedure. Provider authority and client responsibilities follow [`docs/architecture/client-boundaries.md`](docs/architecture/client-boundaries.md).
-
-## Session profiles
-
-Profiles are selected when a session is created and are enforced by the daemon.
-
-| Profile | Purpose |
+| Area | Capability |
 | --- | --- |
-| `standard` | Normal coding session with the configured built-in tools and extensions |
-| `minimal` | Small tool surface for focused work |
-| `chat` | Tool-free conversation |
-| `exec` | Bash-only session with no Skills, MCP servers, file tools, or web tools |
+| Sessions | Create, list, resume, fork, clone, interrupt, detach, reconnect, compact, configure, dispose |
+| Durability | Append-only JSONL, operation IDs, crash-safe journal, restart reconciliation, deterministic replay |
+| Clients | Terminal UI, local web UI, headless `print`, `json`, and `rpc`, and a typed SDK |
+| Models | Over 35 providers, provider-qualified selection, usage and cost reporting, streaming text and reasoning |
+| Tools | `read`, `write`, `edit`, `bash`, `web_fetch`, `web_search` |
+| Extensions | Agent Skills, MCP 2025-11-25 (stdio and Streamable HTTP), prompt templates, daemon extensions |
+| Workspace | Bounded file listing and reads, Git status, structured diffs, last-turn checkpoints |
+| Isolation | Bubblewrap, Landlock, seccomp, and rlimits on Linux; Seatbelt on macOS; rootless Podman or Docker |
+| Safety | Path canonicalization, symlink-escape rejection, secret redaction, bounded messages |
+| Extras | Axolotl mascot that reflects session state, and Axl Lounge word and puzzle games for waiting on long turns |
 
-The [`exec` profile](docs/session-profiles.md) does not make an unsafe session safe. Isolation and tool exposure are separate controls.
+---
 
-## Built-in tools
+## Terminal and web clients
 
-The standard session exposes:
+The terminal UI has Unicode-aware multiline editing, searchable history, themes, model and thinking controls, retained tool cards with diff previews, image attachments, regular and fullscreen modes, optional Vim editing, and MCP approval dialogs.
 
-- `read`: bounded file reads under daemon policy
-- `write`: atomic writes under daemon policy
-- `edit`: exact replacement under daemon policy
-- `bash`: commands executed through the selected sandbox
-- `web_fetch`: bounded public HTTP and HTTPS retrieval
-- `web_search`: DuckDuckGo Instant Answer by default, or Brave Search when configured
+The web client is a responsive, static React app served by an authenticated loopback gateway. Run `axl web` to open it. It supports session selection, synchronized history, split panes, a command palette, model picker, workspace changes, and the same controls the daemon grants the terminal. Closing the browser detaches only that browser.
 
-`web_fetch` blocks private and reserved destinations, limits redirects and response size, and returns readable or raw text. Set `BRAVE_SEARCH_API_KEY` to use ranked Brave Search results.
+Both clients use only the public SDK. See [web client architecture](docs/architecture/web-client.md) and [gateway security](docs/architecture/web-gateway-security.md).
 
-## Terminal client
+---
 
-The TUI supports:
+## Models
 
-- Unicode-aware multiline editing, selection, undo, kill-ring operations, clipboard paste, and external-editor handoff
-- searchable command and prompt history
-- regular terminal scrollback and persistent fullscreen presentation
-- model, thinking-level, theme, detail, and tool-output controls
-- live text, reasoning, activity, and tool status
-- retained tool call/result cards with bounded output and diff previews
-- image attachment upload and terminal-aware image rendering
-- session resume, fork, clone, compact, reload, review, and status flows
-- MCP approval, browser authorization, and structured-input dialogs
-- optional Vim editing, prompt stash, model favorites, attention bell, and developer panel
-- an optional pixel-art mascot above the composer that reflects session state, drawn as an inline image where the terminal supports one and as glyphs otherwise
+Axl ships with providers including OpenAI, Anthropic, Google, Vertex, Amazon Bedrock, GitHub Copilot, xAI, DeepSeek, Mistral, Groq, OpenRouter, Cloudflare, Fireworks, Together, Hugging Face, Moonshot, Z.ai, MiniMax, Qwen, and OpenCode. Add local or hosted endpoints in `~/.axl/models.json`.
 
-Run `/commands` for available actions and `/hotkeys` for keyboard controls.
+```bash
+axl providers      # offline listing
+axl login <id>     # API key or OAuth
+axl refresh        # explicit catalog refresh
+```
+
+Provider secrets never pass through daemon RPC, the SDK, or canonical events. See the [provider reference](docs/provider-support/provider-reference.md) for every environment variable, endpoint, region, and limitation.
+
+---
 
 ## Sandboxing
 
 Axl refuses to run model-selected commands when required isolation is unavailable.
 
-### Native Linux
-
-The native Linux backend combines Bubblewrap namespaces and mounts, Landlock filesystem mediation, a versioned seccomp policy, dropped capabilities, private runtime directories, and resource limits.
-
-### macOS
-
-The native macOS backend uses Seatbelt and reports unavailable controls explicitly.
-
-### OCI
-
-Pull an image yourself and pass an immutable digest:
+| Backend | Mechanism |
+| --- | --- |
+| Linux | Bubblewrap namespaces, Landlock, versioned seccomp policy, dropped capabilities, resource limits |
+| macOS | Seatbelt, with unavailable controls reported explicitly |
+| OCI | Rootless Podman or Docker with seccomp and cgroups v2, digest-pinned images only |
 
 ```bash
-podman pull docker.io/library/bash:5.2.37
-axl --sandbox podman \
-  --image docker.io/library/bash@sha256:<64-hex-digest>
+axl --sandbox podman --image docker.io/library/bash@sha256:<64-hex-digest>
 ```
 
-Replace `podman` with `docker` to use Docker. Axl never pulls an image implicitly and rejects mutable tags.
+`axl --unsafe` disables OS isolation and file-tool path policy. Unsafe sessions use separate state and stay visibly labeled. See [sandbox backends](docs/architecture/sandbox-backends.md) and the [security policy](SECURITY.md).
 
-### Unsafe mode
+### Session profiles
 
-```bash
-axl --unsafe
-```
+| Profile | Purpose |
+| --- | --- |
+| `standard` | Normal coding session with built-in tools and extensions |
+| `minimal` | Small tool surface for focused work |
+| `chat` | Tool-free conversation |
+| `exec` | Bash only, with no Skills, MCP, file tools, or web tools |
 
-Unsafe mode disables operating-system isolation and file-tool path policy. Commands and extensions run with the user's host access. Unsafe sessions use separate state under `~/.axl/unsafe/`, record their unenforced status, and remain visibly labeled.
+See [session profiles](docs/session-profiles.md).
 
-See [Local sandbox backends](docs/architecture/sandbox-backends.md) and [Security policy](SECURITY.md).
+---
 
-## SDK and client development
+## Extending Axl
 
-`@axl/sdk` is currently private and in-tree. It provides:
+First-party and third-party features share one public extension API. Disabled features add no prompt content, UI, or background work.
 
-- typed `request(method, params)` results from the protocol method map
-- capability negotiation and exact wire-version checks
-- idempotency keys and safe retry for eligible mutations
-- resumable subscriptions with frozen snapshot paging
-- acknowledged opaque cursors and authoritative gap recovery
-- transport-independent connection contracts
-- a Unix-socket adapter
-- a deterministic conversation and activity projector
-- provider-neutral model metadata for presentation clients
+- **Project instructions:** `AGENTS.md` files from the repository root to the working directory, recorded in the session log.
+- **Agent Skills:** Discovered from `~/.axl/skills/`, `~/.agents/skills/`, and project `.axl/skills/` and `.agents/skills/`. The model finds and activates them through one `capability_search` tool.
+- **MCP servers:** Run `/mcp` to paste a server's README config. Axl probes the server before saving it.
+- **Prompt templates:** Markdown files in `~/.axl/prompts/` or `.axl/prompts/`, run with `/prompt`.
+- **Themes:** JSON files in `~/.axl/themes/` or `.axl/themes/`, selected with `/theme`.
+- **Daemon extensions:** TypeScript or JavaScript in `~/.axl/extensions/` for tools, tool-call hooks, and commands.
 
-A new client should use the SDK rather than parse wire messages or reduce canonical events itself. Platform transports, authentication mechanisms, and cursor stores implement shared contracts as separate adapters. The daemon remains the authority regardless of client platform.
+Details are in [Customizing Axl](docs/customization.md) and [Daemon extensions](docs/extensions.md).
 
-Browser, desktop, IDE, Android, and iOS clients are planned. The current browser architecture and security contracts are specified, but no `packages/web` application is implemented yet.
+---
 
-## Extensions
+## Build a client
 
-First-party and third-party features use the same public extension API. Extensions declare capabilities before activation and receive no private kernel imports. Disabling an extension removes its prompt content, UI, listeners, and background work.
+`@axl/sdk` is in-tree and private for now. It gives you typed requests, capability negotiation, idempotent retry, resumable subscriptions with cursor acknowledgement and gap recovery, a Unix-socket adapter, and a deterministic conversation projector. A new client should use the SDK instead of parsing wire messages. The daemon stays the authority on every platform.
 
-Implemented first-party integrations include:
+---
 
-- Prompt template discovery, argument expansion, and editable review
-- Agent Skills discovery, validation, and progressive loading
-- MCP over stdio and Streamable HTTP with daemon-owned discovery and session-scoped native tool activation
-- capability-scoped terminal commands, shortcuts, widgets, lifecycle listeners, and tool renderers
-
-### Configure MCP servers
-
-Run `/mcp` in the terminal or web client. The panel lists every configured server with its daemon-reported discovery state (`discovered`, `failed` with the error, `disabled`, or `not discovered yet`), its tool count, and the tools that are active in the current session. From there you can add, enable, disable, remove, or reload servers.
-
-To add a server quickly, press `p` (terminal) or **Paste config** (web) and paste the `mcpServers` block from the server's README, a bare server URL, or a command line. Axl translates common host formats, derives a name when none is given, maps VS Code `${input:id}` placeholders to `${ID}`, and lists the environment variables the entry reads so you know what to export. Both GitHub README snippets paste as-is: the header-less one is authorized with OAuth in your browser, the PAT one only needs `export GITHUB_MCP_PAT=…` before starting the daemon.
-
-The guided alternative asks step by step: name, transport (remote Streamable HTTP or local stdio process), the URL or command line copied from the server's README, optional header or environment variable names for secrets, and optional filesystem roots. The review step shows the exact JSON that will be written. Axl connects to the server and lists its tools first; only a server that answers is saved to `~/.axl/mcp.json` (validated, atomic, mode `0600`), after which the active session reloads. A server that later fails discovery is isolated: the rest of the session loads, the panel shows the failure, and the footer reports `mcp:discovered/total`.
-
-The model can discover and activate the same `configure_mcp` capability when you ask it to add or remove an MCP server. This configuration path is daemon-managed and does not require weakening the command sandbox.
-
-You can also edit the file directly. For a remote server, add an entry under `mcpServers`:
-
-```json
-{
-  "mcpServers": {
-    "example": {
-      "url": "https://example.com/mcp",
-      "headers": { "Authorization": "EXAMPLE_API_TOKEN" }
-    }
-  }
-}
-```
-
-Header and child-process environment values are read from the daemon's environment, never stored: a bare name such as `GITHUB_TOKEN` sends that variable's value, and a template such as `Bearer ${GITHUB_TOKEN}` wraps it in literal text. A remote server that answers `401` without configured headers is authorized with OAuth: Axl opens the browser prompt, and saves the token privately. Local stdio servers use `command`, optional `args`, `cwd`, `env`, and `roots`:
-
-```json
-{
-  "mcpServers": {
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem@2026.8.31", "/path/to/project"],
-      "roots": ["/path/to/project"]
-    }
-  }
-}
-```
-
-Restart the daemon or run `/reload` after editing the file manually. MCP tools stay outside the stable prompt until selected through capability discovery.
-
-## Package map
+## Repository map
 
 | Package | Responsibility |
 | --- | --- |
-| `packages/protocol` | Dependency-free canonical event, wire, RPC, capability, and validation contracts |
-| `packages/kernel` | Event log, replay, agent loop, tool protocol, cancellation, queues, policy, and extension-host lifecycle |
-| `packages/ai` | Provider contracts, credentials, model metadata, thinking policy, dialects, and Azure OpenAI support |
-| `packages/daemon` | Authoritative sessions, operation coordination, subscriptions, presence, workspace RPCs, and Unix-socket server |
-| `packages/sdk` | Typed client, reconnect and retry behavior, subscriptions, cursors, and deterministic projections |
-| `packages/runtime` | Provider, tool, extension, and sandbox assembly for the daemon process |
-| `packages/sandbox` | Native and OCI operating-system confinement |
-| `packages/cli` | Process startup, placement selection, provider setup, and client launch |
-| `packages/tui` | Interactive terminal presentation over the public SDK, including the mascot assets under `assets/` |
-| `packages/extensions/prompts` | Prompt template discovery and editor expansion |
-| `packages/extensions/skills` | Agent Skills integration |
-| `packages/extensions/mcp` | MCP integration |
+| `packages/protocol` | Dependency-free events, RPCs, capabilities, and validation |
+| `packages/kernel` | Event log, agent loop, tool protocol, cancellation, queues, policy, extension host |
+| `packages/ai` | Provider contracts, credentials, model metadata, dialects |
+| `packages/daemon` | Sessions, operation coordination, subscriptions, presence, workspace RPCs |
+| `packages/sdk` | Typed client, reconnect, cursors, projections |
+| `packages/runtime` | Assembles providers, tools, extensions, and sandbox for the daemon |
+| `packages/sandbox` | Native and OCI confinement |
+| `packages/cli` | Startup, placement, provider setup, client launch |
+| `packages/tui` | Terminal client |
+| `packages/web` | Web client |
+| `packages/ui`, `packages/theme` | Shared presentation components and themes |
+| `packages/extensions/*` | Prompts, Skills, MCP, Lounge, and the extension API and host |
 
-## Architecture specifications
+More in [CODE_STRUCTURE.md](CODE_STRUCTURE.md).
 
-- [Client authority and adapter boundaries](docs/architecture/client-boundaries.md)
-- [Architecture decisions](docs/architecture/decisions.md)
-- [Local web client architecture](docs/architecture/web-client.md)
-- [Wire protocol and TypeScript SDK](docs/architecture/web-protocol.md)
-- [Mutation and event delivery](docs/architecture/web-delivery.md)
-- [Workspace and Git RPC](docs/architecture/workspace-rpc.md)
-- [Web gateway security](docs/architecture/web-gateway-security.md)
-- [Web build and packaging](docs/architecture/web-packaging.md)
-- [Local sandbox backends](docs/architecture/sandbox-backends.md)
-
-## Project documents
+## Documentation
 
 - [Setup](SETUP.md)
+- [Customizing Axl](docs/customization.md)
+- [Provider reference](docs/provider-support/provider-reference.md)
 - [Session profiles](docs/session-profiles.md)
 - [Context compaction](docs/compaction.md)
 - [Daemon extensions](docs/extensions.md)
-- [Development guide](docs/DEVELOPMENT_GUIDE.md)
-- [Product vision and implementation roadmap](ROADMAP.md)
-- [Repository structure](CODE_STRUCTURE.md)
-- [Open-source policy](OPEN_SOURCE.md)
-- [Release guide](RELEASES.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security policy](SECURITY.md)
-- [Governance](GOVERNANCE.md)
-- [Code of conduct](CODE_OF_CONDUCT.md)
+- [Architecture decisions](docs/architecture/decisions.md)
+- [Client boundaries](docs/architecture/client-boundaries.md)
+- [Wire protocol and SDK](docs/architecture/web-protocol.md)
+- [Workspace and Git RPC](docs/architecture/workspace-rpc.md)
+- [Sandbox backends](docs/architecture/sandbox-backends.md)
+- [Releases](RELEASES.md)
 
-## Development
+## Contributing
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm build
-pnpm typecheck
-pnpm lint
-pnpm format:check
-pnpm test
-pnpm check:boundaries
-pnpm check:generated
-pnpm audit --audit-level high
+pnpm check          # build, typecheck, lint, format, tests, boundaries
 reuse lint
 ```
 
-Run `pnpm check` for the normal local build and test gate. See the [development guide](docs/DEVELOPMENT_GUIDE.md) for focused commands and contribution workflow.
+Read [CONTRIBUTING.md](CONTRIBUTING.md), the [development guide](docs/DEVELOPMENT_GUIDE.md), and [AI_POLICY.md](AI_POLICY.md) first. Every commit needs a DCO `Signed-off-by` trailer. Also see [GOVERNANCE.md](GOVERNANCE.md), [SECURITY.md](SECURITY.md), and the [code of conduct](CODE_OF_CONDUCT.md).
+
+## Mascot
+
+The axolotl is pixel art by [Dheirav](https://github.com/Dheirav). It reacts to what the session is doing in both the terminal and web clients. See [mascot art](docs/mascot/ART.md).
 
 ## License
 
