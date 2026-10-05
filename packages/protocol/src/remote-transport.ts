@@ -369,10 +369,6 @@ export function parseCryptoSessionId(value: unknown, path = "cryptoSessionId"): 
   return uuid<typeof cryptoSessionIdBrand>(value, path);
 }
 
-export function parseAxlSessionId(value: unknown, path = "axlSessionId"): AxlSessionId {
-  return uuid<typeof axlSessionIdBrand>(value, path);
-}
-
 export function parseRouteId(value: unknown, path = "routeId"): RouteId {
   return uuid<typeof routeIdBrand>(value, path);
 }
@@ -391,10 +387,6 @@ export function parseRemoteRequestId(value: unknown, path = "requestId"): Reques
 
 export function parseIdempotencyKey(value: unknown, path = "idempotencyKey"): IdempotencyKey {
   return uuid<typeof idempotencyKeyBrand>(value, path);
-}
-
-export function parseObjectId(value: unknown, path = "objectId"): ObjectId {
-  return uuid<typeof objectIdBrand>(value, path);
 }
 
 export function parseRelayLimits(value: unknown, path = "limits"): RelayLimits {

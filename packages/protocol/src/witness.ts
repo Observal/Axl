@@ -346,10 +346,6 @@ function encodeLineage(lineage: WitnessLineage, path: string): number[] {
   return output;
 }
 
-export function encodeWitnessLineage(lineage: WitnessLineage): Uint8Array {
-  return Uint8Array.from(encodeLineage(lineage, "lineage"));
-}
-
 export function parseWitnessCredential(value: Uint8Array, path = "credential"): WitnessCredential {
   if (
     !(value instanceof Uint8Array) ||
@@ -720,11 +716,6 @@ export function parseWitnessReplicaTrustSet(
     }
   }
   return replicas;
-}
-
-export function parseWitnessHttpRequestBody(value: Uint8Array): Uint8Array {
-  parseWitnessRequest(value);
-  return copy(value);
 }
 
 export function parseWitnessHttpResponseBody(value: Uint8Array): Uint8Array {
