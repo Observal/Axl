@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Hari Srinivasan
 // SPDX-FileCopyrightText: 2026 Kaushik Kumar
 // SPDX-FileCopyrightText: 2026 Lokesh
+// SPDX-FileCopyrightText: 2026 PranavD2905
 // SPDX-FileCopyrightText: 2026 VishnuM449
 // SPDX-License-Identifier: Apache-2.0
 
@@ -64,6 +65,7 @@ const HELP = `Usage: axl [session-id] [options]
        axl doctor
        axl daemon [status|stop|restart] [options]
        axl print [prompt] [options]
+       axl run -p [prompt] [options]   Same as axl print
        axl json [prompt] [options]
        axl rpc [options]
        axl session export <session-id> --raw [--output <directory>]
@@ -153,7 +155,57 @@ interface CliArguments {
   showVersion: boolean;
 }
 
+const RUN_VALUE_OPTIONS = new Set([
+  "--cwd",
+  "--provider",
+  "--model",
+  "--thinking",
+  "--max-output-tokens",
+  "--http-idle-timeout",
+  "--profile",
+  "--socket",
+  "--sandbox",
+  "--image",
+]);
+const RUN_FLAG_OPTIONS = new Set([
+  "--unsafe",
+  "--web-tools",
+  "--no-web-tools",
+  "--web-fetch",
+  "--no-web-fetch",
+  "--web-search",
+  "--no-web-search",
+]);
+
+// Rewrites `axl run -p ...` into the equivalent `axl print ...` arguments.
+// Prompt words go after `--` so they are never read as commands.
+function printArgumentsForRun(argv: readonly string[]): string[] {
+  const options: string[] = [];
+  const prompt: string[] = [];
+  let print = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] as string;
+    if (argument === "--help" || argument === "-h") return ["--help"];
+    if (argument === "--") {
+      prompt.push(...argv.slice(index + 1));
+      break;
+    }
+    if (argument === "-p" || argument === "--print") print = true;
+    else if (RUN_FLAG_OPTIONS.has(argument)) options.push(argument);
+    else if (RUN_VALUE_OPTIONS.has(argument)) {
+      const value = argv[index + 1];
+      if (value === undefined) throw new Error(`${argument} requires a value`);
+      options.push(argument, value);
+      index += 1;
+    } else if (argument.startsWith("-")) throw new Error(`Unsupported run option ${argument}`);
+    else prompt.push(argument);
+  }
+  if (!print) throw new Error("run requires -p; interactive run is not supported");
+  return ["print", ...options, "--", ...prompt];
+}
+
 function parseArguments(argv: readonly string[]): CliArguments {
+  if (argv[0] === "run") return parseArguments(printArgumentsForRun(argv.slice(1)));
   const parsed: CliArguments = {
     interrupt: false,
     yes: false,
