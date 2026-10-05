@@ -1,5 +1,6 @@
 <!-- SPDX-FileCopyrightText: 2026 Hari Srinivasan -->
 <!-- SPDX-FileCopyrightText: 2026 Kaushik Kumar -->
+<!-- SPDX-FileCopyrightText: 2026 PranavD2905 -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 # Terminal compatibility matrix
@@ -77,7 +78,7 @@ Record the terminal version, operating system, multiplexer, width, image mode, a
 | --- | --- | --- | --- | --- | --- | --- |
 | Windows Terminal with WSL | Pending | Pending | Pending | Metadata | Pending | User test |
 | Native Linux terminal | Pending | Pending | Pending | Capability dependent | Pending | User test |
-| VS Code terminal | Pending | Pending | Pending | Metadata | Pending | User test |
+| VS Code terminal | Not run yet | Not run yet | Not run yet | Metadata expected, not run yet | Not run yet | VS Code 1.134.0, zsh 5.9, macOS 26.5.2 arm64, no multiplexer, default image mode. Manual scenario not run yet, see #466 |
 | tmux on Linux | Pending | Pending | Pending | Metadata by default | Pending | User test |
 | Kitty | Pending | Pending | Pending | Kitty | Pending | User test |
 | Ghostty | Pending | Pending | Pending | Kitty | Pending | User test |
