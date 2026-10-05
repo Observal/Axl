@@ -25,8 +25,7 @@ defmodule AxlRelay.Connection do
        limits: nil,
        rate_window_started: System.monotonic_time(:millisecond),
        last_inbound_at: nil,
-       rate_frames: 0,
-       rate_bytes: 0
+       rate_frames: 0
      }}
   end
 
@@ -67,7 +66,7 @@ defmodule AxlRelay.Connection do
   def handle_in({message, opcode: :binary}, %{phase: :active} = state) do
     with true <- byte_size(message) <= state.limits.max_frame_bytes,
          {:ok, %{kind: :send} = frame} <- Frame.decode(message),
-         {:ok, rate_state} <- rate_limit(state, byte_size(message)) do
+         {:ok, rate_state} <- rate_limit(state) do
       rate_state = %{rate_state | last_inbound_at: System.monotonic_time(:millisecond)}
       admitted = receipt(frame.attempt_id, :admitted)
 
@@ -165,28 +164,21 @@ defmodule AxlRelay.Connection do
     :ok
   end
 
-  defp rate_limit(state, bytes) do
+  defp rate_limit(state) do
     now = System.monotonic_time(:millisecond)
 
     current =
       if now - state.rate_window_started >= state.limits.rate_window_ms do
-        %{state | rate_window_started: now, rate_frames: 0, rate_bytes: 0}
+        %{state | rate_window_started: now, rate_frames: 0}
       else
         state
       end
 
-    max_frames = current.limits.max_frames_per_window
-    max_bytes = current.limits.max_frame_bytes * max_frames
-
-    if current.rate_frames + 1 > max_frames or current.rate_bytes + bytes > max_bytes do
+    # Frames are already capped at max_frame_bytes, so the frame count bounds the bytes too.
+    if current.rate_frames + 1 > current.limits.max_frames_per_window do
       {:error, :rate_limited}
     else
-      {:ok,
-       %{
-         current
-         | rate_frames: current.rate_frames + 1,
-           rate_bytes: current.rate_bytes + bytes
-       }}
+      {:ok, %{current | rate_frames: current.rate_frames + 1}}
     end
   end
 

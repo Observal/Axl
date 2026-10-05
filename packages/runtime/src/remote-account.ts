@@ -58,7 +58,6 @@ const MAX_TOKEN_CHARACTERS = 16_384;
 
 /** Where `axl remote login` returns; registered with the user pool's daemon client. */
 export const REMOTE_LOGIN_PORT = 47_813;
-export const REMOTE_LOGIN_REDIRECT = `http://localhost:${REMOTE_LOGIN_PORT}/callback`;
 /** The production stack, unless `axl remote login --origin` names another. */
 export const DEFAULT_REMOTE_ORIGIN = "https://remote.observal.io";
 
