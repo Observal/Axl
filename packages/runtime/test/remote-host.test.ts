@@ -137,6 +137,31 @@ test("a /remote while another daemon serves remote access names that daemon and 
   assert.match(host.status().lastError?.message ?? "", /another Axl daemon \(process 4242/u);
 });
 
+test("a /remote that fails after replacing the pairing does not restore the replaced one", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "axl-remote-host-"));
+  let host: HostedRemoteHost | undefined;
+  context.after(async () => {
+    await host?.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 3 });
+  });
+  await writeFile(join(root, "host.json"), PAIRED);
+  const output: string[] = [];
+  host = await HostedRemoteHost.open(
+    settings(async () => undefined),
+    root,
+    (message) => output.push(message),
+  );
+  await host.attach({} as AxlDaemon);
+  await assert.rejects(host.start(), {
+    name: "RemotePairingStartError",
+    message: /Remote pairing could not start/u,
+  });
+  // The replaced device was revoked and its session pruned, so nothing is left to restore.
+  await assert.rejects(access(join(root, "host.json")));
+  assert.equal(host.pairedDevice(), undefined);
+  assert.ok(output.some((line) => line.includes("pairing could not start")));
+});
+
 test("unpairing forgets the paired device and ends its shares", async (context) => {
   const offline = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
   const { root, host, output } = await pairedHost(context, offline);

@@ -141,6 +141,7 @@ async function start(context: TestContext) {
       "Bearer internal",
     );
   return {
+    post,
     invite,
     enroll,
     revoke,
@@ -221,6 +222,23 @@ test("enrollment closes with the pairing window and rejects keys that are not P-
     stack.code(await stack.enroll(secret, Uint8Array.of(1, 2, 3), tablet)),
     "invalid_device_key",
   );
+});
+
+test("a malformed device request is a bad request, not an outage", async (context) => {
+  const stack = await start(context);
+  const { secret } = await stack.invite();
+  const valid = encodeRemoteDeviceEnrollmentRequest({
+    version: 1,
+    installationId,
+    deviceId: phone,
+    secret,
+    publicKey: (await deviceKey()).publicKey,
+  });
+  const empty = await stack.post(REMOTE_DEVICE_ENROLLMENT_PATH, { ...valid, publicKey: "" });
+  assert.equal(empty.status, 400);
+  assert.equal(stack.code(empty), "bad_request");
+  const unauthenticated = await stack.post(REMOTE_DEVICE_ENROLLMENT_PATH, valid, "Bearer wrong");
+  assert.deepEqual(unauthenticated, { status: 401, body: { error: { code: "unauthorized" } } });
 });
 
 test("revoking a device stops new tickets and ones already issued", async (context) => {

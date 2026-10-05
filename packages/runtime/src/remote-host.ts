@@ -165,7 +165,6 @@ function describe(cause: unknown): string {
   return detail.length === 0 ? String(cause) : `${String(cause)} (${detail.join(" ")})`;
 }
 
-/** Resolve once the relay is connected or closed, or after `timeoutMs`. */
 /** Settle once the bridge's witness is out of recovery, or after `timeoutMs` regardless. */
 function whenWitnessSettles(bridge: WindowsRemoteE2eeBridge, timeoutMs: number): Promise<void> {
   if (bridge.witnessStatus?.state !== "recovering") return Promise.resolve();
@@ -183,6 +182,7 @@ function whenWitnessSettles(bridge: WindowsRemoteE2eeBridge, timeoutMs: number):
   });
 }
 
+/** Resolve once the relay is connected or closed, or after `timeoutMs`. */
 function whenConnected(relay: RemoteRelayConnection, timeoutMs: number): Promise<void> {
   if (relay.state === "connected") return Promise.resolve();
   return new Promise((resolve) => {
@@ -265,6 +265,11 @@ interface Session {
   /** Serializes pairing work on the endpoint until the bridge owns it. */
   tail: Promise<void>;
   claimHash?: string;
+  /** A Welcome the endpoint created whose publication has not succeeded yet. */
+  welcome?: {
+    readonly claimHash: string;
+    readonly publication: Parameters<HostedPairingClient["publishWelcome"]>[0];
+  };
   bridge?: WindowsRemoteE2eeBridge;
   /** Shared with the device as soon as it activates this pairing. */
   shareOnPair?: SessionId;
@@ -535,14 +540,16 @@ export class HostedRemoteHost implements RemotePairingService {
     if (previous !== undefined) {
       this.#paired = undefined;
       await this.#retire(previous.deviceId);
+      // Its session is pruned next, so a pairing that fails to start must not restore it.
+      await rm(join(this.#root, "host.json"), { force: true });
     }
     const cryptoSessionId = parseCryptoSessionId(uuidV7());
     const deviceId = parseDeviceId(uuidV7());
     const enrollmentSecret = createRemoteDeviceEnrollmentSecret();
     await this.#prune(cryptoSessionId);
-    const session = await this.#openSession(cryptoSessionId, deviceId);
-    if (shareOnPair !== undefined) session.shareOnPair = shareOnPair;
     try {
+      const session = await this.#openSession(cryptoSessionId, deviceId);
+      if (shareOnPair !== undefined) session.shareOnPair = shareOnPair;
       await this.#devices.invite(this.#config.installationId, deviceId, enrollmentSecret);
       const issued = await session.barrier.complete(await session.endpoint.issue(operation()));
       const invitation = released<{ readonly bytes: Uint8Array; readonly expiresAtMs: bigint }>(
@@ -775,6 +782,14 @@ export class HostedRemoteHost implements RemotePairingService {
       if (session.claimHash !== hashText) throw new Error("A different claim was already accepted");
       return;
     }
+    if (session.welcome !== undefined) {
+      // The endpoint already holds this claim's Welcome; only its publication is retried.
+      if (session.welcome.claimHash !== hashText) {
+        throw new Error("A different claim was already accepted");
+      }
+      await this.#publishWelcome(session);
+      return;
+    }
     const reservationId = uuidV7();
     const binding = {
       version: 1 as const,
@@ -806,12 +821,23 @@ export class HostedRemoteHost implements RemotePairingService {
       HOSTED_GRANT_GENERATION,
       DEVICE_SCOPES,
     );
-    await this.#pairing.publishWelcome({
-      ...binding,
-      welcome: welcome.bytes,
-      welcomeHash: new Uint8Array(createHash("sha384").update(welcome.bytes).digest()),
-    });
-    session.claimHash = hashText;
+    session.welcome = {
+      claimHash: hashText,
+      publication: {
+        ...binding,
+        welcome: welcome.bytes,
+        welcomeHash: new Uint8Array(createHash("sha384").update(welcome.bytes).digest()),
+      },
+    };
+    await this.#publishWelcome(session);
+  }
+
+  async #publishWelcome(session: Session): Promise<void> {
+    const pending = session.welcome;
+    if (pending === undefined) return;
+    await this.#pairing.publishWelcome(pending.publication);
+    session.claimHash = pending.claimHash;
+    delete session.welcome;
     this.#log("remote: claim accepted and Welcome published");
   }
 

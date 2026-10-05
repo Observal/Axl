@@ -16,9 +16,14 @@ import {
   parseFetchPairingLinkRequest,
   parseFetchPairingWelcomeRequest,
   parseInternalConsumeRelayTicketRequest,
+  parseIssueRelayTicketRequest,
   parsePublishPairingClaimRequest,
   parsePublishPairingLinkRequest,
   parsePublishPairingWelcomeRequest,
+  parseRemoteDeviceEnrollmentRequest,
+  parseRemoteDeviceInvitationRequest,
+  parseRemoteDeviceRevocationRequest,
+  parseRemoteInstallationRegistrationRequest,
   parseReservePairingClaimRequest,
   REMOTE_DEVICE_ENROLLMENT_PATH,
   REMOTE_DEVICE_INVITATION_PATH,
@@ -158,7 +163,8 @@ function respondError(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof HttpRequestError) {
     respond(response, error.status, {
-      error: { code: error.code, message: error.message },
+      error:
+        error.message === "" ? { code: error.code } : { code: error.code, message: error.message },
     });
     return;
   }
@@ -170,8 +176,13 @@ function respondError(response: ServerResponse, error: unknown): void {
   });
 }
 
-/** Parse a request body, answering 400 rather than 503 when it is malformed. */
-function parseRequest<T>(parse: (value: unknown) => T, value: unknown): T {
+/** Read a JSON body and parse it, answering 400 rather than 503 when it is malformed. */
+async function readRequest<T>(
+  request: IncomingMessage,
+  parse: (value: unknown) => T,
+  maximumBytes?: number,
+): Promise<T> {
+  const value = parseJson(await readBody(request, maximumBytes));
   try {
     return parse(value);
   } catch (cause) {
@@ -180,6 +191,22 @@ function parseRequest<T>(parse: (value: unknown) => T, value: unknown): T {
   }
 }
 
+/** For a service that parses its own input: check the body first, then hand it over unchanged. */
+function checked(parse: (value: unknown) => unknown): (value: unknown) => unknown {
+  return (value) => {
+    parse(value);
+    return value;
+  };
+}
+
+const ACCEPTED = { version: 1, accepted: true } as const;
+
+/** A route that acts for a signed-in principal, answering with a status and a JSON body. */
+type PrincipalRoute = (
+  principal: AccountPrincipal,
+  request: IncomingMessage,
+) => Promise<readonly [status: number, body?: unknown]>;
+
 function requestPath(request: IncomingMessage): string | undefined {
   if (request.url === undefined) return undefined;
   const url = new URL(request.url, "http://control-plane.invalid");
@@ -187,16 +214,84 @@ function requestPath(request: IncomingMessage): string | undefined {
 }
 
 export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): RequestListener {
-  const authenticate = async (
+  /** The caller's principal: 401 without one, 403 for a phone sign-in off the phone routes. */
+  const principalFor = async (
     request: IncomingMessage,
     path: string,
-  ): Promise<AccountPrincipal | undefined> => {
+  ): Promise<AccountPrincipal> => {
     const principal = await options.publicAuthentication.authenticate(request);
-    if (principal?.scope === "phone" && !PHONE_PATHS.has(path)) {
+    if (principal === undefined) throw new HttpRequestError(401, "", "unauthorized");
+    if (principal.scope === "phone" && !PHONE_PATHS.has(path)) {
       throw new HttpRequestError(403, "A phone sign-in cannot call this route", "scope_forbidden");
     }
     return principal;
   };
+  const { tickets, pairing, pairingLinks, devices, installations } = options;
+  const routes = new Map<string, PrincipalRoute>([
+    [
+      "/v1/relay/tickets",
+      async (principal, request) => [
+        201,
+        await tickets.issue(
+          principal,
+          await readRequest(request, checked(parseIssueRelayTicketRequest)),
+        ),
+      ],
+    ],
+  ]);
+  if (pairing !== undefined) {
+    routes.set("/v1/e2ee/pairing/claims", async (principal, request) => {
+      const claim = await readRequest(request, parsePublishPairingClaimRequest, 24 * 1024);
+      await pairing.publishClaim(principal, claim);
+      return [201, ACCEPTED];
+    });
+    routes.set("/v1/e2ee/pairing/claims/reserve", async (principal, request) => {
+      const binding = await readRequest(request, parseReservePairingClaimRequest);
+      return [200, encodePairingReservation(await pairing.reserveClaim(principal, binding))];
+    });
+    routes.set("/v1/e2ee/pairing/welcomes", async (principal, request) => {
+      const welcome = await readRequest(request, parsePublishPairingWelcomeRequest, 24 * 1024);
+      return [
+        201,
+        encodePairingWelcomePublication(await pairing.publishWelcome(principal, welcome)),
+      ];
+    });
+    routes.set("/v1/e2ee/pairing/welcomes/fetch", async (principal, request) => {
+      const binding = await readRequest(request, parseFetchPairingWelcomeRequest);
+      return [200, encodePairingWelcomePublication(await pairing.fetchWelcome(principal, binding))];
+    });
+    routes.set("/v1/e2ee/pairing/welcomes/acknowledge", async (principal, request) => {
+      const binding = await readRequest(request, parseAcknowledgePairingWelcomeRequest);
+      await pairing.acknowledgeWelcome(principal, binding);
+      return [204];
+    });
+  }
+  if (pairingLinks !== undefined) {
+    routes.set(PAIRING_LINK_PUBLISH_PATH, async (principal, request) => {
+      const link = await readRequest(request, parsePublishPairingLinkRequest, 8 * 1024);
+      await pairingLinks.publish(principal, link);
+      return [201, ACCEPTED];
+    });
+  }
+  if (installations !== undefined) {
+    routes.set(REMOTE_INSTALLATION_REGISTRATION_PATH, async (principal, request) => {
+      const body = await readRequest(request, checked(parseRemoteInstallationRegistrationRequest));
+      await installations.register(principal, body);
+      return [201, ACCEPTED];
+    });
+  }
+  if (devices !== undefined) {
+    for (const [path, parse, action] of [
+      [REMOTE_DEVICE_INVITATION_PATH, parseRemoteDeviceInvitationRequest, devices.invite],
+      [REMOTE_DEVICE_ENROLLMENT_PATH, parseRemoteDeviceEnrollmentRequest, devices.enroll],
+      [REMOTE_DEVICE_REVOCATION_PATH, parseRemoteDeviceRevocationRequest, devices.revoke],
+    ] as const) {
+      routes.set(path, async (principal, request) => {
+        await action.call(devices, principal, await readRequest(request, checked(parse)));
+        return [200, ACCEPTED];
+      });
+    }
+  }
   return (request, response) => {
     void (async () => {
       if (request.method !== "POST") {
@@ -204,143 +299,25 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
         return;
       }
       const path = requestPath(request);
-      if (path === "/v1/relay/tickets") {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
+      const route = path === undefined ? undefined : routes.get(path);
+      if (route !== undefined && path !== undefined) {
+        const [status, body] = await route(await principalFor(request, path), request);
+        if (body === undefined) {
+          response.writeHead(status, { "cache-control": "no-store" });
+          response.end();
+        } else {
+          respond(response, status, body);
         }
-        const result = await options.tickets.issue(principal, parseJson(await readBody(request)));
-        respond(response, 201, result);
         return;
       }
-      if (path === "/v1/e2ee/pairing/claims" && options.pairing !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        await options.pairing.publishClaim(
-          principal,
-          parsePublishPairingClaimRequest(parseJson(await readBody(request, 24 * 1024))),
-        );
-        respond(response, 201, { version: 1, accepted: true });
-        return;
-      }
-      if (path === "/v1/e2ee/pairing/claims/reserve" && options.pairing !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        const result = await options.pairing.reserveClaim(
-          principal,
-          parseReservePairingClaimRequest(parseJson(await readBody(request))),
-        );
-        respond(response, 200, encodePairingReservation(result));
-        return;
-      }
-      if (path === "/v1/e2ee/pairing/welcomes" && options.pairing !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        const result = await options.pairing.publishWelcome(
-          principal,
-          parsePublishPairingWelcomeRequest(parseJson(await readBody(request, 24 * 1024))),
-        );
-        respond(response, 201, encodePairingWelcomePublication(result));
-        return;
-      }
-      if (path === "/v1/e2ee/pairing/welcomes/fetch" && options.pairing !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        const result = await options.pairing.fetchWelcome(
-          principal,
-          parseFetchPairingWelcomeRequest(parseJson(await readBody(request))),
-        );
-        respond(response, 200, encodePairingWelcomePublication(result));
-        return;
-      }
-      if (path === "/v1/e2ee/pairing/welcomes/acknowledge" && options.pairing !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        await options.pairing.acknowledgeWelcome(
-          principal,
-          parseAcknowledgePairingWelcomeRequest(parseJson(await readBody(request))),
-        );
-        response.writeHead(204, { "cache-control": "no-store" });
-        response.end();
-        return;
-      }
-      if (path === PAIRING_LINK_PUBLISH_PATH && options.pairingLinks !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        await options.pairingLinks.publish(
-          principal,
-          parseRequest(
-            parsePublishPairingLinkRequest,
-            parseJson(await readBody(request, 8 * 1024)),
-          ),
-        );
-        respond(response, 201, { version: 1, accepted: true });
-        return;
-      }
-      if (path === PAIRING_LINK_FETCH_PATH && options.pairingLinks !== undefined) {
+      if (path === PAIRING_LINK_FETCH_PATH && pairingLinks !== undefined) {
         // The phone opening a short link has no credential yet; see pairing-links.ts.
-        const result = await options.pairingLinks.fetch(
-          parseRequest(parseFetchPairingLinkRequest, parseJson(await readBody(request))),
-        );
-        respond(response, 200, encodePairingLinkPublication(result));
-        return;
-      }
-      if (path === REMOTE_INSTALLATION_REGISTRATION_PATH && options.installations !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        await options.installations.register(principal, parseJson(await readBody(request)));
-        respond(response, 201, { version: 1, accepted: true });
-        return;
-      }
-      const devices = options.devices;
-      const deviceAction =
-        devices === undefined
-          ? undefined
-          : path === REMOTE_DEVICE_INVITATION_PATH
-            ? devices.invite.bind(devices)
-            : path === REMOTE_DEVICE_ENROLLMENT_PATH
-              ? devices.enroll.bind(devices)
-              : path === REMOTE_DEVICE_REVOCATION_PATH
-                ? devices.revoke.bind(devices)
-                : undefined;
-      if (deviceAction !== undefined && path !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
-        await deviceAction(principal, parseJson(await readBody(request)));
-        respond(response, 200, { version: 1, accepted: true });
+        const link = await readRequest(request, parseFetchPairingLinkRequest);
+        respond(response, 200, encodePairingLinkPublication(await pairingLinks.fetch(link)));
         return;
       }
       if (path === WITNESS_HTTP_PATH && options.witness !== undefined) {
-        const principal = await authenticate(request, path);
-        if (principal === undefined) {
-          respond(response, 401, { error: { code: "unauthorized" } });
-          return;
-        }
+        const principal = await principalFor(request, path);
         if (request.headers["content-type"] !== WITNESS_HTTP_CONTENT_TYPE) {
           throw new HttpRequestError(415, "Witness request has an unsupported content type");
         }
@@ -363,7 +340,7 @@ export function createControlPlaneHandler(options: ControlPlaneHandlerOptions): 
           respond(response, 401, { error: { code: "unauthorized" } });
           return;
         }
-        const result = await options.tickets.consume(
+        const result = await tickets.consume(
           parseInternalConsumeRelayTicketRequest(parseJson(body)),
         );
         respond(response, 200, encodeInternalConsumeRelayTicketResult(result));
