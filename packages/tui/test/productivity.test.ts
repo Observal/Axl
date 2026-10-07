@@ -54,6 +54,24 @@ test("Vim mode edits through the standard grapheme-safe editor", () => {
   assert.equal(editor.render(40).cursorColumn, 3);
 });
 
+test("Vim D and C delete to the end of the line", () => {
+  const editor = new LineEditor();
+  const vim = new VimModeController();
+
+  editor.setText("test D leaves in normal mode\nthis should be safe", 4);
+  vim.handle({ kind: "escape" }, editor);
+  assert.equal(vim.mode, "normal");
+  vim.handle({ kind: "char", char: "D" }, editor);
+  assert.equal(editor.text, "test\nthis should be safe");
+  assert.equal(vim.mode, "normal");
+  editor.setText("test C switches to insert mode\nthis should be safe", 4);
+  vim.handle({ kind: "escape" }, editor);
+  assert.equal(vim.mode, "normal");
+  vim.handle({ kind: "char", char: "C" }, editor);
+  assert.equal(editor.text, "test\nthis should be safe");
+  assert.equal(vim.mode, "insert");
+});
+
 test("vertical movement preserves the preferred visual column", () => {
   const editor = new LineEditor();
   editor.setText("abcdef\nx\nabcdef");
