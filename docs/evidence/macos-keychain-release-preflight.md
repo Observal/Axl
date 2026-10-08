@@ -170,6 +170,10 @@ local unsigned test outputs, not signed release artifacts.
   No valid tests were deleted, skipped, or weakened. CI on supported runner environments must
   decide the broader gate; this is not reported as a full test pass. Logs are local and
   must be redacted before sharing. `git diff --check`: passed.
+- `pnpm audit --audit-level high`: **failed** on the existing lockfile with 1 critical
+  (`proxy-addr`) and 2 high (`source-map-js`, `@modelcontextprotocol/sdk`) advisories in
+  unrelated MCP/web dependency paths. No dependency was changed by this PR. The audit result
+  is a repository release gate, not a Mac Keychain test pass.
 
 ## Unavailable scenarios / gates
 
