@@ -180,6 +180,9 @@ jobs:
           cargo test --locked -p axl-keychain-helper -- --nocapture
           cargo clippy --locked -p axl-e2ee -p axl-keychain-helper --all-targets -- -D warnings
           cargo clippy --locked -p axl-e2ee-node --all-targets --features hosted-macos -- -D warnings
+      - name: Check signed-helper installer verification and publication without signing assets
+        if: needs.changes.outputs.e2ee == 'true'
+        run: PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest discover -s packages/e2ee/helpers/keychain -p 'test_*.py' -v
       - name: Install pinned pnpm and Node dependencies
         if: needs.changes.outputs.e2ee == 'true'
         run: |

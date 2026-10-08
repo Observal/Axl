@@ -457,11 +457,18 @@ impl<W: Sealer> SealedFileEnvelopeKeyStore<W> {
         if fs::symlink_metadata(&path).is_err() {
             return Ok(None);
         }
-        validate_file(&path, self.uid)?;
+        // Validate the opened inode, not a path that could be replaced between stat and open.
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| PersistenceError::SecureStoreAccessDenied)?;
+        let metadata = file.metadata().map_err(|_| PersistenceError::Io)?;
+        if !metadata.is_file() || metadata.uid() != self.uid || metadata.mode() & 0o077 != 0 {
+            return Err(PersistenceError::SecureStoreAccessDenied);
+        }
         let mut protected = Vec::new();
-        File::open(&path)
-            .map_err(|_| PersistenceError::Io)?
-            .take((MAX_RECORD_BYTES + 1) as u64)
+        file.take((MAX_RECORD_BYTES + 1) as u64)
             .read_to_end(&mut protected)
             .map_err(|_| PersistenceError::Io)?;
         if protected.len() > MAX_RECORD_BYTES {
@@ -914,6 +921,25 @@ mod tests {
         bytes[0] ^= 1;
         fs::write(&path, bytes).unwrap();
         assert!(store.load(SESSION, KEY, b"context").is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_record_is_refused_without_opening_its_target() {
+        let root = root("record-symlink");
+        let store =
+            SealedFileEnvelopeKeyStore::new(&root, FakeDpapi::new("S-1-5-21-1"), &WSL_DPAPI)
+                .unwrap();
+        store.prepare(SESSION, KEY, &DATA, b"context").unwrap();
+        store.activate(SESSION, KEY, b"context").unwrap();
+        let path = store.path(SESSION, KEY, Lifecycle::Active);
+        let original = root.join("original");
+        fs::rename(&path, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &path).unwrap();
+        assert_eq!(
+            store.load(SESSION, KEY, b"context"),
+            Err(PersistenceError::SecureStoreAccessDenied)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
