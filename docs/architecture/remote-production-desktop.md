@@ -3,7 +3,7 @@
 
 # Production remote access from macOS and Linux desktop daemons
 
-Status: implemented in RC behind the per-account opt-in, awaiting the security review. The Linux desktop path passes the full phone E2E against GNOME Keyring in CI. The macOS path is built and fails closed until the Developer ID signed helper exists. It extends [Production remote access from a WSL daemon](remote-production-wsl.md) to two more daemon targets and changes nothing about the WSL record format. No public support claim follows from it.
+Status: implemented in RC behind the per-account opt-in, awaiting independent security review and release approval. The Linux desktop path passes the full phone E2E against GNOME Keyring in CI. The macOS path is built and fails closed until a verified Developer ID signed and notarized helper is installed and independently tested on both native architectures. It extends [Production remote access from a WSL daemon](remote-production-wsl.md) to two more daemon targets and changes nothing about the WSL record format. No public support claim follows from it.
 
 ## Purpose
 
@@ -55,9 +55,9 @@ This differs from the RFC's macOS row, which stores each record as its own Keych
 
 ### Signing
 
-The helper ships as `AxlKeychainHelper.app/Contents/MacOS/axl-keychain-helper` with an embedded provisioning profile, because a command-line tool cannot carry a Developer ID provisioning profile on its own. It is signed with the Developer ID certificate, the hardened runtime, and the `keychain-access-groups` entitlement for Axl's team identifier, then notarized. `packages/e2ee/helpers/keychain/install-macos.sh` builds the bundle into `~/Library/Application Support/Axl`, where `axl remote login` looks for it, and signs it that way when given the identity, team, and profile.
+The helper ships as `AxlKeychainHelper.app/Contents/MacOS/axl-keychain-helper` with an embedded provisioning profile, because a command-line tool cannot carry a Developer ID provisioning profile on its own. It is signed with the Developer ID certificate, the hardened runtime, and the `keychain-access-groups` entitlement for Axl's team identifier, then notarized. `packages/e2ee/helpers/keychain/install-macos.sh` requires a Developer ID identity, team ID, provisioning profile, and a preconfigured notarytool Keychain profile. It builds, signs, submits a ZIP to Apple, staples the accepted ticket to the app, verifies the bundle and a re-extracted stapled release ZIP, and publishes it under an immutable versioned path. After verification it atomically switches the canonical helper path to that version. A failed post-switch verification restores the old version (or removes the pointer on first install); old versions and Keychain data are retained. Upgrades require the daemon to be stopped and explicit acknowledgment; the script does not stop it. Legacy installations with a real app directory at the canonical path require a separately reviewed migration. It prints artifact hashes. Distribution through an independent channel still requires a separate reviewed procedure. Do not run it without authorization to use signing assets, submit to Apple, and install locally. `verify-macos.py` checks the exact app identity, team, signed entitlements, embedded profile, Developer ID chain, timestamp, hardened runtime, stapled ticket, and Gatekeeper assessment. A successful installer run alone does not prove a supported release or independent witnesses.
 
-Until that signing exists, a locally built helper is unsigned or ad-hoc signed. The Keychain refuses it with `errSecMissingEntitlement`, the helper answers `access denied`, and login and the daemon's endpoint fail closed with `secure_store_access_denied`. CI asserts exactly this.
+An unentitled locally built helper is only a negative-test artifact. The Keychain refuses it with `errSecMissingEntitlement`, the helper answers `access denied`, and login and the daemon's endpoint fail closed with `secure_store_access_denied`. CI asserts exactly this.
 
 ### What it protects and what it does not
 
