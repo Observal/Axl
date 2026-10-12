@@ -73,7 +73,7 @@ Options:
   --cwd <path>       Set the workspace directory
   --provider <id>    Select the initial provider
   --model <id>       Select the initial model
-  --thinking <level> Select the initial reasoning effort
+  --thinking <level> Select reasoning effort: off, minimal, low, medium, high, xhigh, max
   --max-output-tokens <n|model>  Set an output ceiling or use the model maximum
   --http-idle-timeout <ms>       Header/body idle timeout; 0 disables it
   --profile <name>   Select the standard or Bash-only exec profile
@@ -82,16 +82,16 @@ Options:
   --socket <path>    Use a custom daemon socket
   --sandbox <kind>   Use native, podman, or docker isolation
   -p, --print        Print one response and exit
-  --json              Emit canonical events as JSONL and exit
+  --json             Emit canonical events as JSONL and exit
   -r, --resume       Open the all-session resume picker
   --image <digest>   Use a locally available digest-pinned OCI image
   --unsafe           Disable operating-system isolation
-  --web-tools         Enable web_fetch and web_search (default)
-  --no-web-tools      Disable web_fetch and web_search
-  --web-fetch         Enable web_fetch
-  --no-web-fetch      Disable web_fetch
-  --web-search        Enable web_search
-  --no-web-search     Disable web_search
+  --web-tools        Enable web_fetch and web_search (default)
+  --no-web-tools     Disable web_fetch and web_search
+  --web-fetch        Enable web_fetch
+  --no-web-fetch     Disable web_fetch
+  --web-search       Enable web_search
+  --no-web-search    Disable web_search
   --output <path>    Set the raw session export directory
   --confirm-prefix   Recover only events before an unsupported oversized event
   --interrupt        Authorize cancellation for daemon stop/restart
