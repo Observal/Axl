@@ -54,7 +54,7 @@ export class VimModeController {
     if (this.pending === "c") {
       this.pending = "";
       if (char === "w") {
-        editor.deleteWordForward();
+        editor.changeWordForward();
         this.current = "insert";
       } else if (char === "c") {
         editor.clearCurrentLine();

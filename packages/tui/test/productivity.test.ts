@@ -54,7 +54,7 @@ test("Vim mode edits through the standard grapheme-safe editor", () => {
   assert.equal(editor.render(40).cursorColumn, 3);
 });
 
-test("Vim mode change commands cw and cc delete then enter insert mode", () => {
+test("Vim mode cw changes the word but keeps the separator", () => {
   const editor = new LineEditor();
   const vim = new VimModeController();
   editor.setText("one two");
@@ -63,8 +63,38 @@ test("Vim mode change commands cw and cc delete then enter insert mode", () => {
   vim.handle({ kind: "char", char: "0" }, editor);
   vim.handle({ kind: "char", char: "c" }, editor);
   vim.handle({ kind: "char", char: "w" }, editor);
-  assert.equal(editor.text, "two");
+  // Vim's cw stops at the end of the word; unlike dw it does not eat the space.
+  assert.equal(editor.text, " two");
   assert.equal(vim.mode, "insert");
+});
+
+test("Vim mode cw mid-word and on whitespace match Vim", () => {
+  const editor = new LineEditor();
+  const vim = new VimModeController();
+  editor.setText("alpha beta gamma");
+
+  vim.handle({ kind: "escape" }, editor);
+  // Mid-word: delete from the cursor to the end of "alpha".
+  vim.handle({ kind: "char", char: "0" }, editor);
+  vim.handle({ kind: "char", char: "l" }, editor);
+  vim.handle({ kind: "char", char: "l" }, editor);
+  vim.handle({ kind: "char", char: "c" }, editor);
+  vim.handle({ kind: "char", char: "w" }, editor);
+  assert.equal(editor.text, "al beta gamma");
+
+  // On whitespace cw falls back to dw, which takes the whitespace run and the
+  // following word with it.
+  const second = new LineEditor();
+  const secondVim = new VimModeController();
+  second.setText("one   two");
+  secondVim.handle({ kind: "escape" }, second);
+  secondVim.handle({ kind: "char", char: "0" }, second);
+  secondVim.handle({ kind: "right" }, second);
+  secondVim.handle({ kind: "right" }, second);
+  secondVim.handle({ kind: "right" }, second);
+  secondVim.handle({ kind: "char", char: "c" }, second);
+  secondVim.handle({ kind: "char", char: "w" }, second);
+  assert.equal(second.text, "one");
 });
 
 test("Vim mode cc clears the current line but keeps it", () => {

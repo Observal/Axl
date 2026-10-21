@@ -312,6 +312,26 @@ export class LineEditor {
     }
   }
 
+  /**
+   * Vim `cw`: delete to the end of the current word but keep the separator.
+   * Unlike `dw`, `cw` does not consume the whitespace after the word; on
+   * whitespace (or at the end of the buffer) Vim falls back to `dw`.
+   */
+  changeWordForward(): void {
+    const onWord =
+      this.cursor < this.buffer.length &&
+      wordCharacter.test(graphemeAt(this.buffer, this.cursor));
+    if (!onWord) {
+      this.deleteWordForward();
+      return;
+    }
+    let to = this.cursor;
+    while (to < this.buffer.length && wordCharacter.test(graphemeAt(this.buffer, to))) {
+      to = nextBoundary(this.buffer, to);
+    }
+    this.kill(this.cursor, to);
+  }
+
   deleteWordForward(): void {
     let to = this.wordRight();
     while (to < this.buffer.length && !wordCharacter.test(graphemeAt(this.buffer, to))) {
