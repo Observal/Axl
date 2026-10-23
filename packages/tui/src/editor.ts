@@ -201,6 +201,7 @@ export function decodeKeys(data: string): EditorKey[] {
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const wordCharacter = /[\p{L}\p{N}_]/u;
+const blankCharacter = /\s/u;
 
 function boundaries(value: string): number[] {
   const result = [0];
@@ -318,15 +319,19 @@ export class LineEditor {
    * whitespace (or at the end of the buffer) Vim falls back to `dw`.
    */
   changeWordForward(): void {
-    const onWord =
-      this.cursor < this.buffer.length &&
-      wordCharacter.test(graphemeAt(this.buffer, this.cursor));
-    if (!onWord) {
+    const at = this.cursor < this.buffer.length ? graphemeAt(this.buffer, this.cursor) : "";
+    // On whitespace (or at the end of the buffer) Vim's `cw` falls back to `dw`.
+    if (!at || blankCharacter.test(at)) {
       this.deleteWordForward();
       return;
     }
+    // Otherwise `cw` is `ce`: change to the end of the current word, where a run
+    // of non-blank punctuation counts as a word of its own.
+    const inWord = wordCharacter.test(at);
+    const sameClass = (char: string): boolean =>
+      inWord ? wordCharacter.test(char) : !wordCharacter.test(char) && !blankCharacter.test(char);
     let to = this.cursor;
-    while (to < this.buffer.length && wordCharacter.test(graphemeAt(this.buffer, to))) {
+    while (to < this.buffer.length && sameClass(graphemeAt(this.buffer, to))) {
       to = nextBoundary(this.buffer, to);
     }
     this.kill(this.cursor, to);

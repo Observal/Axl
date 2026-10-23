@@ -123,6 +123,44 @@ test("Vim mode c followed by another key cancels without editing", () => {
   assert.equal(vim.mode, "normal");
 });
 
+test("Vim mode navigation cancels a pending operator", () => {
+  const editor = new LineEditor();
+  const vim = new VimModeController();
+  editor.setText("one two three");
+
+  vim.handle({ kind: "escape" }, editor);
+  vim.handle({ kind: "char", char: "0" }, editor);
+  vim.handle({ kind: "char", char: "w" }, editor);
+  assert.equal(editor.render(40).cursorColumn, 3);
+  vim.handle({ kind: "char", char: "c" }, editor);
+  // The exact sequence from review: `c`, Left, `w`. The Left cancels `c`, so
+  // `w` moves a word instead of changing one.
+  vim.handle({ kind: "left" }, editor);
+  vim.handle({ kind: "char", char: "w" }, editor);
+
+  assert.equal(editor.text, "one two three");
+  assert.equal(vim.mode, "normal");
+  assert.equal(editor.render(40).cursorColumn, 3);
+});
+
+test("Vim mode cw on punctuation changes only the punctuation run", () => {
+  const editor = new LineEditor();
+  const vim = new VimModeController();
+  editor.setText("foo.bar baz");
+
+  vim.handle({ kind: "escape" }, editor);
+  vim.handle({ kind: "char", char: "0" }, editor);
+  vim.handle({ kind: "char", char: "l" }, editor);
+  vim.handle({ kind: "char", char: "l" }, editor);
+  vim.handle({ kind: "char", char: "l" }, editor);
+  vim.handle({ kind: "char", char: "c" }, editor);
+  vim.handle({ kind: "char", char: "w" }, editor);
+
+  // Vim treats the punctuation run as its own word, so `.bar ` is not removed.
+  assert.equal(editor.text, "foobar baz");
+  assert.equal(vim.mode, "insert");
+});
+
 test("vertical movement preserves the preferred visual column", () => {
   const editor = new LineEditor();
   editor.setText("abcdef\nx\nabcdef");
