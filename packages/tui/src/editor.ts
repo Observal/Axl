@@ -201,6 +201,7 @@ export function decodeKeys(data: string): EditorKey[] {
 
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const wordCharacter = /[\p{L}\p{N}_]/u;
+const blankCharacter = /\s/u;
 
 function boundaries(value: string): number[] {
   const result = [0];
@@ -312,6 +313,30 @@ export class LineEditor {
     }
   }
 
+  /**
+   * Vim `cw`: delete to the end of the current word but keep the separator.
+   * Unlike `dw`, `cw` does not consume the whitespace after the word; on
+   * whitespace (or at the end of the buffer) Vim falls back to `dw`.
+   */
+  changeWordForward(): void {
+    const at = this.cursor < this.buffer.length ? graphemeAt(this.buffer, this.cursor) : "";
+    // On whitespace (or at the end of the buffer) Vim's `cw` falls back to `dw`.
+    if (!at || blankCharacter.test(at)) {
+      this.deleteWordForward();
+      return;
+    }
+    // Otherwise `cw` is `ce`: change to the end of the current word, where a run
+    // of non-blank punctuation counts as a word of its own.
+    const inWord = wordCharacter.test(at);
+    const sameClass = (char: string): boolean =>
+      inWord ? wordCharacter.test(char) : !wordCharacter.test(char) && !blankCharacter.test(char);
+    let to = this.cursor;
+    while (to < this.buffer.length && sameClass(graphemeAt(this.buffer, to))) {
+      to = nextBoundary(this.buffer, to);
+    }
+    this.kill(this.cursor, to);
+  }
+
   deleteWordForward(): void {
     let to = this.wordRight();
     while (to < this.buffer.length && !wordCharacter.test(graphemeAt(this.buffer, to))) {
@@ -325,6 +350,13 @@ export class LineEditor {
     if (lineEnd < this.buffer.length) this.kill(lineStart, lineEnd + 1);
     else if (lineStart > 0) this.kill(lineStart - 1, lineEnd);
     else this.kill(0, lineEnd);
+  }
+
+  /** Remove the current line's text, keep the line itself, and put the cursor at its start. */
+  clearCurrentLine(): void {
+    const { lineStart, lineEnd } = this.position();
+    if (lineStart === lineEnd) return;
+    this.kill(lineStart, lineEnd);
   }
 
   openLine(direction: "above" | "below"): void {

@@ -32,12 +32,23 @@ export class VimModeController {
       this.pending = "";
       return true;
     }
-    if (key.kind === "enter" || key.kind === "follow-up" || key.kind === "tab") return false;
+    if (key.kind === "enter" || key.kind === "follow-up" || key.kind === "tab") {
+      // Any other key cancels a pending operator, including keys the editor
+      // handles itself.
+      this.pending = "";
+      return false;
+    }
     if (key.kind === "ctrl" && key.char === "r") {
+      this.pending = "";
       editor.apply({ kind: "redo" });
       return true;
     }
-    if (key.kind !== "char") return this.handleNavigation(key, editor);
+    if (key.kind !== "char") {
+      // Navigation cancels a pending operator: `c`, Left, `w` must move by a
+      // word rather than change one.
+      this.pending = "";
+      return this.handleNavigation(key, editor);
+    }
 
     const char = key.char;
     if (this.pending === "f") {
@@ -51,7 +62,18 @@ export class VimModeController {
       else if (char === "w") editor.deleteWordForward();
       return true;
     }
-    if (char === "d" || char === "f") {
+    if (this.pending === "c") {
+      this.pending = "";
+      if (char === "w") {
+        editor.changeWordForward();
+        this.current = "insert";
+      } else if (char === "c") {
+        editor.clearCurrentLine();
+        this.current = "insert";
+      }
+      return true;
+    }
+    if (char === "d" || char === "f" || char === "c") {
       this.pending = char;
       return true;
     }
