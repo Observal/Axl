@@ -55,11 +55,18 @@ const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
 
 const FILE_LANGUAGES: Readonly<Record<string, string>> = {
   dockerfile: "dockerfile",
+  containerfile: "dockerfile",
   makefile: "makefile",
+  gnumakefile: "makefile",
   cmakelists: "cmake",
   "cmakelists.txt": "cmake",
   gemfile: "ruby",
   rakefile: "ruby",
+  vagrantfile: "ruby",
+  ".bashrc": "bash",
+  ".zshrc": "bash",
+  ".bash_profile": "bash",
+  ".profile": "bash",
 };
 
 function languageName(language: string | undefined): string | undefined {
@@ -75,6 +82,11 @@ export function languageForPath(path: string): string | undefined {
   const name = path.split(/[\\/]/u).at(-1)?.toLowerCase() ?? "";
   const named = FILE_LANGUAGES[name];
   if (named !== undefined) return named;
+  // Dockerfile.* / Containerfile.* keep dockerfile highlighting even when the
+  // "extension" is an environment name (dev, prod, …) that is not a language.
+  if (name.startsWith("dockerfile.") || name.startsWith("containerfile.")) {
+    return "dockerfile";
+  }
   const extension = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
   return languageName(extension);
 }
