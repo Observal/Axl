@@ -109,6 +109,25 @@ Shift plus Enter and Ctrl plus Enter depend on the terminal reporting a modified
 
 Ctrl plus Backspace also depends on a distinct terminal sequence. When a terminal sends the ordinary Backspace byte for both keys, use Alt plus Backspace or Ctrl plus W for word deletion. Ordinary Backspace always remains single-grapheme deletion.
 
+## Vim mode
+
+Toggle with `/vim`. Editing starts in insert mode. Escape switches to normal mode; Escape in normal mode clears a pending `d` or `f` prefix.
+
+| Action | Keys |
+| --- | --- |
+| Move left / down / up / right | `h` `j` `k` `l`, arrow keys |
+| Word forward / back | `w` `b`, or the terminal word-left / word-right keys |
+| Line start / end | `0` `$`, Home, End |
+| Find next character on the line | `f` then a character |
+| Enter insert mode | `i` (here), `a` (after cursor), `I` (line start), `A` (line end), `o` (open below), `O` (open above) |
+| Delete character under cursor | `x` |
+| Delete current line / word forward | `dd` / `dw` |
+| Undo / redo | `u` / Ctrl+R |
+| Paste from the kill ring | `p` or `P` |
+| Open a slash command | `/` or `:` (both insert `/` and return to insert mode) |
+
+Enter, Alt+Enter follow-up, and Tab stay with the ordinary editor bindings in normal mode.
+
 ## Quit and detach
 
 `/detach` releases this attachment without cancelling work. `/quit` uses the host-injected SDK lifecycle surface to interrupt work and shut down the daemon after durable cleanup. Shared sessions or clients require confirmation. Escape interrupts while staying attached. Ctrl+C clears the editor; a second press within 500 ms quits. Ctrl+D quits with an empty editor. A missing host-control surface produces an explicit error, not a detach fallback. Failed or stalled graceful cleanup offers a separate force confirmation when the host supports it.
