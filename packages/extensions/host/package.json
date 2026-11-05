@@ -15,7 +15,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b tsconfig.build.json --force",
+    "build": "node init && tsc -b tsconfig.build.json --force",
     "test": "pnpm --filter @axl/protocol build && pnpm --filter @axl/kernel build && pnpm --filter @axl/extension-api build && node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

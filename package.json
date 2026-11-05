@@ -8,9 +8,9 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "tsc -b packages/*/tsconfig.build.json packages/extensions/*/tsconfig.build.json --force && pnpm --filter @axl/web build",
-    "build:release": "node scripts/build-release-package.ts",
-    "build:release-metadata": "node scripts/build-release-metadata.ts",
+    "build": "node init && tsc -b packages/*/tsconfig.build.json packages/extensions/*/tsconfig.build.json --force && pnpm --filter @axl/web build",
+    "build:release": "node init && node scripts/build-release-package.ts",
+    "build:release-metadata": "node init && node scripts/build-release-metadata.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm check:generated",
     "check:boundaries": "node scripts/check-boundaries.ts",
     "check:generated": "node scripts/check-generated.ts",

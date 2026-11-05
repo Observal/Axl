@@ -9,8 +9,7 @@ dist/
 coverage/
 docs/screenshots/
 *.tsbuildinfo
-.env
-.env.*
+temp_auto_push.bat
 !.env.example
 
 # Local web-client review notes; not part of the tracked repository.
@@ -21,3 +20,6 @@ web-client-tracking.md
 !CODE_STRUCTURE.md
 !OPEN_SOURCE.md
 !ROADMAP.md
+.gitignore
+branch_structure.json
+config.bat
