@@ -3,6 +3,7 @@
 // SPDX-FileCopyrightText: 2026 Lokesh
 // SPDX-FileCopyrightText: 2026 Srihari
 // SPDX-FileCopyrightText: 2026 VishnuM449
+// SPDX-FileCopyrightText: 2026 Priyansh Kansara
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
@@ -43,6 +44,37 @@ test("--help and --version do not require credentials", () => {
   const version = spawnSync(process.execPath, [entry, "--version"], { encoding: "utf8" });
   assert.equal(version.status, 0);
   assert.equal(version.stdout, "axl 0.0.0-dev\n");
+});
+
+test("--help lines up option descriptions and lists the thinking levels", () => {
+  const help = spawnSync(process.execPath, [entry, "--help"], { encoding: "utf8" });
+  assert.equal(help.status, 0);
+
+  const optionLine = /^( {2}(?:-\w, )?--[a-z-]+(?: <[^>]+>)?)( +)(\S.*)$/u;
+  const columns = new Set<number>();
+  const thinkingLines: string[] = [];
+  for (const line of help.stdout.split("\n")) {
+    const match = optionLine.exec(line);
+    const flag = match?.[1];
+    const gap = match?.[2];
+    if (flag === undefined || gap === undefined) continue;
+    columns.add(flag.length + gap.length);
+    if (flag.includes("--thinking")) thinkingLines.push(line);
+  }
+
+  assert.ok(columns.size > 0, "no option lines found in --help");
+  assert.deepEqual(
+    [...columns],
+    [Math.max(...columns)],
+    "--help option descriptions start in different columns",
+  );
+
+  assert.equal(thinkingLines.length, 1);
+  for (const thinkingLine of thinkingLines) {
+    for (const level of ["off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+      assert.match(thinkingLine, new RegExp(`\\b${level}\\b`, "u"));
+    }
+  }
 });
 
 async function temporaryDirectory(context: TestContext): Promise<string> {
