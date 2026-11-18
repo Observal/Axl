@@ -70,37 +70,37 @@ const HELP = `Usage: axl [session-id] [options]
        axl session migrate-events <session-id> [--confirm-prefix]
 
 Options:
-  --cwd <path>       Set the workspace directory
-  --provider <id>    Select the initial provider
-  --model <id>       Select the initial model
-  --thinking <level> Select the initial reasoning effort
+  --cwd <path>                   Set the workspace directory
+  --provider <id>                Select the initial provider
+  --model <id>                   Select the initial model
+  --thinking <level>             Select the initial reasoning effort (off, minimal, low, medium, high, xhigh, max)
   --max-output-tokens <n|model>  Set an output ceiling or use the model maximum
   --http-idle-timeout <ms>       Header/body idle timeout; 0 disables it
-  --profile <name>   Select the standard or Bash-only exec profile
-  --theme <name>     Select the terminal theme
-  --tui-mode <mode>  Use regular or fullscreen terminal mode
-  --socket <path>    Use a custom daemon socket
-  --sandbox <kind>   Use native, podman, or docker isolation
-  -p, --print        Print one response and exit
-  --json              Emit canonical events as JSONL and exit
-  -r, --resume       Open the all-session resume picker
-  --image <digest>   Use a locally available digest-pinned OCI image
-  --unsafe           Disable operating-system isolation
-  --web-tools         Enable web_fetch and web_search (default)
-  --no-web-tools      Disable web_fetch and web_search
-  --web-fetch         Enable web_fetch
-  --no-web-fetch      Disable web_fetch
-  --web-search        Enable web_search
-  --no-web-search     Disable web_search
-  --output <path>    Set the raw session export directory
-  --confirm-prefix   Recover only events before an unsupported oversized event
-  --interrupt        Authorize cancellation for daemon stop/restart
-  --yes              Confirm disconnecting other daemon clients
-  --force            Force a previously requested shutdown (daemon stop --yes)
-  --no-open          Do not open a browser for axl web
-  --print-url        Print the one-use axl web launch URL for manual opening
-  --help             Show this help
-  --version          Show the installed version
+  --profile <name>               Select the standard or Bash-only exec profile
+  --theme <name>                 Select the terminal theme
+  --tui-mode <mode>              Use regular or fullscreen terminal mode
+  --socket <path>                Use a custom daemon socket
+  --sandbox <kind>               Use native, podman, or docker isolation
+  -p, --print                    Print one response and exit
+  --json                         Emit canonical events as JSONL and exit
+  -r, --resume                   Open the all-session resume picker
+  --image <digest>               Use a locally available digest-pinned OCI image
+  --unsafe                       Disable operating-system isolation
+  --web-tools                    Enable web_fetch and web_search (default)
+  --no-web-tools                 Disable web_fetch and web_search
+  --web-fetch                    Enable web_fetch
+  --no-web-fetch                 Disable web_fetch
+  --web-search                   Enable web_search
+  --no-web-search                Disable web_search
+  --output <path>                Set the raw session export directory
+  --confirm-prefix               Recover only events before an unsupported oversized event
+  --interrupt                    Authorize cancellation for daemon stop/restart
+  --yes                          Confirm disconnecting other daemon clients
+  --force                        Force a previously requested shutdown (daemon stop --yes)
+  --no-open                      Do not open a browser for axl web
+  --print-url                    Print the one-use axl web launch URL for manual opening
+  --help                         Show this help
+  --version                      Show the installed version
 `;
 
 type SandboxChoice = "native" | "podman" | "docker";
